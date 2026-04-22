@@ -3,7 +3,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
@@ -16,7 +16,7 @@ use super::parse_channel_id;
 
 // ── Body types ─────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LinkDispatchThreadBody {
     pub dispatch_id: String,
     pub thread_id: String,
@@ -655,7 +655,7 @@ pub(super) async fn try_reuse_thread(
     minimal_message: &str,
     dispatch_id: &str,
     card_id: &str,
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
 ) -> Result<Option<bool>, super::discord_delivery::DispatchMessagePostError> {
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
@@ -683,8 +683,10 @@ pub(super) async fn try_reuse_thread(
             clear_thread_for_channel_pg(pool, card_id, expected_parent)
                 .await
                 .ok();
-        } else if let Ok(conn) = db.lock() {
-            clear_thread_for_channel(&conn, card_id, expected_parent);
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, expected_parent);
+            }
         }
         return Ok(None);
     }
@@ -724,16 +726,18 @@ pub(super) async fn try_reuse_thread(
             .execute(pool)
             .await
             .ok();
-        } else if let Ok(conn) = db.lock() {
-            clear_thread_for_channel(&conn, card_id, expected_parent);
-            // Also clear active_thread_id if it points to the mismatched thread,
-            // preventing get_thread_for_channel() fallback from re-selecting it
-            conn.execute(
-                "UPDATE kanban_cards SET active_thread_id = NULL \
-                 WHERE id = ?1 AND active_thread_id = ?2",
-                libsql_rusqlite::params![card_id, thread_id],
-            )
-            .ok();
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, expected_parent);
+                // Also clear active_thread_id if it points to the mismatched thread,
+                // preventing get_thread_for_channel() fallback from re-selecting it
+                conn.execute(
+                    "UPDATE kanban_cards SET active_thread_id = NULL \
+                     WHERE id = ?1 AND active_thread_id = ?2",
+                    libsql_rusqlite::params![card_id, thread_id],
+                )
+                .ok();
+            }
         }
         return Ok(None);
     }
@@ -751,8 +755,10 @@ pub(super) async fn try_reuse_thread(
             clear_thread_for_channel_pg(pool, card_id, expected_parent)
                 .await
                 .ok();
-        } else if let Ok(conn) = db.lock() {
-            clear_thread_for_channel(&conn, card_id, expected_parent);
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, expected_parent);
+            }
         }
         return Ok(Some(false));
     }
@@ -827,20 +833,22 @@ pub(super) async fn try_reuse_thread(
                 .execute(pool)
                 .await
                 .ok();
-            } else if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                    libsql_rusqlite::params![thread_id, dispatch_id],
-                )
-                .ok();
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    libsql_rusqlite::params![
-                        format!("dispatch_notified:{}", dispatch_id),
-                        dispatch_id
-                    ],
-                )
-                .ok();
+            } else if let Some(db) = db {
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
+                        libsql_rusqlite::params![thread_id, dispatch_id],
+                    )
+                    .ok();
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                        libsql_rusqlite::params![
+                            format!("dispatch_notified:{}", dispatch_id),
+                            dispatch_id
+                        ],
+                    )
+                    .ok();
+                }
             }
             if let Err(error) =
                 super::discord_delivery::persist_dispatch_message_target_and_add_pending_reaction_with_pg(

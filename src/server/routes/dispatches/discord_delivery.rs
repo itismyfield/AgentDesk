@@ -52,15 +52,11 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
 }
 
 fn resolve_dispatch_thread_owner_user_id(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
 ) -> Option<u64> {
     let config = crate::config::load_graceful();
-    crate::server::routes::escalation::effective_owner_user_id_with_backends(
-        Some(db),
-        pg_pool,
-        &config,
-    )
+    crate::server::routes::escalation::effective_owner_user_id_with_backends(db, pg_pool, &config)
 }
 
 fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
@@ -258,7 +254,7 @@ pub(crate) trait DispatchTransport: Send + Sync {
 
     fn send_dispatch(
         &self,
-        db: crate::db::Db,
+        db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
@@ -267,7 +263,7 @@ pub(crate) trait DispatchTransport: Send + Sync {
 
     fn send_review_followup(
         &self,
-        db: crate::db::Db,
+        db: Option<crate::db::Db>,
         card_id: String,
         channel_id_num: u64,
         message: String,
@@ -285,10 +281,13 @@ pub(crate) struct HttpDispatchTransport {
 
 impl HttpDispatchTransport {
     pub(crate) fn from_runtime(db: &crate::db::Db) -> Self {
-        Self::from_runtime_with_pg(db, None)
+        Self::from_runtime_with_pg(Some(db), None)
     }
 
-    pub(crate) fn from_runtime_with_pg(db: &crate::db::Db, pg_pool: Option<PgPool>) -> Self {
+    pub(crate) fn from_runtime_with_pg(
+        db: Option<&crate::db::Db>,
+        pg_pool: Option<PgPool>,
+    ) -> Self {
         Self {
             announce_bot_token: crate::credential::read_bot_token("announce"),
             discord_api_base: discord_api_base_url(),
@@ -318,7 +317,7 @@ impl DispatchTransport for HttpDispatchTransport {
 
     fn send_dispatch(
         &self,
-        db: crate::db::Db,
+        db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
@@ -336,7 +335,7 @@ impl DispatchTransport for HttpDispatchTransport {
                 }
             };
             send_dispatch_to_discord_inner_with_context_pg(
-                &db,
+                db.as_ref(),
                 &agent_id,
                 &title,
                 &card_id,
@@ -352,7 +351,7 @@ impl DispatchTransport for HttpDispatchTransport {
 
     fn send_review_followup(
         &self,
-        db: crate::db::Db,
+        db: Option<crate::db::Db>,
         card_id: String,
         channel_id_num: u64,
         message: String,
@@ -365,7 +364,7 @@ impl DispatchTransport for HttpDispatchTransport {
                 .as_deref()
                 .ok_or_else(|| "no announce bot token".to_string())?;
             send_review_result_message_via_http(
-                &db,
+                db.as_ref(),
                 transport.pg_pool.as_ref(),
                 &card_id,
                 channel_id_num,
@@ -585,7 +584,7 @@ pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
     message_id: &str,
 ) -> Result<(), String> {
     persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-        db,
+        Some(db),
         _client,
         _token,
         _base_url,
@@ -598,7 +597,7 @@ pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
 }
 
 pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     _client: &reqwest::Client,
     _token: &str,
     _base_url: &str,
@@ -610,6 +609,11 @@ pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction_wit
     if let Some(pool) = pg_pool {
         persist_dispatch_message_target_on_pg(pool, dispatch_id, channel_id, message_id).await?;
     } else {
+        let Some(db) = db else {
+            return Err(format!(
+                "sqlite db required while saving message target for {dispatch_id}"
+            ));
+        };
         let conn = db
             .lock()
             .map_err(|_| format!("db lock failed while saving message target for {dispatch_id}"))?;
@@ -644,11 +648,11 @@ pub(crate) async fn sync_dispatch_status_reaction(
     db: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    sync_dispatch_status_reaction_with_pg(db, None, dispatch_id).await
+    sync_dispatch_status_reaction_with_pg(Some(db), None, dispatch_id).await
 }
 
 pub(crate) async fn sync_dispatch_status_reaction_with_pg(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> Result<(), String> {
@@ -683,7 +687,7 @@ pub(crate) async fn sync_dispatch_status_reaction_with_pg(
 }
 
 async fn load_dispatch_reaction_row(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<(String, Option<String>)>, String> {
@@ -709,6 +713,11 @@ async fn load_dispatch_reaction_row(
             .transpose();
     }
 
+    let Some(db) = db else {
+        return Err(format!(
+            "dispatch reaction sync for {dispatch_id} requires sqlite db or postgres pool"
+        ));
+    };
     let conn = db
         .lock()
         .map_err(|_| format!("db lock failed for dispatch reaction sync {dispatch_id}"))?;
@@ -1302,7 +1311,7 @@ fn discord_thread_created_at(
 }
 
 async fn reset_stale_slot_thread_if_needed(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     client: &reqwest::Client,
     token: &str,
@@ -1368,6 +1377,11 @@ async fn reset_stale_slot_thread_if_needed(
         )
         .await?;
     } else {
+        let Some(db) = db else {
+            return Err(format!(
+                "sqlite db required while resetting stale slot thread for {dispatch_id}"
+            ));
+        };
         reset_slot_thread_bindings_excluding(
             db,
             &slot_binding.agent_id,
@@ -1652,7 +1666,7 @@ async fn build_slot_thread_name_pg(
             .into_iter()
             .filter_map(|row| {
                 Some((
-                    i64::from(row.try_get::<i32, _>("github_issue_number").ok()?),
+                    row.try_get::<i64, _>("github_issue_number").ok()?,
                     row.try_get::<String, _>("kanban_card_id").ok()?,
                 ))
             })
@@ -2025,7 +2039,7 @@ async fn maybe_add_owner_to_dispatch_thread(
 }
 
 async fn claim_dispatch_delivery_guard(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<bool, String> {
@@ -2055,6 +2069,9 @@ async fn claim_dispatch_delivery_guard(
         return Ok(result.rows_affected() > 0);
     }
 
+    let Some(db) = db else {
+        return Err("delivery guard requires sqlite db or postgres pool".to_string());
+    };
     let conn = db
         .lock()
         .map_err(|_| "db lock failed for delivery guard".to_string())?;
@@ -2079,7 +2096,7 @@ async fn claim_dispatch_delivery_guard(
 }
 
 async fn finalize_dispatch_delivery_guard(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     success: bool,
@@ -2105,24 +2122,29 @@ async fn finalize_dispatch_delivery_guard(
         return;
     }
 
-    if let Ok(conn) = db.lock() {
-        conn.execute(
-            "DELETE FROM kv_meta WHERE key = ?1",
-            [&format!("dispatch_reserving:{dispatch_id}")],
-        )
-        .ok();
-        if success {
+    if let Some(db) = db {
+        if let Ok(conn) = db.lock() {
             conn.execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
+                "DELETE FROM kv_meta WHERE key = ?1",
+                [&format!("dispatch_reserving:{dispatch_id}")],
             )
             .ok();
+            if success {
+                conn.execute(
+                    "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    libsql_rusqlite::params![
+                        format!("dispatch_notified:{dispatch_id}"),
+                        dispatch_id
+                    ],
+                )
+                .ok();
+            }
         }
     }
 }
 
 async fn load_dispatch_delivery_metadata(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
@@ -2154,6 +2176,9 @@ async fn load_dispatch_delivery_metadata(
             .ok_or_else(|| format!("dispatch {dispatch_id} not found"));
     }
 
+    let Some(db) = db else {
+        return Err("dispatch metadata lookup requires sqlite db or postgres pool".to_string());
+    };
     let conn = db
         .lock()
         .map_err(|_| "db lock failed for dispatch metadata query".to_string())?;
@@ -2166,7 +2191,7 @@ async fn load_dispatch_delivery_metadata(
 }
 
 async fn load_card_issue_info(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
 ) -> Result<(Option<String>, Option<i64>), String> {
@@ -2186,8 +2211,7 @@ async fn load_card_issue_info(
                     row.try_get("github_issue_url").map_err(|error| {
                         format!("read postgres github_issue_url for {card_id}: {error}")
                     })?,
-                    row.try_get::<Option<i32>, _>("github_issue_number")
-                        .map(|value| value.map(i64::from))
+                    row.try_get::<Option<i64>, _>("github_issue_number")
                         .map_err(|error| {
                             format!("read postgres github_issue_number for {card_id}: {error}")
                         })?,
@@ -2197,6 +2221,9 @@ async fn load_card_issue_info(
             .map(|value| value.unwrap_or_default());
     }
 
+    let Some(db) = db else {
+        return Err("issue lookup requires sqlite db or postgres pool".to_string());
+    };
     let conn = db
         .lock()
         .map_err(|_| "db lock failed for issue lookup".to_string())?;
@@ -2221,12 +2248,20 @@ pub(crate) async fn send_dispatch_to_discord(
     dispatch_id: &str,
 ) -> Result<(), String> {
     let transport = HttpDispatchTransport::from_runtime(db);
-    send_dispatch_to_discord_guarded(db, None, agent_id, title, card_id, dispatch_id, &transport)
-        .await
+    send_dispatch_to_discord_guarded(
+        Some(db),
+        None,
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        &transport,
+    )
+    .await
 }
 
 pub(crate) async fn send_dispatch_to_discord_with_pg(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     title: &str,
@@ -2255,7 +2290,7 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
     transport: &T,
 ) -> Result<(), String> {
     send_dispatch_to_discord_guarded(
-        db,
+        Some(db),
         transport.pg_pool(),
         agent_id,
         title,
@@ -2267,7 +2302,7 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
 }
 
 async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     title: &str,
@@ -2282,7 +2317,7 @@ async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
 
     let send_result = transport
         .send_dispatch(
-            db.clone(),
+            db.cloned(),
             agent_id.to_string(),
             title.to_string(),
             card_id.to_string(),
@@ -2305,7 +2340,7 @@ async fn send_dispatch_to_discord_inner_with_context(
     thread_owner_user_id: Option<u64>,
 ) -> Result<(), String> {
     send_dispatch_to_discord_inner_with_context_pg(
-        db,
+        Some(db),
         agent_id,
         title,
         card_id,
@@ -2319,7 +2354,7 @@ async fn send_dispatch_to_discord_inner_with_context(
 }
 
 async fn send_dispatch_to_discord_inner_with_context_pg(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     agent_id: &str,
     title: &str,
     card_id: &str,
@@ -2356,6 +2391,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         )
         .await?
     } else {
+        let Some(db) = db else {
+            return Err("sqlite db required for channel lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for channel lookup".into()),
@@ -2464,6 +2502,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         )
         .await?
     } else {
+        let Some(db) = db else {
+            return Err("sqlite db required for slot binding lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for slot binding lookup".into()),
@@ -2499,6 +2540,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             )
             .await?;
         } else {
+            let Some(db) = db else {
+                return Err("sqlite db required for slot reset".into());
+            };
             reset_slot_thread_bindings_excluding(
                 db,
                 &binding.agent_id,
@@ -2537,13 +2581,15 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                 )
                 .await?
             } else {
-                db.lock().ok().and_then(|conn| {
-                    read_slot_thread_binding(
-                        &conn,
-                        &binding.agent_id,
-                        binding.slot_index,
-                        channel_id_num,
-                    )
+                db.and_then(|db| {
+                    db.lock().ok().and_then(|conn| {
+                        read_slot_thread_binding(
+                            &conn,
+                            &binding.agent_id,
+                            binding.slot_index,
+                            channel_id_num,
+                        )
+                    })
                 })
             };
         }
@@ -2558,6 +2604,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         build_slot_thread_name_pg(pool, dispatch_id, card_id, slot_index, issue_number, title)
             .await?
     } else {
+        let Some(db) = db else {
+            return Err("sqlite db required for slot thread naming".into());
+        };
         build_slot_thread_name(db, dispatch_id, card_id, slot_index, issue_number, title)
     };
     let existing_thread_ids = if let Some(pool) = pg_pool {
@@ -2571,9 +2620,8 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         )
         .await?
     } else {
-        db.lock()
-            .ok()
-            .map(|conn| {
+        db.and_then(|db| {
+            db.lock().ok().map(|conn| {
                 collect_slot_thread_candidates(
                     &conn,
                     agent_id,
@@ -2583,7 +2631,8 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                     !reset_slot_thread_before_reuse,
                 )
             })
-            .unwrap_or_default()
+        })
+        .unwrap_or_default()
     };
 
     for existing_tid in &existing_thread_ids {
@@ -2618,16 +2667,18 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                             )
                             .await?;
                         }
-                    } else if let Ok(conn) = db.lock() {
-                        set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
-                        if let Some(binding) = slot_binding.as_ref() {
-                            upsert_slot_thread_id(
-                                &conn,
-                                &binding.agent_id,
-                                binding.slot_index,
-                                channel_id_num,
-                                existing_tid,
-                            );
+                    } else if let Some(db) = db {
+                        if let Ok(conn) = db.lock() {
+                            set_thread_for_channel(&conn, card_id, channel_id_num, existing_tid);
+                            if let Some(binding) = slot_binding.as_ref() {
+                                upsert_slot_thread_id(
+                                    &conn,
+                                    &binding.agent_id,
+                                    binding.slot_index,
+                                    channel_id_num,
+                                    existing_tid,
+                                );
+                            }
                         }
                     }
                     archive_duplicate_slot_threads(
@@ -2665,8 +2716,10 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         if let Some(pool) = pg_pool {
             clear_slot_thread_id_pg(pool, &binding.agent_id, binding.slot_index, channel_id_num)
                 .await?;
-        } else if let Ok(conn) = db.lock() {
-            clear_slot_thread_id(&conn, &binding.agent_id, binding.slot_index, channel_id_num);
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_slot_thread_id(&conn, &binding.agent_id, binding.slot_index, channel_id_num);
+            }
         }
     }
 
@@ -2732,21 +2785,28 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                                     )
                                     .await?;
                                 }
-                            } else if let Ok(conn) = db.lock() {
-                                conn.execute(
-                                    "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                                    libsql_rusqlite::params![thread_id, dispatch_id],
-                                )
-                                .ok();
-                                set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                                if let Some(binding) = slot_binding.as_ref() {
-                                    upsert_slot_thread_id(
+                            } else if let Some(db) = db {
+                                if let Ok(conn) = db.lock() {
+                                    conn.execute(
+                                        "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
+                                        libsql_rusqlite::params![thread_id, dispatch_id],
+                                    )
+                                    .ok();
+                                    set_thread_for_channel(
                                         &conn,
-                                        &binding.agent_id,
-                                        binding.slot_index,
+                                        card_id,
                                         channel_id_num,
                                         thread_id,
                                     );
+                                    if let Some(binding) = slot_binding.as_ref() {
+                                        upsert_slot_thread_id(
+                                            &conn,
+                                            &binding.agent_id,
+                                            binding.slot_index,
+                                            channel_id_num,
+                                            thread_id,
+                                        );
+                                    }
                                 }
                             }
                             persist_dispatch_message_target_and_add_pending_reaction_with_pg(
@@ -2850,7 +2910,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
 }
 
 async fn resolve_review_followup_target_channel(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     client: &reqwest::Client,
     token: &str,
@@ -2864,6 +2924,9 @@ async fn resolve_review_followup_target_channel(
             None => latest_work_dispatch_thread_pg(pool, card_id).await?,
         }
     } else {
+        let Some(db) = db else {
+            return Err("db lock failed for thread lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for thread lookup".into()),
@@ -2904,8 +2967,10 @@ async fn resolve_review_followup_target_channel(
                     "[review] failed to clear postgres thread mapping for {card_id}/{channel_id_num}: {error}"
                 );
             }
-        } else if let Ok(conn) = db.lock() {
-            clear_thread_for_channel(&conn, card_id, channel_id_num);
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, channel_id_num);
+            }
         }
         return Ok(channel_id);
     }
@@ -2933,8 +2998,10 @@ async fn resolve_review_followup_target_channel(
                     "[review] failed to clear locked postgres thread mapping for {card_id}/{channel_id_num}: {error}"
                 );
             }
-        } else if let Ok(conn) = db.lock() {
-            clear_thread_for_channel(&conn, card_id, channel_id_num);
+        } else if let Some(db) = db {
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, channel_id_num);
+            }
         }
         return Ok(channel_id);
     }
@@ -2992,7 +3059,7 @@ pub(super) async fn send_review_result_to_primary(
     let token = crate::credential::read_bot_token("announce");
     let transport = HttpDispatchTransport::with_context(token.as_deref(), &discord_api_base, None);
     send_review_result_to_primary_with_transport(
-        db,
+        Some(db),
         card_id,
         review_dispatch_id,
         verdict,
@@ -3002,7 +3069,7 @@ pub(super) async fn send_review_result_to_primary(
 }
 
 pub(super) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
     verdict: &str,
@@ -3028,7 +3095,7 @@ async fn send_review_result_to_primary_with_context(
 ) -> Result<(), String> {
     let transport = HttpDispatchTransport::with_context(token, discord_api_base, None);
     send_review_result_to_primary_with_context_and_transport(
-        db,
+        Some(db),
         card_id,
         review_dispatch_id,
         verdict,
@@ -3038,7 +3105,7 @@ async fn send_review_result_to_primary_with_context(
 }
 
 async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTransport>(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
     verdict: &str,
@@ -3080,6 +3147,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             issue_url,
         )
     } else {
+        let Some(db) = db else {
+            return Err("db lock failed for card lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for card lookup".into()),
@@ -3106,6 +3176,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             })?
             .flatten()
     } else {
+        let Some(db) = db else {
+            return Err("db lock failed for review dispatch lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for review dispatch lookup".into()),
@@ -3142,9 +3215,8 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                 .map(|s| s == "rework_pending" || s == "dilemma_pending")
                 .unwrap_or(false)
             } else {
-                db.lock()
-                    .ok()
-                    .and_then(|conn| {
+                db.and_then(|db| {
+                    db.lock().ok().and_then(|conn| {
                         conn.query_row(
                             "SELECT review_status FROM kanban_cards WHERE id = ?1",
                             [card_id],
@@ -3153,8 +3225,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                         .ok()
                         .flatten()
                     })
-                    .map(|s| s == "rework_pending" || s == "dilemma_pending")
-                    .unwrap_or(false)
+                })
+                .map(|s| s == "rework_pending" || s == "dilemma_pending")
+                .unwrap_or(false)
             };
             if skip {
                 tracing::info!(
@@ -3207,11 +3280,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                     "last_verdict": verdict,
                 })
                 .to_string();
-                let _ = crate::engine::ops::review_state_sync_with_backends(
-                    Some(db),
-                    pg_pool,
-                    &payload,
-                );
+                let _ = crate::engine::ops::review_state_sync_with_backends(db, pg_pool, &payload);
                 tracing::info!(
                     "[review-followup] enqueued review-decision dispatch {} for card {}",
                     id,
@@ -3237,6 +3306,9 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                 format!("agent {agent_id} missing primary discord channel for review followup")
             })?
     } else {
+        let Some(db) = db else {
+            return Err("db lock failed for primary channel lookup".into());
+        };
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for primary channel lookup".into()),
@@ -3291,7 +3363,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 
     transport
         .send_review_followup(
-            db.clone(),
+            db.cloned(),
             card_id.to_string(),
             channel_id_num,
             message,
@@ -3301,7 +3373,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 }
 
 fn create_review_decision_followup_dispatch(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     agent_id: &str,
@@ -3337,12 +3409,15 @@ fn create_review_decision_followup_dispatch(
 
 #[cfg(test)]
 fn create_review_decision_followup_dispatch_sqlite_test(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     card_id: &str,
     agent_id: &str,
     title: &str,
     context: &serde_json::Value,
 ) -> Result<(String, String, bool), String> {
+    let Some(db) = db else {
+        return Err("sqlite db required for review-decision follow-up dispatch".to_string());
+    };
     crate::dispatch::create_dispatch_record_sqlite_test(
         db,
         card_id,
@@ -3357,7 +3432,7 @@ fn create_review_decision_followup_dispatch_sqlite_test(
 
 #[cfg(not(test))]
 fn create_review_decision_followup_dispatch_sqlite_test(
-    _db: &crate::db::Db,
+    _db: Option<&crate::db::Db>,
     _card_id: &str,
     _agent_id: &str,
     _title: &str,
@@ -3367,7 +3442,7 @@ fn create_review_decision_followup_dispatch_sqlite_test(
 }
 
 async fn send_review_result_message_via_http(
-    db: &crate::db::Db,
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     channel_id_num: u64,
@@ -4886,7 +4961,7 @@ mod tests {
         .await
         .unwrap();
 
-        sync_dispatch_status_reaction_with_pg(&sqlite, Some(&pool), "dispatch-complete")
+        sync_dispatch_status_reaction_with_pg(Some(&sqlite), Some(&pool), "dispatch-complete")
             .await
             .unwrap();
 
@@ -5278,7 +5353,7 @@ mod tests {
             pg_pool: Some(pool.clone()),
         };
         send_review_result_to_primary_with_context_and_transport(
-            &db,
+            Some(&db),
             "card-review",
             "dispatch-review",
             "pass",
@@ -5355,7 +5430,7 @@ mod tests {
         .unwrap();
 
         send_dispatch_to_discord_with_pg(
-            &sqlite,
+            Some(&sqlite),
             Some(&pool),
             "agent-1",
             "PG card",
