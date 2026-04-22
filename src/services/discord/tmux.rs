@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
@@ -40,6 +41,8 @@ use super::tmux_restart_handoff::{
 use super::{SharedData, TmuxWatcherHandle, rate_limit_wait};
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
+const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WatcherLineOutcome {
@@ -94,9 +97,15 @@ fn watcher_ready_for_input_turn_completed(
     data_start_offset: u64,
     current_offset: u64,
     ready_for_input: bool,
+    post_work_observed: bool,
     now: std::time::Instant,
-) -> bool {
-    tracker.observe_idle(current_offset > data_start_offset, ready_for_input, now)
+) -> crate::services::provider::ReadyForInputIdleState {
+    tracker.observe_idle_state(
+        current_offset > data_start_offset,
+        ready_for_input,
+        post_work_observed,
+        now,
+    )
 }
 
 fn merge_task_notification_kind(
@@ -825,6 +834,257 @@ fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
     } else {
         shared.sqlite.as_ref()
     }
+}
+
+fn watcher_has_post_work_ready_evidence(
+    full_response: &str,
+    tool_state: &WatcherToolState,
+    task_notification_kind: Option<TaskNotificationKind>,
+) -> bool {
+    !full_response.trim().is_empty() || tool_state.any_tool_used || task_notification_kind.is_some()
+}
+
+fn normalize_human_alert_target(channel: &str) -> Option<String> {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return None;
+    }
+    Some(if channel.starts_with("channel:") {
+        channel.to_string()
+    } else {
+        format!("channel:{channel}")
+    })
+}
+
+fn load_human_alert_target(shared: &SharedData) -> Option<String> {
+    if let Some(pool) = shared.pg_pool.as_ref() {
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            |pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
+                )
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load postgres human alert target: {error}"))
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten()
+        .and_then(|channel| normalize_human_alert_target(&channel));
+    }
+
+    sqlite_runtime_db(shared)
+        .and_then(|db| db.read_conn().ok())
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
+        .and_then(|channel| normalize_human_alert_target(&channel))
+}
+
+fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
+    let mut metadata = existing_metadata
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let mut labels = metadata
+        .get("labels")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !labels.iter().any(|existing| existing == label) {
+        labels.push(label.to_string());
+    }
+    metadata.insert(
+        "labels".to_string(),
+        serde_json::Value::String(labels.join(",")),
+    );
+
+    serde_json::Value::Object(metadata).to_string()
+}
+
+fn update_card_ready_failure_marker_sqlite(
+    db: &crate::db::Db,
+    card_id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    let conn = db
+        .separate_conn()
+        .map_err(|error| format!("open sqlite card metadata DB: {error}"))?;
+    let existing_metadata = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("load sqlite card metadata for {card_id}: {error}"))?
+        .flatten();
+    let metadata_json =
+        merge_card_label_metadata(existing_metadata.as_deref(), READY_FOR_INPUT_STUCK_LABEL);
+    let updated = conn
+        .execute(
+            "UPDATE kanban_cards
+             SET metadata = ?1,
+                 blocked_reason = ?2,
+                 updated_at = datetime('now')
+             WHERE id = ?3",
+            libsql_rusqlite::params![metadata_json, reason, card_id],
+        )
+        .map_err(|error| format!("update sqlite ready marker for {card_id}: {error}"))?;
+    Ok(updated > 0)
+}
+
+async fn update_card_ready_failure_marker_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    let existing_metadata = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT metadata::text FROM kanban_cards WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres card metadata for {card_id}: {error}"))?
+    .flatten();
+    let metadata_json =
+        merge_card_label_metadata(existing_metadata.as_deref(), READY_FOR_INPUT_STUCK_LABEL);
+    let updated = sqlx::query(
+        "UPDATE kanban_cards
+         SET metadata = $1::jsonb,
+             blocked_reason = $2,
+             updated_at = NOW()
+         WHERE id = $3",
+    )
+    .bind(metadata_json)
+    .bind(reason)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("update postgres ready marker for {card_id}: {error}"))?
+    .rows_affected();
+    Ok(updated > 0)
+}
+
+fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<String> {
+    if let Some(pool) = shared.pg_pool.as_ref() {
+        let dispatch_id = dispatch_id.to_string();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |pool| async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT kanban_card_id FROM task_dispatches WHERE id = $1",
+                )
+                .bind(dispatch_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|error| format!("load postgres dispatch card id: {error}"))
+            },
+            |message| message,
+        )
+        .ok()
+        .flatten();
+    }
+
+    sqlite_runtime_db(shared)
+        .and_then(|db| db.read_conn().ok())
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ReadyForInputFailureResult {
+    pub dispatch_failed: bool,
+    pub card_id: Option<String>,
+    pub card_marked: bool,
+    pub human_alert_sent: bool,
+}
+
+pub(super) async fn fail_dispatch_for_ready_for_input_stall(
+    shared: &Arc<SharedData>,
+    dispatch_id: &str,
+    tmux_session_name: &str,
+) -> Result<ReadyForInputFailureResult, String> {
+    let payload = serde_json::json!({
+        "reason": READY_FOR_INPUT_STUCK_REASON,
+        "failure_kind": READY_FOR_INPUT_STUCK_LABEL,
+        "tmux_session_name": tmux_session_name,
+    });
+    let changed = crate::dispatch::set_dispatch_status_with_backends(
+        sqlite_runtime_db(shared.as_ref()),
+        shared.pg_pool.as_ref(),
+        dispatch_id,
+        "failed",
+        Some(&payload),
+        "tmux_ready_for_input_stuck",
+        Some(&["pending", "dispatched"]),
+        false,
+    )
+    .map_err(|error| format!("mark dispatch {dispatch_id} failed for ready stall: {error}"))?;
+
+    let card_id = load_dispatch_card_id(shared.as_ref(), dispatch_id);
+    let mut card_marked = false;
+    if let Some(card_id_ref) = card_id.as_deref() {
+        card_marked = if let Some(pool) = shared.pg_pool.as_ref() {
+            update_card_ready_failure_marker_pg(pool, card_id_ref, READY_FOR_INPUT_STUCK_REASON)
+                .await?
+        } else if let Some(db) = sqlite_runtime_db(shared.as_ref()) {
+            update_card_ready_failure_marker_sqlite(db, card_id_ref, READY_FOR_INPUT_STUCK_REASON)?
+        } else {
+            false
+        };
+    }
+
+    let human_alert_sent = if changed > 0 {
+        load_human_alert_target(shared.as_ref()).is_some_and(|target| {
+            let card_label = card_id.as_deref().unwrap_or("-");
+            let content = format!(
+                "자동큐 safety-net 발동: dispatch {dispatch_id} / card {card_label} / session {tmux_session_name} / {READY_FOR_INPUT_STUCK_REASON}"
+            );
+            enqueue_lifecycle_notification_best_effort(
+                sqlite_runtime_db(shared.as_ref()),
+                shared.pg_pool.as_ref(),
+                &target,
+                Some(dispatch_id),
+                "dispatch.stuck_at_ready",
+                &content,
+            )
+        })
+    } else {
+        false
+    };
+
+    Ok(ReadyForInputFailureResult {
+        dispatch_failed: changed > 0,
+        card_id,
+        card_marked,
+        human_alert_sent,
+    })
 }
 
 pub(super) fn recovery_handled_channel_exists(shared: &SharedData, channel_id: u64) -> bool {
@@ -1559,6 +1819,7 @@ pub(super) async fn tmux_output_watcher(
             let mut ready_for_input_tracker =
                 crate::services::provider::ReadyForInputIdleTracker::default();
             let mut last_ready_probe_at: Option<std::time::Instant> = None;
+            let mut ready_for_input_failure_notice: Option<String> = None;
 
             while !found_result && turn_start.elapsed() < turn_timeout {
                 if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
@@ -1683,18 +1944,112 @@ pub(super) async fn tmux_output_watcher(
                             .await
                             .unwrap_or(Ok(false))
                             .unwrap_or(false);
-                            if watcher_ready_for_input_turn_completed(
+                            let post_work_observed = watcher_has_post_work_ready_evidence(
+                                &full_response,
+                                &tool_state,
+                                task_notification_kind,
+                            );
+                            match watcher_ready_for_input_turn_completed(
                                 &mut ready_for_input_tracker,
                                 data_start_offset,
                                 current_offset,
                                 ready_for_input,
+                                post_work_observed,
                                 now,
                             ) {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] 👁 watcher synthesized completion for {tmux_session_name}: tmux ready for input with idle output at offset {current_offset}"
-                                );
-                                found_result = true;
+                                crate::services::provider::ReadyForInputIdleState::None => {}
+                                crate::services::provider::ReadyForInputIdleState::FreshIdle => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::info!(
+                                        "  [{ts}] 👁 watcher observed fresh ready-for-input idle for {tmux_session_name} at offset {current_offset}; leaving session untouched"
+                                    );
+                                }
+                                crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
+                                        shared.sqlite.as_ref(),
+                                        shared.pg_pool.as_ref(),
+                                        watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
+                                    )
+                                    .or_else(|| {
+                                        super::inflight::load_inflight_state(
+                                            &watcher_provider,
+                                            channel_id.get(),
+                                        )
+                                        .and_then(|state| state.dispatch_id)
+                                    });
+                                    if let Some(dispatch_id) = dispatch_id {
+                                        match fail_dispatch_for_ready_for_input_stall(
+                                            &shared,
+                                            &dispatch_id,
+                                            &tmux_session_name,
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => {
+                                                tracing::warn!(
+                                                    "  [{ts}] ⚠ watcher marked post-work Ready-for-input stall as failed for {} / dispatch {} (card={:?}, card_marked={}, human_alert_sent={})",
+                                                    tmux_session_name,
+                                                    dispatch_id,
+                                                    result.card_id,
+                                                    result.card_marked,
+                                                    result.human_alert_sent
+                                                );
+                                                if let Some(state) = super::inflight::load_inflight_state(
+                                                    &watcher_provider,
+                                                    channel_id.get(),
+                                                )
+                                                .filter(|state| !state.rebind_origin)
+                                                {
+                                                    let user_msg_id = serenity::MessageId::new(state.user_msg_id);
+                                                    super::formatting::remove_reaction_raw(
+                                                        &http,
+                                                        channel_id,
+                                                        user_msg_id,
+                                                        '⏳',
+                                                    )
+                                                    .await;
+                                                    super::formatting::add_reaction_raw(
+                                                        &http,
+                                                        channel_id,
+                                                        user_msg_id,
+                                                        '⚠',
+                                                    )
+                                                    .await;
+                                                }
+                                                super::inflight::clear_inflight_state(
+                                                    &watcher_provider,
+                                                    channel_id.get(),
+                                                );
+                                                ready_for_input_failure_notice = Some(format!(
+                                                    "⚠️ 작업 후 `Ready for input` 상태에서 멈춰 dispatch를 실패 처리했습니다.\n사유: {READY_FOR_INPUT_STUCK_REASON}"
+                                                ));
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    "  [{ts}] ⚠ watcher failed to persist Ready-for-input stall failure for {} / dispatch {}: {}",
+                                                    tmux_session_name,
+                                                    dispatch_id,
+                                                    error
+                                                );
+                                                ready_for_input_failure_notice = Some(format!(
+                                                    "⚠️ 작업 후 `Ready for input` 상태에서 멈췄지만 dispatch 실패 처리를 저장하지 못했습니다.\n사유: {}",
+                                                    truncate_str(&error, 300)
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            "  [{ts}] ⚠ watcher detected post-work Ready-for-input stall for {} but could not resolve a dispatched task",
+                                            tmux_session_name
+                                        );
+                                        ready_for_input_failure_notice = Some(
+                                            "⚠️ 작업 후 `Ready for input` 상태에서 멈췄지만 연결된 dispatch를 찾지 못해 자동 실패 처리하지 못했습니다.".to_string(),
+                                        );
+                                    }
+                                    full_response.clear();
+                                    found_result = true;
+                                }
                             }
                         }
                     }
@@ -1826,6 +2181,26 @@ pub(super) async fn tmux_output_watcher(
                         last_edit_text = display_text;
                     }
                 }
+            }
+
+            if let Some(notice) = ready_for_input_failure_notice {
+                match placeholder_msg_id {
+                    Some(msg_id) => {
+                        rate_limit_wait(&shared, channel_id).await;
+                        let _ = channel_id
+                            .edit_message(
+                                &http,
+                                msg_id,
+                                serenity::EditMessage::new().content(&notice),
+                            )
+                            .await;
+                    }
+                    None => {
+                        let _ = channel_id.say(&http, &notice).await;
+                    }
+                }
+                clear_provider_overload_retry_state(channel_id);
+                continue;
             }
         }
 
@@ -4102,9 +4477,11 @@ async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadSessionCleanupPlan, OffsetAdvanceDecision, TmuxWatcherHandle, WatcherToolState,
-        build_bg_trigger_session_key, claim_or_replace_watcher, dead_session_cleanup_plan,
-        enqueue_background_trigger_response_to_notify_outbox, lifecycle_reason_code_for_tmux_exit,
+        DeadSessionCleanupPlan, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
+        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
+        claim_or_replace_watcher, dead_session_cleanup_plan,
+        enqueue_background_trigger_response_to_notify_outbox,
+        fail_dispatch_for_ready_for_input_stall, lifecycle_reason_code_for_tmux_exit,
         load_restored_provider_session_id, notify_path_offset_advance_decision,
         parse_bg_trigger_offset_from_session_key, process_watcher_lines,
         refresh_session_heartbeat_from_tmux_output,
@@ -4492,36 +4869,186 @@ mod tests {
         let mut tracker = ReadyForInputIdleTracker::default();
         let start = std::time::Instant::now();
 
-        assert!(!watcher_ready_for_input_turn_completed(
-            &mut tracker,
-            100,
-            100,
-            true,
-            start
-        ));
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, true, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
 
         tracker.record_output();
-        assert!(!watcher_ready_for_input_turn_completed(
-            &mut tracker,
-            100,
-            120,
-            true,
-            start
-        ));
-        assert!(!watcher_ready_for_input_turn_completed(
-            &mut tracker,
-            100,
-            120,
-            true,
-            start + std::time::Duration::from_secs(10)
-        ));
-        assert!(watcher_ready_for_input_turn_completed(
-            &mut tracker,
-            100,
-            120,
-            true,
-            start + std::time::Duration::from_secs(16)
-        ));
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 120, true, true, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                true,
+                start + std::time::Duration::from_secs(10)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                true,
+                start + std::time::Duration::from_secs(16)
+            ),
+            crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout
+        );
+    }
+
+    #[test]
+    fn watcher_ready_for_input_fresh_idle_does_not_trigger_failure_path() {
+        let mut tracker = ReadyForInputIdleTracker::default();
+        let start = std::time::Instant::now();
+
+        tracker.record_output();
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 120, true, false, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                false,
+                start + std::time::Duration::from_secs(10)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                false,
+                start + std::time::Duration::from_secs(16)
+            ),
+            crate::services::provider::ReadyForInputIdleState::FreshIdle
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_for_input_stall_marks_dispatch_failed_and_alerts_humans() {
+        let db = crate::db::test_db();
+        let shared = super::super::make_shared_data_for_tests_with_storage(Some(db.clone()), None);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id)
+                 VALUES ('agent-1', 'Agent 1', '444111')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+                 VALUES ('run-ready-stall', 'test/repo', 'agent-1', 'running')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority)
+                 VALUES ('card-ready-stall', 'Ready stall card', 'in_progress', 'medium')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at
+                 ) VALUES (
+                    'dispatch-ready-stall', 'card-ready-stall', 'agent-1', 'implementation', 'dispatched', 'Ready stall', '123456', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at
+                 ) VALUES (
+                    'entry-ready-stall', 'run-ready-stall', 'card-ready-stall', 'agent-1', 'dispatched', 'dispatch-ready-stall', datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kv_meta (key, value) VALUES ('kanban_human_alert_channel_id', '555123')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = fail_dispatch_for_ready_for_input_stall(
+            &shared,
+            "dispatch-ready-stall",
+            "AgentDesk-ready-stall",
+        )
+        .await
+        .expect("ready-for-input failure helper");
+
+        assert!(result.dispatch_failed);
+        assert_eq!(result.card_id.as_deref(), Some("card-ready-stall"));
+        assert!(result.card_marked);
+        assert!(result.human_alert_sent);
+
+        let conn = db.lock().unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-ready-stall'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "failed");
+
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-ready-stall'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(entry_status, "failed");
+
+        let (blocked_reason, metadata_raw): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT blocked_reason, metadata FROM kanban_cards WHERE id = 'card-ready-stall'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            blocked_reason.as_deref(),
+            Some(READY_FOR_INPUT_STUCK_REASON)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(metadata_raw.as_deref().expect("metadata after ready stall"))
+                .unwrap();
+        assert_eq!(metadata["labels"], "stuck_at_ready");
+
+        let (target, reason_code, content): (String, Option<String>, String) = conn
+            .query_row(
+                "SELECT target, reason_code, content
+                 FROM message_outbox
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(target, "channel:555123");
+        assert_eq!(reason_code.as_deref(), Some("dispatch.stuck_at_ready"));
+        assert!(content.contains("dispatch-ready-stall"));
+        assert!(content.contains("card-ready-stall"));
     }
 
     // ── #826: background-task auto-trigger relay routes through notify outbox ──

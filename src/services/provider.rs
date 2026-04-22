@@ -701,6 +701,13 @@ pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
 const READY_FOR_INPUT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const READY_FOR_INPUT_IDLE_MIN_PROBES: u32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadyForInputIdleState {
+    None,
+    FreshIdle,
+    PostWorkIdleTimeout,
+}
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ReadyForInputIdleTracker {
     first_ready_at: Option<std::time::Instant>,
@@ -712,15 +719,16 @@ impl ReadyForInputIdleTracker {
         self.reset();
     }
 
-    pub(crate) fn observe_idle(
+    pub(crate) fn observe_idle_state(
         &mut self,
         output_ever_grew: bool,
         ready_for_input: bool,
+        post_work_observed: bool,
         now: std::time::Instant,
-    ) -> bool {
+    ) -> ReadyForInputIdleState {
         if !output_ever_grew || !ready_for_input {
             self.reset();
-            return false;
+            return ReadyForInputIdleState::None;
         }
 
         if self.first_ready_at.is_none() {
@@ -728,11 +736,21 @@ impl ReadyForInputIdleTracker {
         }
         self.consecutive_ready_probes += 1;
 
-        now.duration_since(
+        let timed_out = now.duration_since(
             self.first_ready_at
                 .expect("first_ready_at set above before elapsed check"),
         ) >= READY_FOR_INPUT_IDLE_TIMEOUT
-            && self.consecutive_ready_probes >= READY_FOR_INPUT_IDLE_MIN_PROBES
+            && self.consecutive_ready_probes >= READY_FOR_INPUT_IDLE_MIN_PROBES;
+
+        if !timed_out {
+            return ReadyForInputIdleState::None;
+        }
+
+        if post_work_observed {
+            ReadyForInputIdleState::PostWorkIdleTimeout
+        } else {
+            ReadyForInputIdleState::FreshIdle
+        }
     }
 
     fn reset(&mut self) {
@@ -864,11 +882,12 @@ where
                     let has_new_bytes = file_len > current_offset;
                     let output_ever_grew = current_offset > start_offset;
                     if !has_new_bytes
-                        && ready_for_input_tracker.observe_idle(
+                        && ready_for_input_tracker.observe_idle_state(
                             output_ever_grew,
                             is_ready_for_input(),
+                            true,
                             Instant::now(),
-                        )
+                        ) == ReadyForInputIdleState::PostWorkIdleTimeout
                     {
                         if !emit_synthetic_done(state) {
                             return Ok(ReadOutputResult::Cancelled {
@@ -1846,12 +1865,34 @@ mod tests {
         let mut tracker = super::ReadyForInputIdleTracker::default();
         let start = std::time::Instant::now();
 
-        assert!(!tracker.observe_idle(false, true, start));
+        assert_eq!(
+            tracker.observe_idle_state(false, true, false, start),
+            super::ReadyForInputIdleState::None
+        );
 
         tracker.record_output();
-        assert!(!tracker.observe_idle(true, true, start));
-        assert!(!tracker.observe_idle(true, true, start + std::time::Duration::from_secs(10)));
-        assert!(tracker.observe_idle(true, true, start + std::time::Duration::from_secs(16)));
+        assert_eq!(
+            tracker.observe_idle_state(true, true, true, start),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(10)
+            ),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(16)
+            ),
+            super::ReadyForInputIdleState::PostWorkIdleTimeout
+        );
     }
 
     #[test]
@@ -1860,14 +1901,87 @@ mod tests {
         let start = std::time::Instant::now();
 
         tracker.record_output();
-        assert!(!tracker.observe_idle(true, true, start));
-        assert!(!tracker.observe_idle(true, false, start + std::time::Duration::from_secs(8)));
-        assert!(!tracker.observe_idle(true, true, start + std::time::Duration::from_secs(16)));
+        assert_eq!(
+            tracker.observe_idle_state(true, true, true, start),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                false,
+                true,
+                start + std::time::Duration::from_secs(8)
+            ),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(16)
+            ),
+            super::ReadyForInputIdleState::None
+        );
 
         tracker.record_output();
-        assert!(!tracker.observe_idle(true, true, start + std::time::Duration::from_secs(17)));
-        assert!(!tracker.observe_idle(true, true, start + std::time::Duration::from_secs(25)));
-        assert!(tracker.observe_idle(true, true, start + std::time::Duration::from_secs(33)));
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(17)
+            ),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(25)
+            ),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                true,
+                start + std::time::Duration::from_secs(33)
+            ),
+            super::ReadyForInputIdleState::PostWorkIdleTimeout
+        );
+    }
+
+    #[test]
+    fn test_ready_for_input_idle_tracker_distinguishes_fresh_idle_from_post_work_idle() {
+        let mut tracker = super::ReadyForInputIdleTracker::default();
+        let start = std::time::Instant::now();
+
+        tracker.record_output();
+        assert_eq!(
+            tracker.observe_idle_state(true, true, false, start),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                false,
+                start + std::time::Duration::from_secs(10)
+            ),
+            super::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            tracker.observe_idle_state(
+                true,
+                true,
+                false,
+                start + std::time::Duration::from_secs(16)
+            ),
+            super::ReadyForInputIdleState::FreshIdle
+        );
     }
 
     #[cfg(unix)]

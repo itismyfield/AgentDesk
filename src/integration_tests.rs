@@ -31,6 +31,7 @@ mod tests {
     }
 
     fn test_engine(db: &db::Db) -> PolicyEngine {
+        crate::pipeline::ensure_loaded();
         let mut config = crate::config::Config::default();
         config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
@@ -6926,6 +6927,7 @@ mod tests {
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_repo(&db, "test/repo");
+        set_kv(&db, "merge_strategy_mode", "pr-always");
         seed_card_with_repo(&db, "card-211-create", "review", "test/repo", 212, None);
         seed_stamped_create_pr_state(
             &db,
@@ -6967,7 +6969,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+        assert_eq!(blocked_reason, None);
     }
 
     #[cfg(unix)]
@@ -6983,6 +6985,7 @@ mod tests {
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_repo(&db, "test/qa");
+        set_kv(&db, "merge_strategy_mode", "pr-always");
         let qa_override = serde_json::json!({
             "states": [
                 {"id": "backlog", "label": "Backlog"},
@@ -7069,7 +7072,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+        assert_eq!(blocked_reason, None);
     }
 
     #[cfg(unix)]
@@ -7242,6 +7245,7 @@ mod tests {
         seed_repo(&db, "test/repo");
         seed_card_with_repo(&db, "card-211-direct", "done", "test/repo", 211, None);
         set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(&db, "merge_strategy_mode", "pr-always");
         seed_completed_work_dispatch_target(
             &db,
             "impl-211-direct",
@@ -7274,7 +7278,7 @@ mod tests {
             .unwrap();
         assert!(
             !merged.success(),
-            "terminal done cards without tracked PR must use PR+CI flow and keep feature commit out of origin/main"
+            "pr-always terminal cards must use PR+CI flow and keep the feature commit out of origin/main"
         );
         assert_eq!(get_card_status(&db, "card-211-direct"), "done");
         assert_eq!(
@@ -7292,6 +7296,107 @@ mod tests {
             )
             .unwrap();
         assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_terminal_direct_merge_push_success_reaches_origin_main() {
+        let (repo, _remote, gh) = setup_test_repo_with_origin_and_mock_gh(&[]);
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        run_git(repo.path(), &["branch", "wt/card-211-direct-success"]);
+
+        let worktree_path = worktrees_dir.join("card-211-direct-success");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                "wt/card-211-direct-success",
+            ],
+        );
+        fs::write(worktree_path.join("feature.txt"), "direct success\n").unwrap();
+        run_git(worktree_path.as_path(), &["add", "feature.txt"]);
+        run_git(
+            worktree_path.as_path(),
+            &["commit", "-m", "feat: direct merge success #211"],
+        );
+        let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-211-direct-success",
+            "done",
+            "test/repo",
+            220,
+            None,
+        );
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(&db, "merge_strategy_mode", "direct-first");
+        seed_completed_work_dispatch_target(
+            &db,
+            "impl-211-direct-success",
+            "card-211-direct-success",
+            "implementation",
+            worktree_path.to_str().unwrap(),
+            "wt/card-211-direct-success",
+            &feature_commit,
+        );
+        seed_worktree_session(
+            &db,
+            "session-211-direct-success",
+            worktree_path.to_str().unwrap(),
+        );
+
+        engine
+            .try_fire_hook_by_name(
+                "OnCardTerminal",
+                serde_json::json!({"card_id": "card-211-direct-success"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        run_git(repo.path(), &["fetch", "origin", "main"]);
+        let merged = Command::new("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                &feature_commit,
+                "origin/main",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(
+            merged.success(),
+            "direct-first success must push the feature commit to origin/main"
+        );
+        assert_eq!(
+            run_git_output(repo.path(), &["rev-list", "--count", "origin/main..main"]),
+            "0",
+            "local main must stay aligned after successful direct push"
+        );
+        assert_eq!(get_card_status(&db, "card-211-direct-success"), "done");
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-direct-success").as_deref(),
+            Some("closed")
+        );
+        assert_eq!(pr_tracking_pr_number(&db, "card-211-direct-success"), None);
+        assert_eq!(
+            kv_value(&db, "merge_strategy_mode:card:card-211-direct-success").as_deref(),
+            None
+        );
+
+        let log = gh_log(&gh._gh);
+        assert!(
+            !log.contains("pr create"),
+            "successful direct-first merge must not create a PR fallback"
+        );
     }
 
     #[cfg(unix)]
