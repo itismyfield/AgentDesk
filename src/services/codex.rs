@@ -30,6 +30,8 @@ use crate::services::tmux_diagnostics::{
 };
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
+pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
+pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
 /// Public so onboarding/health-check can use the exact same resolution contract.
 #[allow(dead_code)]
@@ -1097,6 +1099,17 @@ fn codex_mcp_result(result: &Value) -> (String, bool) {
     (codex_mcp_payload_content(payload), is_error)
 }
 
+pub(crate) fn codex_background_event_summary(json: &Value) -> Option<&str> {
+    if json.get("type").and_then(Value::as_str) != Some("background_event") {
+        return None;
+    }
+
+    json.get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+}
+
 fn handle_codex_json_line(
     line: &str,
     sender: &Sender<StreamMessage>,
@@ -1153,6 +1166,15 @@ fn handle_codex_json_line(
         "mcp_tool_call_end" => {
             let (content, is_error) = codex_mcp_result(json.get("result").unwrap_or(&Value::Null));
             let _ = sender.send(StreamMessage::ToolResult { content, is_error });
+        }
+        "background_event" => {
+            if let Some(summary) = codex_background_event_summary(&json) {
+                let _ = sender.send(StreamMessage::TaskNotification {
+                    task_id: CODEX_BACKGROUND_TASK_NOTIFICATION_ID.to_string(),
+                    status: CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS.to_string(),
+                    summary: summary.to_string(),
+                });
+            }
         }
         "item.completed" => {
             if let Some(item) = json.get("item") {
@@ -1235,6 +1257,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::{
+        CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
         TMUX_PROMPT_B64_PREFIX, base_exec_args, build_tmux_launch_env_lines, compose_codex_prompt,
         handle_codex_json_line,
     };
@@ -1300,6 +1323,40 @@ mod tests {
         assert!(matches!(items[1], StreamMessage::Text { .. }));
         assert!(matches!(items[2], StreamMessage::StatusUpdate { .. }));
         assert!(matches!(items[3], StreamMessage::Done { .. }));
+    }
+
+    #[test]
+    fn test_handle_codex_json_line_maps_background_event_to_task_notification() {
+        let (tx, rx) = mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started_at = std::time::Instant::now();
+
+        let done = handle_codex_json_line(
+            r#"{"type":"background_event","message":"CI green"}"#,
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started_at,
+        )
+        .unwrap();
+
+        assert_eq!(done, Some(false));
+
+        let items: Vec<StreamMessage> = rx.try_iter().collect();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            StreamMessage::TaskNotification {
+                task_id,
+                status,
+                summary,
+            } => {
+                assert_eq!(task_id, CODEX_BACKGROUND_TASK_NOTIFICATION_ID);
+                assert_eq!(status, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS);
+                assert_eq!(summary, "CI green");
+            }
+            other => panic!("Expected TaskNotification, got {:?}", other),
+        }
     }
 
     #[test]

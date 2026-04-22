@@ -123,13 +123,12 @@ fn build_monitor_completion_message(response: &str) -> String {
 /// would silently drop the reply.
 ///
 /// **Provider coverage (important):** the `system/task_notification` JSONL
-/// event is emitted by `session_backend.rs::parse_stream_message` when the
-/// Claude Code harness auto-fires a turn. The codex provider does NOT emit
-/// this event — its stream parser (`codex_tmux_wrapper.rs`) only produces
-/// `system/init` and `item.*` records. As a result this predicate is
-/// **Claude-only** and codex background-trigger completions currently bypass
-/// the notify-bot path (existing pre-#826 behaviour, silent drop). Codex
-/// coverage is tracked as a follow-up in #898.
+/// event is the canonical provider-agnostic marker for a background-trigger
+/// turn. Claude emits it directly via `session_backend.rs::parse_stream_message`.
+/// Codex emits a raw `background_event`, which `codex_tmux_wrapper.rs`
+/// normalizes into the same `system/task_notification` record before the
+/// watcher sees the stream. This keeps the routing predicate shared across
+/// providers.
 ///
 /// **`inflight_present` semantics (#897 round 2):** this parameter tracks
 /// the presence of a *foreground* inflight (a legitimate turn driven by a
@@ -143,7 +142,7 @@ fn build_monitor_completion_message(response: &str) -> String {
 /// Returns `true` only when ALL of the following hold:
 /// 1. The turn produced an assistant response (no use rerouting emptiness).
 /// 2. A `system/task_notification` event was observed in the turn's JSONL
-///    stream (canonical Claude Code marker for a background-trigger turn).
+///    stream (canonical background-trigger marker after provider normalization).
 /// 3. No FOREGROUND inflight state exists for the channel (rules out
 ///    concurrent real user turns that happen to also include the marker;
 ///    a rebind-origin synthetic inflight does not count).
@@ -3499,13 +3498,13 @@ pub(super) fn process_watcher_lines(
                         if subtype == "compact" || subtype == "auto_compact" {
                             outcome.auto_compacted = true;
                         }
-                        // #826: Claude Code emits a task_notification system
-                        // event when it auto-fires a turn in response to a
-                        // background task completing (e.g. a Bash
-                        // run_in_background finish). This is the authoritative
-                        // marker that lets us distinguish a background-trigger
-                        // turn from a normal foreground turn whose inflight
-                        // file was merely cleared early by turn_bridge.
+                        // `task_notification` is the authoritative
+                        // provider-normalized marker for a background-trigger
+                        // turn (Claude emits it directly; Codex normalizes
+                        // `background_event` into the same JSONL shape). It
+                        // lets us distinguish a background-trigger turn from
+                        // a normal foreground turn whose inflight file was
+                        // merely cleared early by turn_bridge.
                         if subtype == "task_notification" {
                             outcome.task_notification_seen = true;
                         }
@@ -4983,8 +4982,9 @@ mod tests {
     /// contains a normal assistant+result pair must leave the flag clear.
     #[test]
     fn process_watcher_lines_surfaces_task_notification_marker() {
-        // Background-trigger turn: Claude Code opens with a system
-        // task_notification event before streaming the assistant response.
+        // Background-trigger turn: provider stream has already been
+        // normalized to the canonical system/task_notification event before
+        // streaming the assistant response.
         let mut bg_buffer = concat!(
             "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-42\",\"status\":\"completed\",\"summary\":\"CI green\"}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PR #825 리뷰 반영 완료\"}]}}\n",
