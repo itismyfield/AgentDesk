@@ -22,6 +22,31 @@ ADK_DEFAULT_HOST=$(_read_default host "0.0.0.0")
 ADK_DEFAULT_LOOPBACK=$(_read_default loopback "127.0.0.1")
 export ADK_DEFAULT_PORT ADK_DEFAULT_HOST ADK_DEFAULT_LOOPBACK
 
+setup_sccache_env() {
+  local homebrew_bin="/opt/homebrew/bin"
+  local sccache_bin=""
+
+  case ":${PATH:-}:" in
+    *":$homebrew_bin:"*) ;;
+    *)
+      if [ -x "$homebrew_bin/sccache" ]; then
+        export PATH="$homebrew_bin:${PATH:-}"
+      fi
+      ;;
+  esac
+
+  if command -v sccache >/dev/null 2>&1; then
+    sccache_bin="$(command -v sccache)"
+  else
+    return 1
+  fi
+
+  export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+  export RUSTC_WRAPPER="${RUSTC_WRAPPER:-$sccache_bin}"
+  mkdir -p "$SCCACHE_DIR"
+}
+
 _trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"

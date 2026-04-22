@@ -274,6 +274,13 @@ fi
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
+if ! setup_sccache_env; then
+    echo "✗ sccache not found in PATH"
+    echo "  Install it first (for example: brew install sccache)"
+    exit 1
+fi
+echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
+
 # Build the release binary from the current workspace by default so promotion
 # always ships code compiled from the current HEAD. When a validated external
 # artifact is provided explicitly, keep the existing override behavior.

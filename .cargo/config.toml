@@ -1,3 +1,10 @@
+[build]
+# Keep per-worktree target/ directories, but share rustc output through sccache.
+rustc-wrapper = "sccache"
+
+[env]
+SCCACHE_CACHE_SIZE = { value = "10G", force = false }
+
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"
 rustflags = ["-C", "target-feature=+crt-static"]

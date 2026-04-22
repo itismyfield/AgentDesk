@@ -12,7 +12,10 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=_defaults.sh
+. "$SCRIPT_DIR/_defaults.sh"
 cd "$PROJECT_DIR"
 
 SKIP_DASHBOARD=false
@@ -90,6 +93,12 @@ write_checksum() {
 
 echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
 echo ""
+
+if ! setup_sccache_env; then
+  echo "Error: sccache not found. Install it first (for example: brew install sccache)."
+  exit 1
+fi
+echo "▸ sccache cache: ${SCCACHE_DIR} (size ${SCCACHE_CACHE_SIZE})"
 
 # ── 1. Build Rust binary ──────────────────────────────────────────────────────
 if ! command -v cargo &>/dev/null; then
