@@ -163,7 +163,7 @@ fn queue_status_raw_pg(pool: &PgPool) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 

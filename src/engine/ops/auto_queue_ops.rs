@@ -346,7 +346,7 @@ fn activate_raw(
             |error| serde_json::json!({ "error": error }).to_string(),
         ) {
             Ok(json) => json,
-            Err(error_json) => error_json,
+            Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
         };
     }
 

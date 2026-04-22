@@ -1386,6 +1386,6 @@ fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }

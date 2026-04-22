@@ -444,7 +444,7 @@ fn dispatch_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(count) => format!(r#"{{"count":{count}}}"#),
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -494,7 +494,7 @@ fn dispatch_set_retry_count_raw_pg(pool: &PgPool, dispatch_id: &str, count: i32)
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -709,7 +709,7 @@ fn dispatch_set_status_raw_pg(
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 

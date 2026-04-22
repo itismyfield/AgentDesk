@@ -327,7 +327,7 @@ fn card_get_raw_pg(pool: &PgPool, card_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -417,7 +417,7 @@ fn card_list_raw_pg(pool: &PgPool, filter_json: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -478,7 +478,7 @@ fn card_assign_raw_pg(pool: &PgPool, card_id: &str, agent_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -532,7 +532,7 @@ fn card_set_priority_raw_pg(pool: &PgPool, card_id: &str, priority: &str) -> Str
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 

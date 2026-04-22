@@ -213,7 +213,7 @@ fn kv_set_raw_pg(pool: &PgPool, key: &str, value: &str, ttl_seconds: i64) -> Str
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(result) => result,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -240,7 +240,7 @@ fn kv_get_raw_pg(pool: &PgPool, key: &str) -> String {
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(result) => result,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
@@ -259,6 +259,6 @@ fn kv_delete_raw_pg(pool: &PgPool, key: &str) -> String {
         |error| format!(r#"{{"error":"{error}"}}"#),
     ) {
         Ok(result) => result,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }

@@ -113,6 +113,19 @@ pub(super) fn register_review_ops<'js>(
     Ok(())
 }
 
+/// Ensure a Rust-side error string is valid JSON so the JS wrapper's
+/// `JSON.parse` does not fail with "unexpected token". Future errors from
+/// `block_on_pg_result` come through as raw `String` (not JSON), whereas
+/// runtime errors are already JSON-wrapped by the map_runtime_error closure —
+/// this normalizer covers both paths.
+pub(crate) fn ensure_js_error_json(raw: String) -> String {
+    if raw.trim_start().starts_with('{') {
+        raw
+    } else {
+        json!({ "error": raw }).to_string()
+    }
+}
+
 fn metadata_requests_review_round_advance(metadata_raw: Option<&str>) -> bool {
     metadata_raw
         .filter(|raw| !raw.trim().is_empty())
@@ -329,7 +342,7 @@ fn review_get_verdict_raw_pg(pool: &PgPool, card_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => ensure_js_error_json(raw),
     }
 }
 
@@ -352,14 +365,14 @@ fn review_entry_context_raw_pg(pool: &PgPool, card_id: &str) -> String {
                               AND td.status = 'completed'
                         ) AS completed_work_count,
                         (
-                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))
+                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))::text
                             FROM task_dispatches td
                             WHERE td.kanban_card_id = kc.id
                               AND td.dispatch_type IN ('implementation', 'rework')
                               AND td.status = 'completed'
                         ) AS latest_work_completed_at,
                         (
-                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))
+                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))::text
                             FROM task_dispatches td
                             WHERE td.kanban_card_id = kc.id
                               AND td.dispatch_type = 'review'
@@ -428,7 +441,7 @@ fn review_entry_context_raw_pg(pool: &PgPool, card_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => ensure_js_error_json(raw),
     }
 }
 
@@ -551,7 +564,7 @@ fn review_record_entry_raw_pg(pool: &PgPool, card_id: &str, opts_json: &str) -> 
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => ensure_js_error_json(raw),
     }
 }
 
@@ -607,7 +620,7 @@ fn review_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => ensure_js_error_json(raw),
     }
 }
 

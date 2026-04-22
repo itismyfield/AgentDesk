@@ -271,7 +271,7 @@ fn agent_get_raw_pg(pool: &PgPool, agent_id: &str) -> String {
 
     match result {
         Ok(value) => value,
-        Err(error_json) => error_json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
 }
 
