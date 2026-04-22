@@ -137,6 +137,11 @@ pub struct ResetGlobalBody {
 }
 
 #[derive(Debug, Default, Deserialize)]
+pub struct PauseBody {
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub struct CancelQuery {
     pub run_id: Option<String>,
 }
@@ -1737,7 +1742,28 @@ pub(crate) fn cancel_with_conn(
     crate::services::auto_queue::cancel_run::cancel_with_conn(health_registry, conn)
 }
 
-async fn pause_with_pg(
+async fn soft_pause_with_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
+    let paused = sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'paused',
+             completed_at = NULL
+         WHERE status = 'active'",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| format!("pause postgres auto_queue_runs: {error}"))?
+    .rows_affected() as usize;
+
+    Ok(json!({
+        "ok": true,
+        "paused_runs": paused,
+        "cancelled_dispatches": 0usize,
+        "released_slots": 0usize,
+        "cleared_slot_sessions": 0usize,
+    }))
+}
+
+async fn force_pause_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
@@ -1813,6 +1839,48 @@ async fn pause_with_pg(
         response["warning"] = json!(warning);
     }
     Ok(response)
+}
+
+fn force_pause_with_conn(
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    conn: &libsql_rusqlite::Connection,
+) -> serde_json::Value {
+    let active_run_ids =
+        crate::services::auto_queue::cancel_run::load_run_ids_with_status(conn, &["active"])
+            .unwrap_or_default();
+    let cancelled_dispatches =
+        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs(
+            conn,
+            &active_run_ids,
+            "auto_queue_pause",
+        );
+    let slot_cleanup = crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs(
+        health_registry,
+        conn,
+        &active_run_ids,
+    );
+    let paused = conn
+        .execute(
+            "UPDATE auto_queue_runs
+             SET status = 'paused',
+                 completed_at = NULL
+             WHERE status = 'active'",
+            [],
+        )
+        .unwrap_or(0);
+    let mut response = json!({
+        "ok": true,
+        "paused_runs": paused,
+        "cancelled_dispatches": cancelled_dispatches,
+        "released_slots": slot_cleanup.released_slots,
+        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
+    });
+    if let Some(warning) =
+        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
+    {
+        response["warning"] = json!(warning);
+    }
+    response
 }
 
 async fn cancel_with_pg(
@@ -10478,10 +10546,25 @@ pub async fn reset_global(
     }
 }
 
-/// POST /api/auto-queue/pause — pause all active runs
-pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+/// POST /api/auto-queue/pause — soft-pause active runs; `force=true` keeps the legacy cancel path
+pub async fn pause(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let body: PauseBody = match parse_json_body(body, "pause") {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+    let force = body.force.unwrap_or(false);
+
     if let Some(pool) = state.pg_pool.as_ref() {
-        return match pause_with_pg(state.health_registry.clone(), pool).await {
+        return match if force {
+            force_pause_with_pg(state.health_registry.clone(), pool).await
+        } else {
+            soft_pause_with_pg(pool).await
+        } {
             Ok(response) => (StatusCode::OK, Json(response)),
             Err(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -10499,41 +10582,26 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             );
         }
     };
-    let active_run_ids =
-        crate::services::auto_queue::cancel_run::load_run_ids_with_status(&conn, &["active"])
-            .unwrap_or_default();
-    let cancelled_dispatches =
-        crate::services::auto_queue::cancel_run::cancel_live_dispatches_for_runs(
-            &conn,
-            &active_run_ids,
-            "auto_queue_pause",
-        );
-    let slot_cleanup = crate::services::auto_queue::cancel_run::clear_and_release_slots_for_runs(
-        state.health_registry.clone(),
-        &conn,
-        &active_run_ids,
-    );
-    let paused = conn
-        .execute(
-            "UPDATE auto_queue_runs
-             SET status = 'paused',
-                 completed_at = NULL
-             WHERE status = 'active'",
-            [],
-        )
-        .unwrap_or(0);
-    let mut response = json!({
-        "ok": true,
-        "paused_runs": paused,
-        "cancelled_dispatches": cancelled_dispatches,
-        "released_slots": slot_cleanup.released_slots,
-        "cleared_slot_sessions": slot_cleanup.cleared_slot_sessions,
-    });
-    if let Some(warning) =
-        crate::services::auto_queue::cancel_run::slot_cleanup_warning(&slot_cleanup.warnings)
-    {
-        response["warning"] = json!(warning);
-    }
+    let response = if force {
+        force_pause_with_conn(state.health_registry.clone(), &conn)
+    } else {
+        let paused = conn
+            .execute(
+                "UPDATE auto_queue_runs
+                 SET status = 'paused',
+                     completed_at = NULL
+                 WHERE status = 'active'",
+                [],
+            )
+            .unwrap_or(0);
+        json!({
+            "ok": true,
+            "paused_runs": paused,
+            "cancelled_dispatches": 0usize,
+            "released_slots": 0usize,
+            "cleared_slot_sessions": 0usize,
+        })
+    };
     (StatusCode::OK, Json(response))
 }
 
