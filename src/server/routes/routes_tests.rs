@@ -10064,7 +10064,7 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
         String,
         Option<String>,
         Option<String>,
-        i32,
+        i64,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -10080,7 +10080,7 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     .await
     .unwrap();
     let (review_state_round, review_state_status, review_state_pending_dispatch): (
-        i32,
+        i64,
         String,
         Option<String>,
     ) = sqlx::query_as(

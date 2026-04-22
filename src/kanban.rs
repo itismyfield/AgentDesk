@@ -2002,7 +2002,10 @@ fn record_true_negative_if_pass_with_backends(
                     return Ok(false);
                 }
 
-                let review_round = sqlx::query_scalar::<_, Option<i32>>(
+                // `card_review_state.review_round` is BIGINT (0008_int4_to_bigint_audit.sql).
+                // Decoding as `i32` raises `ColumnDecode: mismatched types`, which silently
+                // aborted this whole true_negative recording path.
+                let review_round = sqlx::query_scalar::<_, Option<i64>>(
                     "SELECT review_round
                      FROM card_review_state
                      WHERE card_id = $1",
@@ -2012,6 +2015,9 @@ fn record_true_negative_if_pass_with_backends(
                 .await
                 .map_err(|error| format!("load postgres review round for {card_id}: {error}"))?
                 .flatten();
+                // `review_tuning_outcomes.review_round` is still INTEGER (not in the
+                // 0008 bigint audit). Downcast is safe — review rounds are bounded small.
+                let review_round_i32 = review_round.map(|v| v as i32);
 
                 let review_results = sqlx::query(
                     "SELECT result
@@ -2053,7 +2059,7 @@ fn record_true_negative_if_pass_with_backends(
                      VALUES ($1, NULL, $2, $3, 'done', 'true_negative', $4)",
                 )
                 .bind(&card_id)
-                .bind(review_round)
+                .bind(review_round_i32)
                 .bind(&last_verdict)
                 .bind(finding_cats)
                 .execute(&pool)
