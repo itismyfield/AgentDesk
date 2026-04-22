@@ -29,12 +29,21 @@ fn seed_test_agents(db: &Db) {
 }
 
 fn test_engine(db: &Db) -> PolicyEngine {
-    let config = crate::config::Config::default();
+    // Disable FSEvents-backed policy hot reload in tests. Each PolicyEngine
+    // construction registers a new macOS FSEvents watcher on ./policies, and
+    // the test harness reuses one process across thousands of tests. The
+    // watcher handles accumulate (notify v6 cannot reliably free the FSEvents
+    // stream on drop), and once macOS fseventsd's f2d_register_rpc starts
+    // throttling, the next watch() call blocks indefinitely — surfacing as a
+    // `cargo test --bin agentdesk` hang with no progress.
+    let mut config = crate::config::Config::default();
+    config.policies.hot_reload = false;
     PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
 }
 
 fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
-    let config = crate::config::Config::default();
+    let mut config = crate::config::Config::default();
+    config.policies.hot_reload = false;
     PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
 }
 
