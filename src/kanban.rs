@@ -201,6 +201,290 @@ fn scrub_worktree_keys_from_json(raw: Option<&str>, keys: &[&str]) -> Option<Str
     serde_json::to_string(&value).ok()
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PgTransitionCleanupCounts {
+    pub cancelled_dispatches: usize,
+    pub skipped_auto_queue_entries: usize,
+}
+
+async fn clear_escalation_alert_state_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM kv_meta WHERE key = ANY($1)")
+        .bind(vec![
+            format!("pm_pending:{card_id}"),
+            format!("pm_decision_sent:{card_id}"),
+        ])
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("clear postgres escalation state for {card_id}: {error}")
+        })?;
+    Ok(())
+}
+
+async fn strip_stale_worktree_metadata_from_dispatches_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    const STALE_KEYS: &[&str] = &[
+        "worktree_path",
+        "worktree_branch",
+        "completed_worktree_path",
+        "completed_branch",
+    ];
+
+    let rows = sqlx::query(
+        "SELECT id, context::text AS context, result::text AS result
+         FROM task_dispatches
+         WHERE kanban_card_id = $1",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load postgres dispatch cleanup rows for {card_id}: {error}")
+    })?;
+
+    for row in rows {
+        let dispatch_id: String = row.try_get("id").map_err(|error| {
+            anyhow::anyhow!("decode postgres dispatch id for {card_id}: {error}")
+        })?;
+        let context_raw: Option<String> = row.try_get("context").map_err(|error| {
+            anyhow::anyhow!("decode postgres dispatch context for {dispatch_id}: {error}")
+        })?;
+        let result_raw: Option<String> = row.try_get("result").map_err(|error| {
+            anyhow::anyhow!("decode postgres dispatch result for {dispatch_id}: {error}")
+        })?;
+
+        let new_context = scrub_worktree_keys_from_json(context_raw.as_deref(), STALE_KEYS);
+        let new_result = scrub_worktree_keys_from_json(result_raw.as_deref(), STALE_KEYS);
+
+        if new_context.is_none() && new_result.is_none() {
+            continue;
+        }
+
+        let context_value: Option<String> = new_context.or(context_raw);
+        let result_value: Option<String> = new_result.or(result_raw);
+
+        sqlx::query(
+            "UPDATE task_dispatches
+             SET context = $1::jsonb,
+                 result = $2::jsonb,
+                 updated_at = NOW()
+             WHERE id = $3",
+        )
+        .bind(context_value)
+        .bind(result_value)
+        .bind(&dispatch_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("save postgres dispatch cleanup row {dispatch_id}: {error}")
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn skip_live_auto_queue_entries_for_card_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<usize> {
+    let rows = sqlx::query(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')
+           AND run_id IN (
+               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+           )",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres auto-queue entries for {card_id}: {error}"))?;
+
+    let mut changed = 0usize;
+    for row in rows {
+        let entry_id: String = row.try_get("id").map_err(|error| {
+            anyhow::anyhow!("decode postgres auto-queue entry for {card_id}: {error}")
+        })?;
+        let result = crate::db::auto_queue::update_entry_status_on_pg_tx(
+            tx,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+            "force_transition_cleanup",
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("skip postgres auto-queue entry {entry_id}: {error}"))?;
+        if result.changed {
+            changed += 1;
+        }
+    }
+
+    Ok(changed)
+}
+
+async fn count_live_dispatches_for_card_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<usize> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("count postgres live dispatches for {card_id}: {error}"))?;
+    Ok(count.max(0) as usize)
+}
+
+async fn cancel_active_dispatches_for_card_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+    reason: Option<&str>,
+) -> anyhow::Result<usize> {
+    let rows = sqlx::query(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("load postgres live dispatches for {card_id}: {error}"))?;
+    let dispatch_ids: Vec<String> = rows
+        .into_iter()
+        .map(|row| row.try_get("id"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            anyhow::anyhow!("decode postgres live dispatch id for {card_id}: {error}")
+        })?;
+
+    if dispatch_ids.is_empty() {
+        return Ok(0);
+    }
+
+    sqlx::query(
+        "UPDATE sessions
+         SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END,
+             active_dispatch_id = NULL
+         WHERE active_dispatch_id = ANY($1)",
+    )
+    .bind(&dispatch_ids)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("clear postgres live session dispatches for {card_id}: {error}")
+    })?;
+
+    let cancel_payload = reason
+        .map(|value| json!({ "reason": value, "completion_source": "force_transition" }))
+        .unwrap_or_else(|| json!({ "completion_source": "force_transition" }));
+    let mut cancelled = 0usize;
+    for dispatch_id in dispatch_ids {
+        let rows_affected = sqlx::query(
+            "UPDATE task_dispatches
+             SET status = 'cancelled',
+                 updated_at = NOW(),
+                 completed_at = COALESCE(completed_at, NOW()),
+                 result = COALESCE(result, CAST($2 AS jsonb)::text)
+             WHERE id = $1
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind(&dispatch_id)
+        .bind(cancel_payload.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("cancel postgres dispatch {dispatch_id}: {error}"))?
+        .rows_affected();
+        cancelled += rows_affected as usize;
+    }
+
+    Ok(cancelled)
+}
+
+async fn cleanup_force_transition_revert_fields_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    use crate::engine::transition::TransitionIntent;
+
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        tx,
+        &TransitionIntent::SetLatestDispatchId {
+            card_id: card_id.to_string(),
+            dispatch_id: None,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        tx,
+        &TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET review_round = 0,
+             review_notes = NULL,
+             suggestion_pending_at = NULL,
+             review_entered_at = NULL,
+             awaiting_dod_at = NULL,
+             blocked_reason = NULL,
+             updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("reset postgres kanban cleanup fields for {card_id}: {error}")
+    })?;
+
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
+         ) VALUES (
+            $1, 0, 'idle', NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, NULL, NOW()
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            review_round = 0,
+            state = 'idle',
+            pending_dispatch_id = NULL,
+            last_verdict = NULL,
+            last_decision = NULL,
+            decided_by = NULL,
+            decided_at = NULL,
+            approach_change_round = NULL,
+            session_reset_round = NULL,
+            review_entered_at = NULL,
+            updated_at = NOW()",
+    )
+    .bind(card_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| anyhow::anyhow!("reset postgres review state for {card_id}: {error}"))?;
+
+    clear_escalation_alert_state_on_pg_tx(tx, card_id).await?;
+    strip_stale_worktree_metadata_from_dispatches_on_pg_tx(tx, card_id).await?;
+    Ok(())
+}
+
 pub(crate) fn log_audit_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -544,7 +828,44 @@ where
     )
 }
 
-pub async fn transition_status_with_opts_pg(
+async fn execute_allowed_cleanup_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+    new_status: &str,
+    on_pg_policy: AllowedOnConnMutation,
+) -> Result<PgTransitionCleanupCounts> {
+    let mut counts = PgTransitionCleanupCounts::default();
+
+    match on_pg_policy {
+        AllowedOnConnMutation::ForceTransitionRevertCleanup => {
+            let reason = format!("force-transition to {new_status}");
+            counts.cancelled_dispatches =
+                cancel_active_dispatches_for_card_on_pg_tx(tx, card_id, Some(&reason)).await?;
+            counts.skipped_auto_queue_entries =
+                skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
+            cleanup_force_transition_revert_fields_on_pg_tx(tx, card_id).await?;
+        }
+        AllowedOnConnMutation::ForceTransitionTerminalCleanup => {
+            counts.cancelled_dispatches =
+                count_live_dispatches_for_card_on_pg_tx(tx, card_id).await?;
+            crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+                tx, card_id,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
+        AllowedOnConnMutation::TestOnlyRollbackGuard => {
+            return Err(anyhow::anyhow!("cleanup failed"));
+        }
+        AllowedOnConnMutation::TestOnlyManualInterventionCleanup => {
+            clear_escalation_alert_state_on_pg_tx(tx, card_id).await?;
+        }
+    }
+
+    Ok(counts)
+}
+
+async fn transition_status_with_opts_pg_inner(
     db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,
@@ -552,7 +873,8 @@ pub async fn transition_status_with_opts_pg(
     new_status: &str,
     source: &str,
     force_intent: crate::engine::transition::ForceIntent,
-) -> Result<TransitionResult> {
+    on_pg_policy: Option<AllowedOnConnMutation>,
+) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
     };
@@ -598,11 +920,14 @@ pub async fn transition_status_with_opts_pg(
         .map_err(|error| anyhow::anyhow!("decode blocked_reason for {card_id}: {error}"))?;
 
     if old_status == new_status {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
+        return Ok((
+            TransitionResult {
+                changed: false,
+                from: old_status,
+                to: new_status.to_string(),
+            },
+            PgTransitionCleanupCounts::default(),
+        ));
     }
 
     crate::pipeline::ensure_loaded();
@@ -692,11 +1017,14 @@ pub async fn transition_status_with_opts_pg(
     }
 
     if decision.outcome == TransitionOutcome::NoOp {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
+        return Ok((
+            TransitionResult {
+                changed: false,
+                from: old_status,
+                to: new_status.to_string(),
+            },
+            PgTransitionCleanupCounts::default(),
+        ));
     }
 
     let old_manual_intervention = crate::manual_intervention::requires_manual_intervention(
@@ -715,13 +1043,28 @@ pub async fn transition_status_with_opts_pg(
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
 
-    if effective.is_terminal(new_status) {
-        crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
-            &mut tx, card_id,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    }
+    let cleanup_counts = if let Some(policy) = on_pg_policy {
+        tracing::debug!(
+            card_id,
+            source,
+            on_pg_policy = policy.audit_value(),
+            rationale = policy.rationale(),
+            "[kanban] executing allowlisted postgres cleanup after transition intents"
+        );
+        execute_allowed_cleanup_on_pg_tx(&mut tx, card_id, new_status, policy).await?
+    } else {
+        let mut counts = PgTransitionCleanupCounts::default();
+        if effective.is_terminal(new_status) {
+            counts.cancelled_dispatches =
+                count_live_dispatches_for_card_on_pg_tx(&mut tx, card_id).await?;
+            crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+                &mut tx, card_id,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
+        counts
+    };
 
     let new_state_row = sqlx::query(
         "SELECT review_status, blocked_reason
@@ -739,24 +1082,17 @@ pub async fn transition_status_with_opts_pg(
         .try_get("blocked_reason")
         .map_err(|error| anyhow::anyhow!("decode new blocked_reason for {card_id}: {error}"))?;
 
-    tx.commit()
-        .await
-        .map_err(|error| anyhow::anyhow!("commit postgres transition tx: {error}"))?;
-
     let new_manual_intervention = crate::manual_intervention::requires_manual_intervention(
         new_review_status.as_deref(),
         new_blocked_reason.as_deref(),
     );
-    if old_manual_intervention
-        && !new_manual_intervention
-        && let Some(db) = db
-        && let Ok(conn) = db.lock()
-        && let Err(error) = clear_escalation_alert_state_on_conn(&conn, card_id)
-    {
-        tracing::warn!(
-            "[kanban] failed to clear manual-intervention alert state for {card_id}: {error}"
-        );
+    if old_manual_intervention && !new_manual_intervention {
+        clear_escalation_alert_state_on_pg_tx(&mut tx, card_id).await?;
     }
+
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit postgres transition tx: {error}"))?;
 
     github_sync_on_transition_pg(pg_pool, &effective, card_id, new_status).await;
     fire_dynamic_hooks(
@@ -777,11 +1113,60 @@ pub async fn transition_status_with_opts_pg(
         );
     }
 
-    Ok(TransitionResult {
-        changed: true,
-        from: old_status,
-        to: new_status.to_string(),
-    })
+    Ok((
+        TransitionResult {
+            changed: true,
+            from: old_status,
+            to: new_status.to_string(),
+        },
+        cleanup_counts,
+    ))
+}
+
+pub async fn transition_status_with_opts_pg(
+    db: Option<&Db>,
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+) -> Result<TransitionResult> {
+    transition_status_with_opts_pg_inner(
+        db,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        None,
+    )
+    .await
+    .map(|(result, _)| result)
+}
+
+pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
+    db: Option<&Db>,
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+    on_pg_policy: AllowedOnConnMutation,
+) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
+    transition_status_with_opts_pg_inner(
+        db,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        Some(on_pg_policy),
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -829,7 +1214,7 @@ fn fire_dynamic_hooks(
     // No fallback — YAML is the sole source of truth for hook bindings.
 }
 
-async fn resolve_pipeline_with_pg(
+pub(crate) async fn resolve_pipeline_with_pg(
     pg_pool: &sqlx::PgPool,
     repo_id: Option<&str>,
     agent_id: Option<&str>,

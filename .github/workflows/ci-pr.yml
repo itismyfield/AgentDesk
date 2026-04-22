@@ -98,6 +98,29 @@ jobs:
   test_fast:
     name: Fast targeted tests (ubuntu-latest)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RUST_BACKTRACE: 1
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -121,13 +144,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --all-targets transition
+          cargo test --all-targets transition -- --test-threads=1
           cargo test --all-targets auto_queue
           cargo test --all-targets cancel
           cargo test --all-targets review_decision
           cargo test invariant --all-targets -- --skip _pg_ --skip postgres_
-        env:
-          RUST_BACKTRACE: 1
 
   high-risk-recovery:
     name: High-risk recovery
