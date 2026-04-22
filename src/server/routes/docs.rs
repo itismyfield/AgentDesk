@@ -2014,9 +2014,27 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/auto-queue/pause",
             "auto-queue",
-            "Pause all active runs",
+            "Soft-pause active runs",
         )
-        .with_example(json!({}), json!({"ok": true, "paused_runs": 1})),
+        .with_params([(
+            "force",
+            body_param(
+                "boolean",
+                false,
+                "Cancel live dispatches and release tmux slots before pausing",
+            )
+            .with_default(false),
+        )])
+        .with_example(
+            json!({}),
+            json!({
+                "ok": true,
+                "paused_runs": 1,
+                "cancelled_dispatches": 0,
+                "released_slots": 0,
+                "cleared_slot_sessions": 0
+            }),
+        ),
         ep(
             "POST",
             "/api/auto-queue/resume",

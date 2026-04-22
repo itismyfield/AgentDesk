@@ -5475,6 +5475,17 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
     assert_eq!(dispatch["params"]["activate"]["default"], true);
     assert_eq!(dispatch["params"]["auto_assign_agent"]["default"], true);
     assert_eq!(dispatch["example"]["response"]["dispatch"]["count"], 1);
+
+    let pause = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/pause")
+        .expect("auto-queue pause endpoint must be present");
+    assert_eq!(pause["params"]["force"]["type"], "boolean");
+    assert_eq!(pause["params"]["force"]["default"], false);
+    assert_eq!(pause["example"]["response"]["paused_runs"], 1);
+    assert_eq!(pause["example"]["response"]["cancelled_dispatches"], 0);
+    assert_eq!(pause["example"]["response"]["released_slots"], 0);
+    assert_eq!(pause["example"]["response"]["cleared_slot_sessions"], 0);
 }
 
 #[tokio::test]
@@ -18591,7 +18602,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
 }
 
 #[tokio::test]
-async fn auto_queue_pause_cancels_live_dispatches_and_releases_slots() {
+async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots() {
     let db = test_db();
     let engine = test_engine(&db);
     ensure_auto_queue_tables(&db);
@@ -18688,8 +18699,9 @@ async fn auto_queue_pause_cancels_live_dispatches_and_releases_slots() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["paused_runs"], 1);
-    assert_eq!(json["cancelled_dispatches"], 1);
-    assert_eq!(json["released_slots"], 1);
+    assert_eq!(json["cancelled_dispatches"], 0);
+    assert_eq!(json["released_slots"], 0);
+    assert_eq!(json["cleared_slot_sessions"], 0);
 
     let conn = db.lock().unwrap();
     let run_status: String = conn
@@ -18710,9 +18722,187 @@ async fn auto_queue_pause_cancels_live_dispatches_and_releases_slots() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(dispatched_entry.0, "pending");
-    assert_eq!(dispatched_entry.1, None);
-    assert_eq!(dispatched_entry.2, None);
+    assert_eq!(dispatched_entry.0, "dispatched");
+    assert_eq!(dispatched_entry.1, Some("dispatch-pause-slot".to_string()));
+    assert!(
+        dispatched_entry.2.is_some(),
+        "soft pause must leave the in-flight dispatch timestamp untouched"
+    );
+
+    let pending_entry: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-pause-pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_entry, "pending");
+
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-pause-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_status, "dispatched");
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-pause-slot' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(slot, (Some("run-pause-slot".to_string()), Some(0)));
+
+    let session: (String, Option<String>, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id, tokens, claude_session_id
+             FROM sessions
+             WHERE session_key = 'host:AgentDesk-claude-pause-slot'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        session,
+        (
+            "working".to_string(),
+            Some("dispatch-pause-slot".to_string()),
+            19,
+            Some("claude-pause-slot".to_string()),
+        )
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-pause-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-pause-dispatched",
+        4496,
+        "in_progress",
+        "agent-pause-slot",
+    );
+    seed_auto_queue_card(&db, "card-pause-pending", 4497, "ready", "agent-pause-slot");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-pause-slot', 'test-repo', 'agent-pause-slot', 'active', 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-pause-slot', 0, 'run-pause-slot', 0, ?1
+            )",
+            [json!({"111": "222000000000004496"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-pause-slot', 'card-pause-dispatched', 'agent-pause-slot',
+                'implementation', 'dispatched', 'Pause slot dispatch', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-pause-dispatched', 'run-pause-slot', 'card-pause-dispatched',
+                'agent-pause-slot', 'dispatched', 'dispatch-pause-slot', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-pause-pending', 'run-pause-slot', 'card-pause-pending',
+                'agent-pause-slot', 'pending', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, session_info, tokens,
+                active_dispatch_id, thread_channel_id, claude_session_id,
+                last_heartbeat, created_at
+            ) VALUES (
+                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
+                'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/pause")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({"force": true})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["paused_runs"], 1);
+    assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["released_slots"], 1);
+    assert_eq!(json["cleared_slot_sessions"], 1);
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-pause-slot'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "paused");
+
+    let dispatched_entry_status: String = conn
+        .query_row(
+            "SELECT status
+             FROM auto_queue_entries
+             WHERE id = 'entry-pause-dispatched'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatched_entry_status, "skipped");
 
     let pending_entry: String = conn
         .query_row(
@@ -18759,7 +18949,7 @@ async fn auto_queue_pause_cancels_live_dispatches_and_releases_slots() {
 }
 
 #[tokio::test]
-async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
+async fn auto_queue_pause_pg_soft_does_not_cancel_live_dispatches_or_release_slots() {
     let db = test_db();
     let engine = test_engine(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -18926,8 +19116,9 @@ async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["paused_runs"], 1);
-    assert_eq!(json["cancelled_dispatches"], 1);
-    assert_eq!(json["released_slots"], 1);
+    assert_eq!(json["cancelled_dispatches"], 0);
+    assert_eq!(json["released_slots"], 0);
+    assert_eq!(json["cleared_slot_sessions"], 0);
 
     let run_status =
         sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
@@ -18950,9 +19141,15 @@ async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
     .fetch_one(&pg_pool)
     .await
     .unwrap();
-    assert_eq!(dispatched_entry.0, "pending");
-    assert_eq!(dispatched_entry.1, None);
-    assert_eq!(dispatched_entry.2, None);
+    assert_eq!(dispatched_entry.0, "dispatched");
+    assert_eq!(
+        dispatched_entry.1,
+        Some("dispatch-pause-slot-pg".to_string())
+    );
+    assert!(
+        dispatched_entry.2.is_some(),
+        "soft pause must leave the postgres dispatch timestamp untouched"
+    );
 
     let dispatch_status =
         sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
@@ -18960,7 +19157,7 @@ async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
             .fetch_one(&pg_pool)
             .await
             .unwrap();
-    assert_eq!(dispatch_status, "cancelled");
+    assert_eq!(dispatch_status, "dispatched");
 
     let slot: (Option<String>, Option<i64>) = sqlx::query_as(
         "SELECT assigned_run_id, assigned_thread_group
@@ -18972,7 +19169,7 @@ async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
     .fetch_one(&pg_pool)
     .await
     .unwrap();
-    assert_eq!(slot, (None, None));
+    assert_eq!(slot, (Some("run-pause-slot-pg".to_string()), Some(0)));
 
     let session: (String, Option<String>, i64, Option<String>) = sqlx::query_as(
         "SELECT status, active_dispatch_id, tokens::BIGINT, claude_session_id
@@ -18983,10 +19180,15 @@ async fn auto_queue_pause_pg_cancels_live_dispatches_and_releases_slots() {
     .fetch_one(&pg_pool)
     .await
     .unwrap();
-    assert_eq!(session.0, "idle");
-    assert_eq!(session.1, None);
-    assert_eq!(session.2, 0);
-    assert_eq!(session.3, None);
+    assert_eq!(
+        session,
+        (
+            "working".to_string(),
+            Some("dispatch-pause-slot-pg".to_string()),
+            19,
+            Some("claude-pause-slot-pg".to_string()),
+        )
+    );
 
     pg_pool.close().await;
     pg_db.drop().await;
