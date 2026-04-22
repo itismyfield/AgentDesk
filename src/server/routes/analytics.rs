@@ -31,6 +31,50 @@ fn sqlite_datetime_to_millis(value: &str) -> Option<i64> {
         .map(|ts| DateTime::<Utc>::from_naive_utc_and_offset(ts, Utc).timestamp_millis())
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct AnalyticsQuery {
+    pub provider: Option<String>,
+    #[serde(rename = "channelId")]
+    pub channel_id: Option<String>,
+    #[serde(rename = "eventType")]
+    pub event_type: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/analytics
+pub async fn analytics(
+    State(state): State<AppState>,
+    Query(params): Query<AnalyticsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let filters = crate::services::observability::AnalyticsFilters {
+        provider: params.provider,
+        channel_id: params.channel_id,
+        event_type: params.event_type,
+        event_limit: params.limit.unwrap_or(100),
+        counter_limit: 200,
+    };
+
+    match crate::services::observability::query_analytics(
+        &state.db,
+        state.pg_pool.as_ref(),
+        &filters,
+    )
+    .await
+    {
+        Ok(response) => match serde_json::to_value(response) {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize analytics response: {error}")})),
+            ),
+        },
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query analytics: {error}")})),
+        ),
+    }
+}
+
 /// GET /api/streaks
 pub async fn streaks(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.lock() {
@@ -1051,6 +1095,11 @@ mod tests {
         format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
+    fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
+        let config = crate::config::Config::default();
+        crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
     #[test]
     fn build_rate_limit_provider_payloads_hides_unused_unsupported_qwen() {
         let conn = test_conn();
@@ -1100,6 +1149,55 @@ mod tests {
         assert_eq!(providers[0]["provider"], json!("qwen"));
         assert_eq!(providers[0]["unsupported"], json!(true));
         assert_eq!(providers[0]["buckets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn analytics_route_returns_observability_payload() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        let db = crate::db::test_db();
+        crate::services::observability::init_observability(db.clone(), None);
+        crate::services::observability::emit_turn_started(
+            "codex",
+            4242,
+            Some("dispatch-analytics"),
+            Some("session-analytics"),
+            Some("turn-analytics"),
+        );
+        crate::services::observability::emit_turn_finished(
+            "codex",
+            4242,
+            Some("dispatch-analytics"),
+            Some("session-analytics"),
+            Some("turn-analytics"),
+            "completed",
+            120,
+            false,
+        );
+        crate::services::observability::flush_for_tests().await;
+
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status, Json(body)) = analytics(
+            State(state),
+            Query(AnalyticsQuery {
+                provider: Some("codex".to_string()),
+                channel_id: Some("4242".to_string()),
+                event_type: None,
+                limit: Some(10),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["counters"][0]["turn_attempts"], json!(1));
+        assert_eq!(body["counters"][0]["turn_successes"], json!(1));
+        assert!(
+            body["events"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|event| event["event_type"] == json!("turn_finished"))
+        );
     }
 
     #[tokio::test]

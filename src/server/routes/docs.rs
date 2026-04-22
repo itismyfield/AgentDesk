@@ -2073,6 +2073,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "queue",
             "Extend live turn timeout",
         ),
+        ep("GET", "/api/analytics", "analytics", "Observability counters and structured events")
+            .with_params([
+                (
+                    "provider",
+                    query_param("string", false, "Filter by provider id (claude/codex/gemini/qwen)"),
+                ),
+                (
+                    "channelId",
+                    query_param("string", false, "Filter by Discord channel id"),
+                ),
+                (
+                    "eventType",
+                    query_param("string", false, "Filter by event type"),
+                ),
+                (
+                    "limit",
+                    query_param("integer", false, "Maximum recent events to return").with_default(100),
+                ),
+            ]),
         ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
         ep("GET", "/api/achievements", "analytics", "Agent achievements"),
         ep(

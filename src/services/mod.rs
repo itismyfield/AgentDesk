@@ -12,6 +12,7 @@ pub mod kanban;
 pub mod mcp_config;
 pub mod memory;
 pub mod message_outbox;
+pub mod observability;
 pub mod platform;
 pub mod process;
 pub mod provider;

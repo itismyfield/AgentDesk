@@ -267,8 +267,8 @@ async fn set_dispatch_status_on_pg(
             ) VALUES ($1, $2, $3, $4, $5, $6, CAST($7 AS jsonb))",
         )
         .bind(dispatch_id)
-        .bind(kanban_card_id)
-        .bind(dispatch_type)
+        .bind(&kanban_card_id)
+        .bind(&dispatch_type)
         .bind(&current_status)
         .bind(to_status)
         .bind(transition_source)
@@ -278,6 +278,18 @@ async fn set_dispatch_status_on_pg(
         .map_err(|error| {
             anyhow::anyhow!("insert postgres dispatch event for {dispatch_id}: {error}")
         })?;
+        crate::services::observability::emit_dispatch_result(
+            dispatch_id,
+            kanban_card_id.as_deref(),
+            dispatch_type.as_deref(),
+            Some(&current_status),
+            to_status,
+            transition_source,
+            result_json
+                .as_ref()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .as_ref(),
+        );
 
         if should_enqueue_status_reaction(to_status, transition_source) {
             sqlx::query(
@@ -509,6 +521,15 @@ pub(crate) fn record_dispatch_status_event_on_conn(
             payload.map(|value| value.to_string()),
         ],
     )?;
+    crate::services::observability::emit_dispatch_result(
+        dispatch_id,
+        kanban_card_id.as_deref(),
+        dispatch_type.as_deref(),
+        from_status,
+        to_status,
+        transition_source,
+        payload,
+    );
     Ok(())
 }
 

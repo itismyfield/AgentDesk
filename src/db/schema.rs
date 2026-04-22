@@ -105,6 +105,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN raw_provider_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
     ensure_turns_schema(conn)?;
+    ensure_observability_schema(conn)?;
     run_migration_once(
         conn,
         SESSION_AGENT_ID_BACKFILL_META_KEY,
@@ -1866,6 +1867,46 @@ fn ensure_turns_schema(conn: &Connection) -> Result<()> {
             ON turns (dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_turns_finished_at
             ON turns (finished_at DESC);",
+    )?;
+    Ok(())
+}
+
+fn ensure_observability_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS observability_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type   TEXT NOT NULL,
+            provider     TEXT,
+            channel_id   TEXT,
+            dispatch_id  TEXT,
+            session_key  TEXT,
+            turn_id      TEXT,
+            status       TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_observability_events_created_at
+            ON observability_events (created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_observability_events_provider_channel
+            ON observability_events (provider, channel_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_observability_events_dispatch_id
+            ON observability_events (dispatch_id);
+        CREATE TABLE IF NOT EXISTS observability_counter_snapshots (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider             TEXT NOT NULL,
+            channel_id           TEXT NOT NULL,
+            turn_attempts        INTEGER NOT NULL DEFAULT 0,
+            guard_fires          INTEGER NOT NULL DEFAULT 0,
+            watcher_replacements INTEGER NOT NULL DEFAULT 0,
+            recovery_fires       INTEGER NOT NULL DEFAULT 0,
+            turn_successes       INTEGER NOT NULL DEFAULT 0,
+            turn_failures        INTEGER NOT NULL DEFAULT 0,
+            snapshot_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_observability_counter_snapshots_provider_channel
+            ON observability_counter_snapshots (provider, channel_id, snapshot_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_observability_counter_snapshots_snapshot_at
+            ON observability_counter_snapshots (snapshot_at DESC);",
     )?;
     Ok(())
 }

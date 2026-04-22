@@ -1124,6 +1124,8 @@ pub(super) fn claim_or_replace_watcher(
     watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    source: &str,
 ) -> bool {
     use dashmap::mapref::entry::Entry;
     match watchers.entry(channel_id) {
@@ -1140,6 +1142,11 @@ pub(super) fn claim_or_replace_watcher(
                 channel_id
             );
             entry.insert(handle);
+            crate::services::observability::emit_watcher_replaced(
+                provider.as_str(),
+                channel_id.get(),
+                source,
+            );
             false
         }
         Entry::Vacant(entry) => {

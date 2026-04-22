@@ -148,6 +148,7 @@ pub async fn run(
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)?;
+    crate::services::observability::init_observability(db.clone(), pg_pool.clone());
     if let Some(pool) = pg_pool.as_ref() {
         crate::db::postgres::startup_reseed(pool, &config)
             .await

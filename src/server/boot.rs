@@ -35,6 +35,7 @@ pub(super) async fn serve_http(
         .await
         .map_err(anyhow::Error::msg)?;
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
+    crate::services::observability::init_observability(db.clone(), pg_pool.clone());
 
     let app = build_app(
         &dashboard_dir,

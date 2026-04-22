@@ -330,6 +330,19 @@ pub(super) async fn restore_inflight_turns(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
         );
+        let restart_report_exists =
+            super::restart_report::load_restart_report(provider, state.channel_id).is_some();
+        crate::services::observability::emit_recovery_fired(
+            provider.as_str(),
+            state.channel_id,
+            state.dispatch_id.as_deref(),
+            state.session_key.as_deref(),
+            if restart_report_exists {
+                "restart_report"
+            } else {
+                "restore_inflight"
+            },
+        );
 
         // No generation gate — adopt mode allows old-gen session recovery.
         // If a restart report exists for this channel, check whether the agent
@@ -337,7 +350,7 @@ pub(super) async fn restore_inflight_turns(
         // file contains a completed result we deliver it directly and clear both
         // the inflight state and the restart report, so the flush loop won't
         // overwrite the message with a generic follow-up.
-        if super::restart_report::load_restart_report(provider, state.channel_id).is_some() {
+        if restart_report_exists {
             let output_path_for_check: Option<String> = state
                 .output_path
                 .clone()
@@ -1895,6 +1908,8 @@ pub(crate) async fn rebind_inflight_for_channel(
                 &shared.tmux_watchers,
                 discord_channel_id,
                 handle,
+                provider,
+                "recovery_restore_inflight",
             );
             tokio::spawn(super::tmux::tmux_output_watcher(
                 discord_channel_id,

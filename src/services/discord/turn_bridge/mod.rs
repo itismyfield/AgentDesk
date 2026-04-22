@@ -411,6 +411,7 @@ pub(super) fn spawn_turn_bridge(
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
         let user_msg_id = bridge.user_msg_id;
+        let turn_id = format!("discord:{}:{}", bridge.channel_id.get(), bridge.user_msg_id.get());
         let user_text_owned = bridge.user_text_owned.clone();
         let request_owner_name = bridge.request_owner_name.clone();
         let role_binding = bridge.role_binding.clone();
@@ -491,6 +492,13 @@ pub(super) fn spawn_turn_bridge(
         let turn_start = std::time::Instant::now();
 
         let _ = save_inflight_state(&inflight_state);
+        crate::services::observability::emit_turn_started(
+            provider.as_str(),
+            channel_id.get(),
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            Some(turn_id.as_str()),
+        );
 
         while !done {
             let mut state_dirty = false;
@@ -924,6 +932,8 @@ pub(super) fn spawn_turn_bridge(
                                         &shared_owned.tmux_watchers,
                                         channel_id,
                                         handle,
+                                        &provider,
+                                        "turn_bridge_tmux_ready",
                                     );
                                     true
                                 }
@@ -1143,6 +1153,16 @@ pub(super) fn spawn_turn_bridge(
         } else {
             None
         };
+        if review_dispatch_warning.is_some() {
+            crate::services::observability::emit_guard_fired(
+                provider.as_str(),
+                channel_id.get(),
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "review_dispatch_pending",
+            );
+        }
 
         // Explicitly complete implementation/rework dispatches before sending idle.
         // These types are NOT auto-completed by the session idle hook — they require
@@ -1778,7 +1798,6 @@ pub(super) fn spawn_turn_bridge(
             .await;
         }
 
-        let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
         let memory_role_id = resolve_memory_role_id(role_binding.as_ref());
         let recall_feedback_analysis = if should_analyze_recall_feedback
             || transcript_contains_explicit_memento_tool_call(&transcript_events)
@@ -1793,6 +1812,31 @@ pub(super) fn spawn_turn_bridge(
             cache_read_tokens: accumulated_cache_read_tokens,
             output_tokens: accumulated_output_tokens,
         };
+        let turn_outcome = if cancelled {
+            "cancelled"
+        } else if recovery_retry {
+            "recovery_retry"
+        } else if is_prompt_too_long {
+            "prompt_too_long"
+        } else if transport_error {
+            "transport_error"
+        } else if rx_disconnected && tmux_handed_off && full_response.is_empty() {
+            "tmux_handoff"
+        } else if full_response.trim().is_empty() {
+            "empty_response"
+        } else {
+            "completed"
+        };
+        crate::services::observability::emit_turn_finished(
+            provider.as_str(),
+            channel_id.get(),
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            Some(turn_id.as_str()),
+            turn_outcome,
+            turn_duration_ms(turn_start),
+            rx_disconnected && tmux_handed_off && full_response.is_empty(),
+        );
 
         if should_persist_transcript
             && (shared_owned.sqlite.is_some() || shared_owned.pg_pool.is_some())
