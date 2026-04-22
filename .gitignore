@@ -24,3 +24,6 @@ __pycache__/
 /.codex/skills/
 /.gemini/skills/
 /.qwen/skills/
+
+# Claude Code Agent tool isolated worktrees
+/.claude/worktrees/
