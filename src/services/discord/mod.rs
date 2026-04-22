@@ -190,7 +190,7 @@ pub(in crate::services::discord) fn should_phase2_recover_message(
     true
 }
 
-pub(in crate::services::discord) fn recovery_known_message_ids(
+pub(in crate::services::discord) fn queued_message_ids(
     snapshot: &ChannelMailboxSnapshot,
 ) -> std::collections::HashSet<u64> {
     let mut ids = std::collections::HashSet::new();
@@ -202,6 +202,13 @@ pub(in crate::services::discord) fn recovery_known_message_ids(
                 .map(|message_id| message_id.get()),
         );
     }
+    ids
+}
+
+pub(in crate::services::discord) fn recovery_known_message_ids(
+    snapshot: &ChannelMailboxSnapshot,
+) -> std::collections::HashSet<u64> {
+    let mut ids = queued_message_ids(snapshot);
     if let Some(active_id) = snapshot.active_user_message_id {
         ids.insert(active_id.get());
     }
@@ -2039,7 +2046,7 @@ mod tests {
     use super::{ChannelId, MessageId, UserId};
     use super::{
         DiscordBotSettings, Intervention, InterventionMode, is_allowed_turn_sender,
-        mark_session_disconnected_for_idle_cleanup, recovery_known_message_ids,
+        mark_session_disconnected_for_idle_cleanup, queued_message_ids, recovery_known_message_ids,
         should_phase2_recover_message,
     };
     use crate::services::discord::settings::{
@@ -2134,6 +2141,30 @@ mod tests {
         assert!(existing.contains(&100));
         assert!(existing.contains(&200));
         assert!(!should_phase2_recover_message(200, None, &existing));
+    }
+
+    #[test]
+    fn queued_message_ids_exclude_active_turn_message() {
+        let snapshot = super::ChannelMailboxSnapshot {
+            active_user_message_id: Some(MessageId::new(200)),
+            intervention_queue: vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(100),
+                source_message_ids: vec![MessageId::new(90), MessageId::new(100)],
+                text: "queued".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            }],
+            ..Default::default()
+        };
+
+        let existing = queued_message_ids(&snapshot);
+        assert!(existing.contains(&90));
+        assert!(existing.contains(&100));
+        assert!(!existing.contains(&200));
     }
 
     #[test]

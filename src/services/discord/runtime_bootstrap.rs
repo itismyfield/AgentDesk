@@ -889,14 +889,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         .await;
 
                         gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
-                        restore_inflight_turns(
-                            &http_for_tmux,
-                            &shared_for_tmux2,
-                            &provider_for_restore,
-                        )
-                        .await;
 
                         // Restore pending intervention queues saved during previous SIGTERM
+                        // before inflight turn recovery. Drain-mode queue snapshots are the
+                        // source of truth for restart-gap user input; if inflight recovery
+                        // recreates an active turn first, the active message id can make a
+                        // persisted queue item look "already known" and incorrectly drop it.
                         let (restored_queues, restored_overrides) =
                             load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
                         let allowed_bot_ids_for_restore: Vec<u64> = {
@@ -941,7 +939,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                     continue;
                                 }
                                 let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
-                                let mut existing_ids = recovery_known_message_ids(&snapshot);
+                                let mut existing_ids = queued_message_ids(&snapshot);
                                 let mut queue = snapshot.intervention_queue;
                                 for item in items {
                                     if !super::is_allowed_turn_sender(
@@ -977,6 +975,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)"
                             );
                         }
+
+                        restore_inflight_turns(
+                            &http_for_tmux,
+                            &shared_for_tmux2,
+                            &provider_for_restore,
+                        )
+                        .await;
 
                         // P1-2: Warn about legacy queue files that cannot be restored
                         warn_legacy_pending_queue_files(&provider_for_restore);
