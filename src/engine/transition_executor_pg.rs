@@ -211,7 +211,6 @@ mod tests {
     use std::collections::HashMap;
 
     struct TestDatabase {
-        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
         database_url: String,
@@ -245,7 +244,6 @@ mod tests {
 
     impl TestDatabase {
         async fn create() -> Self {
-            let lock = crate::db::postgres::lock_test_lifecycle();
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
@@ -258,7 +256,6 @@ mod tests {
             .expect("create postgres test db");
 
             Self {
-                _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
