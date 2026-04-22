@@ -14,11 +14,13 @@ use crate::services::provider::{
     fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
+#[cfg(test)]
+use crate::services::session_backend::parse_stream_message;
 use crate::services::session_backend::{
-    insert_process_session, parse_assistant_extra_tool_uses, parse_stream_message,
-    process_session_is_alive, process_session_pid, process_session_probe,
-    read_output_file_until_result, remove_process_session, send_process_session_input,
-    terminate_process_handle,
+    StreamLineState, insert_process_session, observe_stream_context,
+    parse_assistant_extra_tool_uses, parse_stream_message_with_state, process_session_is_alive,
+    process_session_pid, process_session_probe, read_output_file_until_result,
+    remove_process_session, send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -707,6 +709,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
+    let mut stream_state = StreamLineState::new();
 
     debug_log("Entering lines loop - will block until first line arrives...");
     for line in reader.lines() {
@@ -862,8 +865,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 }
             }
 
+            observe_stream_context(&json, &mut stream_state);
+
             debug_log("  Calling parse_stream_message...");
-            if let Some(msg) = parse_stream_message(&json) {
+            if let Some(msg) = parse_stream_message_with_state(&json, &stream_state) {
                 debug_log(&format!(
                     "  Parsed message variant: {:?}",
                     std::mem::discriminant(&msg)
@@ -924,10 +929,14 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         task_id,
                         status,
                         summary,
+                        kind,
                     } => {
                         debug_log(&format!(
-                            "  >>> TaskNotification: task_id={}, status={}, summary={}",
-                            task_id, status, summary
+                            "  >>> TaskNotification: task_id={}, status={}, kind={}, summary={}",
+                            task_id,
+                            status,
+                            kind.as_str(),
+                            summary
                         ));
                     }
                     StreamMessage::StatusUpdate {

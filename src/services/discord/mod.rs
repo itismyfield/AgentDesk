@@ -47,10 +47,12 @@ pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::HeadlessTurnStartError;
 pub(crate) use turn_bridge::TmuxCleanupPolicy;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -133,13 +135,56 @@ const SESSION_RECOVERY_CONTEXT_MESSAGES: usize = 10;
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const MONITOR_AUTO_TURN_ORIGIN_LITERAL: &str = "[origin=monitor_auto_turn]";
+
+fn hidden_monitor_auto_turn_origin_marker() -> &'static str {
+    static MARKER: OnceLock<String> = OnceLock::new();
+    MARKER.get_or_init(|| {
+        MONITOR_AUTO_TURN_ORIGIN_LITERAL
+            .bytes()
+            .flat_map(|byte| {
+                (0..8).rev().map(move |shift| {
+                    if (byte >> shift) & 1 == 1 {
+                        '\u{200C}'
+                    } else {
+                        '\u{200B}'
+                    }
+                })
+            })
+            .collect()
+    })
+}
+
+pub(in crate::services::discord) fn prepend_monitor_auto_turn_origin(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{}{}", hidden_monitor_auto_turn_origin_marker(), trimmed)
+    }
+}
+
+pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
+    text: &'a str,
+) -> (Cow<'a, str>, bool) {
+    if let Some(rest) = text.strip_prefix(hidden_monitor_auto_turn_origin_marker()) {
+        return (Cow::Borrowed(rest), true);
+    }
+
+    if let Some(rest) = text.strip_prefix(MONITOR_AUTO_TURN_ORIGIN_LITERAL) {
+        return (Cow::Owned(rest.trim_start().to_string()), true);
+    }
+
+    (Cow::Borrowed(text), false)
+}
 
 pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
     format!("session_retry_context:{}", channel_id.get())
 }
 
 pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
-    text.trim_start().starts_with("DISPATCH:")
+    let (sanitized, has_monitor_origin) = strip_monitor_auto_turn_origin(text);
+    has_monitor_origin || sanitized.trim_start().starts_with("DISPATCH:")
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(

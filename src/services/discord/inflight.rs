@@ -75,16 +75,13 @@ pub(super) struct InflightTurnState {
     /// session that had no real user-authored turn driving it (zero-valued
     /// `user_msg_id` / `current_msg_id` / `request_owner_user_id`).
     ///
-    /// Callers that route based on "is there a live foreground turn" must
-    /// treat a rebind-origin inflight as **absent** — otherwise the
-    /// background-trigger notify-bot predicate in
-    /// `should_route_terminal_response_via_notify_bot` sees a
-    /// non-rebind_origin inflight, routes the recovered auto-trigger
-    /// response back through the command bot, and reintroduces the
-    /// loop-hazard that #826 was fixing. Reactions / transcript writes
-    /// that key off `user_msg_id` should also skip work when this flag is
-    /// set, because the placeholder IDs do not identify a real Discord
-    /// message.
+    /// Callers that route or persist based on "is there a live foreground
+    /// turn" must treat a rebind-origin inflight as **absent**. This state
+    /// exists only to surface a live adopted tmux session through inflight /
+    /// monitoring APIs; it does not represent a user-authored Discord turn.
+    /// Reactions / transcript writes that key off `user_msg_id` should also
+    /// skip work when this flag is set, because the placeholder IDs do not
+    /// identify a real Discord message.
     #[serde(default)]
     pub rebind_origin: bool,
 }

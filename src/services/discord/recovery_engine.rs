@@ -1809,11 +1809,10 @@ pub(crate) async fn rebind_inflight_for_channel(
     // apply because this recovery has no originating Discord message.
     //
     // #897 counter-model re-review (round 2): flag this as `rebind_origin`
-    // so routing predicates that key off "is there a live foreground turn"
-    // treat it as absent. Without that, the watcher's
-    // `should_route_terminal_response_via_notify_bot` sees a non-empty
-    // inflight and drops background-trigger output back to the command-bot
-    // path — precisely the loop-hazard #826 was avoiding.
+    // so routing / persistence code that keys off "is there a live
+    // foreground turn" treats it as absent. This synthetic state exists only
+    // to expose a recovered tmux session through inflight APIs; it must not
+    // masquerade as a user-authored Discord turn.
     let mut state = super::inflight::InflightTurnState::new(
         provider.clone(),
         channel_id,

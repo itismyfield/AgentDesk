@@ -598,7 +598,10 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            let text = new_message.content.trim();
+            let raw_text = new_message.content.trim();
+            let (sanitized_text, has_monitor_auto_turn_origin) =
+                super::super::strip_monitor_auto_turn_origin(raw_text);
+            let text = sanitized_text.trim();
             let announce_bot_id = super::super::resolve_announce_bot_user_id(&data.shared).await;
 
             let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get())
@@ -609,7 +612,7 @@ pub(in crate::services::discord) async fn handle_event(
                     announce_bot_id,
                     user_id.get(),
                     new_message.author.bot,
-                    text,
+                    raw_text,
                 )
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -657,6 +660,16 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             if text.is_empty() {
+                return Ok(());
+            }
+
+            if has_monitor_auto_turn_origin {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ⏭ MONITOR-AUTO-TURN: dropping bot-authored monitor relay {} in channel {}",
+                    new_message.id,
+                    channel_id
+                );
                 return Ok(());
             }
 
