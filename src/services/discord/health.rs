@@ -862,6 +862,7 @@ impl TestHealthHarness {
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
             tmux_watchers: dashmap::DashMap::new(),
+            tmux_relay_coords: dashmap::DashMap::new(),
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
