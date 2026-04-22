@@ -25,30 +25,48 @@ const RUNTIME_CONFIG_KEYS: &[&str] = &[
 #[derive(Clone)]
 pub struct SettingsService {
     db: Db,
+    pg_pool: Option<sqlx::PgPool>,
     config: Arc<crate::config::Config>,
 }
 
 impl SettingsService {
-    pub fn new(db: Db, config: Arc<crate::config::Config>) -> Self {
-        Self { db, config }
+    pub fn new(db: Db, pg_pool: Option<sqlx::PgPool>, config: Arc<crate::config::Config>) -> Self {
+        Self {
+            db,
+            pg_pool,
+            config,
+        }
     }
 
     pub fn get_runtime_config(&self) -> ServiceResult<Value> {
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("get_runtime_config.lock")
-        })?;
-
-        let value: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "{}".to_string());
-
-        let saved: Value = serde_json::from_str(&value).unwrap_or_else(|_| json!({}));
+        let saved = match crate::services::discord::internal_api::get_kv_value("runtime-config") {
+            Ok(Some(value)) => serde_json::from_str(&value).unwrap_or_else(|_| json!({})),
+            Ok(None) => json!({}),
+            Err(error) if direct_api_context_unavailable(&error) => {
+                if let Some(pg_pool) = self.pg_pool.as_ref() {
+                    load_runtime_config_pg(pg_pool)?
+                } else {
+                    let conn = self.db.lock().map_err(|e| {
+                        ServiceError::internal(format!("{e}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("get_runtime_config.lock")
+                    })?;
+                    let value: String = conn
+                        .query_row(
+                            "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or_else(|_| "{}".to_string());
+                    serde_json::from_str(&value).unwrap_or_else(|_| json!({}))
+                }
+            }
+            Err(error) => {
+                return Err(ServiceError::internal(error)
+                    .with_code(ErrorCode::Database)
+                    .with_operation("get_runtime_config.load_runtime_config"));
+            }
+        };
         let defaults = runtime_config_defaults(self.config.as_ref());
 
         let mut current = defaults.as_object().cloned().unwrap_or_default();
@@ -65,18 +83,51 @@ impl SettingsService {
     }
 
     pub fn put_runtime_config(&self, body: Value) -> ServiceResult<()> {
+        if let Some(obj) = body.as_object() {
+            match write_runtime_config_internal_api(obj) {
+                Ok(()) => return Ok(()),
+                Err(error) if !direct_api_context_unavailable(&error) => {
+                    return Err(ServiceError::internal(error)
+                        .with_code(ErrorCode::Database)
+                        .with_operation("put_runtime_config.pg_sync_runtime_config"));
+                }
+                Err(_) => {
+                    if let Some(pg_pool) = self.pg_pool.as_ref() {
+                        write_runtime_config_pg(pg_pool, obj)?;
+                    } else {
+                        let conn = self.db.lock().map_err(|e| {
+                            ServiceError::internal(format!("{e}"))
+                                .with_code(ErrorCode::Database)
+                                .with_operation("put_runtime_config.lock")
+                        })?;
+                        write_runtime_config(&conn, obj)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+        match crate::services::discord::internal_api::set_kv_value("runtime-config", &value_str) {
+            Ok(()) => return Ok(()),
+            Err(error) if !direct_api_context_unavailable(&error) => {
+                return Err(ServiceError::internal(error)
+                    .with_code(ErrorCode::Database)
+                    .with_operation("put_runtime_config.upsert_runtime_config"));
+            }
+            Err(_) => {}
+        }
+
+        if let Some(pg_pool) = self.pg_pool.as_ref() {
+            upsert_runtime_config_value_pg(pg_pool, &value_str)?;
+            return Ok(());
+        }
+
         let conn = self.db.lock().map_err(|e| {
             ServiceError::internal(format!("{e}"))
                 .with_code(ErrorCode::Database)
                 .with_operation("put_runtime_config.lock")
         })?;
-
-        if let Some(obj) = body.as_object() {
-            write_runtime_config(&conn, obj)?;
-            return Ok(());
-        }
-
-        let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
             [&value_str],
@@ -89,6 +140,31 @@ impl SettingsService {
 
         Ok(())
     }
+}
+
+fn direct_api_context_unavailable(error: &str) -> bool {
+    error.contains("direct runtime API context is unavailable")
+}
+
+fn load_runtime_config_pg(pg_pool: &sqlx::PgPool) -> ServiceResult<Value> {
+    let value = crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |bridge_pool| async move {
+            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+                .bind("runtime-config")
+                .fetch_optional(&bridge_pool)
+                .await
+                .map(|value| value.unwrap_or_else(|| "{}".to_string()))
+                .map_err(|error| format!("load pg runtime-config: {error}"))
+        },
+        |error| error,
+    )
+    .map_err(|error| {
+        ServiceError::internal(error)
+            .with_code(ErrorCode::Database)
+            .with_operation("get_runtime_config.load_runtime_config_pg")
+    })?;
+    Ok(serde_json::from_str(&value).unwrap_or_else(|_| json!({})))
 }
 
 fn insert_runtime_number(map: &mut Map<String, Value>, key: &str, value: Option<u64>) {
@@ -233,6 +309,118 @@ fn runtime_scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
+fn write_runtime_config_internal_api(values: &Map<String, Value>) -> Result<(), String> {
+    let value_str =
+        serde_json::to_string(&Value::Object(values.clone())).unwrap_or_else(|_| "{}".to_string());
+    crate::services::discord::internal_api::set_kv_value("runtime-config", &value_str)?;
+    for key in RUNTIME_CONFIG_KEYS {
+        crate::services::discord::internal_api::delete_kv_value(key)?;
+    }
+    for (key, value) in values {
+        if let Some(text) = runtime_scalar_to_string(value) {
+            crate::services::discord::internal_api::set_kv_value(key, &text)?;
+        }
+    }
+    Ok(())
+}
+
+fn upsert_runtime_config_value_pg(pg_pool: &sqlx::PgPool, value_str: &str) -> ServiceResult<()> {
+    let value_str = value_str.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |bridge_pool| async move {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value, expires_at)
+                 VALUES ($1, $2, NULL)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+            )
+            .bind("runtime-config")
+            .bind(&value_str)
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| format!("upsert pg runtime-config: {error}"))?;
+            Ok(())
+        },
+        |error| error,
+    )
+    .map_err(|error| {
+        ServiceError::internal(error)
+            .with_code(ErrorCode::Database)
+            .with_operation("put_runtime_config.upsert_runtime_config_pg")
+    })
+}
+
+fn write_runtime_config_pg(
+    pg_pool: &sqlx::PgPool,
+    values: &Map<String, Value>,
+) -> ServiceResult<()> {
+    let value_str =
+        serde_json::to_string(&Value::Object(values.clone())).unwrap_or_else(|_| "{}".to_string());
+    let scalar_values = values
+        .iter()
+        .filter_map(|(key, value)| runtime_scalar_to_string(value).map(|text| (key.clone(), text)))
+        .collect::<Vec<_>>();
+
+    crate::utils::async_bridge::block_on_pg_result(
+        pg_pool,
+        move |bridge_pool| async move {
+            let mut tx = bridge_pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin runtime-config pg tx: {error}"))?;
+
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value, expires_at)
+                 VALUES ($1, $2, NULL)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+            )
+            .bind("runtime-config")
+            .bind(&value_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("upsert pg runtime-config: {error}"))?;
+
+            for key in RUNTIME_CONFIG_KEYS {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(*key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("delete pg runtime-config scalar {key}: {error}"))?;
+            }
+
+            for (key, text) in scalar_values {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value, expires_at)
+                     VALUES ($1, $2, NULL)
+                     ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value,
+                             expires_at = EXCLUDED.expires_at",
+                )
+                .bind(&key)
+                .bind(&text)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("upsert pg runtime-config scalar {key}: {error}"))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit runtime-config pg tx: {error}"))?;
+            Ok(())
+        },
+        |error| error,
+    )
+    .map_err(|error| {
+        ServiceError::internal(error)
+            .with_code(ErrorCode::Database)
+            .with_operation("put_runtime_config.write_runtime_config_pg")
+    })
+}
+
 fn write_runtime_config(
     conn: &libsql_rusqlite::Connection,
     values: &Map<String, Value>,
@@ -280,8 +468,6 @@ pub fn seed_runtime_config_defaults(
     conn: &libsql_rusqlite::Connection,
     config: &crate::config::Config,
 ) {
-    let defaults = runtime_config_defaults_map(config);
-    let yaml_overrides = runtime_config_yaml_overrides(config);
     let saved_obj = conn
         .query_row(
             "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
@@ -291,6 +477,39 @@ pub fn seed_runtime_config_defaults(
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|value| value.as_object().cloned());
+    let target = seeded_runtime_config_map(saved_obj, config);
+
+    if let Err(error) = write_runtime_config(conn, &target) {
+        tracing::warn!("[settings] failed to seed runtime config defaults: {error}");
+    }
+}
+
+pub async fn seed_runtime_config_defaults_pg(
+    pool: &sqlx::PgPool,
+    config: &crate::config::Config,
+) -> Result<(), String> {
+    let saved_obj = sqlx::query_scalar::<_, String>(
+        "SELECT value
+         FROM kv_meta
+         WHERE key = $1
+         LIMIT 1",
+    )
+    .bind("runtime-config")
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load pg runtime-config seed state: {error}"))?
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|value| value.as_object().cloned());
+    let target = seeded_runtime_config_map(saved_obj, config);
+    write_runtime_config_pg(pool, &target).map_err(|error| error.to_string())
+}
+
+fn seeded_runtime_config_map(
+    saved_obj: Option<Map<String, Value>>,
+    config: &crate::config::Config,
+) -> Map<String, Value> {
+    let defaults = runtime_config_defaults_map(config);
+    let yaml_overrides = runtime_config_yaml_overrides(config);
 
     let mut current = if config.runtime.reset_overrides_on_restart {
         defaults.clone()
@@ -305,12 +524,8 @@ pub fn seed_runtime_config_defaults(
     }
 
     if config.runtime.reset_overrides_on_restart || saved_obj.is_none() || current != defaults {
-        if let Err(error) = write_runtime_config(conn, &current) {
-            tracing::warn!("[settings] failed to seed runtime config defaults: {error}");
-        }
-    } else if let Some(saved) = saved_obj {
-        if let Err(error) = write_runtime_config(conn, &saved) {
-            tracing::warn!("[settings] failed to preserve runtime config defaults: {error}");
-        }
+        current
+    } else {
+        saved_obj.unwrap_or(current)
     }
 }

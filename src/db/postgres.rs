@@ -160,12 +160,14 @@ pub async fn migrate(pool: &PgPool) -> Result<(), String> {
 pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String> {
     apply_kv_seed_actions(pool, &config_default_seed_actions(config)).await?;
     upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
+    crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
+    crate::server::routes::escalation::seed_escalation_defaults_pg(pool, config).await?;
 
     for repo_id in normalized_repo_ids(&config.github.repos) {
         register_repo(pool, &repo_id).await?;
     }
 
-    sync_agents_from_config(pool, &config.agents).await?;
+    sync_agents_from_config_pg(pool, &config.agents).await?;
     Ok(())
 }
 
@@ -255,7 +257,10 @@ pub async fn register_repo(pool: &PgPool, repo_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn sync_agents_from_config(pool: &PgPool, agents: &[AgentDef]) -> Result<usize, String> {
+pub async fn sync_agents_from_config_pg(
+    pool: &PgPool,
+    agents: &[AgentDef],
+) -> Result<usize, String> {
     let config_ids: BTreeSet<&str> = agents.iter().map(|agent| agent.id.as_str()).collect();
     let existing_rows = sqlx::query("SELECT id FROM agents")
         .fetch_all(pool)
@@ -612,6 +617,21 @@ mod tests {
             .expect("server_port in kv_meta");
         assert_eq!(server_port, config.server.port.to_string());
 
+        let runtime_config_raw: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("runtime-config")
+                .fetch_one(&pool)
+                .await
+                .expect("runtime-config in kv_meta");
+        let runtime_config: serde_json::Value =
+            serde_json::from_str(&runtime_config_raw).expect("parse runtime-config json");
+        assert_eq!(
+            runtime_config
+                .get("dispatchPollSec")
+                .and_then(|value| value.as_u64()),
+            Some(30)
+        );
+
         let repo_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM github_repos WHERE id = $1")
             .bind("itismyfield/AgentDesk")
             .fetch_one(&pool)
@@ -633,6 +653,14 @@ mod tests {
             agent_row.get::<Option<String>, _>("discord_channel_cdx"),
             Some("pg-agent-cdx".to_string())
         );
+
+        let escalation_override_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM kv_meta WHERE key = $1")
+                .bind("escalation-settings-override")
+                .fetch_one(&pool)
+                .await
+                .expect("count escalation override");
+        assert_eq!(escalation_override_count, 0);
 
         close_test_pool(pool, "db::postgres migration test pool")
             .await

@@ -148,11 +148,13 @@ pub async fn run(
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)?;
-    seed_startup_runtime_state(&db, &config);
     if let Some(pool) = pg_pool.as_ref() {
         crate::db::postgres::startup_reseed(pool, &config)
             .await
             .map_err(anyhow::Error::msg)?;
+        seed_sqlite_startup_runtime_state(&db, &config, false);
+    } else {
+        seed_startup_runtime_state(&db, &config);
     }
     crate::pipeline::refresh_override_health_report(&db, pg_pool.as_ref()).await;
 
@@ -235,16 +237,22 @@ pub async fn run(
 }
 
 fn seed_startup_runtime_state(db: &Db, config: &Config) {
-    if let Ok(conn) = db.lock() {
-        routes::settings::seed_config_defaults(&conn, config);
-        // server_port is always overwritten (not INSERT OR IGNORE) to match current config
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', ?1)",
-            [config.server.port.to_string()],
-        )
-        .ok();
-    } else {
-        tracing::warn!("[startup] failed to lock db for config default seeding");
+    seed_sqlite_startup_runtime_state(db, config, true);
+}
+
+fn seed_sqlite_startup_runtime_state(db: &Db, config: &Config, seed_runtime_kv: bool) {
+    if seed_runtime_kv {
+        if let Ok(conn) = db.lock() {
+            routes::settings::seed_config_defaults(&conn, config);
+            // server_port is always overwritten (not INSERT OR IGNORE) to match current config
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', ?1)",
+                [config.server.port.to_string()],
+            )
+            .ok();
+        } else {
+            tracing::warn!("[startup] failed to lock db for config default seeding");
+        }
     }
 
     if let Err(error) = seed_github_repos_from_config(db, config) {
@@ -971,6 +979,30 @@ mod tests {
             repo_ids(&db),
             vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()]
         );
+    }
+
+    #[test]
+    fn sqlite_startup_fallback_can_skip_runtime_kv_seeding() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.server.port = 43121;
+        config.github.repos = vec!["owner/repo-a".to_string()];
+        config.agents = vec![crate::config::AgentDef {
+            id: "project-agentdesk".to_string(),
+            name: "AgentDesk".to_string(),
+            name_ko: None,
+            provider: "claude".to_string(),
+            channels: crate::config::AgentChannels::default(),
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+        }];
+
+        seed_sqlite_startup_runtime_state(&db, &config, false);
+
+        assert_eq!(kv_value(&db, "server_port"), None);
+        assert_eq!(repo_ids(&db), vec!["owner/repo-a".to_string()]);
+        assert_eq!(agent_ids(&db), vec!["project-agentdesk".to_string()]);
     }
 
     #[tokio::test]

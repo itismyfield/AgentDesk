@@ -3,9 +3,10 @@ use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row as SqlxRow;
 
 use crate::config::{Config, EscalationMode};
-use crate::db::agents::load_agent_channel_bindings;
+use crate::db::agents::{load_agent_channel_bindings, load_agent_channel_bindings_pg};
 use crate::server::routes::AppState;
 use crate::services::discord::health::active_request_owner_for_channel;
 
@@ -150,30 +151,35 @@ fn load_override(conn: &libsql_rusqlite::Connection) -> Option<EscalationSetting
     raw.and_then(|raw| serde_json::from_str::<EscalationSettings>(&raw).ok())
 }
 
+async fn load_override_pg_async(pool: &sqlx::PgPool) -> Result<Option<EscalationSettings>, String> {
+    let raw = sqlx::query_scalar::<_, String>(
+        "SELECT value
+         FROM kv_meta
+         WHERE key = $1
+         LIMIT 1",
+    )
+    .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "load postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
+        )
+    })?;
+    Ok(raw.and_then(|value| serde_json::from_str::<EscalationSettings>(&value).ok()))
+}
+
 fn merged_settings(conn: &libsql_rusqlite::Connection, config: &Config) -> EscalationSettings {
     load_override(conn).unwrap_or_else(|| escalation_defaults(config))
 }
 
 fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<EscalationSettings, String> {
-    let key = ESCALATION_SETTINGS_OVERRIDE_KEY.to_string();
     let defaults = escalation_defaults(config);
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            let raw = sqlx::query_scalar::<_, String>(
-                "SELECT value
-                 FROM kv_meta
-                 WHERE key = $1
-                 LIMIT 1",
-            )
-            .bind(&key)
-            .fetch_optional(&bridge_pool)
-            .await
-            .map_err(|error| {
-                format!("load postgres escalation settings override {key}: {error}")
-            })?;
-            Ok(raw
-                .and_then(|value| serde_json::from_str::<EscalationSettings>(&value).ok())
+            Ok(load_override_pg_async(&bridge_pool)
+                .await?
                 .unwrap_or(defaults))
         },
         |error| error,
@@ -223,6 +229,32 @@ fn store_override(
     Ok(())
 }
 
+fn store_override_pg(pool: &sqlx::PgPool, settings: &EscalationSettings) -> Result<(), String> {
+    let raw = serde_json::to_string(settings).map_err(|error| error.to_string())?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                 SET value = EXCLUDED.value",
+            )
+            .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
+            .bind(&raw)
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "store postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
+                )
+            })?;
+            Ok(())
+        },
+        |error| error,
+    )
+}
+
 fn clear_override(conn: &libsql_rusqlite::Connection) -> Result<(), String> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key = ?1",
@@ -230,6 +262,25 @@ fn clear_override(conn: &libsql_rusqlite::Connection) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn clear_override_pg(pool: &sqlx::PgPool) -> Result<(), String> {
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "clear postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
+                    )
+                })?;
+            Ok(())
+        },
+        |error| error,
+    )
 }
 
 fn parse_time_window(raw: &str) -> Option<(NaiveTime, NaiveTime)> {
@@ -320,6 +371,77 @@ fn load_card_summary(
     .map_err(|_| format!("card not found: {card_id}"))
 }
 
+async fn load_card_summary_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Result<CardEscalationSummary, String> {
+    let row = sqlx::query(
+        "SELECT
+             kc.title,
+             kc.github_issue_number,
+             kc.assigned_agent_id,
+             kc.description,
+             kc.status,
+             kc.review_status,
+             kc.blocked_reason,
+             (
+                 SELECT COUNT(*)
+                 FROM task_dispatches td_count
+                 WHERE td_count.kanban_card_id = $1
+             ) AS dispatch_count,
+             (
+                 SELECT td_last.to_agent_id
+                 FROM task_dispatches td_last
+                 WHERE td_last.kanban_card_id = $1
+                   AND td_last.to_agent_id IS NOT NULL
+                   AND BTRIM(td_last.to_agent_id) != ''
+                 ORDER BY COALESCE(td_last.completed_at, td_last.updated_at, td_last.created_at) DESC,
+                          td_last.id DESC
+                 LIMIT 1
+             ) AS last_agent_id
+         FROM kanban_cards kc
+         WHERE kc.id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres card summary {card_id}: {error}"))?;
+
+    let Some(row) = row else {
+        return Err(format!("card not found: {card_id}"));
+    };
+
+    Ok(CardEscalationSummary {
+        title: row
+            .try_get("title")
+            .map_err(|error| format!("decode postgres card summary title {card_id}: {error}"))?,
+        issue_number: row.try_get("github_issue_number").map_err(|error| {
+            format!("decode postgres card summary github_issue_number {card_id}: {error}")
+        })?,
+        assigned_agent_id: row.try_get("assigned_agent_id").map_err(|error| {
+            format!("decode postgres card summary assigned_agent_id {card_id}: {error}")
+        })?,
+        description: row.try_get("description").map_err(|error| {
+            format!("decode postgres card summary description {card_id}: {error}")
+        })?,
+        status: row
+            .try_get("status")
+            .map_err(|error| format!("decode postgres card summary status {card_id}: {error}"))?,
+        review_status: row.try_get("review_status").map_err(|error| {
+            format!("decode postgres card summary review_status {card_id}: {error}")
+        })?,
+        blocked_reason: row.try_get("blocked_reason").map_err(|error| {
+            format!("decode postgres card summary blocked_reason {card_id}: {error}")
+        })?,
+        dispatch_count: row.try_get("dispatch_count").map_err(|error| {
+            format!("decode postgres card summary dispatch_count {card_id}: {error}")
+        })?,
+        last_agent_id: row.try_get("last_agent_id").map_err(|error| {
+            format!("decode postgres card summary last_agent_id {card_id}: {error}")
+        })?,
+    })
+}
+
 fn latest_dispatch_agent_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT to_agent_id
@@ -333,6 +455,25 @@ fn latest_dispatch_agent_id(conn: &libsql_rusqlite::Connection, card_id: &str) -
         |row| row.get(0),
     )
     .ok()
+}
+
+async fn latest_dispatch_agent_id_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT to_agent_id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND to_agent_id IS NOT NULL
+           AND BTRIM(to_agent_id) != ''
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres latest dispatch agent {card_id}: {error}"))
 }
 
 fn candidate_parent_channels(
@@ -368,6 +509,44 @@ fn candidate_parent_channels(
         }
     }
     channels
+}
+
+async fn candidate_parent_channels_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    assigned_agent_id: Option<&str>,
+) -> Result<Vec<u64>, String> {
+    let mut agent_ids = Vec::new();
+    if let Some(agent_id) = latest_dispatch_agent_id_pg_async(pool, card_id).await? {
+        agent_ids.push(agent_id);
+    }
+    if let Some(agent_id) = assigned_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !agent_ids.iter().any(|existing| existing == agent_id) {
+            agent_ids.push(agent_id.to_string());
+        }
+    }
+
+    let mut channels = Vec::new();
+    for agent_id in agent_ids {
+        let Some(bindings) = load_agent_channel_bindings_pg(pool, &agent_id)
+            .await
+            .map_err(|error| format!("load postgres agent channel bindings {agent_id}: {error}"))?
+        else {
+            continue;
+        };
+        for channel in bindings.all_channels() {
+            let Some(channel_id) = parse_channel_reference(&channel) else {
+                continue;
+            };
+            if !channels.contains(&channel_id) {
+                channels.push(channel_id);
+            }
+        }
+    }
+    Ok(channels)
 }
 
 async fn resolve_owner_target(
@@ -419,6 +598,23 @@ fn load_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> O
     .ok()
 }
 
+async fn load_cached_thread_id_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Result<Option<String>, String> {
+    let key = escalation_thread_key(card_id);
+    sqlx::query_scalar::<_, String>(
+        "SELECT value
+         FROM kv_meta
+         WHERE key = $1
+         LIMIT 1",
+    )
+    .bind(&key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))
+}
+
 fn save_cached_thread_id(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -432,6 +628,33 @@ fn save_cached_thread_id(
     Ok(())
 }
 
+fn save_cached_thread_id_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    thread_id: &str,
+) -> Result<(), String> {
+    let key = escalation_thread_key(card_id);
+    let thread_id = thread_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE
+                 SET value = EXCLUDED.value",
+            )
+            .bind(&key)
+            .bind(&thread_id)
+            .execute(&bridge_pool)
+            .await
+            .map_err(|error| format!("save postgres cached escalation thread {key}: {error}"))?;
+            Ok(())
+        },
+        |error| error,
+    )
+}
+
 fn clear_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Result<(), String> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key = ?1",
@@ -439,6 +662,87 @@ fn clear_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> 
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn clear_cached_thread_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Result<(), String> {
+    let key = escalation_thread_key(card_id);
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                .bind(&key)
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("clear postgres cached escalation thread {key}: {error}")
+                })?;
+            Ok(())
+        },
+        |error| error,
+    )
+}
+
+fn claim_cached_thread_id_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    created_thread_id: &str,
+) -> Result<String, String> {
+    let key = escalation_thread_key(card_id);
+    let created_thread_id = created_thread_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let mut tx = bridge_pool.begin().await.map_err(|error| {
+                format!("begin postgres escalation thread cache txn {key}: {error}")
+            })?;
+
+            if let Some(existing) = sqlx::query_scalar::<_, String>(
+                "SELECT value
+                 FROM kv_meta
+                 WHERE key = $1
+                 LIMIT 1",
+            )
+            .bind(&key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))?
+            {
+                tx.commit().await.map_err(|error| {
+                    format!("commit postgres escalation thread cache txn {key}: {error}")
+                })?;
+                return Ok(existing);
+            }
+
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO NOTHING",
+            )
+            .bind(&key)
+            .bind(&created_thread_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("save postgres cached escalation thread {key}: {error}"))?;
+
+            let effective = sqlx::query_scalar::<_, String>(
+                "SELECT value
+                 FROM kv_meta
+                 WHERE key = $1
+                 LIMIT 1",
+            )
+            .bind(&key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("reload postgres cached escalation thread {key}: {error}"))?
+            .unwrap_or(created_thread_id);
+
+            tx.commit().await.map_err(|error| {
+                format!("commit postgres escalation thread cache txn {key}: {error}")
+            })?;
+            Ok(effective)
+        },
+        |error| error,
+    )
 }
 
 fn format_card_label(summary: &CardEscalationSummary) -> String {
@@ -640,6 +944,49 @@ fn load_recent_dispatch_results(
     Ok(results)
 }
 
+async fn load_recent_dispatch_results_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query(
+        "SELECT dispatch_type, result
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('completed', 'failed')
+         ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(card_id)
+    .bind(ESCALATION_RECENT_RESULT_LIMIT as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres recent dispatch results {card_id}: {error}"))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        let dispatch_type: Option<String> = row.try_get("dispatch_type").map_err(|error| {
+            format!("decode postgres recent dispatch dispatch_type {card_id}: {error}")
+        })?;
+        let result: Option<String> = row.try_get("result").map_err(|error| {
+            format!("decode postgres recent dispatch result {card_id}: {error}")
+        })?;
+        let Some(summary) = result
+            .as_deref()
+            .and_then(summarize_dispatch_result_text)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let label = dispatch_type
+            .as_deref()
+            .map(normalize_whitespace)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "dispatch".to_string());
+        results.push(format!("{label}: {summary}"));
+    }
+    Ok(results)
+}
+
 fn load_card_context(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -671,6 +1018,82 @@ fn load_card_context(
     } else {
         Ok(Some(context))
     }
+}
+
+async fn load_card_context_pg_async(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    summary: &CardEscalationSummary,
+) -> Result<Option<CardContext>, String> {
+    let issue_summary = summarize_issue_description(summary.description.as_deref());
+    let progress_summary = format_progress_summary(summary);
+    let recent_results = load_recent_dispatch_results_pg_async(pool, card_id).await?;
+    let blocked_reason = summary
+        .blocked_reason
+        .as_deref()
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(&value, ESCALATION_REASON_CHAR_LIMIT));
+
+    let context = CardContext {
+        issue_summary,
+        progress_summary,
+        recent_results,
+        blocked_reason,
+    };
+
+    if context.issue_summary.is_none()
+        && context.progress_summary.is_none()
+        && context.recent_results.is_empty()
+        && context.blocked_reason.is_none()
+    {
+        Ok(None)
+    } else {
+        Ok(Some(context))
+    }
+}
+
+fn load_escalation_emit_inputs_pg(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    card_id: &str,
+) -> Result<
+    (
+        EscalationSettings,
+        CardEscalationSummary,
+        Option<CardContext>,
+        Vec<u64>,
+        Option<String>,
+    ),
+    String,
+> {
+    let defaults = escalation_defaults(config);
+    let card_id = card_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let settings = load_override_pg_async(&bridge_pool)
+                .await?
+                .unwrap_or(defaults);
+            let summary = load_card_summary_pg_async(&bridge_pool, &card_id).await?;
+            let context = load_card_context_pg_async(&bridge_pool, &card_id, &summary).await?;
+            let parent_channels = candidate_parent_channels_pg_async(
+                &bridge_pool,
+                &card_id,
+                summary.assigned_agent_id.as_deref(),
+            )
+            .await?;
+            let cached_thread_id = load_cached_thread_id_pg_async(&bridge_pool, &card_id).await?;
+            Ok((
+                settings,
+                summary,
+                context,
+                parent_channels,
+                cached_thread_id,
+            ))
+        },
+        |error| error,
+    )
 }
 
 fn render_context_sections(context: Option<&CardContext>) -> Vec<String> {
@@ -953,7 +1376,53 @@ async fn emit_escalation_with_base_url(
         );
     }
 
-    let (settings, summary, context, parent_channels, cached_thread_id) = {
+    let (settings, summary, context, parent_channels, cached_thread_id) = if let Some(pool) =
+        state.pg_pool.as_ref()
+    {
+        match load_escalation_emit_inputs_pg(pool, &state.config, &card_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "[escalation] postgres load failed for {card_id}; falling back to sqlite"
+                );
+                let conn = match state.db.separate_conn() {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("db open failed: {err}")})),
+                        );
+                    }
+                };
+                let settings = merged_settings(&conn, &state.config);
+                let summary = match load_card_summary(&conn, &card_id) {
+                    Ok(summary) => summary,
+                    Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
+                };
+                let context = match load_card_context(&conn, &card_id, &summary) {
+                    Ok(context) => context,
+                    Err(err) => {
+                        tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
+                        None
+                    }
+                };
+                let parent_channels = candidate_parent_channels(
+                    &conn,
+                    &card_id,
+                    summary.assigned_agent_id.as_deref(),
+                );
+                let cached_thread_id = load_cached_thread_id(&conn, &card_id);
+                (
+                    settings,
+                    summary,
+                    context,
+                    parent_channels,
+                    cached_thread_id,
+                )
+            }
+        }
+    } else {
         let conn = match state.db.separate_conn() {
             Ok(conn) => conn,
             Err(err) => {
@@ -1043,13 +1512,27 @@ async fn emit_escalation_with_base_url(
                         );
                     }
                     Ok(false) => {
-                        if let Ok(conn) = state.db.separate_conn() {
+                        if let Some(pool) = state.pg_pool.as_ref() {
+                            if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
+                                tracing::warn!(
+                                    %error,
+                                    "[escalation] failed to clear postgres cached thread for {card_id}"
+                                );
+                            }
+                        } else if let Ok(conn) = state.db.separate_conn() {
                             let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
                     Err(err) => {
                         tracing::warn!("[escalation] thread reuse failed for {card_id}: {err}");
-                        if let Ok(conn) = state.db.separate_conn() {
+                        if let Some(pool) = state.pg_pool.as_ref() {
+                            if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
+                                tracing::warn!(
+                                    %error,
+                                    "[escalation] failed to clear postgres cached thread for {card_id}"
+                                );
+                            }
+                        } else if let Ok(conn) = state.db.separate_conn() {
                             let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
@@ -1099,7 +1582,26 @@ async fn emit_escalation_with_base_url(
                         // before saving. If another concurrent escalation already
                         // created and saved a thread, use the existing one instead
                         // of overwriting it with our newly created thread.
-                        let effective_thread_id = if let Ok(conn) = state.db.separate_conn() {
+                        let effective_thread_id = if let Some(pool) = state.pg_pool.as_ref() {
+                            match claim_cached_thread_id_pg(pool, &card_id, &thread_id) {
+                                Ok(existing_or_saved) => {
+                                    if existing_or_saved != thread_id {
+                                        tracing::info!(
+                                            "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
+                                            existing_or_saved
+                                        );
+                                    }
+                                    existing_or_saved
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "[escalation] failed to cache postgres thread for {card_id}"
+                                    );
+                                    thread_id
+                                }
+                            }
+                        } else if let Ok(conn) = state.db.separate_conn() {
                             if let Some(existing) = load_cached_thread_id(&conn, &card_id) {
                                 tracing::info!(
                                     "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
@@ -1220,21 +1722,63 @@ pub fn seed_escalation_defaults(conn: &libsql_rusqlite::Connection, config: &Con
     }
 }
 
+pub async fn seed_escalation_defaults_pg(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<(), String> {
+    if !config.runtime.reset_overrides_on_restart {
+        return Ok(());
+    }
+
+    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+        .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            format!(
+                "clear postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
+            )
+        })?;
+    Ok(())
+}
+
 /// GET /api/settings/escalation
 pub async fn get_escalation_settings(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.read_conn() {
-        Ok(conn) => conn,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("db open failed: {err}")})),
-            );
-        }
-    };
     let defaults = escalation_defaults(&state.config);
-    let current = merged_settings(&conn, &state.config);
+    let current = if let Some(pool) = state.pg_pool.as_ref() {
+        match merged_settings_pg(pool, &state.config) {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "[escalation] postgres settings load failed; falling back to sqlite"
+                );
+                let conn = match state.db.read_conn() {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("db open failed: {err}")})),
+                        );
+                    }
+                };
+                merged_settings(&conn, &state.config)
+            }
+        }
+    } else {
+        let conn = match state.db.read_conn() {
+            Ok(conn) => conn,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("db open failed: {err}")})),
+                );
+            }
+        };
+        merged_settings(&conn, &state.config)
+    };
     (
         StatusCode::OK,
         Json(
@@ -1264,33 +1808,85 @@ pub async fn put_escalation_settings(
     }
 
     let defaults = escalation_defaults(&state.config);
-    let conn = match state.db.separate_conn() {
-        Ok(conn) => conn,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("db open failed: {err}")})),
+    let store_result = if let Some(pool) = state.pg_pool.as_ref() {
+        let pg_result = if body == defaults {
+            clear_override_pg(pool)
+        } else {
+            store_override_pg(pool, &body)
+        };
+        if let Err(error) = &pg_result {
+            tracing::warn!(
+                %error,
+                "[escalation] postgres settings write failed; falling back to sqlite"
             );
         }
+        pg_result
+    } else {
+        Err("sqlite-fallback-required".to_string())
     };
 
-    let store_result = if body == defaults {
-        clear_override(&conn)
+    let current = if store_result.is_ok() {
+        if let Some(pool) = state.pg_pool.as_ref() {
+            match merged_settings_pg(pool, &state.config) {
+                Ok(current) => current,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "[escalation] postgres settings reload failed; falling back to sqlite"
+                    );
+                    let conn = match state.db.separate_conn() {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": format!("db open failed: {err}")})),
+                            );
+                        }
+                    };
+                    merged_settings(&conn, &state.config)
+                }
+            }
+        } else {
+            let conn = match state.db.separate_conn() {
+                Ok(conn) => conn,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("db open failed: {err}")})),
+                    );
+                }
+            };
+            merged_settings(&conn, &state.config)
+        }
     } else {
-        store_override(&conn, &body)
+        let conn = match state.db.separate_conn() {
+            Ok(conn) => conn,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("db open failed: {err}")})),
+                );
+            }
+        };
+        let fallback_result = if body == defaults {
+            clear_override(&conn)
+        } else {
+            store_override(&conn, &body)
+        };
+        if let Err(err) = fallback_result {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": err})),
+            );
+        }
+        merged_settings(&conn, &state.config)
     };
-    if let Err(err) = store_result {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": err})),
-        );
-    }
 
     (
         StatusCode::OK,
         Json(json!({
             "ok": true,
-            "current": merged_settings(&conn, &state.config),
+            "current": current,
             "defaults": defaults,
         })),
     )
