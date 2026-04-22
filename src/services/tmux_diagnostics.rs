@@ -38,6 +38,7 @@ pub fn tmux_exit_reason_is_normal_completion(reason: &str) -> bool {
     let lower = reason.trim().to_ascii_lowercase();
     lower.contains("turn completed")
         || lower.contains("dispatch turn completed")
+        || lower.contains("unified-thread run completed")
         || lower == "exit:0"
 }
 
@@ -246,6 +247,9 @@ mod tests {
             "turn completed (code 0)"
         ));
         assert!(tmux_exit_reason_is_normal_completion("exit:0"));
+        assert!(tmux_exit_reason_is_normal_completion(
+            "[2026-04-23 12:34:56] unified-thread run completed"
+        ));
         assert!(!tmux_exit_reason_is_normal_completion("signal:9"));
     }
 

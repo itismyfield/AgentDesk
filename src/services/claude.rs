@@ -24,9 +24,8 @@ use crate::services::session_backend::{
 };
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
-    record_normal_tmux_exit_reason, record_tmux_exit_reason,
-    should_recreate_session_after_followup_fifo_error, tmux_session_exists,
-    tmux_session_has_live_pane,
+    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+    tmux_session_exists, tmux_session_has_live_pane,
 };
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
@@ -1398,7 +1397,6 @@ fn execute_streaming_local_tmux(
 
         match read_result {
             ReadOutputResult::Completed { offset } => {
-                record_normal_tmux_exit_reason(tmux_session_name);
                 let _ = sender.send(StreamMessage::TmuxReady {
                     output_path,
                     input_fifo_path,
@@ -1571,9 +1569,6 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    if matches!(&read_result, ReadOutputResult::Completed { .. }) {
-        record_normal_tmux_exit_reason(tmux_session_name);
-    }
     let outcome = classify_followup_result(
         read_result,
         start_offset,

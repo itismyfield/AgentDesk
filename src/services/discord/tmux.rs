@@ -71,9 +71,8 @@ fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     }
 }
 
-fn tmux_death_is_normal_completion(reason: Option<&str>, diagnostic: Option<&str>) -> bool {
+fn tmux_death_is_normal_completion(reason: Option<&str>, _diagnostic: Option<&str>) -> bool {
     reason.is_some_and(tmux_exit_reason_is_normal_completion)
-        || diagnostic.is_some_and(|diag| diag.contains("recent_output=completed_result_present"))
 }
 
 fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsage> {
@@ -4129,17 +4128,21 @@ mod tests {
             lifecycle_reason_code_for_tmux_exit("dispatch turn completed"),
             "lifecycle.normal_completion"
         );
+        assert_eq!(
+            lifecycle_reason_code_for_tmux_exit("unified-thread run completed"),
+            "lifecycle.normal_completion"
+        );
     }
 
     #[test]
-    fn normal_completion_detection_accepts_completion_diagnostic_without_exit_reason() {
+    fn normal_completion_detection_requires_a_trusted_exit_reason() {
         assert!(tmux_death_is_normal_completion(
-            None,
+            Some("turn completed (code 0)"),
             Some("recent_output=completed_result_present")
         ));
         assert!(!tmux_death_is_normal_completion(
             None,
-            Some("recent_output=result_error_present")
+            Some("recent_output=completed_result_present")
         ));
     }
 
