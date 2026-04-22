@@ -148,8 +148,10 @@ function staleDispatchedRecoveryConditionsSql() {
 
   if (configuredStaleDispatchedRecoverMissingDispatch()) {
     conditions.push(
-      "NOT EXISTS (" +
-        "SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
+      "(" +
+        "e.dispatch_id IS NOT NULL AND NOT EXISTS (" +
+          "SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
+        ")" +
       ")"
     );
   }
