@@ -2308,6 +2308,80 @@ pub(super) async fn tmux_output_watcher(
             foreground_inflight_present,
         );
 
+        // Cross-watcher relay coordination (root-cause fix for duplicate
+        // terminal-response emission observed when `claim_or_replace_watcher`
+        // replaces a watcher mid-flight and both the outgoing and incoming
+        // instance pass their per-instance dedupe guards for the same tmux
+        // range). `TmuxRelayCoord` is shared across all watcher instances for
+        // the channel (survives handle replacement), so the two atomics below
+        // serialize concurrent emissions and carry the confirmed-delivery
+        // watermark between instances without touching disk.
+        //
+        // The local `last_relayed_offset` / `last_enqueued_offset` guard above
+        // is retained: it handles the single-instance cases (resume after
+        // pause, inflight-mirror-driven restart recovery) and makes per-tick
+        // dedupe cheap. The coord guard is the missing multi-instance layer.
+        let relay_coord = shared.tmux_relay_coord(channel_id);
+        let confirmed_end_pre_claim = relay_coord
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire);
+        // Strict `<` preserves the same "exact boundary = new turn" semantic
+        // the local dedupe above uses (see comment at line ~2125 about the
+        // `task_notification` auto-trigger writing its tmux output starting
+        // at the previous turn's end offset).
+        if confirmed_end_pre_claim != 0 && data_start_offset < confirmed_end_pre_claim {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 Cross-watcher dedupe: skipped relay for {} (data_start={}, confirmed_end={})",
+                tmux_session_name,
+                data_start_offset,
+                confirmed_end_pre_claim
+            );
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            continue;
+        }
+        // CAS the emission slot. `0` = free; any non-zero value = a watcher
+        // is mid-emission with that start offset. `.max(1)` guarantees the
+        // stored value is non-zero even when `data_start_offset == 0`.
+        let slot_claim_token = data_start_offset.max(1);
+        if relay_coord
+            .relay_slot
+            .compare_exchange(
+                0,
+                slot_claim_token,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 Cross-watcher serialization: slot busy, skipped relay for {} (data_start={})",
+                tmux_session_name,
+                data_start_offset
+            );
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            continue;
+        }
+        // Re-check confirmed_end inside the slot in case another watcher
+        // advanced it between our first load and the CAS above.
+        let confirmed_end_in_slot = relay_coord
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire);
+        if confirmed_end_in_slot != 0 && data_start_offset < confirmed_end_in_slot {
+            relay_coord
+                .relay_slot
+                .store(0, std::sync::atomic::Ordering::Release);
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            continue;
+        }
+
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
         let relay_ok = if has_assistant_response {
@@ -2504,6 +2578,35 @@ pub(super) async fn tmux_output_watcher(
             false
         };
 
+        // Advance the shared confirmed-delivery watermark on any committed
+        // emission (direct send, notify enqueue, or empty-turn cleanup — all
+        // three represent "this tmux range is done" from the cross-watcher
+        // dedupe perspective). CAS loop ensures we only ever move the
+        // watermark FORWARD, even if some other instance has raced ahead.
+        if relay_ok {
+            let mut cur = relay_coord
+                .confirmed_end_offset
+                .load(std::sync::atomic::Ordering::Acquire);
+            while cur < current_offset {
+                match relay_coord.confirmed_end_offset.compare_exchange(
+                    cur,
+                    current_offset,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => cur = observed,
+                }
+            }
+        }
+        // Release the emission slot regardless of success. If delivery failed
+        // the local `last_relayed_offset` also stayed put, so the same watcher
+        // (or its replacement) can retry on the next tick without fighting
+        // the slot.
+        relay_coord
+            .relay_slot
+            .store(0, std::sync::atomic::Ordering::Release);
+
         let provider_kind = watcher_provider.clone();
         let inflight_state = super::inflight::load_inflight_state(&provider_kind, channel_id.get());
         let watcher_session_id = state.last_session_id.clone();
@@ -2644,6 +2747,7 @@ pub(super) async fn tmux_output_watcher(
                         let mut work_completion_context =
                             super::turn_bridge::build_work_dispatch_completion_result(
                                 shared.db.as_ref(),
+                                shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_completed",
                                 false,
@@ -2668,22 +2772,13 @@ pub(super) async fn tmux_output_watcher(
                                 tracing::info!(
                                     "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
                                 );
-                                if let Some(pool) = shared.pg_pool.as_ref() {
-                                    if let Err(error) =
-                                        crate::server::routes::dispatches::queue_dispatch_followup_pg(
-                                            pool, did,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(
-                                            "  [{ts}] ⚠ watcher: failed to enqueue followup for {did}: {error}"
-                                        );
-                                    }
-                                } else {
-                                    crate::server::routes::dispatches::queue_dispatch_followup(
-                                        db, did,
-                                    );
-                                }
+                                let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
+                                    Some(db),
+                                    shared.pg_pool.as_ref(),
+                                    did,
+                                    "watcher_completed",
+                                )
+                                .await;
                                 true
                             }
                             Err(e) => {
@@ -2694,6 +2789,7 @@ pub(super) async fn tmux_output_watcher(
                                 let mut fallback_result =
                                     super::turn_bridge::build_work_dispatch_completion_result(
                                         shared.db.as_ref(),
+                                        shared.pg_pool.as_ref(),
                                         did,
                                         "watcher_db_fallback",
                                         true,
@@ -2706,16 +2802,29 @@ pub(super) async fn tmux_output_watcher(
                                         serde_json::Value::Bool(true),
                                     );
                                 }
-                                super::turn_bridge::runtime_db_fallback_complete_with_result(
-                                    did,
-                                    &fallback_result,
-                                )
+                                let completed =
+                                    super::turn_bridge::runtime_db_fallback_complete_with_result(
+                                        did,
+                                        &fallback_result,
+                                    );
+                                if completed {
+                                    let _ =
+                                        super::turn_bridge::queue_dispatch_followup_with_handles(
+                                            shared.db.as_ref(),
+                                            shared.pg_pool.as_ref(),
+                                            did,
+                                            "watcher_completed_fallback",
+                                        )
+                                        .await;
+                                }
+                                completed
                             }
                         }
                     } else {
                         let mut fallback_result =
                             super::turn_bridge::build_work_dispatch_completion_result(
                                 shared.db.as_ref(),
+                                shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_db_fallback",
                                 true,
@@ -2728,10 +2837,21 @@ pub(super) async fn tmux_output_watcher(
                                 serde_json::Value::Bool(true),
                             );
                         }
-                        super::turn_bridge::runtime_db_fallback_complete_with_result(
-                            did,
-                            &fallback_result,
-                        )
+                        let completed =
+                            super::turn_bridge::runtime_db_fallback_complete_with_result(
+                                did,
+                                &fallback_result,
+                            );
+                        if completed {
+                            let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
+                                shared.db.as_ref(),
+                                shared.pg_pool.as_ref(),
+                                did,
+                                "watcher_completed_runtime_fallback",
+                            )
+                            .await;
+                        }
+                        completed
                     }
                 }
                 Some(_) => {
