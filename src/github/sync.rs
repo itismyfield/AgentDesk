@@ -97,6 +97,30 @@ fn merge_unique_issues(target: &mut Vec<GhIssue>, extras: Vec<GhIssue>) {
     target.extend(extras.into_iter().filter(|issue| seen.insert(issue.number)));
 }
 
+fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
+    let repo_dir = match crate::services::platform::shell::resolve_repo_dir_for_target(Some(repo)) {
+        Ok(Some(repo_dir)) => repo_dir,
+        Ok(None) => {
+            tracing::debug!("[github-sync] {repo}: repo dir unavailable for mainline sync");
+            return Vec::new();
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[github-sync] {repo}: repo dir resolution failed for mainline sync: {error}"
+            );
+            return Vec::new();
+        }
+    };
+
+    match crate::services::platform::shell::git_mainline_issue_numbers(&repo_dir) {
+        Ok(numbers) => numbers,
+        Err(error) => {
+            tracing::warn!("[github-sync] {repo}: mainline commit scan failed: {error}");
+            Vec::new()
+        }
+    }
+}
+
 /// Sync GitHub issue state with kanban cards for a single repo.
 ///
 /// - If a linked issue is CLOSED on GitHub -> update card to "done"
@@ -196,6 +220,52 @@ pub fn sync_github_issues_for_repo(
         );
     }
 
+    let mainline_issue_numbers = mainline_issue_numbers_for_repo(repo);
+    if !mainline_issue_numbers.is_empty() {
+        let mut mainline_cards_to_close: Vec<(String, i64)> = Vec::new();
+        {
+            let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
+            for issue_number in &mainline_issue_numbers {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, status FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
+                    )
+                    .map_err(|e| format!("prepare: {e}"))?;
+
+                let cards: Vec<(String, String)> = stmt
+                    .query_map(libsql_rusqlite::params![*issue_number, repo], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| format!("query: {e}"))?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                for (card_id, card_status) in cards {
+                    if matches!(card_status.as_str(), "in_progress" | "review") {
+                        mainline_cards_to_close.push((card_id, *issue_number));
+                    }
+                }
+            }
+        }
+
+        for (card_id, issue_number) in &mainline_cards_to_close {
+            let _ = crate::kanban::transition_status_with_opts(
+                db,
+                engine,
+                card_id,
+                terminal,
+                "github-sync-mainline",
+                crate::engine::transition::ForceIntent::SystemRecovery,
+            );
+            tracing::info!(
+                "[github-sync] {repo}#{}: card {} → {} (mainline commit matched issue)",
+                issue_number,
+                card_id,
+                terminal
+            );
+        }
+    }
+
     Ok(result)
 }
 
@@ -265,6 +335,44 @@ pub async fn sync_github_issues_for_repo_pg(
                     card.id
                 );
             }
+        }
+    }
+
+    let mainline_issue_numbers = mainline_issue_numbers_for_repo(repo);
+    if !mainline_issue_numbers.is_empty() {
+        let mut mainline_done_count = 0usize;
+
+        for issue_number in mainline_issue_numbers {
+            let cards = load_pg_cards_for_issue(pool, repo, issue_number).await?;
+
+            for card in cards {
+                if !matches!(card.status.as_str(), "in_progress" | "review") {
+                    continue;
+                }
+
+                let pipeline = resolve_pg_pipeline(
+                    pool,
+                    repo,
+                    repo_override.as_ref(),
+                    card.assigned_agent_id.as_deref(),
+                    &mut agent_overrides,
+                )
+                .await?;
+                close_pg_card_for_issue(pool, &card, &pipeline).await?;
+                mainline_done_count += 1;
+                tracing::info!(
+                    "[github-sync] {repo}#{}: card {} → terminal (mainline commit matched issue)",
+                    issue_number,
+                    card.id
+                );
+            }
+        }
+
+        if mainline_done_count > 0 {
+            tracing::info!(
+                "[github-sync] {repo}: mainline commit sync completed for {} card(s)",
+                mainline_done_count
+            );
         }
     }
 

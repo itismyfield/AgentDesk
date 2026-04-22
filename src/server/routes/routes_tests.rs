@@ -7257,6 +7257,212 @@ async fn github_repos_pg_sync_closes_card_and_cleans_live_state() {
     pg_pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn github_repos_pg_sync_marks_in_progress_card_done_from_main_commit() {
+    let _env_lock = env_lock();
+    let _gh = install_mock_gh_issue_list(
+        "owner/pg-repo",
+        r#"[{"number":404,"state":"OPEN","title":"PG route mainline","labels":[],"body":"Issue remains open"}]"#,
+        "[]",
+    );
+    let repo = tempfile::tempdir().unwrap();
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test"]);
+    run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+    git_commit(repo.path(), "fix: mainline merge (#404)");
+    let config_dir = write_repo_mapping_config(&[("owner/pg-repo", repo.path())]);
+    let config_path = config_dir.path().join("agentdesk.yaml");
+    let _config = EnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/repos")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"owner/pg-repo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, repo_id, title, status, priority, github_issue_number,
+            latest_dispatch_id, review_status, review_round, review_entered_at,
+            created_at, updated_at
+         )
+         VALUES (
+            $1, $2, $3, 'in_progress', 'medium', $4,
+            $5, 'reviewing', 2, NOW(),
+            NOW(), NOW()
+         )",
+    )
+    .bind("card-pg-mainline")
+    .bind("owner/pg-repo")
+    .bind("PG mainline sync")
+    .bind(404_i64)
+    .bind("dispatch-pg-mainline")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         )
+         VALUES (
+            $1, $2, $3, 'implementation', 'dispatched', 'Live implementation', NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-pg-mainline")
+    .bind("card-pg-mainline")
+    .bind("pg-agent")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ($1, $2, $3, 'active')",
+    )
+    .bind("run-pg-mainline")
+    .bind("owner/pg-repo")
+    .bind("pg-agent")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, dispatch_id, status, created_at
+         )
+         VALUES (
+            $1, $2, $3, $4, $5, 'dispatched', NOW()
+         )",
+    )
+    .bind("entry-pg-mainline")
+    .bind("run-pg-mainline")
+    .bind("card-pg-mainline")
+    .bind("pg-agent")
+    .bind("dispatch-pg-mainline")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, review_entered_at, updated_at
+         )
+         VALUES (
+            $1, 2, 'reviewing', $2, NOW(), NOW()
+         )",
+    )
+    .bind("card-pg-mainline")
+    .bind("dispatch-pg-mainline")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let sync_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/repos/owner/pg-repo/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_response.status(), StatusCode::OK);
+
+    let sync_body = axum::body::to_bytes(sync_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let sync_json: serde_json::Value = serde_json::from_slice(&sync_body).unwrap();
+    assert_eq!(sync_json["cards_created"], 0);
+
+    let (card_status, latest_dispatch_id, review_status, review_round): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT status, latest_dispatch_id, review_status, review_round
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind("card-pg-mainline")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(card_status, "done");
+    assert!(latest_dispatch_id.is_none());
+    assert!(review_status.is_none());
+    assert!(review_round.is_none());
+
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-pg-mainline")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let (entry_status, entry_dispatch_id): (String, Option<String>) =
+        sqlx::query_as("SELECT status, dispatch_id FROM auto_queue_entries WHERE id = $1")
+            .bind("entry-pg-mainline")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(entry_status, "done");
+    assert_eq!(entry_dispatch_id.as_deref(), Some("dispatch-pg-mainline"));
+
+    let run_status: String = sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
+        .bind("run-pg-mainline")
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        run_status, "active",
+        "mainline issue sync should not force the queue run to complete"
+    );
+
+    let (review_state, pending_dispatch_id): (String, Option<String>) = sqlx::query_as(
+        "SELECT state, pending_dispatch_id
+         FROM card_review_state
+         WHERE card_id = $1",
+    )
+    .bind("card-pg-mainline")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(review_state, "idle");
+    assert!(pending_dispatch_id.is_none());
+
+    let last_synced_at: Option<String> =
+        sqlx::query_scalar("SELECT last_synced_at::text FROM github_repos WHERE id = $1")
+            .bind("owner/pg-repo")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert!(last_synced_at.is_some());
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
 // ── Pipeline config hierarchy tests (#135) ──
 
 fn seed_repo(db: &Db, repo_id: &str) {

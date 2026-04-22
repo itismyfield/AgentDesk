@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+use regex::Regex;
+use std::collections::BTreeSet;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
@@ -819,6 +821,45 @@ pub fn find_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option
     None
 }
 
+/// Collect issue numbers referenced by commit subjects on the local `main`
+/// branch, falling back to `master` if `main` does not exist.
+pub fn git_mainline_issue_numbers(repo_dir: &str) -> Result<Vec<i64>, String> {
+    static ISSUE_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = ISSUE_RE.get_or_init(|| Regex::new(r"#(\d+)").expect("valid issue regex"));
+
+    let mut last_error: Option<String> = None;
+    for branch in ["main", "master"] {
+        let output = git_command()
+            .args(["log", "--format=%s", "--first-parent", branch])
+            .current_dir(repo_dir)
+            .output()
+            .map_err(|error| format!("git log {branch}: {error}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            last_error = Some(if stderr.is_empty() {
+                format!("git log {branch} failed")
+            } else {
+                format!("git log {branch} failed: {stderr}")
+            });
+            continue;
+        }
+
+        let subjects = String::from_utf8_lossy(&output.stdout);
+        let mut issues = BTreeSet::new();
+        for capture in regex.captures_iter(&subjects) {
+            if let Some(issue) = capture
+                .get(1)
+                .and_then(|matched| matched.as_str().parse::<i64>().ok())
+            {
+                issues.insert(issue);
+            }
+        }
+        return Ok(issues.into_iter().collect());
+    }
+
+    Err(last_error.unwrap_or_else(|| "git log main failed".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1167,31 @@ mod tests {
 
         let found = find_latest_commit_for_issue(repo_dir, 269).unwrap();
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn git_mainline_issue_numbers_deduplicates_subject_refs() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        git_command()
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fix: mainline merge (#404)",
+            ])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        git_command()
+            .args(["commit", "--allow-empty", "-m", "chore: unrelated"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        let issues = git_mainline_issue_numbers(repo_dir).unwrap();
+        assert_eq!(issues, vec![404]);
     }
 
     #[test]
