@@ -251,6 +251,120 @@ pub fn reactivate_done_entry_on_conn(
     })
 }
 
+pub async fn reactivate_done_entry_on_pg(
+    pool: &PgPool,
+    entry_id: &str,
+    trigger_source: &str,
+    options: &EntryStatusUpdateOptions,
+) -> Result<EntryStatusUpdateResult, String> {
+    let current = load_entry_status_row_pg(pool, entry_id).await?;
+    if current.status != ENTRY_STATUS_DONE {
+        return update_entry_status_on_pg(
+            pool,
+            entry_id,
+            ENTRY_STATUS_DISPATCHED,
+            trigger_source,
+            options,
+        )
+        .await;
+    }
+
+    let effective_dispatch_id = options
+        .dispatch_id
+        .clone()
+        .or_else(|| current.dispatch_id.clone());
+    let effective_slot_index = options.slot_index.or(current.slot_index);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("open postgres auto-queue done reactivation tx: {error}"))?;
+
+    let rows_affected = sqlx::query(
+        "UPDATE auto_queue_entries
+         SET status = 'dispatched',
+             dispatch_id = $1,
+             slot_index = $2,
+             dispatched_at = NOW(),
+             completed_at = NULL
+         WHERE id = $3
+           AND status = 'done'",
+    )
+    .bind(&effective_dispatch_id)
+    .bind(effective_slot_index)
+    .bind(entry_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("reactivate postgres auto-queue entry {entry_id}: {error}"))?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback postgres auto-queue reactivation {entry_id}: {error}")
+        })?;
+        let latest = load_entry_status_row_pg(pool, entry_id).await?;
+        if entry_status_row_matches_target(
+            &latest,
+            ENTRY_STATUS_DISPATCHED,
+            effective_dispatch_id.as_deref(),
+            effective_slot_index,
+        ) {
+            return Ok(EntryStatusUpdateResult {
+                run_id: latest.run_id,
+                from_status: latest.status,
+                to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+                changed: false,
+            });
+        }
+
+        return Err(format!(
+            "invalid auto-queue entry transition for {entry_id}: {} -> {}",
+            latest.status, ENTRY_STATUS_DISPATCHED
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'active',
+             completed_at = NULL
+         WHERE id = $1
+           AND status = 'completed'",
+    )
+    .bind(&current.run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        format!(
+            "reactivate postgres auto-queue run {}: {error}",
+            current.run_id
+        )
+    })?;
+
+    if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
+        record_entry_dispatch_history_on_pg(&mut tx, entry_id, dispatch_id, trigger_source).await?;
+    }
+
+    record_entry_transition_on_pg(
+        &mut tx,
+        entry_id,
+        ENTRY_STATUS_DONE,
+        ENTRY_STATUS_DISPATCHED,
+        trigger_source,
+    )
+    .await?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres auto-queue reactivation {entry_id}: {error}"))?;
+
+    Ok(EntryStatusUpdateResult {
+        run_id: current.run_id,
+        from_status: ENTRY_STATUS_DONE.to_string(),
+        to_status: ENTRY_STATUS_DISPATCHED.to_string(),
+        changed: true,
+    })
+}
+
 pub fn record_entry_dispatch_failure_on_conn(
     conn: &Connection,
     entry_id: &str,
@@ -1008,7 +1122,7 @@ async fn load_entry_status_row_pg_tx(
                 slot_index::BIGINT AS slot_index,
                 COALESCE(thread_group, 0)::BIGINT AS thread_group,
                 COALESCE(batch_phase, 0)::BIGINT AS batch_phase,
-                completed_at
+                completed_at::text AS completed_at
          FROM auto_queue_entries
          WHERE id = $1",
     )
@@ -3805,7 +3919,7 @@ async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<Entry
                 slot_index::BIGINT AS slot_index,
                 COALESCE(thread_group, 0)::BIGINT AS thread_group,
                 COALESCE(batch_phase, 0)::BIGINT AS batch_phase,
-                completed_at
+                completed_at::text AS completed_at
          FROM auto_queue_entries
          WHERE id = $1",
     )
@@ -4315,14 +4429,21 @@ async fn completion_notify_targets_on_pg(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let channel_id: Option<String> =
-            sqlx::query_scalar("SELECT discord_channel_id FROM agents WHERE id = $1")
-                .bind(agent_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|error| {
-                    format!("load completion notify agent channel for run {run_id}: {error}")
-                })?;
+        let channel_id = sqlx::query("SELECT discord_channel_id FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!("load completion notify agent channel for run {run_id}: {error}")
+            })?
+            .map(|row| {
+                row.try_get::<Option<String>, _>("discord_channel_id")
+                    .map_err(|error| {
+                        format!("decode completion notify agent channel for run {run_id}: {error}")
+                    })
+            })
+            .transpose()?
+            .flatten();
         if let Some(channel_id) = channel_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())

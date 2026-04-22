@@ -1241,11 +1241,12 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(json["status"], "idle");
     assert!(json["recent_output"].is_null());
     assert!(json["started_at"].is_null());
@@ -1610,10 +1611,16 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
             .status();
     }
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected reopen response: {body_text}"
+    );
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["tmux_session"], tmux_name);
@@ -1697,11 +1704,12 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["queue_preserved"], true);
@@ -2897,7 +2905,7 @@ async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns
         String,
         Option<String>,
         Option<String>,
-        i64,
+        i32,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -7732,7 +7740,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         String,
         Option<String>,
         Option<String>,
-        i64,
+        i32,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -7968,6 +7976,275 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         reentered_review_state_status, "reviewing",
         "card_review_state.state must reflect the new review round"
     );
+}
+
+#[tokio::test]
+async fn postgres_force_transition_to_ready_cleans_up_live_state() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    seed_agent(&db, "agent-ft-clean-pg");
+    seed_repo(&db, "test-repo");
+    set_pmd_channel(&db, "pmd-chan-123");
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("test-repo")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("agent-ft-clean-pg")
+        .bind("Agent Force Transition Cleanup PG")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            latest_dispatch_id, review_status, review_round, review_notes,
+            suggestion_pending_at, review_entered_at, awaiting_dod_at,
+            created_at, updated_at, started_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10,
+            NOW() - INTERVAL '12 minutes', NOW() - INTERVAL '11 minutes', NOW() - INTERVAL '10 minutes',
+            NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '20 minutes'
+         )",
+    )
+    .bind("card-ft-clean-pg")
+    .bind("Force Transition Cleanup PG")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("agent-ft-clean-pg")
+    .bind("test-repo")
+    .bind("dispatch-ft-clean-pg")
+    .bind("reviewing")
+    .bind(4_i64)
+    .bind("stale review notes")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes'
+         )",
+    )
+    .bind("dispatch-ft-clean-pg")
+    .bind("card-ft-clean-pg")
+    .bind("agent-ft-clean-pg")
+    .bind("implementation")
+    .bind("pending")
+    .bind("live impl")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, NOW() - INTERVAL '9 minutes', NOW() - INTERVAL '9 minutes'
+         )",
+    )
+    .bind("session-ft-clean-pg")
+    .bind("agent-ft-clean-pg")
+    .bind("codex")
+    .bind("working")
+    .bind("dispatch-ft-clean-pg")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES
+            ($1, $2, $3, 'active'),
+            ($4, $2, $3, 'active')",
+    )
+    .bind("run-ft-clean-pg")
+    .bind("test-repo")
+    .bind("agent-ft-clean-pg")
+    .bind("run-ft-clean-pg-pending")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW() - INTERVAL '10 minutes'
+         )",
+    )
+    .bind("entry-ft-clean-pg-dispatched")
+    .bind("run-ft-clean-pg")
+    .bind("card-ft-clean-pg")
+    .bind("agent-ft-clean-pg")
+    .bind("dispatched")
+    .bind("dispatch-ft-clean-pg")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status
+         ) VALUES (
+            $1, $2, $3, $4, $5
+         )",
+    )
+    .bind("entry-ft-clean-pg-pending")
+    .bind("run-ft-clean-pg-pending")
+    .bind("card-ft-clean-pg")
+    .bind("agent-ft-clean-pg")
+    .bind("pending")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, state, pending_dispatch_id, review_round, last_verdict, last_decision,
+            approach_change_round, session_reset_round, review_entered_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW() - INTERVAL '11 minutes', NOW()
+         )",
+    )
+    .bind("card-ft-clean-pg")
+    .bind("suggestion_pending")
+    .bind("old-review-dispatch")
+    .bind(4_i64)
+    .bind("pass")
+    .bind("approved")
+    .bind(3_i64)
+    .bind(4_i64)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-ft-clean-pg/force-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"ready"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected force-transition response: {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["forced"], true);
+    assert_eq!(json["cancelled_dispatches"], serde_json::json!(1));
+    assert_eq!(json["skipped_auto_queue_entries"], serde_json::json!(2));
+    assert_eq!(json["card"]["status"], "ready");
+
+    let (
+        card_status,
+        latest_dispatch_id,
+        review_status,
+        review_round,
+        review_notes,
+        suggestion_pending_at,
+        review_entered_at,
+        awaiting_dod_at,
+    ): (
+        String,
+        Option<String>,
+        Option<String>,
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, latest_dispatch_id, review_status, review_round, review_notes,
+                suggestion_pending_at::text, review_entered_at::text, awaiting_dod_at::text
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind("card-ft-clean-pg")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    let (review_state_round, review_state_status, review_state_pending_dispatch): (
+        i32,
+        String,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT review_round, state, pending_dispatch_id
+         FROM card_review_state
+         WHERE card_id = $1",
+    )
+    .bind("card-ft-clean-pg")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-ft-clean-pg")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    let entry_rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, dispatch_id
+         FROM auto_queue_entries
+         WHERE kanban_card_id = $1
+         ORDER BY id ASC",
+    )
+    .bind("card-ft-clean-pg")
+    .fetch_all(&pg_pool)
+    .await
+    .unwrap();
+    let (session_status, active_dispatch_id): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, active_dispatch_id
+         FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind("session-ft-clean-pg")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+
+    assert_eq!(card_status, "ready");
+    assert!(latest_dispatch_id.is_none());
+    assert!(review_status.is_none());
+    assert_eq!(review_round, 0);
+    assert!(review_notes.is_none());
+    assert!(suggestion_pending_at.is_none());
+    assert!(review_entered_at.is_none());
+    assert!(awaiting_dod_at.is_none());
+    assert_eq!(review_state_round, 0);
+    assert_eq!(review_state_status, "idle");
+    assert!(review_state_pending_dispatch.is_none());
+    assert_eq!(dispatch_status, "cancelled");
+    assert_eq!(
+        entry_rows,
+        vec![("skipped".to_string(), None), ("skipped".to_string(), None),]
+    );
+    assert_eq!(session_status, "idle");
+    assert!(active_dispatch_id.is_none());
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -8622,6 +8899,17 @@ async fn postgres_reopen_updates_review_tuning_outcome_in_postgres() {
     seed_repo(&db, "test-repo");
     set_pmd_channel(&db, "pmd-chan-123");
     ensure_auto_queue_tables(&db);
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("test-repo")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("agent-reopen-pg")
+        .bind("Agent Reopen PG")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
     let reopen_target = crate::pipeline::get()
         .dispatchable_states()
         .into_iter()
@@ -8629,36 +8917,50 @@ async fn postgres_reopen_updates_review_tuning_outcome_in_postgres() {
         .expect("default pipeline should expose at least one dispatchable state")
         .to_string();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, repo_id,
-                review_status, created_at, updated_at, completed_at
-            ) VALUES (
-                'card-reopen-pg', 'Issue #270 PG', 'done', 'medium', 'agent-reopen-pg', 'test-repo',
-                'pass', datetime('now'), datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-reopen-pg', 'test-repo', 'agent-reopen-pg', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, completed_at
-            ) VALUES (
-                'entry-reopen-pg', 'run-reopen-pg', 'card-reopen-pg', 'agent-reopen-pg',
-                'done', datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            review_status, created_at, updated_at, completed_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), NOW()
+         )",
+    )
+    .bind("card-reopen-pg")
+    .bind("Issue #270 PG")
+    .bind("done")
+    .bind("medium")
+    .bind("agent-reopen-pg")
+    .bind("test-repo")
+    .bind("pass")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind("run-reopen-pg")
+    .bind("test-repo")
+    .bind("agent-reopen-pg")
+    .bind("active")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, completed_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, NOW()
+         )",
+    )
+    .bind("entry-reopen-pg")
+    .bind("run-reopen-pg")
+    .bind("card-reopen-pg")
+    .bind("agent-reopen-pg")
+    .bind("done")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
 
     sqlx::query(
         "INSERT INTO review_tuning_outcomes (
@@ -8699,13 +9001,20 @@ async fn postgres_reopen_updates_review_tuning_outcome_in_postgres() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unexpected reopen response for card-reopen-pg: {body_text}"
+    );
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["reopened"], true);
     assert_eq!(json["to"], reopen_target);
+    assert_eq!(json["card"]["status"], reopen_target);
 
     let outcome: String = sqlx::query_scalar(
         "SELECT outcome
