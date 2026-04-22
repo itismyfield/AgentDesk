@@ -6,11 +6,14 @@ use serenity::ChannelId;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
+use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::message_outbox::{
     OutboxMessage, enqueue_lifecycle_notification_best_effort, enqueue_outbox_best_effort,
 };
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
-use crate::services::session_backend::StreamLineState;
+use crate::services::session_backend::{
+    StreamLineState, classify_task_notification_kind, observe_stream_context,
+};
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
     tmux_session_exists, tmux_session_has_live_pane,
@@ -48,17 +51,7 @@ pub(super) struct WatcherLineOutcome {
     pub provider_overload_message: Option<String>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
-    /// #826 marker: Claude Code emits `{"type":"system","subtype":"task_notification",...}`
-    /// at the start of a turn it auto-fires in response to a background task
-    /// completing (e.g. a `Bash run_in_background` finishing). This is the
-    /// canonical signal that the current tmux turn is a *background-trigger*
-    /// turn — one for which no user-authored message exists and the terminal
-    /// response must be routed through the notify-bot outbox rather than
-    /// relayed via the command bot. Distinguishing this from a normal
-    /// foreground turn (where `turn_bridge` has merely cleared the inflight
-    /// file prior to handing output back to the watcher) is the P1 review fix
-    /// for the over-broad `inflight.is_none()` predicate.
-    pub task_notification_seen: bool,
+    pub task_notification_kind: Option<TaskNotificationKind>,
 }
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
@@ -100,59 +93,109 @@ fn watcher_ready_for_input_turn_completed(
     tracker.observe_idle(current_offset > data_start_offset, ready_for_input, now)
 }
 
-fn build_monitor_completion_message(response: &str) -> String {
-    let response = response.trim();
-    if response.is_empty() {
-        return String::new();
-    }
+fn merge_task_notification_kind(
+    current: Option<TaskNotificationKind>,
+    new_kind: TaskNotificationKind,
+) -> Option<TaskNotificationKind> {
+    let priority = |kind: TaskNotificationKind| match kind {
+        TaskNotificationKind::Subagent => 0,
+        TaskNotificationKind::Background => 1,
+        TaskNotificationKind::MonitorAutoTurn => 2,
+    };
 
-    format!(
-        "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\n{}",
-        response
-    )
+    match current {
+        Some(existing) if priority(existing) >= priority(new_kind) => Some(existing),
+        _ => Some(new_kind),
+    }
 }
 
-/// #826 P1 #1: Evaluate whether the terminal response for a tmux-backed turn
-/// should be routed through the notify-bot outbox rather than the normal
-/// command-bot relay. Background-trigger turns (Claude Code auto-fired in
-/// response to a `<task-notification>`) must go through notify to avoid
-/// other agents in the channel treating the output as an actionable directive
-/// (infinite-loop hazard). Ordinary foreground turns — even when the inflight
-/// file was cleared early by `turn_bridge` — must NOT be rerouted, because
-/// the notify-bot outbox may not be available in every deployment, which
-/// would silently drop the reply.
-///
-/// **Provider coverage (important):** the `system/task_notification` JSONL
-/// event is the canonical provider-agnostic marker for a background-trigger
-/// turn. Claude emits it directly via `session_backend.rs::parse_stream_message`.
-/// Codex emits a raw `background_event`, which `codex_tmux_wrapper.rs`
-/// normalizes into the same `system/task_notification` record before the
-/// watcher sees the stream. This keeps the routing predicate shared across
-/// providers.
-///
-/// **`inflight_present` semantics (#897 round 2):** this parameter tracks
-/// the presence of a *foreground* inflight (a legitimate turn driven by a
-/// real Discord user message), NOT every file under `discord_inflight/`.
-/// A `rebind_origin` inflight synthesised by `POST /api/inflight/rebind`
-/// must be passed as `false` here — otherwise the recovered auto-trigger
-/// response is routed through the command bot, reintroducing the #826
-/// loop hazard. The caller (watcher loop) filters the inflight snapshot
-/// on `!state.rebind_origin` before invoking this predicate.
-///
-/// Returns `true` only when ALL of the following hold:
-/// 1. The turn produced an assistant response (no use rerouting emptiness).
-/// 2. A `system/task_notification` event was observed in the turn's JSONL
-///    stream (canonical background-trigger marker after provider normalization).
-/// 3. No FOREGROUND inflight state exists for the channel (rules out
-///    concurrent real user turns that happen to also include the marker;
-///    a rebind-origin synthetic inflight does not count).
-#[inline]
-pub(super) fn should_route_terminal_response_via_notify_bot(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalRelayDecision {
+    should_direct_send: bool,
+    should_tag_monitor_origin: bool,
+    should_enqueue_notify_outbox: bool,
+    suppressed: bool,
+}
+
+fn terminal_relay_decision(
     has_assistant_response: bool,
-    task_notification_seen: bool,
-    inflight_present: bool,
-) -> bool {
-    has_assistant_response && task_notification_seen && !inflight_present
+    task_notification_kind: Option<TaskNotificationKind>,
+) -> TerminalRelayDecision {
+    match task_notification_kind {
+        Some(TaskNotificationKind::MonitorAutoTurn) => TerminalRelayDecision {
+            should_direct_send: has_assistant_response,
+            should_tag_monitor_origin: has_assistant_response,
+            should_enqueue_notify_outbox: false,
+            suppressed: false,
+        },
+        Some(TaskNotificationKind::Subagent | TaskNotificationKind::Background) => {
+            TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
+            }
+        }
+        None => TerminalRelayDecision {
+            should_direct_send: has_assistant_response,
+            should_tag_monitor_origin: false,
+            should_enqueue_notify_outbox: false,
+            suppressed: false,
+        },
+    }
+}
+
+fn ensure_monitor_auto_turn_inflight(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
+    input_fifo_path: &str,
+    session_id: Option<&str>,
+    turn_start_offset: u64,
+    last_offset: u64,
+) {
+    if super::inflight::load_inflight_state(provider, channel_id.get()).is_some() {
+        return;
+    }
+
+    let channel_name = parse_provider_and_channel_from_tmux_name(tmux_session_name)
+        .map(|(_, channel_name)| channel_name);
+    let mut synthetic = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        channel_name,
+        0,
+        0,
+        0,
+        "Monitor auto-turn".to_string(),
+        session_id.map(str::to_string),
+        Some(tmux_session_name.to_string()),
+        Some(output_path.to_string()),
+        Some(input_fifo_path.to_string()),
+        last_offset,
+    );
+    synthetic.turn_start_offset = Some(turn_start_offset);
+    synthetic.rebind_origin = true;
+
+    match super::inflight::save_inflight_state_create_new(&synthetic) {
+        Ok(()) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 Registered synthetic inflight for monitor auto-turn in channel {}",
+                channel_id.get()
+            );
+        }
+        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {}
+        Err(super::inflight::CreateNewInflightError::Internal(error)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ Failed to register synthetic monitor inflight for channel {}: {}",
+                channel_id.get(),
+                error
+            );
+        }
+    }
 }
 
 /// #826 P1 #2 (option b): Decide which of the two offset watermarks
@@ -1200,6 +1243,7 @@ pub(super) async fn tmux_output_watcher(
     let watcher_thread_channel_id =
         super::adk_session::parse_thread_channel_id_from_name(&watcher_channel_name);
     let mut current_offset = initial_offset;
+    let input_fifo_path = super::turn_bridge::tmux_runtime_paths(&tmux_session_name).1;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -1216,31 +1260,12 @@ pub(super) async fn tmux_output_watcher(
             None
         }
     };
-    // #826 P1 #2 (option b): Track the offset from which the last
-    // notify-outbox enqueue was STAGED — i.e. the row is in `message_outbox`
-    // but Discord delivery has NOT yet been confirmed by the outbox worker.
-    // This watermark dedupes re-enqueue when the watcher loops back without
-    // foreground delivery confirmation, while `last_relayed_offset` stays
-    // reserved for genuinely-delivered relays. If the outbox worker later
-    // marks the row `status='failed'`, a follow-up tick can choose to re-emit
-    // (by resetting this watermark) without having already advanced the
-    // canonical relayed offset. Seeded from the same persisted watermark so
-    // a replacement watcher does not re-enqueue content the predecessor
-    // already staged.
-    let mut last_enqueued_offset: Option<u64> = last_relayed_offset;
-
     // Rolling-size-cap rotation state. The watcher loop spins predictably
     // (~500ms sleeps) so a mod-N gate on an iteration counter gives a
     // regular-ish cadence for the size check without hitting the fs every
     // spin. See issue #892.
     let mut rotation_tick: u32 = 0;
     const ROTATION_CHECK_EVERY: u32 = 60; // ~30s at 500ms base cadence
-    // #897 counter-model review P1 #2: cadence for the failed-bg_trigger
-    // reconciliation poll. Short enough that a transient outbox failure is
-    // re-staged within ~10s, long enough that the watcher doesn't hammer
-    // SQLite every spin. Independent of ROTATION_CHECK_EVERY so each
-    // subsystem can tune its cadence without affecting the other.
-    const BG_FAILURE_RECONCILE_EVERY: u32 = 20; // ~10s at 500ms base cadence
 
     loop {
         // Always consume resume_offset first — the turn bridge may have set it
@@ -1256,11 +1281,6 @@ pub(super) async fn tmux_output_watcher(
             } else {
                 None
             };
-            // #826 P1 #2: keep the enqueue watermark in lock-step with the
-            // relay watermark when the bridge hands control back — otherwise
-            // a stale enqueue marker from a previous turn could suppress a
-            // fresh background-trigger enqueue on the new turn.
-            last_enqueued_offset = last_relayed_offset;
             // Clear turn_delivered after preserving the duplicate-relay guard so
             // future turns beyond this resume point can be relayed normally.
             turn_delivered.store(false, Ordering::Relaxed);
@@ -1281,28 +1301,6 @@ pub(super) async fn tmux_output_watcher(
         // the watcher loop keeps the wrapper child process simple while
         // still enforcing a 20 MB soft cap (see issue #892).
         rotation_tick = rotation_tick.wrapping_add(1);
-
-        // #897 P1 #2: reconcile any permanently-failed bg_trigger outbox
-        // rows for THIS channel and roll `last_enqueued_offset` back so
-        // the next tick re-stages the failed range instead of silently
-        // letting the watermark pin the dedupe floor past unresolved
-        // output. Runs on its own cadence (independent of rotation) and
-        // never blocks the rest of the loop — a SQL hiccup just returns
-        // None.
-        if rotation_tick % BG_FAILURE_RECONCILE_EVERY == 0 {
-            if let Some(min_failed_offset) = reconcile_failed_bg_trigger_enqueues_for_channel(
-                shared.pg_pool.as_ref(),
-                shared.sqlite.as_ref(),
-                channel_id,
-            )
-            .await
-            {
-                last_enqueued_offset = rollback_enqueued_offset_for_reconciled_failures(
-                    last_enqueued_offset,
-                    min_failed_offset,
-                );
-            }
-        }
 
         if rotation_tick % ROTATION_CHECK_EVERY == 0 {
             let path = output_path.clone();
@@ -1516,11 +1514,22 @@ pub(super) async fn tmux_output_watcher(
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
-        // #826 P1 #1: accumulate the task_notification system-event marker so
-        // the terminal-response branch can distinguish a background-trigger
-        // auto-fired turn from a normal foreground turn whose inflight file
-        // was simply cleared early by turn_bridge.
-        let mut task_notification_seen = initial_outcome.task_notification_seen;
+        let mut task_notification_kind = initial_outcome.task_notification_kind;
+        if matches!(
+            task_notification_kind,
+            Some(TaskNotificationKind::MonitorAutoTurn)
+        ) {
+            ensure_monitor_auto_turn_inflight(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                &output_path,
+                &input_fifo_path,
+                state.last_session_id.as_deref(),
+                data_start_offset,
+                current_offset,
+            );
+        }
 
         // Keep reading until result or timeout
         // Check if a Discord turn claimed this data since our epoch snapshot
@@ -1596,8 +1605,25 @@ pub(super) async fn tmux_output_watcher(
                             is_provider_overloaded || outcome.is_provider_overloaded;
                         stale_resume_detected =
                             stale_resume_detected || outcome.stale_resume_detected;
-                        task_notification_seen =
-                            task_notification_seen || outcome.task_notification_seen;
+                        if let Some(kind) = outcome.task_notification_kind {
+                            task_notification_kind =
+                                merge_task_notification_kind(task_notification_kind, kind);
+                        }
+                        if matches!(
+                            task_notification_kind,
+                            Some(TaskNotificationKind::MonitorAutoTurn)
+                        ) {
+                            ensure_monitor_auto_turn_inflight(
+                                &watcher_provider,
+                                channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &input_fifo_path,
+                                state.last_session_id.as_deref(),
+                                data_start_offset,
+                                current_offset,
+                            );
+                        }
                         if provider_overload_message.is_none() {
                             provider_overload_message = outcome.provider_overload_message;
                         }
@@ -2126,36 +2152,17 @@ pub(super) async fn tmux_output_watcher(
             continue;
         }
 
-        // Duplicate-relay guard: if we already relayed from this same data range, suppress.
-        //
-        // #826: use strict `<` so that data starting EXACTLY at the boundary
-        // recorded by the previous relay (or by the bridge's `resume_offset`)
-        // is treated as new data, not a re-read. After a normal bridge turn
-        // ends the watcher resumes with `last_relayed_offset = Some(Y)` where
-        // `Y` is the byte right after the bridge's last consumed byte. A turn
-        // auto-fired by Claude Code's `<task-notification>` writes its tmux
-        // output starting at that exact `Y`, so `<=` was silently dropping
-        // the entire auto-trigger turn. Strict `<` only catches genuine
-        // re-reads of the same starting offset.
-        //
-        // #826 P1 #2: check the max of the relayed and enqueued watermarks so
-        // that a background-trigger response we already staged on the
-        // notify-bot outbox (but whose Discord delivery the outbox worker
-        // hasn't confirmed yet) isn't re-enqueued on the next tick.
-        let dedupe_floor = match (last_relayed_offset, last_enqueued_offset) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
-        };
-        if let Some(prev_offset) = dedupe_floor {
+        // Duplicate-relay guard: if we already relayed from this same data
+        // range, suppress. Use strict `<` so output starting exactly at the
+        // previous boundary is treated as the next turn rather than a re-read.
+        if let Some(prev_offset) = last_relayed_offset {
             if data_start_offset < prev_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={:?}, last_enqueued={:?})",
+                    "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={:?})",
                     tmux_session_name,
                     data_start_offset,
                     last_relayed_offset,
-                    last_enqueued_offset
                 );
                 if let Some(msg_id) = placeholder_msg_id {
                     let _ = channel_id.delete_message(&http, msg_id).await;
@@ -2270,50 +2277,6 @@ pub(super) async fn tmux_output_watcher(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
-        // #826 P1 #1: Routing a terminal response through the notify-bot
-        // outbox is only correct when the response came from a turn that
-        // Claude Code's `<task-notification>` mechanism auto-fired (no
-        // user-authored message exists, sending via the command bot risks
-        // other agents treating it as a directive → infinite-loop hazard).
-        //
-        // The earlier heuristic — "inflight state is missing at completion"
-        // — is too broad: `turn_bridge` ALSO clears the inflight file before
-        // handing a normal tmux-backed foreground turn's output back to the
-        // watcher for relay. Using only `inflight.is_none()` would silently
-        // reroute ordinary foreground replies through the notify-only path
-        // and drop them when notify/outbox is unavailable.
-        //
-        // The canonical marker is the `system/task_notification` JSONL event
-        // Claude Code emits at the start of an auto-fired turn; we
-        // accumulate it in `task_notification_seen` above. Route to notify
-        // ONLY when BOTH the marker is present AND the inflight file is
-        // absent — the latter remains part of the predicate so that a
-        // foreground turn whose response happens to contain a spurious
-        // task_notification passthrough is still relayed normally.
-        //
-        // Notify bot is the canonical sink for background-task-driven info
-        // per `docs/background-task-pattern.md`; it is dropped at the intake
-        // gate so the agent cannot self-trigger another turn off this
-        // delivery.
-        //
-        // #897 counter-model re-review (round 2): a `rebind_origin`
-        // inflight is a SYNTHETIC placeholder written by
-        // `POST /api/inflight/rebind` to adopt a live tmux session that had
-        // no real user-authored turn driving it. It must be treated as
-        // absent for this predicate — otherwise the recovered
-        // auto-trigger's response drops back to the command-bot relay,
-        // reintroducing the loop hazard the notify routing was fixing.
-        let inflight_snapshot =
-            super::inflight::load_inflight_state(&watcher_provider, channel_id.get());
-        let foreground_inflight_present = inflight_snapshot
-            .as_ref()
-            .is_some_and(|state| !state.rebind_origin);
-        let route_via_notify_bot = should_route_terminal_response_via_notify_bot(
-            has_assistant_response,
-            task_notification_seen,
-            foreground_inflight_present,
-        );
-
         // Cross-watcher relay coordination (root-cause fix for duplicate
         // terminal-response emission observed when `claim_or_replace_watcher`
         // replaces a watcher mid-flight and both the outgoing and incoming
@@ -2322,11 +2285,9 @@ pub(super) async fn tmux_output_watcher(
         // the channel (survives handle replacement), so the two atomics below
         // serialize concurrent emissions and carry the confirmed-delivery
         // watermark between instances without touching disk.
-        //
-        // The local `last_relayed_offset` / `last_enqueued_offset` guard above
-        // is retained: it handles the single-instance cases (resume after
-        // pause, inflight-mirror-driven restart recovery) and makes per-tick
-        // dedupe cheap. The coord guard is the missing multi-instance layer.
+        // The local `last_relayed_offset` guard above handles the
+        // single-instance case; this coord layer closes the multi-instance
+        // duplicate-relay hole.
         let relay_coord = shared.tmux_relay_coord(channel_id);
         let confirmed_end_pre_claim = relay_coord
             .confirmed_end_offset
@@ -2388,166 +2349,77 @@ pub(super) async fn tmux_output_watcher(
             continue;
         }
 
-        // Send the terminal response to Discord
-        // #225 P1-2: Track relay success across branches
-        let relay_ok = if has_assistant_response {
+        // Send the terminal response to Discord.
+        let relay_decision =
+            terminal_relay_decision(has_assistant_response, task_notification_kind);
+        debug_assert!(
+            !relay_decision.should_enqueue_notify_outbox,
+            "monitor/task-notification watcher relays must not use notify-bot outbox"
+        );
+        let relay_ok = if relay_decision.should_direct_send {
             let formatted = super::formatting::format_for_discord_with_provider(
                 current_response,
                 &watcher_provider,
             );
-            let prefixed = build_monitor_completion_message(&formatted);
+            let relay_text = if relay_decision.should_tag_monitor_origin {
+                super::prepend_monitor_auto_turn_origin(&formatted)
+            } else {
+                formatted
+            };
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {}, notify={})",
-                prefixed.len(),
+                "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {}, task_notification_kind={})",
+                relay_text.len(),
                 data_start_offset,
-                route_via_notify_bot
+                task_notification_kind
+                    .map(TaskNotificationKind::as_str)
+                    .unwrap_or("none")
             );
-            // #225 P1-2: Track relay success to gate turn_result_relayed
             let mut relay_ok = true;
-            // #826 P1 #2: Tracks whether the notify-bot outbox enqueue ran and
-            // committed to the DB. Distinct from `relay_ok` because enqueue
-            // success is *staging*, not *delivery*: the outbox row may still
-            // fail to reach Discord, so the canonical `last_relayed_offset`
-            // must NOT advance on enqueue alone. We advance the separate
-            // `last_enqueued_offset` below so subsequent ticks don't re-enqueue
-            // the same tmux range before the worker has had a chance to deliver.
-            let mut notify_enqueue_succeeded = false;
-            // #826 P1 #2: Tracks whether the direct-send fallback (either the
-            // notify-path fallback on enqueue failure, or the normal
-            // foreground command-bot path) actually reached Discord. Only a
-            // confirmed foreground send may advance `last_relayed_offset`.
             let mut direct_send_delivered = false;
-            if route_via_notify_bot {
-                // Background-trigger path: drop the spinner placeholder (it was
-                // sent via the command bot for streaming status) and enqueue the
-                // terminal response on the notify-bot outbox.
-                if let Some(msg_id) = placeholder_msg_id {
-                    let _ = channel_id.delete_message(&http, msg_id).await;
-                }
-                let enqueued = if has_current_response {
-                    enqueue_background_trigger_response_to_notify_outbox(
-                        shared.pg_pool.as_ref(),
-                        shared.sqlite.as_ref(),
-                        channel_id,
-                        &prefixed,
-                        data_start_offset,
-                    )
-                    .await
-                } else {
-                    // No assistant text to deliver — nothing to commit.
-                    true
-                };
-                if enqueued {
-                    // Outbox row is durable (DB-backed) and the background
-                    // worker owns delivery + retries. Mark the enqueue
-                    // watermark so a subsequent tick doesn't stage the same
-                    // range again, but leave the *relayed* watermark alone
-                    // until we have confirmed Discord delivery.
-                    notify_enqueue_succeeded = has_current_response;
-                } else {
-                    // #826 P1 #2: enqueue FAILED — the message has NOT been
-                    // durably persisted to the outbox. Do not let a
-                    // downstream success path accidentally advance
-                    // `last_relayed_offset`; clear `relay_ok` first and then
-                    // *only* revive it if the direct-send fallback reaches
-                    // Discord. This keeps the watcher able to retry the same
-                    // tmux range on the next scan instead of silently moving
-                    // past a dropped response.
-                    relay_ok = false;
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] 👁 background-trigger notify enqueue failed in channel {} — falling back to direct send",
-                        channel_id
-                    );
+            match placeholder_msg_id {
+                Some(msg_id) => {
                     if has_current_response {
-                        match send_long_message_raw(&http, channel_id, &prefixed, &shared).await {
+                        match replace_long_message_raw(
+                            &http,
+                            channel_id,
+                            msg_id,
+                            &relay_text,
+                            &shared,
+                        )
+                        .await
+                        {
                             Ok(_) => {
-                                relay_ok = true;
                                 direct_send_delivered = true;
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] 👁 Fallback relay failed: {e}");
-                                // relay_ok remains false → offset NOT advanced
+                                tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                                relay_ok = false;
                             }
                         }
+                    } else {
+                        let _ = channel_id.delete_message(&http, msg_id).await;
                     }
                 }
-                // Residual risk: enqueue succeeded but the notify-bot outbox
-                // worker may still fail to reach Discord later (notify bot
-                // mis-configured, `/api/send` unreachable, Discord rejects
-                // the message). Because we only advance `last_enqueued_offset`
-                // (not `last_relayed_offset`) on enqueue success, a later
-                // reconciliation pass that notices the outbox row in
-                // `status='failed'` can roll `last_enqueued_offset` back and
-                // trigger a re-stage without having already committed the
-                // canonical relayed watermark.
-            } else {
-                match placeholder_msg_id {
-                    Some(msg_id) => {
-                        if has_current_response {
-                            match replace_long_message_raw(
-                                &http, channel_id, msg_id, &prefixed, &shared,
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    direct_send_delivered = true;
-                                }
-                                Err(e) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
-                                    relay_ok = false;
-                                }
+                None => {
+                    if has_current_response {
+                        match send_long_message_raw(&http, channel_id, &relay_text, &shared).await {
+                            Ok(_) => {
+                                direct_send_delivered = true;
                             }
-                        } else {
-                            let _ = channel_id.delete_message(&http, msg_id).await;
-                        }
-                    }
-                    None => {
-                        if has_current_response {
-                            match send_long_message_raw(&http, channel_id, &prefixed, &shared).await
-                            {
-                                Ok(_) => {
-                                    direct_send_delivered = true;
-                                }
-                                Err(e) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
-                                    relay_ok = false;
-                                }
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
+                                relay_ok = false;
                             }
                         }
                     }
                 }
             }
             if relay_ok {
-                // #826 P1 #2: split the offset-commit gate.
-                //
-                //   * `last_relayed_offset` — canonical "Discord has this"
-                //     watermark. Advances ONLY on confirmed foreground
-                //     delivery (direct send or placeholder replace). Used by
-                //     the on-disk inflight mirror so a replacement watcher
-                //     respects genuinely-delivered history.
-                //
-                //   * `last_enqueued_offset` — "outbox row committed"
-                //     watermark. Advances when the notify-bot outbox enqueue
-                //     succeeded and we expect the worker to deliver.
-                //     Prevents re-enqueue of the same tmux range on the next
-                //     tick, without poisoning the canonical relayed offset if
-                //     the async worker ultimately fails to reach Discord.
-                //
-                // An empty (no-assistant-text) pass still needs to advance
-                // both watermarks so the watcher doesn't spin on the same
-                // range — the original code used a single offset and
-                // advanced it whenever `relay_ok` held. We preserve that
-                // invariant by lifting BOTH here.
-                if direct_send_delivered {
+                if direct_send_delivered || !has_current_response {
                     last_relayed_offset = Some(data_start_offset);
-                    // Any genuine delivery also satisfies the enqueue-dedupe
-                    // floor, so lift that watermark too.
-                    last_enqueued_offset = Some(data_start_offset);
                     if let Some((pk, _)) =
                         parse_provider_and_channel_from_tmux_name(&tmux_session_name)
                     {
@@ -2558,24 +2430,25 @@ pub(super) async fn tmux_output_watcher(
                             let _ = super::inflight::save_inflight_state(&inflight);
                         }
                     }
-                } else if notify_enqueue_succeeded {
-                    last_enqueued_offset = Some(data_start_offset);
-                    // Intentionally do NOT update `last_watcher_relayed_offset`
-                    // in the inflight mirror — a replacement watcher should
-                    // see the response as not-yet-delivered so the outbox
-                    // worker's delivery path remains the single source of
-                    // truth for this range.
-                } else if !has_current_response {
-                    // Empty turn (no content, placeholder just deleted).
-                    // Advance both watermarks in lock-step so the dedupe
-                    // guard matches the old single-offset behaviour and we
-                    // don't re-enter this branch for the same range.
-                    last_relayed_offset = Some(data_start_offset);
-                    last_enqueued_offset = Some(data_start_offset);
                 }
                 clear_provider_overload_retry_state(channel_id);
             }
             relay_ok
+        } else if relay_decision.suppressed {
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 👁 Suppressed task-notification relay for {} (kind={}, offset {})",
+                tmux_session_name,
+                task_notification_kind
+                    .map(TaskNotificationKind::as_str)
+                    .unwrap_or("none"),
+                data_start_offset
+            );
+            clear_provider_overload_retry_state(channel_id);
+            false
         } else {
             if let Some(msg_id) = placeholder_msg_id {
                 // No response text but placeholder exists — clean up
@@ -2583,13 +2456,12 @@ pub(super) async fn tmux_output_watcher(
             }
             false
         };
+        let relay_suppressed = relay_decision.suppressed;
 
         // Advance the shared confirmed-delivery watermark on any committed
-        // emission (direct send, notify enqueue, or empty-turn cleanup — all
-        // three represent "this tmux range is done" from the cross-watcher
-        // dedupe perspective). CAS loop ensures we only ever move the
+        // direct emission or empty-turn cleanup. CAS loop ensures we only ever move the
         // watermark FORWARD, even if some other instance has raced ahead.
-        if relay_ok {
+        if relay_ok || relay_suppressed {
             let mut cur = relay_coord
                 .confirmed_end_offset
                 .load(std::sync::atomic::Ordering::Acquire);
@@ -2879,7 +2751,9 @@ pub(super) async fn tmux_output_watcher(
         // #225 P1-2: Only mark relayed + clear inflight if Discord relay succeeded.
         // If relay failed, preserve retry/handoff path for next startup.
         if relay_ok {
-            if has_assistant_response && let Some(state) = inflight_state.as_ref() {
+            if has_assistant_response
+                && let Some(state) = inflight_state.as_ref().filter(|state| !state.rebind_origin)
+            {
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                     if !session.cleared {
@@ -2921,7 +2795,7 @@ pub(super) async fn tmux_output_watcher(
                     "watcher completed with queued backlog",
                 );
             }
-        } else {
+        } else if !relay_suppressed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
         }
@@ -3239,6 +3113,7 @@ pub(super) fn process_watcher_lines(
 
         // Parse the JSON line
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            observe_stream_context(&val, state);
             let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "assistant" => {
@@ -3513,7 +3388,10 @@ pub(super) fn process_watcher_lines(
                         // a normal foreground turn whose inflight file was
                         // merely cleared early by turn_bridge.
                         if subtype == "task_notification" {
-                            outcome.task_notification_seen = true;
+                            outcome.task_notification_kind = merge_task_notification_kind(
+                                outcome.task_notification_kind,
+                                classify_task_notification_kind(&val, state),
+                            );
                         }
                     }
                 }
@@ -4212,14 +4090,14 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, OffsetAdvanceDecision, WatcherToolState,
-        build_bg_trigger_session_key, build_monitor_completion_message, dead_session_cleanup_plan,
+        build_bg_trigger_session_key, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox, load_restored_provider_session_id,
         notify_path_offset_advance_decision, parse_bg_trigger_offset_from_session_key,
         process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
-        rollback_enqueued_offset_for_reconciled_failures,
-        should_route_terminal_response_via_notify_bot, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state,
+        rollback_enqueued_offset_for_reconciled_failures, terminal_relay_decision,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
     };
+    use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
@@ -4247,23 +4125,6 @@ mod tests {
                 .as_deref(),
             Some("persisted-sid-1")
         );
-    }
-
-    #[test]
-    fn monitor_completion_message_adds_clear_banner() {
-        let response = "**CI 전부 ✅ SUCCESS!**\n세부 결과";
-        let wrapped = build_monitor_completion_message(response);
-
-        assert!(wrapped.starts_with("**✅ 모니터 완료**"));
-        assert!(
-            wrapped.contains("백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.")
-        );
-        assert!(wrapped.ends_with(response));
-    }
-
-    #[test]
-    fn monitor_completion_message_skips_blank_response() {
-        assert!(build_monitor_completion_message("   \n").is_empty());
     }
 
     #[test]
@@ -4595,7 +4456,7 @@ mod tests {
     async fn background_trigger_response_enqueues_notify_outbox_row() {
         let db = crate::db::test_db();
         let channel = ChannelId::new(987_654_321);
-        let content = "**✅ 모니터 완료**\n백그라운드 모니터가 작업 완료를 감지해 결과를 이어서 전달합니다.\n\nPR #825 리뷰 4건 fix 완료";
+        let content = "PR #825 리뷰 4건 fix 완료";
 
         let enqueued = enqueue_background_trigger_response_to_notify_outbox(
             /*pg_pool*/ None,
@@ -4946,93 +4807,134 @@ mod tests {
         );
     }
 
-    /// #826 P1 #1 regression guard: a turn whose inflight file is absent but
-    /// which never emitted a `system/task_notification` event is a NORMAL
-    /// foreground turn (turn_bridge cleared the inflight early before
-    /// handing tmux output back to the watcher). Such turns MUST use the
-    /// direct command-bot relay, not the notify-bot outbox — otherwise a
-    /// deployment without notify wiring silently drops every long reply.
     #[test]
-    fn normal_foreground_turn_without_task_notification_uses_direct_relay() {
-        // No task_notification marker + no inflight + has response → direct.
-        assert!(
-            !should_route_terminal_response_via_notify_bot(
-                /*has_assistant_response*/ true, /*task_notification_seen*/ false,
-                /*inflight_present*/ false,
-            ),
-            "missing inflight ALONE must not reroute a foreground turn to notify"
+    fn terminal_relay_decision_suppresses_internal_task_notifications_without_notify_outbox() {
+        assert_eq!(
+            terminal_relay_decision(true, None),
+            super::TerminalRelayDecision {
+                should_direct_send: true,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
+            }
         );
-
-        // Background-trigger turn with marker and no inflight → notify.
-        assert!(
-            should_route_terminal_response_via_notify_bot(true, true, false),
-            "genuine background-trigger turns (marker present + no inflight) must route to notify"
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn)),
+            super::TerminalRelayDecision {
+                should_direct_send: true,
+                should_tag_monitor_origin: true,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
+            }
         );
-
-        // Marker present but inflight still exists — treat as a concurrent
-        // foreground turn; do not reroute.
-        assert!(
-            !should_route_terminal_response_via_notify_bot(true, true, true),
-            "inflight-present turns must never route to notify even if a task_notification leaked in"
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::Subagent)),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
+            }
         );
-
-        // Marker present but no response — nothing to send.
-        assert!(!should_route_terminal_response_via_notify_bot(
-            false, true, false
-        ));
+        assert_eq!(
+            terminal_relay_decision(true, Some(TaskNotificationKind::Background)),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
+            }
+        );
     }
 
-    /// #826 P1 #1 regression guard (JSONL-level): `process_watcher_lines`
-    /// must expose the `task_notification` system event as
-    /// `task_notification_seen` so the routing predicate can distinguish a
-    /// background-trigger turn from a foreground one. A run that only
-    /// contains a normal assistant+result pair must leave the flag clear.
     #[test]
-    fn process_watcher_lines_surfaces_task_notification_marker() {
-        // Background-trigger turn: provider stream has already been
-        // normalized to the canonical system/task_notification event before
-        // streaming the assistant response.
-        let mut bg_buffer = concat!(
+    fn process_watcher_lines_classifies_background_task_notification() {
+        let mut buffer = concat!(
             "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-42\",\"status\":\"completed\",\"summary\":\"CI green\"}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PR #825 리뷰 반영 완료\"}]}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
-        ).to_string();
-        let mut state = crate::services::session_backend::StreamLineState::new();
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
-        let bg_outcome = process_watcher_lines(
-            &mut bg_buffer,
-            &mut state,
-            &mut full_response,
-            &mut tool_state,
-        );
-        assert!(bg_outcome.found_result);
-        assert!(
-            bg_outcome.task_notification_seen,
-            "task_notification system event must set the marker"
-        );
 
-        // Normal foreground turn: no task_notification event. Marker must
-        // stay false so the router keeps the direct-relay path.
-        let mut fg_buffer = concat!(
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(
+            outcome.task_notification_kind,
+            Some(TaskNotificationKind::Background)
+        );
+        assert_eq!(full_response, "PR #825 리뷰 반영 완료");
+    }
+
+    #[test]
+    fn process_watcher_lines_classifies_subagent_task_notification() {
+        let mut buffer = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(
+            outcome.task_notification_kind,
+            Some(TaskNotificationKind::Subagent)
+        );
+        assert_eq!(full_response, "done");
+    }
+
+    #[test]
+    fn process_watcher_lines_classifies_monitor_auto_turn_task_notification() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_mon_1\",\"name\":\"Monitor\",\"input\":{\"command\":\"gh pr view\"}}]}}\n",
+            "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"mon-1\",\"tool_use_id\":\"toolu_mon_1\",\"task_type\":\"tool\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"mon-1\",\"status\":\"completed\",\"summary\":\"Monitor event: PR updated\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PR #938 상태 갱신 완료\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(
+            outcome.task_notification_kind,
+            Some(TaskNotificationKind::MonitorAutoTurn)
+        );
+        assert_eq!(full_response, "PR #938 상태 갱신 완료");
+    }
+
+    #[test]
+    fn process_watcher_lines_leaves_task_notification_kind_empty_for_foreground_turn() {
+        let mut buffer = concat!(
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
         )
         .to_string();
-        let mut fg_state = crate::services::session_backend::StreamLineState::new();
-        let mut fg_response = String::new();
-        let mut fg_tool_state = WatcherToolState::new();
-        let fg_outcome = process_watcher_lines(
-            &mut fg_buffer,
-            &mut fg_state,
-            &mut fg_response,
-            &mut fg_tool_state,
-        );
-        assert!(fg_outcome.found_result);
-        assert!(
-            !fg_outcome.task_notification_seen,
-            "a turn without task_notification must not set the marker"
-        );
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert_eq!(outcome.task_notification_kind, None);
+        assert_eq!(full_response, "hello");
     }
 
     /// #826 P1 #2 regression guard: when the notify-bot outbox enqueue fails

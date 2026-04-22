@@ -35,6 +35,32 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
 ];
 
 /// Streaming message types for provider responses consumed by Discord orchestration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskNotificationKind {
+    Subagent,
+    Background,
+    MonitorAutoTurn,
+}
+
+impl TaskNotificationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subagent => "subagent",
+            Self::Background => "background",
+            Self::MonitorAutoTurn => "monitor_auto_turn",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "subagent" => Some(Self::Subagent),
+            "background" => Some(Self::Background),
+            "monitor_auto_turn" => Some(Self::MonitorAutoTurn),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamMessage {
     /// Initialization - contains session_id
@@ -57,6 +83,7 @@ pub enum StreamMessage {
         task_id: String,
         status: String,
         summary: String,
+        kind: TaskNotificationKind,
     },
     /// Completion
     Done {

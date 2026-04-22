@@ -6,7 +6,7 @@
 //! - normalized output-file tailing/parsing for wrapper JSONL streams
 
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{StreamMessage, TaskNotificationKind};
 use crate::services::provider::{CancelToken, ReadOutputResult, SessionProbe};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -270,12 +270,20 @@ pub struct StreamLineState {
     pub accum_output_tokens: u64,
     pub final_result: Option<String>,
     pub stdout_error: Option<(String, String)>,
+    pub tool_use_names: HashMap<String, String>,
+    pub task_starts: HashMap<String, TaskStartInfo>,
 }
 
 impl StreamLineState {
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskStartInfo {
+    pub tool_use_id: Option<String>,
+    pub task_type: Option<String>,
 }
 
 pub fn extract_turn_analytics_from_output(
@@ -421,7 +429,9 @@ pub fn process_stream_line(
         }
     }
 
-    if let Some(message) = parse_stream_message(&json) {
+    observe_stream_context(&json, state);
+
+    if let Some(message) = parse_stream_message_with_state(&json, state) {
         match &message {
             StreamMessage::Init { session_id, .. } => {
                 state.last_session_id = Some(session_id.clone());
@@ -454,6 +464,15 @@ pub fn process_stream_line(
 }
 
 pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
+    let mut state = StreamLineState::new();
+    observe_stream_context(json, &mut state);
+    parse_stream_message_with_state(json, &state)
+}
+
+pub(crate) fn parse_stream_message_with_state(
+    json: &Value,
+    state: &StreamLineState,
+) -> Option<StreamMessage> {
     let msg_type = json.get("type")?.as_str()?;
 
     match msg_type {
@@ -483,6 +502,7 @@ pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
                         .and_then(|value| value.as_str())
                         .unwrap_or("")
                         .to_string(),
+                    kind: classify_task_notification_kind(json, state),
                 }),
                 _ => None,
             }
@@ -621,6 +641,101 @@ pub fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
         }
         _ => None,
     }
+}
+
+pub(crate) fn observe_stream_context(json: &Value, state: &mut StreamLineState) {
+    let Some(msg_type) = json.get("type").and_then(|value| value.as_str()) else {
+        return;
+    };
+
+    match msg_type {
+        "assistant" => {
+            let Some(content) = json
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(|content| content.as_array())
+            else {
+                return;
+            };
+
+            for item in content {
+                if item.get("type").and_then(|value| value.as_str()) != Some("tool_use") {
+                    continue;
+                }
+                let Some(tool_use_id) = item.get("id").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let Some(tool_name) = item.get("name").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                state
+                    .tool_use_names
+                    .insert(tool_use_id.to_string(), tool_name.to_string());
+            }
+        }
+        "system" => {
+            if json.get("subtype").and_then(|value| value.as_str()) != Some("task_started") {
+                return;
+            }
+            let Some(task_id) = json.get("task_id").and_then(|value| value.as_str()) else {
+                return;
+            };
+            state.task_starts.insert(
+                task_id.to_string(),
+                TaskStartInfo {
+                    tool_use_id: json
+                        .get("tool_use_id")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string()),
+                    task_type: json
+                        .get("task_type")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string()),
+                },
+            );
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn classify_task_notification_kind(
+    json: &Value,
+    state: &StreamLineState,
+) -> TaskNotificationKind {
+    if let Some(kind) = json
+        .get("task_notification_kind")
+        .and_then(|value| value.as_str())
+        .and_then(TaskNotificationKind::from_str)
+    {
+        return kind;
+    }
+
+    let task_id = json.get("task_id").and_then(|value| value.as_str());
+    let task_info = task_id.and_then(|id| state.task_starts.get(id));
+    let tool_use_id = json
+        .get("tool_use_id")
+        .and_then(|value| value.as_str())
+        .or_else(|| task_info.and_then(|info| info.tool_use_id.as_deref()));
+    let tool_name = tool_use_id.and_then(|id| state.tool_use_names.get(id).map(String::as_str));
+    let task_type = task_info.and_then(|info| info.task_type.as_deref());
+    let summary = json
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+
+    if tool_name == Some("Monitor")
+        || task_type == Some("monitor")
+        || summary.starts_with("Monitor event:")
+    {
+        return TaskNotificationKind::MonitorAutoTurn;
+    }
+
+    if task_type == Some("local_agent") {
+        return TaskNotificationKind::Subagent;
+    }
+
+    TaskNotificationKind::Background
 }
 
 /// Extract tool_use blocks that appear after an initial text block in a single

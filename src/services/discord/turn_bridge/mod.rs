@@ -738,11 +738,6 @@ pub(super) fn spawn_turn_bridge(
                             );
                         }
                         StreamMessage::TaskNotification { summary, .. } => {
-                            if !summary.is_empty() {
-                                full_response.push_str(&format!("\n[Task: {}]\n", summary));
-                                inflight_state.full_response = full_response.clone();
-                                state_dirty = true;
-                            }
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -1385,7 +1380,7 @@ pub(super) fn spawn_turn_bridge(
                 .edit_message(
                     channel_id,
                     current_msg_id,
-                    "⏳ 모니터로 이어서 처리 중...\n완료되면 `✅ 모니터 완료` 배너로 결과를 보냅니다.",
+                    "⏳ 모니터로 이어서 처리 중...\n결과가 준비되면 같은 채널로 바로 이어서 보냅니다.",
                 )
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
