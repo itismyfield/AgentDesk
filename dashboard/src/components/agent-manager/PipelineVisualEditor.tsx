@@ -67,6 +67,19 @@ interface PersistedFsmDraftStore {
   entries: Record<string, PersistedFsmDraftEntry>;
 }
 
+interface PersistedPipelineSnapshotEntry {
+  repo: string;
+  level: EditLevel;
+  agentId: string | null;
+  updatedAtMs: number;
+  snapshot: EditorSnapshot;
+}
+
+interface PersistedPipelineSnapshotStore {
+  version: 1;
+  entries: Record<string, PersistedPipelineSnapshotEntry>;
+}
+
 interface FsmEdgeBinding {
   event: string;
 }
@@ -192,6 +205,11 @@ const EMPTY_FSM_DRAFT_STORE: PersistedFsmDraftStore = {
   entries: {},
 };
 
+const EMPTY_PIPELINE_SNAPSHOT_STORE: PersistedPipelineSnapshotStore = {
+  version: 1,
+  entries: {},
+};
+
 const FSM_VIEWBOX = {
   width: 1100,
   height: 420,
@@ -224,6 +242,30 @@ const FSM_HOOK_OPTIONS = [
 
 function cloneStageDrafts(stages: StageDraft[]) {
   return stages.map((stage) => ({ ...stage }));
+}
+
+function clonePipelineStages(stages: PipelineStage[]) {
+  return stages.map((stage) => ({ ...stage }));
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (typeof value === "undefined") {
+    return value;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch {
+    return value;
+  }
+}
+
+function cloneEditorSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
+  return {
+    pipeline: clonePipelineConfig(snapshot.pipeline),
+    layers: { ...snapshot.layers },
+    rawOverride: cloneJsonValue(snapshot.rawOverride),
+    repoStages: clonePipelineStages(snapshot.repoStages),
+  };
 }
 
 function normalizeSelection(selection: unknown): Selection {
@@ -288,6 +330,64 @@ function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDraftStore
 
   return {
     version: 2,
+    entries,
+  };
+}
+
+function normalizePersistedPipelineSnapshotStore(value: unknown): PersistedPipelineSnapshotStore {
+  if (!value || typeof value !== "object") {
+    return EMPTY_PIPELINE_SNAPSHOT_STORE;
+  }
+
+  const rawEntries =
+    "entries" in value && value.entries && typeof value.entries === "object"
+      ? (value.entries as Record<string, unknown>)
+      : {};
+  const entries: Record<string, PersistedPipelineSnapshotEntry> = {};
+
+  Object.entries(rawEntries).forEach(([scopeKey, entry]) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const parsed = entry as Partial<PersistedPipelineSnapshotEntry>;
+    if (typeof parsed.repo !== "string" || (parsed.level !== "repo" && parsed.level !== "agent")) {
+      return;
+    }
+    const rawSnapshot = parsed.snapshot;
+    if (!rawSnapshot || typeof rawSnapshot !== "object") {
+      return;
+    }
+    const snapshot = rawSnapshot as Partial<EditorSnapshot>;
+    if (!snapshot.pipeline || typeof snapshot.pipeline !== "object") {
+      return;
+    }
+    if (!snapshot.layers || typeof snapshot.layers !== "object") {
+      return;
+    }
+    if (!Array.isArray(snapshot.repoStages)) {
+      return;
+    }
+
+    entries[scopeKey] = {
+      repo: parsed.repo,
+      level: parsed.level,
+      agentId: typeof parsed.agentId === "string" ? parsed.agentId : null,
+      updatedAtMs: typeof parsed.updatedAtMs === "number" ? parsed.updatedAtMs : 0,
+      snapshot: cloneEditorSnapshot({
+        pipeline: snapshot.pipeline as PipelineConfigFull,
+        layers: {
+          default: Boolean((snapshot.layers as EditorSnapshot["layers"]).default),
+          repo: Boolean((snapshot.layers as EditorSnapshot["layers"]).repo),
+          agent: Boolean((snapshot.layers as EditorSnapshot["layers"]).agent),
+        },
+        rawOverride: cloneJsonValue(snapshot.rawOverride),
+        repoStages: clonePipelineStages(snapshot.repoStages as PipelineStage[]),
+      }),
+    };
+  });
+
+  return {
+    version: 1,
     entries,
   };
 }
@@ -514,6 +614,11 @@ export default function PipelineVisualEditor({
     STORAGE_KEYS.fsmDraft,
     EMPTY_FSM_DRAFT_STORE,
   );
+  const [rawPersistedPipelineSnapshotStore, setPersistedPipelineSnapshotStore] =
+    useLocalStorage<PersistedPipelineSnapshotStore>(
+      STORAGE_KEYS.settingsPipelineVisualCache,
+      EMPTY_PIPELINE_SNAPSHOT_STORE,
+    );
 
   const svgRef = useRef<SVGSVGElement>(null);
   const persistedFsmDraftStore = useMemo(
@@ -521,6 +626,11 @@ export default function PipelineVisualEditor({
     [rawPersistedFsmDraftStore],
   );
   const persistedFsmDraftStoreRef = useRef(persistedFsmDraftStore);
+  const persistedPipelineSnapshotStore = useMemo(
+    () => normalizePersistedPipelineSnapshotStore(rawPersistedPipelineSnapshotStore),
+    [rawPersistedPipelineSnapshotStore],
+  );
+  const persistedPipelineSnapshotStoreRef = useRef(persistedPipelineSnapshotStore);
   const [dragConnect, setDragConnect] = useState<{
     fromId: string;
     fromCx: number;
@@ -529,14 +639,19 @@ export default function PipelineVisualEditor({
     cursorY: number;
     hoverId: string | null;
   } | null>(null);
-  const fsmDraftScopeKey = useMemo(
-    () => (repo ? buildFsmDraftScopeKey(repo, level, selectedAgentId) : null),
-    [level, repo, selectedAgentId],
+  const buildScopeKey = useCallback(
+    (nextLevel: EditLevel) => (repo ? buildFsmDraftScopeKey(repo, nextLevel, selectedAgentId) : null),
+    [repo, selectedAgentId],
   );
+  const fsmDraftScopeKey = useMemo(() => buildScopeKey(level), [buildScopeKey, level]);
 
   useEffect(() => {
     persistedFsmDraftStoreRef.current = persistedFsmDraftStore;
   }, [persistedFsmDraftStore]);
+
+  useEffect(() => {
+    persistedPipelineSnapshotStoreRef.current = persistedPipelineSnapshotStore;
+  }, [persistedPipelineSnapshotStore]);
 
   useEffect(() => {
     const updateLayoutMode = () => {
@@ -587,6 +702,22 @@ export default function PipelineVisualEditor({
       rawOverride: rawOverrideResponse.pipeline_config,
       repoStages,
     };
+  }
+
+  function resetEditorState() {
+    setPipelineDraft(null);
+    setSavedPipeline(null);
+    setLayers({
+      default: true,
+      repo: false,
+      agent: false,
+    });
+    setOverrideExtras({});
+    setOverrideExists(false);
+    setAllRepoStages([]);
+    setStageDrafts([]);
+    setSavedStageDrafts([]);
+    setSelection(null);
   }
 
   function applySnapshot(
@@ -654,19 +785,63 @@ export default function PipelineVisualEditor({
     });
   }
 
+  const persistSnapshot = useCallback((
+    scopeKey: string,
+    nextLevel: EditLevel,
+    snapshot: EditorSnapshot,
+  ) => {
+    if (!repo) {
+      return;
+    }
+
+    const nextEntry: PersistedPipelineSnapshotEntry = {
+      repo,
+      level: nextLevel,
+      agentId: selectedAgentId ?? null,
+      updatedAtMs: Date.now(),
+      snapshot: cloneEditorSnapshot(snapshot),
+    };
+
+    setPersistedPipelineSnapshotStore((currentStore) => {
+      const normalizedStore = normalizePersistedPipelineSnapshotStore(currentStore);
+      const currentEntry = normalizedStore.entries[scopeKey];
+      const currentSignature = currentEntry ? JSON.stringify(currentEntry) : null;
+      const nextSignature = JSON.stringify(nextEntry);
+      if (currentSignature === nextSignature) {
+        return normalizedStore;
+      }
+      return {
+        version: 1,
+        entries: {
+          ...normalizedStore.entries,
+          [scopeKey]: nextEntry,
+        },
+      };
+    });
+  }, [repo, selectedAgentId, setPersistedPipelineSnapshotStore]);
+
   useEffect(() => {
     if (!repo) {
-      setPipelineDraft(null);
-      setSavedPipeline(null);
-      setStageDrafts([]);
-      setSavedStageDrafts([]);
+      resetEditorState();
       setLoading(false);
       return;
     }
 
     let cancelled = false;
+    const persistedDraft = fsmDraftScopeKey
+      ? persistedFsmDraftStoreRef.current.entries[fsmDraftScopeKey] ?? null
+      : null;
+    const cachedSnapshot = fsmDraftScopeKey
+      ? persistedPipelineSnapshotStoreRef.current.entries[fsmDraftScopeKey]?.snapshot ?? null
+      : null;
+
     setLoading(true);
     setError(null);
+    if (cachedSnapshot) {
+      applySnapshot(cloneEditorSnapshot(cachedSnapshot), persistedDraft);
+    } else {
+      resetEditorState();
+    }
 
     void (async () => {
       try {
@@ -674,9 +849,9 @@ export default function PipelineVisualEditor({
         if (cancelled) {
           return;
         }
-        const persistedDraft = fsmDraftScopeKey
-          ? persistedFsmDraftStoreRef.current.entries[fsmDraftScopeKey] ?? null
-          : null;
+        if (fsmDraftScopeKey) {
+          persistSnapshot(fsmDraftScopeKey, level, snapshot);
+        }
         applySnapshot(snapshot, persistedDraft);
       } catch (cause) {
         if (!cancelled) {
@@ -696,7 +871,7 @@ export default function PipelineVisualEditor({
     return () => {
       cancelled = true;
     };
-  }, [fsmDraftScopeKey, level, reloadKey, repo, selectedAgentId]);
+  }, [fsmDraftScopeKey, level, persistSnapshot, reloadKey, repo, selectedAgentId]);
 
   const selectedAgentName = selectedAgentLabel(agents, locale, selectedAgentId);
   const useScrollableMobileFsmCanvas = isFsmVariant && compactGraph;
@@ -801,6 +976,20 @@ export default function PipelineVisualEditor({
     [pipelineDraft, selectedFsmEvent],
   );
   const selectedFsmHook = selectedFsmHooks[0] ?? "";
+  const fsmQuickTransitions = useMemo(
+    () =>
+      pipelineDraft?.transitions.map((transition, index) => {
+        const bindingKey = buildFsmEdgeBindingKey(transition.from, transition.to);
+        return {
+          ...transition,
+          index,
+          event:
+            fsmEdgeBindings[bindingKey]?.event
+            ?? inferFsmEventName(transition.from, transition.to),
+        };
+      }) ?? [],
+    [fsmEdgeBindings, pipelineDraft],
+  );
   const fsmEventOptions = useMemo(
     () =>
       Array.from(
@@ -841,10 +1030,10 @@ export default function PipelineVisualEditor({
   const graphPanelNote = isFsmVariant
     ? tr(
         useScrollableMobileFsmCanvas
-          ? "모바일은 축소 대신 가로 스크롤 가능한 전체 크기 캔버스를 사용하고, 패널은 아래로 떨어집니다."
+          ? "모바일은 편집 패널을 먼저 보여주고, FSM 캔버스는 아래에서 가로 스크롤 가능한 프리뷰로 유지합니다."
           : "FSM 캔버스는 1100×420 viewBox로 고정되고, 좁은 화면에서는 패널이 아래로 떨어집니다.",
         useScrollableMobileFsmCanvas
-          ? "Mobile keeps the FSM canvas at readable size with horizontal scroll, and drops the side panel below."
+          ? "Mobile leads with the editor panel, and keeps the FSM canvas below as a horizontally scrollable preview."
           : "The FSM canvas uses a fixed 1100×420 viewBox, and the side panel drops below on narrow screens.",
       )
     : tr(
@@ -1363,6 +1552,10 @@ export default function PipelineVisualEditor({
 
   async function refreshAfterMutation(nextLevel: EditLevel = level) {
     const snapshot = await fetchSnapshot(nextLevel);
+    const nextScopeKey = buildScopeKey(nextLevel);
+    if (nextScopeKey) {
+      persistSnapshot(nextScopeKey, nextLevel, snapshot);
+    }
     applySnapshot(snapshot);
   }
 
@@ -1825,15 +2018,47 @@ export default function PipelineVisualEditor({
         </div>
       )}
 
-      {loading || !pipelineDraft || !graph ? (
-        <div className="rounded-[24px] border px-4 py-8 text-sm text-center" style={EMPTY_PANEL_STYLE}>
-          {tr("비주얼 파이프라인을 불러오는 중…", "Loading visual pipeline…")}
+      {loading && pipelineDraft && graph && (
+        <div
+          data-testid="pipeline-refresh-indicator"
+          className="flex items-center gap-2 rounded-[20px] border px-3.5 py-2 text-xs sm:text-sm"
+          style={STATUS_INFO_STYLE}
+        >
+          <span
+            className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
+            aria-hidden="true"
+          />
+          <span>
+            {tr(
+              "마지막 성공값을 먼저 보여주고 최신 값을 불러오는 중입니다…",
+              "Showing the last successful pipeline while refreshing…",
+            )}
+          </span>
+        </div>
+      )}
+
+      {!pipelineDraft || !graph ? (
+        <div
+          className="rounded-[24px] border px-4 py-8 text-sm text-center"
+          style={error ? STATUS_ERROR_STYLE : EMPTY_PANEL_STYLE}
+        >
+          <div className="flex items-center justify-center gap-2">
+            {loading && (
+              <span
+                className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
+                aria-hidden="true"
+              />
+            )}
+            <span>
+              {error ?? tr("비주얼 파이프라인을 불러오는 중…", "Loading visual pipeline…")}
+            </span>
+          </div>
         </div>
       ) : (
         <>
           <div className={graphGridClass}>
             <div
-              className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4"
+              className={`min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4 ${useScrollableMobileFsmCanvas ? "order-2 xl:order-1" : ""}`}
               style={isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
             >
               {!isFsmVariant && (
@@ -2308,18 +2533,169 @@ export default function PipelineVisualEditor({
             </div>
 
             <div
-              className="min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4"
+              className={`min-w-0 rounded-[24px] border p-4 sm:p-5 space-y-4 ${useScrollableMobileFsmCanvas ? "order-1 xl:order-2" : ""}`}
               style={isFsmVariant ? FSM_INSPECTOR_STYLE : PANEL_STYLE}
             >
+              {useScrollableMobileFsmCanvas && pipelineDraft && (
+                <div
+                  className="rounded-[20px] border p-3 space-y-4"
+                  style={FSM_DETAIL_PANEL_STYLE}
+                  data-testid="fsm-mobile-selector"
+                >
+                  <div className="space-y-1">
+                    <div
+                      className="text-[11px] font-semibold uppercase tracking-[0.18em]"
+                      style={{
+                        ...MUTED_TEXT_STYLE,
+                        fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                      }}
+                    >
+                      {tr("모바일 빠른 편집", "Mobile quick edit")}
+                    </div>
+                    <p className="text-xs leading-5" style={MUTED_TEXT_STYLE}>
+                      {tr(
+                        "모바일에서는 그래프를 직접 누르기보다 아래 목록에서 전환/상태를 고른 뒤 바로 편집합니다.",
+                        "On mobile, pick a transition or state from the list below instead of targeting the graph directly.",
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
+                        {tr("전환", "Transitions")}
+                      </h5>
+                      <span className="text-[11px]" style={MUTED_TEXT_STYLE}>
+                        {`${fsmQuickTransitions.length}`}
+                      </span>
+                    </div>
+                    <div className="grid gap-2">
+                      {fsmQuickTransitions.map((transition) => {
+                        const accent = transitionAccent(transition.type);
+                        const isSelected =
+                          selection?.kind === "transition" && selection.index === transition.index;
+                        return (
+                          <button
+                            key={`${transition.from}-${transition.to}-${transition.index}`}
+                            type="button"
+                            onClick={() => setSelection({ kind: "transition", index: transition.index })}
+                            aria-pressed={isSelected}
+                            data-testid={`fsm-mobile-transition-button-${transition.index}`}
+                            className="w-full rounded-[18px] border px-3 py-3 text-left transition-colors"
+                            style={
+                              isSelected
+                                ? {
+                                    borderColor:
+                                      "color-mix(in srgb, var(--th-accent-primary) 50%, var(--th-border) 50%)",
+                                    background:
+                                      "color-mix(in srgb, var(--th-accent-primary-soft) 84%, #11141b 16%)",
+                                    color: "var(--th-text-primary)",
+                                  }
+                                : {
+                                    borderColor:
+                                      "color-mix(in srgb, var(--th-border) 82%, transparent)",
+                                    background: "#11141b",
+                                    color: "var(--th-text-primary)",
+                                  }
+                            }
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-sm font-medium">
+                                  {transition.from} → {transition.to}
+                                </div>
+                                <div className="mt-1 text-[11px]" style={MUTED_TEXT_STYLE}>
+                                  {transition.event}
+                                </div>
+                              </div>
+                              <span
+                                className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]"
+                                style={{
+                                  borderColor: accent.stroke,
+                                  background: accent.background,
+                                  color: accent.text,
+                                  fontFamily:
+                                    "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                                }}
+                              >
+                                {transition.type}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <h5 className="text-xs font-semibold uppercase tracking-wider" style={MUTED_TEXT_STYLE}>
+                        {tr("상태", "States")}
+                      </h5>
+                      <span className="text-[11px]" style={MUTED_TEXT_STYLE}>
+                        {`${pipelineDraft.states.length}`}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {pipelineDraft.states.map((state) => {
+                        const tone = fsmStateTone(state.id);
+                        const isSelected =
+                          selection?.kind === "state" && selection.stateId === state.id;
+                        return (
+                          <button
+                            key={state.id}
+                            type="button"
+                            onClick={() => setSelection({ kind: "state", stateId: state.id })}
+                            aria-pressed={isSelected}
+                            data-testid={`fsm-mobile-state-button-${state.id}`}
+                            className="rounded-[18px] border px-3 py-3 text-left transition-colors"
+                            style={
+                              isSelected
+                                ? {
+                                    borderColor: tone.stroke,
+                                    background: tone.glow,
+                                    color: "var(--th-text-primary)",
+                                  }
+                                : {
+                                    borderColor:
+                                      "color-mix(in srgb, var(--th-border) 82%, transparent)",
+                                    background: "#11141b",
+                                    color: "var(--th-text-primary)",
+                                  }
+                            }
+                          >
+                            <div className="text-sm font-medium">{state.label}</div>
+                            <div className="mt-1 text-[11px]" style={MUTED_TEXT_STYLE}>
+                              {state.id}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h4 className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
+                <h4
+                  className="text-sm font-semibold"
+                  style={{ color: "var(--th-text-heading)" }}
+                  data-testid="pipeline-selection-title"
+                >
                   {formatSelectionTitle(tr, selection, pipelineDraft)}
                 </h4>
-                {selection?.kind === "state" && (
+                {isFsmVariant && useScrollableMobileFsmCanvas ? (
+                  <span className="text-xs" style={MUTED_TEXT_STYLE}>
+                    {tr(
+                      "모바일은 위 목록으로 선택하고 이 패널에서 바로 수정합니다.",
+                      "Use the quick selector above, then edit here.",
+                    )}
+                  </span>
+                ) : selection?.kind === "state" ? (
                   <span className="text-xs" style={MUTED_TEXT_STYLE}>
                     {tr("노드 클릭으로 선택됨", "Selected from graph")}
                   </span>
-                )}
+                ) : null}
               </div>
 
               {selectedState && (
@@ -2947,7 +3323,7 @@ export default function PipelineVisualEditor({
                 </div>
               )}
 
-              {isFsmVariant && !selectedTransition && (
+              {isFsmVariant && !selectedTransition && !selectedState && (
                 <div
                   className="rounded-[20px] border px-4 py-6 text-sm"
                   style={{
@@ -2957,8 +3333,12 @@ export default function PipelineVisualEditor({
                   }}
                 >
                   {tr(
-                    "전환선을 선택하면 우측 280px 패널에서 event, hook, policy를 바로 편집할 수 있습니다.",
-                    "Select an edge to edit its event, hook, and policy in the 280px side panel.",
+                    useScrollableMobileFsmCanvas
+                      ? "모바일은 위 빠른 선택 목록에서 전환이나 상태를 고른 뒤 이 패널에서 event, hook, policy를 편집합니다."
+                      : "전환선을 선택하면 우측 280px 패널에서 event, hook, policy를 바로 편집할 수 있습니다.",
+                    useScrollableMobileFsmCanvas
+                      ? "On mobile, choose a transition or state from the quick selector above, then edit its event, hook, and policy here."
+                      : "Select an edge to edit its event, hook, and policy in the 280px side panel.",
                   )}
                 </div>
               )}

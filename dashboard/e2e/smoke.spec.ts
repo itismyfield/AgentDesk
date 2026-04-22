@@ -45,6 +45,7 @@ const DRAGGED_HOME_WIDGET_ORDER = [
   "activity",
   "kanban",
 ];
+const PIPELINE_VISUAL_CACHE_KEY = "agentdesk.settings.pipeline.visual-cache.v1";
 
 async function expectNoHorizontalOverflow(page: Page) {
   const metrics = await page.evaluate(() => ({
@@ -782,6 +783,82 @@ const MOCK_DAILY_MISSIONS = [
   },
 ];
 
+const MOCK_SETTINGS_FSM_PIPELINE = {
+  name: "agentdesk-default",
+  version: 1,
+  states: [
+    { id: "backlog", label: "backlog", terminal: false },
+    { id: "ready", label: "ready", terminal: false },
+    { id: "in_progress", label: "progress", terminal: false },
+    { id: "review", label: "review", terminal: false },
+    { id: "done", label: "done", terminal: true },
+    { id: "failed", label: "failed", terminal: false },
+  ],
+  transitions: [
+    { from: "backlog", to: "ready", type: "free", gates: [] },
+    { from: "ready", to: "in_progress", type: "free", gates: [] },
+    { from: "in_progress", to: "review", type: "free", gates: [] },
+    { from: "review", to: "done", type: "gated", gates: ["review_verdict_pass"] },
+    { from: "review", to: "in_progress", type: "gated", gates: ["review_verdict_rework"] },
+    { from: "review", to: "failed", type: "force_only", gates: [] },
+    { from: "failed", to: "ready", type: "free", gates: [] },
+  ],
+  gates: {
+    review_verdict_pass: {
+      type: "builtin",
+      check: "review_verdict_pass",
+      description: "Review approved",
+    },
+    review_verdict_rework: {
+      type: "builtin",
+      check: "review_verdict_rework",
+      description: "Changes requested",
+    },
+  },
+  hooks: {
+    backlog: { on_enter: [], on_exit: [] },
+    ready: { on_enter: [], on_exit: [] },
+    in_progress: { on_enter: [], on_exit: [] },
+    review: { on_enter: [], on_exit: [] },
+    done: { on_enter: [], on_exit: [] },
+    failed: { on_enter: [], on_exit: [] },
+  },
+  events: {
+    on_enqueue: ["OnQueueReady"],
+    on_dispatch: ["OnDispatchRequested"],
+    on_submit: ["OnDispatchCompleted"],
+    on_approve: ["OnReviewApproved"],
+    on_changes_request: ["OnChangesRequested"],
+    on_error: ["OnPipelineError"],
+    on_recover: ["OnRecoverFromFailure"],
+  },
+  clocks: {},
+  timeouts: {},
+  phase_gate: {
+    dispatch_to: "project-agentdesk",
+    dispatch_type: "review",
+    pass_verdict: "approved",
+    checks: ["artifact_attached"],
+  },
+};
+
+const MOCK_SETTINGS_PIPELINE_STAGES = [
+  {
+    stage_name: "implementation",
+    entry_skill: "adk-dashboard",
+    provider: "codex",
+    agent_override_id: null,
+    timeout_minutes: 60,
+    on_failure: "previous",
+    on_failure_target: null,
+    max_retries: 1,
+    skip_condition: null,
+    parallel_with: null,
+    applies_to_agent_id: null,
+    trigger_after: "ready",
+  },
+];
+
 async function mockMeetingsHubApis(page: Page) {
   await page.route(/\/api\/round-table-meetings\/channels$/, async (route) => {
     await route.fulfill({
@@ -1165,6 +1242,127 @@ async function mockDashboardBootstrap(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(MOCK_OPS_HEALTH_BASE),
+    });
+  });
+}
+
+async function mockSettingsPipelineEditorApis(page: Page) {
+  await page.route(/\/api\/github-repos$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        viewer_login: "itismyfield",
+        repos: [
+          {
+            nameWithOwner: "itismyfield/AgentDesk",
+            updatedAt: "2026-04-21T00:00:00Z",
+            isPrivate: true,
+            viewerPermission: "ADMIN",
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/config\/effective\?repo=itismyfield%2FAgentDesk$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        pipeline: MOCK_SETTINGS_FSM_PIPELINE,
+        layers: { default: true, repo: false, agent: false },
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/config\/repo\/itismyfield\/AgentDesk$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        repo: "itismyfield/AgentDesk",
+        pipeline_config: {
+          states: MOCK_SETTINGS_FSM_PIPELINE.states,
+          transitions: MOCK_SETTINGS_FSM_PIPELINE.transitions,
+          gates: MOCK_SETTINGS_FSM_PIPELINE.gates,
+          hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
+          events: MOCK_SETTINGS_FSM_PIPELINE.events,
+          clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
+          timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
+          phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
+        },
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/stages\?repo=itismyfield%2FAgentDesk$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ stages: MOCK_SETTINGS_PIPELINE_STAGES }),
+    });
+  });
+}
+
+async function mockSettingsPipelineEditorApisWithRefreshDelay(page: Page, delayMs = 700) {
+  await page.route(/\/api\/github-repos$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        viewer_login: "itismyfield",
+        repos: [
+          {
+            nameWithOwner: "itismyfield/AgentDesk",
+            updatedAt: "2026-04-21T00:00:00Z",
+            isPrivate: true,
+            viewerPermission: "ADMIN",
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/config\/effective\?repo=itismyfield%2FAgentDesk$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        pipeline: MOCK_SETTINGS_FSM_PIPELINE,
+        layers: { default: true, repo: false, agent: false },
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/config\/repo\/itismyfield\/AgentDesk$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        repo: "itismyfield/AgentDesk",
+        pipeline_config: {
+          states: MOCK_SETTINGS_FSM_PIPELINE.states,
+          transitions: MOCK_SETTINGS_FSM_PIPELINE.transitions,
+          gates: MOCK_SETTINGS_FSM_PIPELINE.gates,
+          hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
+          events: MOCK_SETTINGS_FSM_PIPELINE.events,
+          clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
+          timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
+          phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
+        },
+      }),
+    });
+  });
+
+  await page.route(/\/api\/pipeline\/stages\?repo=itismyfield%2FAgentDesk$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ stages: MOCK_SETTINGS_PIPELINE_STAGES }),
     });
   });
 }
@@ -1840,6 +2038,63 @@ test.describe("Dashboard smoke tests", () => {
 
     const after = await settingsPage.evaluate((node) => node.scrollTop);
     expect(after).toBeGreaterThan(0);
+  });
+
+  test("settings: mobile FSM editor exposes quick selection controls", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "desktop", "Mobile-only test");
+    await mockSettingsPipelineEditorApis(page);
+    await page.goto("/settings?settingsPanel=pipeline");
+
+    await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("fsm-mobile-selector")).toBeVisible();
+
+    await page.getByTestId("fsm-mobile-transition-button-3").click();
+    await expect(page.getByTestId("pipeline-selection-title")).toContainText("review → done");
+
+    await page.getByTestId("fsm-mobile-state-button-review").click();
+    await expect(page.getByTestId("pipeline-selection-title")).toContainText(/상태 · review|State · review/);
+  });
+
+  test("settings: pipeline editor keeps cached content visible while refreshing", async ({ page }) => {
+    await page.addInitScript(({ cacheKey, cacheValue }) => {
+      window.localStorage.setItem(cacheKey, JSON.stringify(cacheValue));
+    }, {
+      cacheKey: PIPELINE_VISUAL_CACHE_KEY,
+      cacheValue: {
+        version: 1,
+        entries: {
+          "itismyfield/AgentDesk::repo::repo": {
+            repo: "itismyfield/AgentDesk",
+            level: "repo",
+            agentId: null,
+            updatedAtMs: Date.now(),
+            snapshot: {
+              pipeline: MOCK_SETTINGS_FSM_PIPELINE,
+              layers: { default: true, repo: false, agent: false },
+              rawOverride: {
+                states: MOCK_SETTINGS_FSM_PIPELINE.states,
+                transitions: MOCK_SETTINGS_FSM_PIPELINE.transitions,
+                gates: MOCK_SETTINGS_FSM_PIPELINE.gates,
+                hooks: MOCK_SETTINGS_FSM_PIPELINE.hooks,
+                events: MOCK_SETTINGS_FSM_PIPELINE.events,
+                clocks: MOCK_SETTINGS_FSM_PIPELINE.clocks,
+                timeouts: MOCK_SETTINGS_FSM_PIPELINE.timeouts,
+                phase_gate: MOCK_SETTINGS_FSM_PIPELINE.phase_gate,
+              },
+              repoStages: MOCK_SETTINGS_PIPELINE_STAGES,
+            },
+          },
+        },
+      },
+    });
+    await mockSettingsPipelineEditorApisWithRefreshDelay(page);
+    await page.goto("/settings?settingsPanel=pipeline");
+
+    await expect(page.getByTestId("settings-page")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("pipeline-selection-title")).toBeVisible({ timeout: 400 });
+    await expect(page.getByTestId("pipeline-refresh-indicator")).toBeVisible();
+    await expect(page.getByTestId("pipeline-selection-title")).toContainText("backlog → ready");
+    await expect(page.getByTestId("pipeline-refresh-indicator")).toBeHidden({ timeout: 3000 });
   });
 
   test("all app shell routes are directly reachable", async ({ page }) => {
