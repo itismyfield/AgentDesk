@@ -9,6 +9,8 @@ use std::time::Duration;
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+#[cfg(test)]
+use sqlx::{Connection, PgConnection};
 use sqlx::{PgPool, Postgres, Row};
 #[cfg(test)]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -392,6 +394,15 @@ where
 }
 
 #[cfg(test)]
+async fn connect_test_connection(database_url: &str, label: &str) -> Result<PgConnection, String> {
+    run_test_postgres_sqlx_op(
+        &format!("{label} connect postgres"),
+        PgConnection::connect(database_url),
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
     let options = PgConnectOptions::from_str(database_url)
         .map_err(|error| format!("{label} parse postgres url: {error}"))?;
@@ -414,13 +425,17 @@ pub(crate) async fn create_test_database(
     label: &str,
 ) -> Result<(), String> {
     let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
-    let admin_pool = connect_test_pool(admin_url, &format!("{label} admin")).await?;
+    let mut admin_conn = connect_test_connection(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} create postgres test db {database_name}"),
-        sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
+        sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&mut admin_conn),
     )
     .await?;
-    close_test_pool(admin_pool, &format!("{label} admin")).await?;
+    run_test_postgres_sqlx_op(
+        &format!("{label} admin close postgres connection"),
+        admin_conn.close(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -449,7 +464,7 @@ pub(crate) async fn drop_test_database(
     label: &str,
 ) -> Result<(), String> {
     let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
-    let admin_pool = connect_test_pool(admin_url, &format!("{label} admin")).await?;
+    let mut admin_conn = connect_test_connection(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} terminate postgres test db sessions {database_name}"),
         sqlx::query(
@@ -459,15 +474,20 @@ pub(crate) async fn drop_test_database(
                AND pid <> pg_backend_pid()",
         )
         .bind(database_name)
-        .execute(&admin_pool),
+        .execute(&mut admin_conn),
     )
     .await?;
     run_test_postgres_sqlx_op(
         &format!("{label} drop postgres test db {database_name}"),
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\"")).execute(&admin_pool),
+        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\""))
+            .execute(&mut admin_conn),
     )
     .await?;
-    close_test_pool(admin_pool, &format!("{label} admin")).await?;
+    run_test_postgres_sqlx_op(
+        &format!("{label} admin close postgres connection"),
+        admin_conn.close(),
+    )
+    .await?;
     Ok(())
 }
 
