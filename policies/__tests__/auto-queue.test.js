@@ -98,7 +98,10 @@ test("auto-queue onTick1min honors stale dispatched runtime config", () => {
         result(sql) {
           assert.match(sql, /datetime\('now', '-5 minutes'\)/);
           assert.doesNotMatch(sql, /e\.dispatch_id IS NULL/);
-          assert.match(sql, /NOT EXISTS \(/);
+          assert.match(
+            sql,
+            /\(e\.dispatch_id IS NOT NULL AND NOT EXISTS \(SELECT 1 FROM task_dispatches td WHERE td\.id = e\.dispatch_id\)\)/
+          );
           return [{
             id: "entry-stale-1",
             agent_id: "agent-1",
