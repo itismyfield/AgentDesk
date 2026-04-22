@@ -1396,8 +1396,17 @@ fn execute_streaming_local_tmux(
         )?;
 
         match read_result {
-            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-                // Normal completion or user cancel — notify caller
+            ReadOutputResult::Completed { offset } => {
+                let _ = sender.send(StreamMessage::TmuxReady {
+                    output_path,
+                    input_fifo_path,
+                    tmux_session_name: tmux_session_name.to_string(),
+                    last_offset: offset,
+                });
+                return Ok(());
+            }
+            ReadOutputResult::Cancelled { offset } => {
+                // Normal user cancel — notify caller
                 let _ = sender.send(StreamMessage::TmuxReady {
                     output_path,
                     input_fifo_path,
