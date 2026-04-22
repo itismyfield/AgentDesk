@@ -506,7 +506,7 @@ pub struct MeetingAgentDef {
     pub provider_hint: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
@@ -514,6 +514,16 @@ pub struct GitHubConfig {
     pub repo_dirs: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_sync_interval")]
     pub sync_interval_minutes: u64,
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            repo_dirs: std::collections::BTreeMap::new(),
+            sync_interval_minutes: default_sync_interval(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -814,7 +824,7 @@ fn normalized_channel_value(value: Option<String>) -> Option<String> {
 }
 
 fn default_sync_interval() -> u64 {
-    10
+    5
 }
 fn default_policies_dir() -> PathBuf {
     PathBuf::from("./policies")

@@ -4483,6 +4483,106 @@ async fn kanban_assign_card_pg_only_without_sqlite_mirror() {
     pg_db.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kanban_assign_issue_pg_upserts_without_duplicates() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("agent-issue")
+        .bind("Agent Issue")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let request_body = json!({
+        "github_repo": "owner/issue-sync",
+        "github_issue_number": 77,
+        "github_issue_url": "https://github.com/owner/issue-sync/issues/77",
+        "title": "Issue sync via assign route",
+        "description": "Assign route must reuse the same card for the same issue.",
+        "assignee_agent_id": "agent-issue"
+    })
+    .to_string();
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/assign-issue")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::CREATED);
+    let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_json["deduplicated"], false);
+    assert_eq!(first_json["card"]["assigned_agent_id"], "agent-issue");
+    assert_eq!(first_json["card"]["github_issue_number"], 77);
+    assert_eq!(first_json["card"]["status"], "requested");
+    let first_card_id = first_json["card"]["id"].as_str().unwrap().to_string();
+
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/assign-issue")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = axum::body::to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(second_json["deduplicated"], true);
+    assert_eq!(second_json["card"]["id"], first_card_id);
+
+    let row = sqlx::query(
+        "SELECT COUNT(*)::BIGINT AS card_count, MIN(id) AS card_id, MIN(status) AS status
+         FROM kanban_cards
+         WHERE repo_id = $1 AND github_issue_number = $2",
+    )
+    .bind("owner/issue-sync")
+    .bind(77_i64)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<i64, _>("card_count").unwrap(), 1);
+    assert_eq!(
+        row.try_get::<Option<String>, _>("card_id").unwrap(),
+        Some(first_card_id)
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("status").unwrap(),
+        Some("requested".to_string())
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn kanban_assign_card_not_found() {
     let db = test_db();
@@ -5412,7 +5512,14 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
     let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 819);
     let db = test_db();
     let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agents (id, name) VALUES (?1, ?2)",
+            libsql_rusqlite::params!["adk-backend", "ADK Backend"],
+        )
+        .unwrap();
+    let app = test_api_router(db.clone(), engine, None);
 
     let response = app
         .oneshot(
@@ -5453,8 +5560,45 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
         "https://github.com/itismyfield/AgentDesk/issues/819"
     );
     assert_eq!(json["issue"]["repo"], "itismyfield/AgentDesk");
+    let card_id = json["kanban_card_id"]
+        .as_str()
+        .expect("sqlite issue route must create a linked kanban card")
+        .to_string();
+    assert!(json["kanban_card_sync_error"].is_null());
     assert_eq!(json["applied_labels"], json!(["agent:adk-backend"]));
     assert_eq!(json["pmd_format_version"], 1);
+
+    let conn = db.lock().unwrap();
+    let (repo_id, status, issue_number, assigned_agent_id, metadata_raw): (
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT repo_id, status, github_issue_number, assigned_agent_id, metadata
+             FROM kanban_cards
+             WHERE id = ?1",
+            [card_id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(repo_id.as_deref(), Some("itismyfield/AgentDesk"));
+    assert_eq!(status, "backlog");
+    assert_eq!(issue_number, Some(819));
+    assert_eq!(assigned_agent_id.as_deref(), Some("adk-backend"));
+    let metadata_json: serde_json::Value =
+        serde_json::from_str(metadata_raw.as_deref().expect("metadata must exist")).unwrap();
+    assert_eq!(metadata_json["labels"], "agent:adk-backend");
 
     let args = fs::read_to_string(gh.path().join("issue-create-args.txt")).unwrap();
     let args: Vec<&str> = args.lines().collect();
@@ -5480,6 +5624,111 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
     assert!(issue_body.contains("## DoD\n- [ ] 성공 시 issue URL과 번호를 반환한다\n- [ ] DoD 항목은 체크리스트로 렌더링된다"));
     assert!(!issue_body.contains("## 의존성"));
     assert!(!issue_body.contains("## 리스크"));
+}
+
+#[tokio::test]
+async fn create_issue_route_pg_returns_kanban_card_id() {
+    let _env_lock = env_lock();
+    let _gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 820);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine(&db);
+
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("adk-backend")
+        .bind("ADK Backend")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/issues")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "PG issue sync path",
+                        "background": "Postgres-backed issue creation must return the linked card id.",
+                        "content": [
+                            "GitHub issue create success should upsert a kanban backlog card.",
+                            "Response payload should expose the linked card id."
+                        ],
+                        "dod": [
+                            "kanban_card_id is returned",
+                            "card metadata keeps the applied agent label"
+                        ],
+                        "agent_id": "adk-backend"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let card_id = json["kanban_card_id"]
+        .as_str()
+        .expect("postgres issue route must return kanban_card_id")
+        .to_string();
+    assert!(json["kanban_card_sync_error"].is_null());
+
+    let row = sqlx::query(
+        "SELECT repo_id, status, github_issue_number, assigned_agent_id, description, metadata::text AS metadata
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(&card_id)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.try_get::<Option<String>, _>("repo_id").unwrap(),
+        Some("itismyfield/AgentDesk".to_string())
+    );
+    assert_eq!(row.try_get::<String, _>("status").unwrap(), "backlog");
+    assert_eq!(
+        row.try_get::<Option<i64>, _>("github_issue_number")
+            .unwrap(),
+        Some(820)
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("assigned_agent_id")
+            .unwrap(),
+        Some("adk-backend".to_string())
+    );
+    let description = row
+        .try_get::<Option<String>, _>("description")
+        .unwrap()
+        .expect("description must contain issue body");
+    assert!(description.contains("## 배경"));
+    let metadata_json: serde_json::Value = serde_json::from_str(
+        row.try_get::<Option<String>, _>("metadata")
+            .unwrap()
+            .as_deref()
+            .expect("metadata must exist"),
+    )
+    .unwrap();
+    assert_eq!(metadata_json["labels"], "agent:adk-backend");
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -6638,13 +6887,21 @@ async fn github_repos_pg_sync_triages_open_issue() {
     let _env_lock = env_lock();
     let _gh = install_mock_gh_issue_list(
         "owner/pg-repo",
-        r#"[{"number":101,"state":"OPEN","title":"PG route open","labels":[{"name":"bug"},{"name":"p1"}],"body":"Investigate route sync"}]"#,
+        r#"[{"number":101,"state":"OPEN","title":"PG route open","labels":[{"name":"bug"},{"name":"p1"},{"name":"agent:agent-sync"}],"body":"Investigate route sync"}]"#,
         "[]",
     );
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
     let db = test_db();
     let engine = test_engine(&db);
+
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("agent-sync")
+        .bind("Agent Sync")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
     let app = test_api_router_with_pg(
         db,
         engine,
@@ -6668,6 +6925,7 @@ async fn github_repos_pg_sync_triages_open_issue() {
     assert_eq!(register_response.status(), StatusCode::CREATED);
 
     let sync_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -6688,13 +6946,32 @@ async fn github_repos_pg_sync_triages_open_issue() {
     assert_eq!(sync_json["cards_created"], 1);
     assert_eq!(sync_json["cards_closed"], 0);
 
-    let (status, issue_number, description, metadata_text): (
+    let second_sync_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/repos/owner/pg-repo/sync")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_sync_response.status(), StatusCode::OK);
+    let second_sync_body = axum::body::to_bytes(second_sync_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_sync_json: serde_json::Value = serde_json::from_slice(&second_sync_body).unwrap();
+    assert_eq!(second_sync_json["cards_created"], 0);
+
+    let (status, priority, issue_number, description, assigned_agent_id, metadata_text): (
         String,
-        Option<i32>,
+        String,
+        Option<i64>,
+        Option<String>,
         Option<String>,
         Option<String>,
     ) = sqlx::query_as(
-        "SELECT status, github_issue_number, description, metadata::text
+        "SELECT status, priority, github_issue_number, description, assigned_agent_id, metadata::text
          FROM kanban_cards
          WHERE repo_id = $1
          ORDER BY github_issue_number",
@@ -6704,11 +6981,13 @@ async fn github_repos_pg_sync_triages_open_issue() {
     .await
     .unwrap();
     assert_eq!(status, "backlog");
+    assert_eq!(priority, "high");
     assert_eq!(issue_number, Some(101));
     assert_eq!(description.as_deref(), Some("Investigate route sync"));
+    assert_eq!(assigned_agent_id.as_deref(), Some("agent-sync"));
     let metadata_json: serde_json::Value =
         serde_json::from_str(metadata_text.as_deref().expect("metadata must exist")).unwrap();
-    assert_eq!(metadata_json["labels"], "bug,p1");
+    assert_eq!(metadata_json["labels"], "bug,p1,agent:agent-sync");
 
     let last_synced_at: Option<String> =
         sqlx::query_scalar("SELECT last_synced_at::text FROM github_repos WHERE id = $1")
@@ -6717,6 +6996,50 @@ async fn github_repos_pg_sync_triages_open_issue() {
             .await
             .unwrap();
     assert!(last_synced_at.is_some());
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn cron_jobs_include_github_issue_card_sync_job() {
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/cron-jobs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let jobs = json["jobs"]
+        .as_array()
+        .expect("cron jobs response must include jobs array");
+    let github_sync_job = jobs
+        .iter()
+        .find(|job| job["id"] == "github_issue_card_sync")
+        .expect("cron jobs must expose github issue card sync");
+    assert_eq!(github_sync_job["schedule"]["kind"], "every");
+    assert_eq!(github_sync_job["schedule"]["everyMs"], 300000);
+    assert_eq!(github_sync_job["enabled"], true);
 
     pg_pool.close().await;
     pg_db.drop().await;
@@ -6863,7 +7186,7 @@ async fn github_repos_pg_sync_closes_card_and_cleans_live_state() {
         String,
         Option<String>,
         Option<String>,
-        Option<i32>,
+        Option<i64>,
     ) = sqlx::query_as(
         "SELECT status, latest_dispatch_id, review_status, review_round
          FROM kanban_cards

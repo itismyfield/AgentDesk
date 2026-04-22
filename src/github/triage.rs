@@ -1,6 +1,7 @@
 //! Issue auto-triage: create kanban backlog cards for new GitHub issues.
 
 use crate::db::Db;
+use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
 use sqlx::PgPool;
 
 use super::sync::GhIssue;
@@ -88,62 +89,81 @@ pub async fn triage_new_issues_pg(
             continue;
         }
 
-        let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM kanban_cards WHERE github_issue_number = $1 AND repo_id = $2",
-        )
-        .bind(issue.number)
-        .bind(repo)
-        .fetch_one(pool)
-        .await
-        .map_err(|error| format!("check existing card: {error}"))?;
-
-        if exists > 0 {
-            continue;
-        }
-
-        let card_id = uuid::Uuid::new_v4().to_string();
-        let labels_str = issue
-            .labels
-            .iter()
-            .map(|label| label.name.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        let metadata = if labels_str.is_empty() {
-            None
-        } else {
-            Some(serde_json::json!({ "labels": labels_str }).to_string())
-        };
+        let metadata = labels_metadata_json(issue);
+        let assigned_agent_id = resolve_agent_label_pg(pool, issue).await?;
         let github_url = format!("https://github.com/{repo}/issues/{}", issue.number);
-        let priority = infer_priority(&issue.labels);
-
-        sqlx::query(
-            "INSERT INTO kanban_cards (
-                id, repo_id, title, status, priority, github_issue_url,
-                github_issue_number, description, metadata, created_at, updated_at
-             )
-             VALUES ($1, $2, $3, 'backlog', $4, $5, $6, $7, CAST($8 AS jsonb), NOW(), NOW())",
+        let upserted = upsert_card_from_issue_pg(
+            pool,
+            IssueCardUpsert {
+                repo_id: repo.to_string(),
+                issue_number: issue.number,
+                issue_url: Some(github_url),
+                title: issue.title.clone(),
+                description: issue.body.clone(),
+                priority: Some(infer_priority(&issue.labels).to_string()),
+                assigned_agent_id,
+                metadata_json: metadata,
+                status_on_create: Some("backlog".to_string()),
+            },
         )
-        .bind(&card_id)
-        .bind(repo)
-        .bind(&issue.title)
-        .bind(priority)
-        .bind(&github_url)
-        .bind(issue.number)
-        .bind(issue.body.as_deref())
-        .bind(metadata.as_deref())
-        .execute(pool)
-        .await
-        .map_err(|error| format!("insert card: {error}"))?;
+        .await?;
 
-        tracing::info!(
-            "[triage] Created backlog card for {repo}#{}: {}",
-            issue.number,
-            issue.title
-        );
-        created += 1;
+        if upserted.created {
+            tracing::info!(
+                "[triage] Created backlog card for {repo}#{}: {}",
+                issue.number,
+                issue.title
+            );
+            created += 1;
+        }
     }
 
     Ok(created)
+}
+
+fn labels_metadata_json(issue: &GhIssue) -> Option<String> {
+    let labels = issue
+        .labels
+        .iter()
+        .map(|label| label.name.trim())
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>();
+
+    if labels.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "labels": labels.join(",") }).to_string())
+    }
+}
+
+async fn resolve_agent_label_pg(pool: &PgPool, issue: &GhIssue) -> Result<Option<String>, String> {
+    let agent_id = issue.labels.iter().find_map(|label| {
+        let raw = label.name.trim();
+        raw.strip_prefix("agent:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+    });
+
+    let Some(agent_id) = agent_id else {
+        return Ok(None);
+    };
+
+    let exists = sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1")
+        .bind(&agent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("resolve agent label {agent_id}: {error}"))?;
+
+    if exists.is_none() {
+        tracing::warn!(
+            "[triage] Ignoring unknown agent label '{}' for issue #{}",
+            agent_id,
+            issue.number
+        );
+    }
+
+    Ok(exists)
 }
 
 /// Simple priority inference from labels.

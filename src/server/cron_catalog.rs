@@ -69,3 +69,12 @@ pub fn legacy_policy_descriptors(engine: &PolicyEngine) -> Vec<CronJobDescriptor
         })
         .collect()
 }
+
+pub fn github_issue_sync_descriptor(interval_minutes: u64) -> Option<CronJobDescriptor> {
+    (interval_minutes > 0).then(|| CronJobDescriptor {
+        job_id: "github_issue_card_sync".to_string(),
+        name: "github issue card sync — reconcile GitHub issues into kanban cards".to_string(),
+        every_ms: (interval_minutes as i64) * 60_000,
+        kv_label: "github_sync".to_string(),
+    })
+}

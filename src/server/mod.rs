@@ -1,3 +1,4 @@
+pub(crate) mod cron_catalog;
 pub mod routes;
 mod worker_registry;
 pub mod ws;
@@ -686,6 +687,36 @@ pub(crate) async fn fire_tick_hook_by_name_for_test(
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, hook_timeout).await;
     record_tick_hook_execution(db, label, &execution);
     execution.outcome
+}
+
+async fn upsert_kv_meta_pg_ignore(pg_pool: &PgPool, key: &str, value: &str) {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pg_pool)
+    .await
+    .ok();
+}
+
+async fn record_periodic_job_execution_pg(
+    pg_pool: &PgPool,
+    label: &str,
+    status: &str,
+    elapsed: std::time::Duration,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+    let elapsed_ms = elapsed.as_millis().to_string();
+    let key_ms = format!("last_tick_{}_ms", label);
+    let key_status = format!("last_tick_{}_status", label);
+    let key_duration = format!("last_tick_{}_duration_ms", label);
+
+    upsert_kv_meta_pg_ignore(pg_pool, &key_ms, &now_ms).await;
+    upsert_kv_meta_pg_ignore(pg_pool, &key_status, status).await;
+    upsert_kv_meta_pg_ignore(pg_pool, &key_duration, &elapsed_ms).await;
 }
 
 /// Background task that periodically fetches rate-limit data from external providers
@@ -2564,6 +2595,7 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
 
     loop {
         tokio::time::sleep(interval).await;
+        let sync_start = std::time::Instant::now();
 
         let mut advisory_lock = match try_acquire_pg_singleton_lock(
             &pg_pool,
@@ -2589,6 +2621,13 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
             Ok(repos) => repos,
             Err(error) => {
                 tracing::error!("[github-sync] Failed to list repos from PG: {error}");
+                record_periodic_job_execution_pg(
+                    &pg_pool,
+                    "github_sync",
+                    "error",
+                    sync_start.elapsed(),
+                )
+                .await;
                 if let Some(conn) = advisory_lock.take() {
                     release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
                         .await;
@@ -2597,6 +2636,7 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
             }
         };
 
+        let mut had_errors = false;
         for repo in &repos {
             if !repo.sync_enabled {
                 continue;
@@ -2606,6 +2646,7 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
                 Ok(i) => i,
                 Err(e) => {
                     tracing::warn!("[github-sync] Fetch failed for {}: {e}", repo.id);
+                    had_errors = true;
                     continue;
                 }
             };
@@ -2616,6 +2657,7 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
                 }
                 Err(error) => {
                     tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
+                    had_errors = true;
                 }
                 _ => {}
             }
@@ -2635,9 +2677,18 @@ async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
                 }
                 Err(error) => {
                     tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
+                    had_errors = true;
                 }
             }
         }
+
+        record_periodic_job_execution_pg(
+            &pg_pool,
+            "github_sync",
+            if had_errors { "error" } else { "ok" },
+            sync_start.elapsed(),
+        )
+        .await;
 
         if let Some(conn) = advisory_lock.take() {
             release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync").await;

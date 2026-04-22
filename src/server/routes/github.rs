@@ -3,11 +3,13 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use libsql_rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 
 use super::AppState;
+use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
 use crate::github;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -55,6 +57,55 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
         .iter()
         .filter_map(|value| trim_non_empty(value))
         .collect()
+}
+
+fn labels_metadata_json(labels: &[String]) -> Option<String> {
+    let labels = labels
+        .iter()
+        .filter_map(|label| trim_non_empty(label))
+        .collect::<Vec<_>>();
+
+    if labels.is_empty() {
+        None
+    } else {
+        Some(json!({ "labels": labels.join(",") }).to_string())
+    }
+}
+
+fn resolve_known_agent_id(conn: &Connection, agent_id: Option<&str>) -> Option<String> {
+    let agent_id = agent_id.and_then(trim_non_empty)?;
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE id = ?1 LIMIT 1",
+            [agent_id.as_str()],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !exists {
+        tracing::warn!("[issues] ignoring unknown assignee '{agent_id}' for linked kanban card");
+    }
+    exists.then_some(agent_id)
+}
+
+async fn resolve_known_agent_id_pg(
+    pool: &PgPool,
+    agent_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(agent_id) = agent_id.and_then(trim_non_empty) else {
+        return Ok(None);
+    };
+
+    let exists = sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1 LIMIT 1")
+        .bind(&agent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("resolve agent {agent_id}: {error}"))?;
+
+    if exists.is_none() {
+        tracing::warn!("[issues] ignoring unknown assignee '{agent_id}' for linked kanban card");
+    }
+
+    Ok(exists)
 }
 
 fn resolve_issue_repo(input: &str) -> Result<String, String> {
@@ -174,7 +225,7 @@ fn build_pmd_issue_body(body: &CreateIssueBody) -> Result<String, String> {
 
 /// POST /api/issues
 pub async fn create_issue(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(body): Json<CreateIssueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if body.auto_dispatch.unwrap_or(false) {
@@ -237,18 +288,143 @@ pub async fn create_issue(
         .unwrap_or_default();
 
     match github::create_issue_with_labels(&repo, &title, &issue_body, &applied_labels).await {
-        Ok(created) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "issue": {
-                    "number": created.number,
-                    "url": created.url,
-                    "repo": repo,
-                },
-                "applied_labels": applied_labels,
-                "pmd_format_version": PMD_FORMAT_VERSION,
-            })),
-        ),
+        Ok(created) => {
+            let metadata_json = labels_metadata_json(&applied_labels);
+            let (kanban_card_id, kanban_card_sync_error) = if let Some(pool) =
+                state.pg_pool.as_ref()
+            {
+                let assigned_agent_id = match resolve_known_agent_id_pg(
+                    pool,
+                    body.agent_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(agent_id) => agent_id,
+                    Err(error) => {
+                        tracing::error!(
+                            "[issues] created GitHub issue {}#{} but failed to resolve assignee: {}",
+                            repo,
+                            created.number,
+                            error
+                        );
+                        return (
+                            StatusCode::CREATED,
+                            Json(json!({
+                                "issue": {
+                                    "number": created.number,
+                                    "url": created.url,
+                                    "repo": repo,
+                                },
+                                "kanban_card_id": serde_json::Value::Null,
+                                "kanban_card_sync_error": error,
+                                "applied_labels": applied_labels,
+                                "pmd_format_version": PMD_FORMAT_VERSION,
+                            })),
+                        );
+                    }
+                };
+                match upsert_card_from_issue_pg(
+                    pool,
+                    IssueCardUpsert {
+                        repo_id: repo.clone(),
+                        issue_number: created.number,
+                        issue_url: Some(created.url.clone()),
+                        title: title.clone(),
+                        description: Some(issue_body.clone()),
+                        priority: None,
+                        assigned_agent_id,
+                        metadata_json: metadata_json.clone(),
+                        status_on_create: Some("backlog".to_string()),
+                    },
+                )
+                .await
+                {
+                    Ok(upserted) => (Some(upserted.card_id), None),
+                    Err(error) => {
+                        tracing::error!(
+                            "[issues] created GitHub issue {}#{} but failed to sync kanban card: {}",
+                            repo,
+                            created.number,
+                            error
+                        );
+                        (None, Some(error))
+                    }
+                }
+            } else {
+                let card_id = uuid::Uuid::new_v4().to_string();
+                match state.db.lock() {
+                    Ok(conn) => {
+                        let assigned_agent_id =
+                            resolve_known_agent_id(&conn, body.agent_id.as_deref());
+                        let metadata_json = metadata_json.as_deref();
+                        match conn.execute(
+                            "INSERT INTO kanban_cards (
+                            id,
+                            repo_id,
+                            title,
+                            status,
+                            priority,
+                            assigned_agent_id,
+                            github_issue_url,
+                            github_issue_number,
+                            description,
+                            metadata,
+                            created_at,
+                            updated_at
+                         ) VALUES (
+                            ?1,
+                            ?2,
+                            ?3,
+                            'backlog',
+                            'medium',
+                            ?4,
+                            ?5,
+                            ?6,
+                            ?7,
+                            ?8,
+                            datetime('now'),
+                            datetime('now')
+                         )",
+                            libsql_rusqlite::params![
+                                card_id,
+                                repo.clone(),
+                                title.clone(),
+                                assigned_agent_id.as_deref(),
+                                created.url.clone(),
+                                created.number,
+                                issue_body.clone(),
+                                metadata_json,
+                            ],
+                        ) {
+                            Ok(_) => (Some(card_id), None),
+                            Err(error) => (
+                                None,
+                                Some(format!(
+                                    "insert sqlite issue card {}#{}: {error}",
+                                    repo, created.number
+                                )),
+                            ),
+                        }
+                    }
+                    Err(error) => (None, Some(format!("db lock: {error}"))),
+                }
+            };
+
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "issue": {
+                        "number": created.number,
+                        "url": created.url,
+                        "repo": repo,
+                    },
+                    "kanban_card_id": kanban_card_id,
+                    "kanban_card_sync_error": kanban_card_sync_error,
+                    "applied_labels": applied_labels,
+                    "pmd_format_version": PMD_FORMAT_VERSION,
+                })),
+            )
+        }
         Err(error) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("gh issue create failed: {error}")})),

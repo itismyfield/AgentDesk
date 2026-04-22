@@ -9,6 +9,7 @@ use serde_json::json;
 use sqlx::Row as SqlxRow;
 
 use super::AppState;
+use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
@@ -1824,6 +1825,136 @@ pub async fn assign_issue(
     State(state): State<AppState>,
     Json(body): Json<AssignIssueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        let upserted = match upsert_card_from_issue_pg(
+            pool,
+            IssueCardUpsert {
+                repo_id: body.github_repo.clone(),
+                issue_number: body.github_issue_number,
+                issue_url: body.github_issue_url.clone(),
+                title: body.title.clone(),
+                description: body.description.clone(),
+                priority: None,
+                assigned_agent_id: Some(body.assignee_agent_id.clone()),
+                metadata_json: None,
+                status_on_create: Some("backlog".to_string()),
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+        let old_status = if upserted.created {
+            "backlog".to_string()
+        } else {
+            match sqlx::query_scalar::<_, String>(
+                "SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1",
+            )
+            .bind(&upserted.card_id)
+            .fetch_optional(pool)
+            .await
+            {
+                Ok(Some(status)) => status,
+                Ok(None) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "failed to reload card after upsert"})),
+                    );
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            }
+        };
+
+        crate::pipeline::ensure_loaded();
+        let pipeline = crate::pipeline::get();
+        let ready_state = pipeline
+            .dispatchable_states()
+            .into_iter()
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                tracing::warn!("Pipeline has no dispatchable states, using initial state");
+                pipeline.initial_state().to_string()
+            });
+
+        if old_status != ready_state {
+            if let Some(path) = pipeline.free_path_to_dispatchable(&old_status) {
+                for step in &path {
+                    if let Err(error) = crate::kanban::transition_status_with_opts_pg(
+                        Some(&state.db),
+                        pool,
+                        &state.engine,
+                        &upserted.card_id,
+                        step,
+                        "assign",
+                        crate::engine::transition::ForceIntent::None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "[assign_issue] postgres walk step to '{step}' failed: {error}"
+                        );
+                        break;
+                    }
+                }
+            } else if let Err(error) = crate::kanban::transition_status_with_opts_pg(
+                Some(&state.db),
+                pool,
+                &state.engine,
+                &upserted.card_id,
+                &ready_state,
+                "assign",
+                crate::engine::transition::ForceIntent::None,
+            )
+            .await
+            {
+                tracing::warn!("[assign_issue] postgres transition failed: {error}");
+            }
+        }
+
+        return match load_card_json_pg(pool, &upserted.card_id).await {
+            Ok(Some(card)) => {
+                let event_name = if upserted.created {
+                    "kanban_card_created"
+                } else {
+                    "kanban_card_updated"
+                };
+                crate::server::ws::emit_event(&state.broadcast_tx, event_name, card.clone());
+                (
+                    if upserted.created {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::OK
+                    },
+                    Json(json!({
+                        "card": card,
+                        "deduplicated": !upserted.created,
+                    })),
+                )
+            }
+            Ok(None) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "failed to read card after assign"})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
 
     let conn = match state.db.lock() {

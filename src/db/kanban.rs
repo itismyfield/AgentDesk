@@ -77,6 +77,154 @@ pub async fn list_registered_repo_ids_pg(pool: &PgPool) -> Result<Vec<String>, S
         .map_err(|error| format!("list registered repos from postgres: {error}"))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct IssueCardUpsert {
+    pub repo_id: String,
+    pub issue_number: i64,
+    pub issue_url: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Option<String>,
+    pub assigned_agent_id: Option<String>,
+    pub metadata_json: Option<String>,
+    pub status_on_create: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueCardUpsertResult {
+    pub card_id: String,
+    pub created: bool,
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
+fn normalize_optional_description(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim_end().to_string())
+        .filter(|raw| !raw.trim().is_empty())
+}
+
+pub async fn upsert_card_from_issue_pg(
+    pool: &PgPool,
+    params: IssueCardUpsert,
+) -> Result<IssueCardUpsertResult, String> {
+    let repo_id = params.repo_id.trim().to_string();
+    if repo_id.is_empty() {
+        return Err("upsert issue card: repo_id is required".to_string());
+    }
+
+    let title = params.title.trim().to_string();
+    if title.is_empty() {
+        return Err("upsert issue card: title is required".to_string());
+    }
+
+    let issue_url = normalize_optional_text(params.issue_url);
+    let description = normalize_optional_description(params.description);
+    let priority = normalize_optional_text(params.priority);
+    let assigned_agent_id = normalize_optional_text(params.assigned_agent_id);
+    let metadata_json = normalize_optional_text(params.metadata_json);
+    let status_on_create =
+        normalize_optional_text(params.status_on_create).unwrap_or_else(|| "backlog".to_string());
+
+    let inserted_id = sqlx::query_scalar::<_, String>(
+        "INSERT INTO kanban_cards (
+            id,
+            repo_id,
+            title,
+            status,
+            priority,
+            assigned_agent_id,
+            github_issue_url,
+            github_issue_number,
+            description,
+            metadata,
+            created_at,
+            updated_at
+         ) VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            COALESCE($5, 'medium'),
+            $6,
+            $7,
+            $8,
+            $9,
+            CAST($10 AS jsonb),
+            NOW(),
+            NOW()
+         )
+         ON CONFLICT (repo_id, github_issue_number)
+         WHERE repo_id IS NOT NULL AND github_issue_number IS NOT NULL
+         DO NOTHING
+         RETURNING id",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&repo_id)
+    .bind(&title)
+    .bind(&status_on_create)
+    .bind(priority.as_deref())
+    .bind(assigned_agent_id.as_deref())
+    .bind(issue_url.as_deref())
+    .bind(params.issue_number)
+    .bind(description.as_deref())
+    .bind(metadata_json.as_deref())
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "insert postgres issue card {repo_id}#{}: {error}",
+            params.issue_number
+        )
+    })?;
+
+    if let Some(card_id) = inserted_id {
+        return Ok(IssueCardUpsertResult {
+            card_id,
+            created: true,
+        });
+    }
+
+    let updated_id = sqlx::query_scalar::<_, String>(
+        "UPDATE kanban_cards
+         SET title = $1,
+             priority = COALESCE($2, kanban_cards.priority),
+             assigned_agent_id = COALESCE($3, kanban_cards.assigned_agent_id),
+             github_issue_url = COALESCE($4, kanban_cards.github_issue_url),
+             description = COALESCE($5, kanban_cards.description),
+             metadata = COALESCE(CAST($6 AS jsonb), kanban_cards.metadata),
+             updated_at = NOW()
+         WHERE repo_id = $7
+           AND github_issue_number = $8
+         RETURNING id",
+    )
+    .bind(&title)
+    .bind(priority.as_deref())
+    .bind(assigned_agent_id.as_deref())
+    .bind(issue_url.as_deref())
+    .bind(description.as_deref())
+    .bind(metadata_json.as_deref())
+    .bind(&repo_id)
+    .bind(params.issue_number)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "update postgres issue card {repo_id}#{}: {error}",
+            params.issue_number
+        )
+    })?;
+
+    Ok(IssueCardUpsertResult {
+        card_id: updated_id,
+        created: false,
+    })
+}
+
 pub fn list_cards(
     conn: &Connection,
     filter: &ListCardsFilter,
