@@ -18615,6 +18615,28 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
         "agent-pause-slot",
     );
     seed_auto_queue_card(&db, "card-pause-pending", 4497, "ready", "agent-pause-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-pause-phase-gate-anchor",
+        4498,
+        "ready",
+        "agent-pause-slot",
+    );
+    seed_auto_queue_card(&db, "card-pause-orphan", 4499, "ready", "agent-pause-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-pause-phase-gate-anchor",
+        4498,
+        "reviewing",
+        "agent-pause-slot",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-pause-orphan",
+        4499,
+        "in_progress",
+        "agent-pause-slot",
+    );
 
     {
         let conn = db.lock().unwrap();
@@ -18647,11 +18669,41 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+            ) VALUES (
+                'dispatch-pause-phase-gate', 'card-pause-phase-gate-anchor', 'agent-pause-slot',
+                'review', 'dispatched', 'Pause phase gate', ?1, datetime('now'), datetime('now')
+            )",
+            [json!({
+                "slot_index": 0,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-pause-slot",
+                    "batch_phase": 1,
+                    "next_phase": 2,
+                    "anchor_card_id": "card-pause-phase-gate-anchor"
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
             ) VALUES (
                 'entry-pause-dispatched', 'run-pause-slot', 'card-pause-dispatched',
                 'agent-pause-slot', 'dispatched', 'dispatch-pause-slot', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-pause-orphan', 'run-pause-slot', 'card-pause-orphan',
+                'agent-pause-slot', 'dispatched', NULL, NULL, 2, 0, datetime('now')
             )",
             [],
         )
@@ -18667,6 +18719,16 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict, next_phase, final_phase, anchor_card_id, created_at, updated_at
+            ) VALUES (
+                'run-pause-slot', 1, 'pending', 'dispatch-pause-phase-gate',
+                'phase_gate_passed', 2, 0, 'card-pause-phase-gate-anchor', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO sessions (
                 session_key, agent_id, provider, status, session_info, tokens,
                 active_dispatch_id, thread_channel_id, claude_session_id,
@@ -18674,6 +18736,18 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
             ) VALUES (
                 'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
                 'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, session_info, tokens,
+                active_dispatch_id, claude_session_id, last_heartbeat, created_at
+            ) VALUES (
+                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'working',
+                'pause sidecar seed', 7, 'dispatch-pause-phase-gate', 'claude-pause-sidecar',
                 datetime('now'), datetime('now')
             )",
             [],
@@ -18792,6 +18866,14 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
         "agent-pause-slot",
     );
     seed_auto_queue_card(&db, "card-pause-pending", 4497, "ready", "agent-pause-slot");
+    seed_auto_queue_card(
+        &db,
+        "card-pause-phase-gate-anchor",
+        4498,
+        "ready",
+        "agent-pause-slot",
+    );
+    seed_auto_queue_card(&db, "card-pause-orphan", 4499, "ready", "agent-pause-slot");
 
     {
         let conn = db.lock().unwrap();
@@ -18824,11 +18906,41 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at
+            ) VALUES (
+                'dispatch-pause-phase-gate', 'card-pause-phase-gate-anchor', 'agent-pause-slot',
+                'review', 'dispatched', 'Pause phase gate', ?1, datetime('now'), datetime('now')
+            )",
+            [json!({
+                "slot_index": 0,
+                "sidecar_dispatch": true,
+                "phase_gate": {
+                    "run_id": "run-pause-slot",
+                    "batch_phase": 1,
+                    "next_phase": 2,
+                    "anchor_card_id": "card-pause-phase-gate-anchor"
+                }
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO auto_queue_entries (
                 id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
             ) VALUES (
                 'entry-pause-dispatched', 'run-pause-slot', 'card-pause-dispatched',
                 'agent-pause-slot', 'dispatched', 'dispatch-pause-slot', 0, 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, priority_rank, thread_group, dispatched_at
+            ) VALUES (
+                'entry-pause-orphan', 'run-pause-slot', 'card-pause-orphan',
+                'agent-pause-slot', 'dispatched', NULL, NULL, 2, 0, datetime('now')
             )",
             [],
         )
@@ -18844,6 +18956,16 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, dispatch_id, pass_verdict, next_phase, final_phase, anchor_card_id, created_at, updated_at
+            ) VALUES (
+                'run-pause-slot', 1, 'pending', 'dispatch-pause-phase-gate',
+                'phase_gate_passed', 2, 0, 'card-pause-phase-gate-anchor', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO sessions (
                 session_key, agent_id, provider, status, session_info, tokens,
                 active_dispatch_id, thread_channel_id, claude_session_id,
@@ -18851,6 +18973,18 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
             ) VALUES (
                 'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
                 'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, session_info, tokens,
+                active_dispatch_id, claude_session_id, last_heartbeat, created_at
+            ) VALUES (
+                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'working',
+                'pause sidecar seed', 7, 'dispatch-pause-phase-gate', 'claude-pause-sidecar',
                 datetime('now'), datetime('now')
             )",
             [],
@@ -18879,9 +19013,9 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["paused_runs"], 1);
-    assert_eq!(json["cancelled_dispatches"], 1);
+    assert_eq!(json["cancelled_dispatches"], 2);
     assert_eq!(json["released_slots"], 1);
-    assert_eq!(json["cleared_slot_sessions"], 1);
+    assert_eq!(json["cleared_slot_sessions"], 2);
 
     let conn = db.lock().unwrap();
     let run_status: String = conn
@@ -18913,14 +19047,50 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
         .unwrap();
     assert_eq!(pending_entry, "pending");
 
-    let dispatch_status: String = conn
+    let orphan_entry: (String, Option<String>, Option<i64>) = conn
         .query_row(
-            "SELECT status FROM task_dispatches WHERE id = 'dispatch-pause-slot'",
+            "SELECT status, dispatch_id, slot_index
+             FROM auto_queue_entries
+             WHERE id = 'entry-pause-orphan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(orphan_entry.0, "pending");
+    assert!(orphan_entry.1.is_none());
+    assert!(orphan_entry.2.is_none());
+
+    let dispatch_statuses: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT id, status
+             FROM task_dispatches
+             WHERE id IN ('dispatch-pause-slot', 'dispatch-pause-phase-gate')
+             ORDER BY id ASC",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        dispatch_statuses,
+        vec![
+            (
+                "dispatch-pause-phase-gate".to_string(),
+                "cancelled".to_string(),
+            ),
+            ("dispatch-pause-slot".to_string(), "cancelled".to_string()),
+        ]
+    );
+
+    let phase_gate_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = 'run-pause-slot'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(dispatch_status, "cancelled");
+    assert_eq!(phase_gate_rows, 0);
 
     let slot: (Option<String>, Option<i64>) = conn
         .query_row(
@@ -18946,6 +19116,20 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
     assert_eq!(session.1, None);
     assert_eq!(session.2, 0);
     assert_eq!(session.3, None);
+
+    let sidecar_session: (String, Option<String>, i64, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id, tokens, claude_session_id
+             FROM sessions
+             WHERE session_key = 'host:AgentDesk-claude-pause-sidecar'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(sidecar_session.0, "idle");
+    assert_eq!(sidecar_session.1, None);
+    assert_eq!(sidecar_session.2, 0);
+    assert_eq!(sidecar_session.3, None);
 }
 
 #[tokio::test]
@@ -19392,7 +19576,7 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_entries"], 1);
     assert_eq!(json["cancelled_dispatches"], 1);
     assert_eq!(json["deleted_phase_gates"], 0);
     assert_eq!(json["remaining_live_dispatches"], 0);
@@ -20059,7 +20243,7 @@ async fn auto_queue_cancel_pg_cancels_live_dispatches_skips_entries_and_releases
     );
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_entries"], 1);
     assert_eq!(json["cancelled_dispatches"], 1);
     assert_eq!(json["deleted_phase_gates"], 0);
     assert_eq!(json["remaining_live_dispatches"], 0);
@@ -20681,7 +20865,7 @@ async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_r
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 2);
+    assert_eq!(json["cancelled_entries"], 1);
     assert_eq!(json["cancelled_dispatches"], 2);
     assert_eq!(json["deleted_phase_gates"], 1);
     assert_eq!(json["remaining_live_dispatches"], 0);
@@ -21620,6 +21804,115 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         Some("dispatch-valid"),
         "valid entry dispatch_id must be preserved"
     );
+}
+
+#[test]
+fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-recovery-config");
+    seed_auto_queue_card(
+        &db,
+        "card-expired-old",
+        9011,
+        "in_progress",
+        "agent-recovery-config",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-expired-recent",
+        9012,
+        "in_progress",
+        "agent-recovery-config",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-orphan-config",
+        9013,
+        "in_progress",
+        "agent-recovery-config",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES
+                ('staleDispatchedGraceMin', '5'),
+                ('staleDispatchedTerminalStatuses', 'expired'),
+                ('staleDispatchedRecoverNullDispatch', 'false'),
+                ('staleDispatchedRecoverMissingDispatch', 'false')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-recovery-config', 'test-repo', 'agent-recovery-config', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ('dispatch-expired-old', 'card-expired-old', 'agent-recovery-config', 'implementation', 'expired', 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+             VALUES ('dispatch-expired-recent', 'card-expired-recent', 'agent-recovery-config', 'implementation', 'expired', 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+             VALUES
+             ('entry-expired-old', 'run-recovery-config', 'card-expired-old', 'agent-recovery-config', 'dispatched', 'dispatch-expired-old', datetime('now', '-6 minutes')),
+             ('entry-expired-recent', 'run-recovery-config', 'card-expired-recent', 'agent-recovery-config', 'dispatched', 'dispatch-expired-recent', datetime('now', '-4 minutes')),
+             ('entry-orphan-config', 'run-recovery-config', 'card-orphan-config', 'agent-recovery-config', 'dispatched', NULL, datetime('now', '-6 minutes'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let conn = db.lock().unwrap();
+    let expired_old: (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(expired_old.0, "pending");
+    assert!(expired_old.1.is_none());
+
+    let expired_recent: (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-recent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(expired_recent.0, "dispatched");
+    assert_eq!(expired_recent.1.as_deref(), Some("dispatch-expired-recent"));
+
+    let orphan_config: (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan-config'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(orphan_config.0, "dispatched");
+    assert!(orphan_config.1.is_none());
 }
 
 /// Regression test for #295: onTick1min must backstop terminal cards that still

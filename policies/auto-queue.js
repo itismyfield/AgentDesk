@@ -99,6 +99,65 @@ function configuredAutoQueueMaxEntryRetries() {
   return configured;
 }
 
+function configuredStaleDispatchedGraceMinutes() {
+  var configured = parseInt(agentdesk.config.get("staleDispatchedGraceMin"), 10);
+  if (!configured || configured < 1) return 2;
+  return configured;
+}
+
+function configuredStaleDispatchedTerminalStatuses() {
+  var configured = agentdesk.config.get("staleDispatchedTerminalStatuses");
+  var raw = typeof configured === "string" ? configured : "cancelled,failed";
+  var statuses = raw
+    .split(",")
+    .map(function(status) { return String(status || "").trim().toLowerCase(); })
+    .filter(function(status) { return /^[a-z_]+$/.test(status); });
+  return statuses.length > 0 ? statuses : ["cancelled", "failed"];
+}
+
+function configuredStaleDispatchedRecoverNullDispatch() {
+  var configured = agentdesk.config.get("staleDispatchedRecoverNullDispatch");
+  if (configured === null || configured === undefined) return true;
+  return configured === true || configured === "true";
+}
+
+function configuredStaleDispatchedRecoverMissingDispatch() {
+  var configured = agentdesk.config.get("staleDispatchedRecoverMissingDispatch");
+  if (configured === null || configured === undefined) return true;
+  return configured === true || configured === "true";
+}
+
+function staleDispatchedRecoveryConditionsSql() {
+  var conditions = [];
+  if (configuredStaleDispatchedRecoverNullDispatch()) {
+    conditions.push("e.dispatch_id IS NULL");
+  }
+
+  var terminalStatuses = configuredStaleDispatchedTerminalStatuses();
+  if (terminalStatuses.length > 0) {
+    conditions.push(
+      "EXISTS (" +
+        "SELECT 1 FROM task_dispatches td " +
+        "WHERE td.id = e.dispatch_id " +
+        "AND td.status IN (" + terminalStatuses.map(function(status) {
+          return "'" + status + "'";
+        }).join(", ") + ")" +
+      ")"
+    );
+  }
+
+  if (configuredStaleDispatchedRecoverMissingDispatch()) {
+    conditions.push(
+      "NOT EXISTS (" +
+        "SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
+      ")"
+    );
+  }
+
+  if (conditions.length === 0) return "0";
+  return conditions.join(" OR ");
+}
+
 function notifyAutoQueueEntryFailure(stuck, failure) {
   if (!stuck || !failure || failure.to !== "failed" || failure.changed !== true) return;
   notifyHumanAlert(
@@ -547,28 +606,19 @@ var autoQueue = {
       activateRun(run.id, null);
     }
 
-    // Recovery path 2 (#179/#191/#214): dispatched entries whose dispatch is stuck
-    // Covers: cancelled/failed dispatch, phantom dispatch_id (row missing),
-    // AND orphan entries (dispatched status but dispatch_id is NULL)
-    // #214: Grace period — only check entries dispatched >2 min ago to avoid
-    // false orphan detection when dispatch intent hasn't drained yet
+    // Recovery path 2 (#179/#191/#214/#952): dispatched entries whose dispatch is stuck.
+    // Threshold and stuck conditions are runtime-configurable so cron recovery can
+    // be tuned without policy edits.
+    var staleDispatchedGraceMinutes = configuredStaleDispatchedGraceMinutes();
+    var staleDispatchedConditions = staleDispatchedRecoveryConditionsSql();
     var stuckDispatched = agentdesk.db.query(
       "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
-      "AND e.dispatched_at IS NOT NULL AND e.dispatched_at < datetime('now', '-2 minutes') " +
-      "AND (" +
-      "  e.dispatch_id IS NULL" +
-      "  OR EXISTS (" +
-      "    SELECT 1 FROM task_dispatches td " +
-      "    WHERE td.id = e.dispatch_id " +
-      "    AND td.status IN ('cancelled', 'failed')" +
-      "  )" +
-      "  OR NOT EXISTS (" +
-      "    SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
-      "  )" +
-      ")",
+      "AND e.dispatched_at IS NOT NULL " +
+      "AND e.dispatched_at < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
+      "AND (" + staleDispatchedConditions + ")",
       []
     );
 

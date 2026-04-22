@@ -299,7 +299,10 @@ function createAgentdeskMock(options) {
         state.autoQueueClearedPhaseGates.push({ runId, phase });
       },
       recordConsultationDispatch() {},
-      recordDispatchFailure() {
+      recordDispatchFailure(entryId, retryLimit, source) {
+        if (typeof settings.recordDispatchFailure === "function") {
+          return clone(settings.recordDispatchFailure(entryId, retryLimit, source, state));
+        }
         return { retryCount: 1, retryLimit: 3, to: "pending", changed: true };
       }
     },
