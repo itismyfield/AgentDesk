@@ -1566,7 +1566,10 @@ async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
                 .uri("/agents/agent-turn-start-busy/turn/start")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"prompt":"run headless probe","source":"system","metadata":{"trigger_source":"test"}}"#,
+                    format!(
+                        r#"{{"prompt":"run headless probe","source":"system","metadata":{{"trigger_source":"test"}},"channel_id":"{}"}}"#,
+                        channel_id
+                    ),
                 ))
                 .unwrap(),
         )
@@ -1584,6 +1587,58 @@ async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
         json["error"]
             .as_str()
             .is_some_and(|value| value.contains("mailbox is busy")),
+        "unexpected error body: {json}"
+    );
+}
+
+#[tokio::test]
+async fn start_agent_turn_rejects_channel_override_outside_agent_bindings() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
+        crate::services::provider::ProviderKind::Codex,
+    )
+    .await;
+    let bound_channel_id = "1485506232256168124";
+    let forbidden_channel_id = "1485506232256168125";
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents
+             (id, name, provider, discord_channel_id, discord_channel_alt, created_at, updated_at)
+             VALUES ('agent-turn-start-forbidden', 'Agent Turn Start Forbidden', 'codex', 'legacy-forbidden', ?1, datetime('now'), datetime('now'))",
+            [bound_channel_id],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, Some(harness.registry()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/agent-turn-start-forbidden/turn/start")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"prompt":"run headless probe","source":"system","channel_id":"{}"}}"#,
+                    forbidden_channel_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|value| value.contains("not allowed")),
         "unexpected error body: {json}"
     );
 }
