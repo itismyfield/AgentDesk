@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --all-targets transition
+          cargo test --all-targets transition -- --test-threads=1
           cargo test --all-targets auto_queue
           cargo test --all-targets cancel
           cargo test --all-targets review_decision
