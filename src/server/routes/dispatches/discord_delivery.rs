@@ -1573,7 +1573,7 @@ async fn build_slot_thread_name_pg(
 ) -> Result<String, String> {
     let mut batch_phase_for_label = 0i64;
     let group_info = sqlx::query(
-        "SELECT run_id, COALESCE(thread_group, 0) AS thread_group, COALESCE(batch_phase, 0) AS batch_phase
+        "SELECT run_id, COALESCE(thread_group, 0)::BIGINT AS thread_group, COALESCE(batch_phase, 0)::BIGINT AS batch_phase
          FROM auto_queue_entries
          WHERE dispatch_id = $1
          LIMIT 1",
@@ -1597,7 +1597,7 @@ async fn build_slot_thread_name_pg(
     .transpose()?
     .or(
         sqlx::query(
-            "SELECT run_id, COALESCE(thread_group, 0) AS thread_group, COALESCE(batch_phase, 0) AS batch_phase
+            "SELECT run_id, COALESCE(thread_group, 0)::BIGINT AS thread_group, COALESCE(batch_phase, 0)::BIGINT AS batch_phase
              FROM auto_queue_entries
              WHERE kanban_card_id = $1
                AND status IN ('pending', 'dispatched')
