@@ -157,13 +157,13 @@ pub async fn run(
         seed_startup_runtime_state(&db, &config);
     }
     crate::pipeline::refresh_override_health_report(&db, pg_pool.as_ref()).await;
+    crate::reconcile::reconcile_boot_runtime(&db, &engine)?;
 
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(
         config.clone(),
-        db.clone(),
         engine.clone(),
         health_registry.clone(),
-        pg_pool.clone(),
+        pg_pool.clone().map(Arc::new),
     );
     worker_registry.run_boot_only_steps().await?;
     worker_registry.start_after_boot_reconcile()?;
@@ -296,7 +296,7 @@ fn seed_github_repos_from_config(db: &Db, config: &Config) -> std::result::Resul
 /// - OnTick1min (1m): non-critical timeouts [A][C][D][E][L], stale detection
 /// - OnTick5min (5m): non-critical reconciliation [R][B][F][G][H][M][O], idle session cleanup
 /// - OnTick (legacy, 5m): backward compat for policies that only register onTick
-async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
+async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
     let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
@@ -309,7 +309,7 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         interval_30s.tick().await;
         count += 1;
 
-        let advisory_lock = if let Some(pool) = engine.pg_pool() {
+        let advisory_lock = if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
             match try_acquire_pg_singleton_lock(pool, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick")
                 .await
             {
@@ -328,24 +328,27 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         };
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
-        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s").await;
+        fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick30s", "30s").await;
 
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
-            fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min").await;
+            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
         }
 
         // ── 5min tier: every 10th tick (300s) ──
         if is_five_min_policy_tick(count) {
-            fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min").await;
+            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
-            if let Err(error) =
-                crate::services::api_friction::process_api_friction_patterns(&db, None, None).await
-            {
-                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
+            if let Some(db) = engine.legacy_db() {
+                if let Err(error) =
+                    crate::services::api_friction::process_api_friction_patterns(db, None, None)
+                        .await
+                {
+                    tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
+                }
             }
             // Also fire legacy OnTick for backward compat
-            fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy").await;
+            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick", "legacy").await;
         }
 
         if let Some(conn) = advisory_lock {
@@ -361,6 +364,23 @@ async fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str,
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
             .await;
     record_tick_hook_execution(db, label, &execution);
+}
+
+async fn fire_tick_hook_by_name_with_pg(
+    engine: &PolicyEngine,
+    pg_pool: Option<&PgPool>,
+    hook_name: &str,
+    label: &str,
+) {
+    let execution =
+        fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
+            .await;
+    if let Some(pool) = pg_pool {
+        record_tick_hook_execution_pg(pool, label, &execution).await;
+    } else if let Some(db) = engine.legacy_db() {
+        record_tick_hook_execution(db, label, &execution);
+    }
+    crate::kanban::drain_hook_side_effects_with_backends(None, engine);
 }
 
 async fn fire_tick_hook_by_name_with_timeout(
@@ -548,6 +568,111 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
     }
 }
 
+async fn record_tick_hook_execution_pg(
+    pg_pool: &PgPool,
+    label: &str,
+    execution: &PolicyTickHookExecution,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
+    let key_ms = format!("last_tick_{}_ms", label);
+    let key_status = format!("last_tick_{}_status", label);
+    let key_duration = format!("last_tick_{}_duration_ms", label);
+    let key_skip_ms = format!("last_tick_{}_skip_ms", label);
+    let status = execution.outcome.status();
+
+    match execution.outcome {
+        PolicyTickHookOutcome::Ok => {
+            if execution.elapsed.as_millis() > POLICY_TICK_WARN_MS {
+                tracing::warn!(
+                    "[policy-tick] {} took {}ms",
+                    label,
+                    execution.elapsed.as_millis()
+                );
+            } else {
+                tracing::debug!(
+                    "[policy-tick] {} took {}ms",
+                    label,
+                    execution.elapsed.as_millis()
+                );
+            }
+        }
+        PolicyTickHookOutcome::Error | PolicyTickHookOutcome::JoinError => {
+            tracing::warn!(
+                "[policy-tick] {} hook {}: {}",
+                label,
+                status,
+                execution.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        PolicyTickHookOutcome::Timeout => {
+            tracing::warn!(
+                "[policy-tick] {} hook timed out after {}ms",
+                label,
+                execution.elapsed.as_millis()
+            );
+        }
+        PolicyTickHookOutcome::SkippedInFlight => {}
+    }
+
+    let upsert_sql = "INSERT INTO kv_meta (key, value)
+                      VALUES ($1, $2)
+                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value";
+    let skipped_inflight = matches!(execution.outcome, PolicyTickHookOutcome::SkippedInFlight);
+
+    sqlx::query(upsert_sql)
+        .bind(&key_status)
+        .bind(status)
+        .execute(pg_pool)
+        .await
+        .ok();
+    sqlx::query(upsert_sql)
+        .bind(&key_skip_ms)
+        .bind(&now_ms)
+        .execute(pg_pool)
+        .await
+        .ok();
+    sqlx::query(upsert_sql)
+        .bind("last_tick_skip_ms")
+        .bind(&now_ms)
+        .execute(pg_pool)
+        .await
+        .ok();
+    sqlx::query(upsert_sql)
+        .bind("last_tick_status")
+        .bind(status)
+        .execute(pg_pool)
+        .await
+        .ok();
+
+    if !skipped_inflight {
+        let elapsed_ms = execution.elapsed.as_millis().to_string();
+        sqlx::query(upsert_sql)
+            .bind(&key_ms)
+            .bind(&now_ms)
+            .execute(pg_pool)
+            .await
+            .ok();
+        sqlx::query(upsert_sql)
+            .bind(&key_duration)
+            .bind(&elapsed_ms)
+            .execute(pg_pool)
+            .await
+            .ok();
+        sqlx::query(upsert_sql)
+            .bind("last_tick_ms")
+            .bind(&now_ms)
+            .execute(pg_pool)
+            .await
+            .ok();
+        sqlx::query(upsert_sql)
+            .bind("last_tick_duration_ms")
+            .bind(&elapsed_ms)
+            .execute(pg_pool)
+            .await
+            .ok();
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn fire_tick_hook_by_name_for_test(
     engine: &PolicyEngine,
@@ -602,7 +727,7 @@ async fn upsert_rate_limit_cache_entry(
     }
 }
 
-async fn rate_limit_sync_loop(db: Option<Db>, pg_pool: Option<PgPool>) {
+async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
     use std::time::Duration;
 
     let interval = Duration::from_secs(120);
@@ -628,7 +753,7 @@ async fn rate_limit_sync_loop(db: Option<Db>, pg_pool: Option<PgPool>) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(db.as_ref(), pg_pool.as_ref(), "claude", &data, now)
+                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "claude", &data, now)
                     .await;
                 tracing::info!("[rate-limit-sync] Claude: {} buckets cached", buckets.len());
             }
@@ -650,7 +775,7 @@ async fn rate_limit_sync_loop(db: Option<Db>, pg_pool: Option<PgPool>) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(db.as_ref(), pg_pool.as_ref(), "codex", &data, now)
+                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "codex", &data, now)
                     .await;
                 tracing::info!("[rate-limit-sync] Codex: {} buckets cached", buckets.len());
             }
@@ -667,7 +792,7 @@ async fn rate_limit_sync_loop(db: Option<Db>, pg_pool: Option<PgPool>) {
                 let n = buckets.len();
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(db.as_ref(), pg_pool.as_ref(), "gemini", &data, now)
+                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "gemini", &data, now)
                     .await;
                 tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
             }
@@ -2421,12 +2546,7 @@ async fn fetch_gemini_rate_limits() -> Result<Vec<serde_json::Value>, anyhow::Er
 }
 
 /// Background task that periodically syncs GitHub issues for all registered repos.
-async fn github_sync_loop(
-    db: Option<Db>,
-    pg_pool: Option<PgPool>,
-    engine: crate::engine::PolicyEngine,
-    interval_minutes: u64,
-) {
+async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
     use std::time::Duration;
 
     if !crate::github::gh_available() {
@@ -2444,72 +2564,36 @@ async fn github_sync_loop(
     loop {
         tokio::time::sleep(interval).await;
 
-        let mut advisory_lock = if let Some(pool) = pg_pool.as_ref() {
-            match try_acquire_pg_singleton_lock(pool, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
-                .await
-            {
-                Ok(Some(conn)) => Some(conn),
-                Ok(None) => {
-                    tracing::debug!("[github-sync] skipped: advisory lock held elsewhere");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!("[github-sync] advisory lock failed: {error}");
-                    continue;
-                }
+        let mut advisory_lock = match try_acquire_pg_singleton_lock(
+            &pg_pool,
+            GITHUB_SYNC_ADVISORY_LOCK_ID,
+            "github-sync",
+        )
+        .await
+        {
+            Ok(Some(conn)) => Some(conn),
+            Ok(None) => {
+                tracing::debug!("[github-sync] skipped: advisory lock held elsewhere");
+                continue;
             }
-        } else {
-            None
+            Err(error) => {
+                tracing::warn!("[github-sync] advisory lock failed: {error}");
+                continue;
+            }
         };
 
         tracing::debug!("[github-sync] Running periodic sync...");
 
-        // Fetch repos
-        let repos = match pg_pool.as_ref() {
-            Some(pool) => match crate::github::list_repos_pg(pool).await {
-                Ok(repos) => repos,
-                Err(error) => {
-                    tracing::error!("[github-sync] Failed to list repos from PG: {error}");
-                    if let Some(conn) = advisory_lock.take() {
-                        release_pg_singleton_lock(
-                            conn,
-                            GITHUB_SYNC_ADVISORY_LOCK_ID,
-                            "github-sync",
-                        )
+        let repos = match crate::github::list_repos_pg(&pg_pool).await {
+            Ok(repos) => repos,
+            Err(error) => {
+                tracing::error!("[github-sync] Failed to list repos from PG: {error}");
+                if let Some(conn) = advisory_lock.take() {
+                    release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
                         .await;
-                    }
-                    continue;
                 }
-            },
-            None => match db.as_ref() {
-                Some(db) => match crate::github::list_repos(db) {
-                    Ok(repos) => repos,
-                    Err(error) => {
-                        tracing::error!("[github-sync] Failed to list repos: {error}");
-                        if let Some(conn) = advisory_lock.take() {
-                            release_pg_singleton_lock(
-                                conn,
-                                GITHUB_SYNC_ADVISORY_LOCK_ID,
-                                "github-sync",
-                            )
-                            .await;
-                        }
-                        continue;
-                    }
-                },
-                None => {
-                    tracing::warn!("[github-sync] skipped: no PG pool and no SQLite db handle");
-                    if let Some(conn) = advisory_lock.take() {
-                        release_pg_singleton_lock(
-                            conn,
-                            GITHUB_SYNC_ADVISORY_LOCK_ID,
-                            "github-sync",
-                        )
-                        .await;
-                    }
-                    continue;
-                }
-            },
+                continue;
+            }
         };
 
         for repo in &repos {
@@ -2525,68 +2609,31 @@ async fn github_sync_loop(
                 }
             };
 
-            if let Some(pool) = pg_pool.as_ref() {
-                match crate::github::triage::triage_new_issues_pg(pool, &repo.id, &issues).await {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
-                    }
-                    Err(error) => {
-                        tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
-                    }
-                    _ => {}
+            match crate::github::triage::triage_new_issues_pg(&pg_pool, &repo.id, &issues).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
                 }
+                Err(error) => {
+                    tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
+                }
+                _ => {}
+            }
 
-                match crate::github::sync::sync_github_issues_for_repo_pg(pool, &repo.id, &issues)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.closed_count > 0 || result.inconsistency_count > 0 {
-                            tracing::info!(
-                                "[github-sync] {}: closed={}, inconsistencies={}",
-                                repo.id,
-                                result.closed_count,
-                                result.inconsistency_count
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
+            match crate::github::sync::sync_github_issues_for_repo_pg(&pg_pool, &repo.id, &issues)
+                .await
+            {
+                Ok(result) => {
+                    if result.closed_count > 0 || result.inconsistency_count > 0 {
+                        tracing::info!(
+                            "[github-sync] {}: closed={}, inconsistencies={}",
+                            repo.id,
+                            result.closed_count,
+                            result.inconsistency_count
+                        );
                     }
                 }
-            } else {
-                let Some(db) = db.as_ref() else {
-                    tracing::warn!(
-                        "[github-sync] skipping sqlite repo sync for {}: db handle unavailable",
-                        repo.id
-                    );
-                    continue;
-                };
-                match crate::github::triage::triage_new_issues(&db, &repo.id, &issues) {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
-                    }
-                    Err(error) => {
-                        tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
-                    }
-                    _ => {}
-                }
-
-                match crate::github::sync::sync_github_issues_for_repo(
-                    &db, &engine, &repo.id, &issues,
-                ) {
-                    Ok(result) => {
-                        if result.closed_count > 0 || result.inconsistency_count > 0 {
-                            tracing::info!(
-                                "[github-sync] {}: closed={}, inconsistencies={}",
-                                repo.id,
-                                result.closed_count,
-                                result.inconsistency_count
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
-                    }
+                Err(error) => {
+                    tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
                 }
             }
         }
@@ -2795,11 +2842,7 @@ where
     pending.len()
 }
 
-async fn message_outbox_loop(
-    db: Option<Db>,
-    pg_pool: Option<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
-) {
+async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<HealthRegistry>>) {
     use std::time::Duration;
 
     let Some(health_registry) = health_registry else {
@@ -2821,20 +2864,18 @@ async fn message_outbox_loop(
 
     loop {
         tokio::time::sleep(poll_interval).await;
-        if drain_message_outbox_batch_once(db.as_ref(), pg_pool.as_ref(), Some(&claim_owner), {
+        if drain_message_outbox_batch_once(None, Some(pg_pool.as_ref()), Some(&claim_owner), {
             let health_registry = health_registry.clone();
-            let db = db.clone();
             let pg_pool = pg_pool.clone();
             move |target, content, source, bot| {
                 let health_registry = health_registry.clone();
-                let db = db.clone();
                 let pg_pool = pg_pool.clone();
                 async move {
                     let (status, err_text) =
                         crate::services::discord::health::send_message_with_backends(
                             &health_registry,
-                            db.as_ref(),
-                            pg_pool.as_ref(),
+                            None,
+                            Some(pg_pool.as_ref()),
                             &target,
                             &content,
                             &source,
@@ -2858,12 +2899,11 @@ async fn message_outbox_loop(
     }
 }
 
-async fn dm_reply_retry_loop(db: Option<Db>, pg_pool: Option<PgPool>) {
+async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
     interval.tick().await; // skip immediate first tick
     loop {
         interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(db.as_ref(), pg_pool.as_ref())
-            .await;
+        crate::services::discord::retry_failed_dm_notifications(None, Some(pg_pool.as_ref())).await;
     }
 }

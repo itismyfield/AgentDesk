@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow};
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
 use sqlx::PgPool;
@@ -15,7 +14,6 @@ use super::ws::{BatchBuffer, BroadcastTx};
 enum BootStepId {
     RefreshMemoryHealth,
     DrainStartupHooks,
-    ReconcileBootRuntime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +24,7 @@ struct BootStepSpec {
     order: u8,
 }
 
-const BOOT_ONLY_STEPS: [BootStepSpec; 3] = [
+const BOOT_ONLY_STEPS: [BootStepSpec; 2] = [
     BootStepSpec {
         id: BootStepId::RefreshMemoryHealth,
         name: "refresh_memory_health_for_startup",
@@ -38,12 +36,6 @@ const BOOT_ONLY_STEPS: [BootStepSpec; 3] = [
         name: "drain_startup_hooks",
         responsibility: "Resume deferred startup hooks persisted before the previous shutdown",
         order: 20,
-    },
-    BootStepSpec {
-        id: BootStepId::ReconcileBootRuntime,
-        name: "reconcile_boot_runtime",
-        responsibility: "Repair broken DB and runtime state before any background worker resumes",
-        order: 30,
     },
 ];
 
@@ -256,24 +248,21 @@ struct RunningWorker {
 
 pub(crate) struct SupervisedWorkerRegistry {
     config: Config,
-    db: Db,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
-    pg_pool: Option<PgPool>,
+    pg_pool: Option<Arc<PgPool>>,
     running: Vec<RunningWorker>,
 }
 
 impl SupervisedWorkerRegistry {
     pub(crate) fn new(
         config: Config,
-        db: Db,
         engine: PolicyEngine,
         health_registry: Option<Arc<HealthRegistry>>,
-        pg_pool: Option<PgPool>,
+        pg_pool: Option<Arc<PgPool>>,
     ) -> Self {
         Self {
             config,
-            db,
             engine,
             health_registry,
             pg_pool,
@@ -295,9 +284,6 @@ impl SupervisedWorkerRegistry {
                 }
                 BootStepId::DrainStartupHooks => {
                     self.engine.drain_startup_hooks();
-                }
-                BootStepId::ReconcileBootRuntime => {
-                    crate::reconcile::reconcile_boot_runtime(&self.db, &self.engine)?;
                 }
             }
         }
@@ -359,30 +345,30 @@ impl SupervisedWorkerRegistry {
                     self.log_skip(spec, "github.sync_interval_minutes <= 0");
                     return Ok(None);
                 }
-                let sync_db = if self.pg_pool.is_some() {
-                    None
-                } else {
-                    Some(self.db.clone())
+                let Some(sync_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
                 };
-                let sync_engine = self.engine.clone();
-                let sync_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::github_sync_loop(sync_db, sync_pg_pool, sync_engine, sync_interval)
-                        .await;
+                    super::github_sync_loop(sync_pg_pool, sync_interval).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::PolicyTick => {
+                let Some(tick_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
                 // #747: build a dedicated tick engine so a stuck tick hook
                 // cannot back up the main engine's actor queue and starve
                 // HTTP/Discord hook paths. The two engines share the same
                 // policies directory (each with its own hot-reload watcher)
                 // and the same PostgreSQL backend.
-                let tick_engine = PolicyEngine::new_for_tick(&self.config, self.pg_pool.clone())
-                    .map_err(|e| {
+                let tick_engine =
+                    PolicyEngine::new_for_tick(&self.config, Some(tick_pg_pool.as_ref().clone()))
+                        .map_err(|e| {
                         anyhow!("failed to initialize dedicated policy tick engine: {e}")
                     })?;
-                let tick_db = self.db.clone();
                 self.register_thread(spec, "policy-tick", move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -391,57 +377,48 @@ impl SupervisedWorkerRegistry {
                             tracing::warn!("Fatal: failed to create policy-tick runtime: {e}");
                             std::process::exit(1);
                         });
-                    rt.block_on(super::policy_tick_loop(tick_engine, tick_db));
+                    rt.block_on(super::policy_tick_loop(tick_engine, Some(tick_pg_pool)));
                 })?;
                 Ok(None)
             }
             ServerWorkerId::RateLimitSync => {
-                let rate_limit_db = if self.pg_pool.is_some() {
-                    None
-                } else {
-                    Some(self.db.clone())
+                let Some(rate_limit_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
                 };
-                let rate_limit_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::rate_limit_sync_loop(rate_limit_db, rate_limit_pg_pool).await;
+                    super::rate_limit_sync_loop(rate_limit_pg_pool).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::MessageOutbox => {
-                let outbox_db = if self.pg_pool.is_some() {
-                    None
-                } else {
-                    Some(self.db.clone())
+                let Some(outbox_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
                 };
                 let outbox_health_registry = self.health_registry.clone();
-                let outbox_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::message_outbox_loop(outbox_db, outbox_pg_pool, outbox_health_registry)
-                        .await;
+                    super::message_outbox_loop(outbox_pg_pool, outbox_health_registry).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::DispatchOutbox => {
-                let dispatch_outbox_db = self.db.clone();
-                let dispatch_outbox_pg_pool = self.pg_pool.clone();
+                let Some(dispatch_outbox_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
                 self.register_tokio(spec, async move {
-                    super::routes::dispatches::dispatch_outbox_loop(
-                        dispatch_outbox_db,
-                        dispatch_outbox_pg_pool,
-                    )
-                    .await;
+                    super::routes::dispatches::dispatch_outbox_loop(dispatch_outbox_pg_pool).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::DmReplyRetry => {
-                let dm_retry_db = if self.pg_pool.is_some() {
-                    None
-                } else {
-                    Some(self.db.clone())
+                let Some(dm_retry_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
                 };
-                let dm_retry_pg_pool = self.pg_pool.clone();
                 self.register_tokio(spec, async move {
-                    super::dm_reply_retry_loop(dm_retry_db, dm_retry_pg_pool).await;
+                    super::dm_reply_retry_loop(dm_retry_pg_pool).await;
                 });
                 Ok(None)
             }
@@ -525,7 +502,7 @@ mod tests {
 
     #[test]
     fn boot_steps_are_explicit_and_ordered() {
-        assert_eq!(BOOT_ONLY_STEPS.len(), 3);
+        assert_eq!(BOOT_ONLY_STEPS.len(), 2);
         assert!(
             BOOT_ONLY_STEPS
                 .windows(2)
@@ -533,7 +510,6 @@ mod tests {
         );
         assert_eq!(BOOT_ONLY_STEPS[0].name, "refresh_memory_health_for_startup");
         assert_eq!(BOOT_ONLY_STEPS[1].name, "drain_startup_hooks");
-        assert_eq!(BOOT_ONLY_STEPS[2].name, "reconcile_boot_runtime");
     }
 
     #[test]
