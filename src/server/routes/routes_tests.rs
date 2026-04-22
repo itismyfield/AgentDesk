@@ -16643,8 +16643,11 @@ async fn auto_queue_reset_pg_preserves_active_runs_on_global_reset() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/reset")
-                .body(Body::empty())
+                .uri("/auto-queue/reset-global")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirmation_token":"confirm-global-reset"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -22249,8 +22252,9 @@ async fn auto_queue_reset_completes_generated_and_pending_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header("content-type", "application/json")
                 .uri("/auto-queue/reset")
-                .body(Body::empty())
+                .body(Body::from(r#"{"agent_id":"agent-reset"}"#))
                 .unwrap(),
         )
         .await
@@ -22462,7 +22466,7 @@ async fn auto_queue_reset_with_agent_id_only_clears_matching_agent_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_queue_reset_without_agent_id_preserves_active_runs() {
+async fn auto_queue_reset_requires_agent_id_and_reset_global_requires_confirmation() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -22513,7 +22517,7 @@ async fn auto_queue_reset_without_agent_id_preserves_active_runs() {
     }
 
     let app = test_api_router(db.clone(), engine, None);
-    let response = app
+    let rejection = app
         .clone()
         .oneshot(
             Request::builder()
@@ -22521,6 +22525,27 @@ async fn auto_queue_reset_without_agent_id_preserves_active_runs() {
                 .uri("/auto-queue/reset")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rejection.status(), StatusCode::BAD_REQUEST);
+    let rejection_body = axum::body::to_bytes(rejection.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rejection_json: serde_json::Value = serde_json::from_slice(&rejection_body).unwrap();
+    assert_eq!(rejection_json["error"], "agent_id is required for reset");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/reset-global")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirmation_token":"confirm-global-reset"}"#,
+                ))
                 .unwrap(),
         )
         .await

@@ -143,6 +143,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(auto_queue::reset_slot_thread),
             )
             .route("/auto-queue/reset", post(auto_queue::reset))
+            .route("/auto-queue/reset-global", post(auto_queue::reset_global))
             .route("/auto-queue/pause", post(auto_queue::pause))
             .route("/auto-queue/resume", post(auto_queue::resume_run))
             .route("/auto-queue/cancel", post(auto_queue::cancel))

@@ -89,7 +89,8 @@ Two tables manage the auto-queue:
 | `/api/auto-queue/entries/{id}/skip` | PATCH | Skip queue entry |
 | `/api/auto-queue/runs/{id}` | PATCH | Update run |
 | `/api/auto-queue/reorder` | PATCH | Reorder queue |
-| `/api/auto-queue/reset` | POST | Reset queue |
+| `/api/auto-queue/reset` | POST | Reset one agent queue |
+| `/api/auto-queue/reset-global` | POST | Reset all queues with confirmation |
 | `/api/auto-queue/pause` | POST | Pause queue |
 | `/api/auto-queue/resume` | POST | Resume queue |
 | `/api/auto-queue/cancel` | POST | Cancel queue |
