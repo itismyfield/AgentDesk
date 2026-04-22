@@ -211,13 +211,41 @@ mod tests {
     use std::collections::HashMap;
 
     struct TestDatabase {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
         database_url: String,
     }
 
+    async fn connect_test_pool(database_url: &str, max_connections: u32, context: &str) -> PgPool {
+        let mut last_error = None;
+
+        for attempt in 1..=3 {
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(max_connections)
+                .acquire_timeout(std::time::Duration::from_secs(30))
+                .connect(database_url)
+                .await
+            {
+                Ok(pool) => return pool,
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+
+        panic!(
+            "{context} after retries: {}",
+            last_error.expect("postgres pool connect should capture final error")
+        );
+    }
+
     impl TestDatabase {
         async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
@@ -230,6 +258,7 @@ mod tests {
             .expect("create postgres test db");
 
             Self {
+                _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
@@ -237,12 +266,11 @@ mod tests {
         }
 
         async fn migrate(&self) -> PgPool {
-            crate::db::postgres::connect_test_pool_and_migrate(
-                &self.database_url,
-                "transition executor pg tests",
-            )
-            .await
-            .expect("migrate postgres test db")
+            let pool = connect_test_pool(&self.database_url, 1, "connect postgres test db").await;
+            crate::db::postgres::migrate(&pool)
+                .await
+                .expect("migrate postgres test db");
+            pool
         }
 
         async fn drop(self) {
