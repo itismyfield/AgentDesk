@@ -309,6 +309,8 @@ kanban:
   max_review_rounds: 3
 ```
 
+For canonical edit paths across runtime config, prompts, policies, memory, `CLAUDE.md`, and MCP mirrors, see [`docs/source-of-truth.md`](docs/source-of-truth.md). Legacy config snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archival only and belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`; use `scripts/archive-config-backups.sh` instead of leaving them beside canonical files.
+
 ### Runtime Configuration
 
 AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-surface canonical owner plus explicit precedence and restart semantics, not a single physical store. The full decision record lives in [`docs/adr-settings-precedence.md`](docs/adr-settings-precedence.md).
