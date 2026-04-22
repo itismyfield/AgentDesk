@@ -64,7 +64,7 @@
 | `db::auto_queue` | `src/db/auto_queue.rs` | 6147 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 165 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::postgres` | `src/db/postgres.rs` | 790 |  |
+| `db::postgres` | `src/db/postgres.rs` | 824 |  |
 | `db::schema` | `src/db/schema.rs` | 2892 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1246 | giant-file |
@@ -99,7 +99,7 @@
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 260 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
 | `engine::transition` | `src/engine/transition.rs` | 1618 | giant-file |
-| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 699 |  |
+| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 662 |  |
 | `error` | `src/error.rs` | 188 |  |
 | `github` | `src/github/mod.rs` | 833 |  |
 | `github::dod` | `src/github/dod.rs` | 395 |  |

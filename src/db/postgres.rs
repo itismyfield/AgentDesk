@@ -1,11 +1,17 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Row};
+#[cfg(test)]
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{AgentChannel, AgentDef, Config};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
@@ -336,6 +342,31 @@ fn database_url_override() -> Option<String> {
 const TEST_POSTGRES_OP_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const TEST_POSTGRES_POOL_MAX: u32 = 2;
+#[cfg(test)]
+const TEST_POSTGRES_SETUP_CONCURRENCY: usize = 4;
+
+#[cfg(test)]
+fn test_postgres_setup_semaphore() -> &'static Arc<Semaphore> {
+    static TEST_POSTGRES_SETUP_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    TEST_POSTGRES_SETUP_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(TEST_POSTGRES_SETUP_CONCURRENCY)))
+}
+
+#[cfg(test)]
+async fn acquire_test_postgres_setup_slot(label: &str) -> Result<OwnedSemaphorePermit, String> {
+    tokio::time::timeout(
+        TEST_POSTGRES_OP_TIMEOUT,
+        test_postgres_setup_semaphore().clone().acquire_owned(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "{label} wait for postgres test setup slot timed out after {}s",
+            TEST_POSTGRES_OP_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|error| format!("{label} acquire postgres test setup slot: {error}"))
+}
 
 #[cfg(test)]
 async fn run_test_postgres_sqlx_op_with_timeout<T, F>(
@@ -382,6 +413,7 @@ pub(crate) async fn create_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
+    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
     let admin_pool = connect_test_pool(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} create postgres test db {database_name}"),
@@ -397,6 +429,7 @@ pub(crate) async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
+    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
     let pool = connect_test_pool(database_url, label).await?;
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
         .await
@@ -415,6 +448,7 @@ pub(crate) async fn drop_test_database(
     database_name: &str,
     label: &str,
 ) -> Result<(), String> {
+    let _setup_slot = acquire_test_postgres_setup_slot(label).await?;
     let admin_pool = connect_test_pool(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} terminate postgres test db sessions {database_name}"),

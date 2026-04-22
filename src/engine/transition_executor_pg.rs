@@ -216,43 +216,18 @@ mod tests {
         database_url: String,
     }
 
-    async fn connect_test_pool(database_url: &str, max_connections: u32, context: &str) -> PgPool {
-        let mut last_error = None;
-
-        for attempt in 1..=3 {
-            match sqlx::postgres::PgPoolOptions::new()
-                .max_connections(max_connections)
-                .acquire_timeout(std::time::Duration::from_secs(30))
-                .connect(database_url)
-                .await
-            {
-                Ok(pool) => return pool,
-                Err(error) => {
-                    last_error = Some(error);
-                    if attempt < 3 {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-            }
-        }
-
-        panic!(
-            "{context} after retries: {}",
-            last_error.expect("postgres pool connect should capture final error")
-        );
-    }
-
     impl TestDatabase {
         async fn create() -> Self {
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_pg_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
-            let admin_pool = connect_test_pool(&admin_url, 1, "connect postgres admin db").await;
-            sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
-                .execute(&admin_pool)
-                .await
-                .expect("create postgres test db");
-            admin_pool.close().await;
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "transition executor pg tests",
+            )
+            .await
+            .expect("create postgres test db");
 
             Self {
                 admin_url,
@@ -262,34 +237,22 @@ mod tests {
         }
 
         async fn migrate(&self) -> PgPool {
-            let pool = connect_test_pool(&self.database_url, 2, "connect postgres test db").await;
-            crate::db::postgres::migrate(&pool)
-                .await
-                .expect("migrate postgres test db");
-            pool
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "transition executor pg tests",
+            )
+            .await
+            .expect("migrate postgres test db")
         }
 
         async fn drop(self) {
-            let admin_pool =
-                connect_test_pool(&self.admin_url, 1, "reconnect postgres admin db").await;
-            sqlx::query(
-                "SELECT pg_terminate_backend(pid)
-                 FROM pg_stat_activity
-                 WHERE datname = $1
-                   AND pid <> pg_backend_pid()",
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "transition executor pg tests",
             )
-            .bind(&self.database_name)
-            .execute(&admin_pool)
-            .await
-            .expect("terminate postgres test db sessions");
-            sqlx::query(&format!(
-                "DROP DATABASE IF EXISTS \"{}\"",
-                self.database_name
-            ))
-            .execute(&admin_pool)
             .await
             .expect("drop postgres test db");
-            admin_pool.close().await;
         }
     }
 
