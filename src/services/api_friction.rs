@@ -613,7 +613,7 @@ async fn load_dispatch_source_context_pg(
         (
             Option<String>,
             Option<String>,
-            Option<i32>,
+            Option<i64>,
             Option<String>,
             Option<String>,
         ),
@@ -636,7 +636,7 @@ async fn load_dispatch_source_context_pg(
             |(card_id, repo_id, issue_number, task_summary, agent_id)| SourceContext {
                 card_id,
                 repo_id,
-                issue_number: issue_number.map(i64::from),
+                issue_number,
                 task_summary,
                 agent_id,
             },
@@ -1196,6 +1196,98 @@ mod tests {
         old_gh_path: Option<std::ffi::OsString>,
     }
 
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_api_friction_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "api_friction tests",
+            )
+            .await
+            .unwrap();
+
+            Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "api_friction tests",
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "api_friction tests",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
     impl Drop for MockGhIssueCreateEnv {
         fn drop(&mut self) {
             if let Some(value) = &self.old_gh_path {
@@ -1527,5 +1619,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(issue_number, 999);
+    }
+
+    #[tokio::test]
+    async fn load_dispatch_source_context_pg_reads_bigint_issue_numbers() {
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, github_issue_number, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+        )
+        .bind("card-api-friction-bigint")
+        .bind("itismyfield/AgentDesk")
+        .bind("API friction card")
+        .bind("in_progress")
+        .bind(3_000_000_123_i64)
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-api-friction-bigint")
+        .bind("card-api-friction-bigint")
+        .bind("agent-1")
+        .bind("implementation")
+        .bind("running")
+        .bind("Bigint dispatch")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+
+        let context = load_dispatch_source_context_pg(&pg_pool, "dispatch-api-friction-bigint")
+            .await
+            .unwrap()
+            .expect("postgres source context");
+
+        assert_eq!(context.card_id.as_deref(), Some("card-api-friction-bigint"));
+        assert_eq!(context.repo_id.as_deref(), Some("itismyfield/AgentDesk"));
+        assert_eq!(context.issue_number, Some(3_000_000_123));
+        assert_eq!(context.task_summary.as_deref(), Some("API friction card"));
+        assert_eq!(context.agent_id.as_deref(), Some("agent-1"));
+
+        pg_pool.close().await;
+        pg_db.drop().await;
     }
 }

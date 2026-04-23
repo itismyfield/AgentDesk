@@ -1507,9 +1507,9 @@ struct CardDispatchInfoPg {
 }
 
 async fn load_card_dispatch_info_pg(pool: &PgPool, card_id: &str) -> Option<CardDispatchInfoPg> {
-    // PG schema: kanban_cards.github_issue_number is INTEGER (INT4). Read as
-    // i32 then widen to i64 for parity with the rusqlite signature.
-    let row = sqlx::query_as::<_, (Option<i32>, Option<String>)>(
+    // PG schema: kanban_cards.github_issue_number is BIGINT after migration
+    // 0008. Decode natively as i64 for parity with the rusqlite signature.
+    let row = sqlx::query_as::<_, (Option<i64>, Option<String>)>(
         "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = $1",
     )
     .bind(card_id)
@@ -1518,7 +1518,7 @@ async fn load_card_dispatch_info_pg(pool: &PgPool, card_id: &str) -> Option<Card
     .ok()
     .flatten()?;
     Some(CardDispatchInfoPg {
-        issue_number: row.0.map(i64::from),
+        issue_number: row.0,
         repo_id: row.1,
     })
 }
@@ -1533,16 +1533,14 @@ async fn load_card_issue_repo_pg(
 }
 
 async fn load_card_pr_number_pg(pool: &PgPool, card_id: &str) -> Option<i64> {
-    // PG schema: pr_tracking.pr_number is INTEGER (INT4). Widen to i64 for
-    // parity with the rusqlite signature.
-    sqlx::query_as::<_, (Option<i32>,)>("SELECT pr_number FROM pr_tracking WHERE card_id = $1")
+    // PG schema: pr_tracking.pr_number is BIGINT after migration 0008.
+    sqlx::query_as::<_, (Option<i64>,)>("SELECT pr_number FROM pr_tracking WHERE card_id = $1")
         .bind(card_id)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten()
         .and_then(|row| row.0)
-        .map(i64::from)
 }
 
 /// PG-native variant of [`resolve_parent_dispatch_context`].
@@ -1561,9 +1559,8 @@ pub(super) async fn resolve_parent_dispatch_context(
         return Ok((None, 0));
     };
 
-    // PG schema: task_dispatches.chain_depth is INTEGER (INT4). Widen to
-    // i64 for parity with the rusqlite return type.
-    let row = sqlx::query_as::<_, (Option<String>, Option<i32>)>(
+    // PG schema: task_dispatches.chain_depth is BIGINT after migration 0008.
+    let row = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
         "SELECT kanban_card_id, COALESCE(chain_depth, 0)
          FROM task_dispatches
          WHERE id = $1",
@@ -1598,7 +1595,7 @@ pub(super) async fn resolve_parent_dispatch_context(
 
     Ok((
         Some(parent_dispatch_id.to_string()),
-        i64::from(parent_chain_depth.unwrap_or(0)) + 1,
+        parent_chain_depth.unwrap_or(0) + 1,
     ))
 }
 
@@ -3046,7 +3043,7 @@ mod tests {
         pool: &sqlx::PgPool,
         dispatch_id: &str,
         card_id: &str,
-        chain_depth: i32,
+        chain_depth: i64,
     ) {
         sqlx::query(
             "INSERT INTO task_dispatches (
@@ -3099,7 +3096,13 @@ mod tests {
         };
 
         pg_seed_card(&pool, "card-pg-parent-happy", Some(847), None).await;
-        pg_seed_dispatch(&pool, "dispatch-pg-parent-happy", "card-pg-parent-happy", 2).await;
+        pg_seed_dispatch(
+            &pool,
+            "dispatch-pg-parent-happy",
+            "card-pg-parent-happy",
+            3_000_000_200,
+        )
+        .await;
 
         let context = json!({ "parent_dispatch_id": "dispatch-pg-parent-happy" });
         let (parent_id, depth) =
@@ -3108,7 +3111,7 @@ mod tests {
                 .expect("happy-path parent context");
 
         assert_eq!(parent_id.as_deref(), Some("dispatch-pg-parent-happy"));
-        assert_eq!(depth, 3);
+        assert_eq!(depth, 3_000_000_201);
 
         pool.close().await;
         pg_db.drop().await;
@@ -3337,13 +3340,13 @@ mod tests {
         pg_seed_card(
             &pool,
             "card-pg-ids-happy",
-            Some(847),
+            Some(3_000_000_111),
             Some("itismyfield/AgentDesk"),
         )
         .await;
         sqlx::query(
             "INSERT INTO pr_tracking (card_id, repo_id, branch, pr_number, head_sha, state)
-             VALUES ($1, 'itismyfield/AgentDesk', 'wt/pg-847', 9001, 'deadbeef', 'review')",
+             VALUES ($1, 'itismyfield/AgentDesk', 'wt/pg-847', 3_000_000_222, 'deadbeef', 'review')",
         )
         .bind("card-pg-ids-happy")
         .execute(&pool)
@@ -3357,8 +3360,14 @@ mod tests {
             obj.get("repo").and_then(|v| v.as_str()),
             Some("itismyfield/AgentDesk")
         );
-        assert_eq!(obj.get("issue_number").and_then(|v| v.as_i64()), Some(847));
-        assert_eq!(obj.get("pr_number").and_then(|v| v.as_i64()), Some(9001));
+        assert_eq!(
+            obj.get("issue_number").and_then(|v| v.as_i64()),
+            Some(3_000_000_111)
+        );
+        assert_eq!(
+            obj.get("pr_number").and_then(|v| v.as_i64()),
+            Some(3_000_000_222)
+        );
         assert_eq!(
             obj.get("verdict_endpoint").and_then(|v| v.as_str()),
             Some("POST /api/review-verdict")

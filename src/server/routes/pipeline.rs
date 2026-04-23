@@ -1097,9 +1097,9 @@ fn sqlite_stage_row_to_json(
 }
 
 fn pg_stage_row_to_json(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value, sqlx::Error> {
-    let stage_order = i64::from(row.try_get::<i32, _>("stage_order")?);
-    let timeout_minutes = i64::from(row.try_get::<i32, _>("timeout_minutes")?);
-    let max_retries = row.try_get::<Option<i32>, _>("max_retries")?.map(i64::from);
+    let stage_order = row.try_get::<i64, _>("stage_order")?;
+    let timeout_minutes = row.try_get::<i64, _>("timeout_minutes")?;
+    let max_retries = row.try_get::<Option<i64>, _>("max_retries")?;
 
     Ok(stage_json(
         row.try_get::<i64, _>("id")?,

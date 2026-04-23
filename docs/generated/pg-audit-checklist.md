@@ -13,10 +13,10 @@ Status legend:
 | Location | Status | Note |
 | --- | --- | --- |
 | `migrations/postgres/0008_int4_to_bigint_audit.sql:16-20,25-27,32-49` | `baseline` | Canonical migration widening `thread_group`, `batch_phase`, `thread_group_count`, `review_round`, `github_issue_number`, `pr_number`, `stage_order`, `timeout_minutes`, `max_retries`, and related fields to `BIGINT`. |
-| `src/dispatch/dispatch_context.rs:1510-1545` | `follow-up` | PG helpers still assume `kanban_cards.github_issue_number` and `pr_tracking.pr_number` are `INT4`, decoding as `Option<i32>` and widening with `map(i64::from)`. |
-| `src/dispatch/dispatch_context.rs:1564-1570` | `follow-up` | Parent-dispatch lookup still decodes `task_dispatches.chain_depth` as `Option<i32>` even though migration 0008 moved the column family to `BIGINT`. |
-| `src/services/api_friction.rs:611-639` | `follow-up` | PG source-context query reads `kc.github_issue_number` as `Option<i32>` and widens in Rust. |
-| `src/server/routes/pipeline.rs:1099-1102` | `follow-up` | `pg_stage_row_to_json` still decodes `stage_order`, `timeout_minutes`, and `max_retries` as `i32` / `Option<i32>`. |
+| `src/dispatch/dispatch_context.rs:1509-1544` | `hardened` | PG helpers now decode `kanban_cards.github_issue_number` and `pr_tracking.pr_number` directly as `Option<i64>`, removing the stale `INT4` widening path around migration 0008. |
+| `src/dispatch/dispatch_context.rs:1551-1569` | `hardened` | Parent-dispatch lookup now decodes `task_dispatches.chain_depth` as `Option<i64>` and increments the BIGINT-native value directly. |
+| `src/services/api_friction.rs:607-640` | `hardened` | PG source-context query now reads `kc.github_issue_number` as `Option<i64>` so the BIGINT value survives without an intermediate `i32`. |
+| `src/server/routes/pipeline.rs:1099-1102` | `hardened` | `pg_stage_row_to_json` now decodes `stage_order`, `timeout_minutes`, and `max_retries` directly as `i64` / `Option<i64>`. |
 | `src/services/retrospectives.rs:551-599` | `hardened` | PG retrospective builder explicitly casts `github_issue_number` and `review_round` to `::BIGINT` before `i64` decode. |
 | `src/db/auto_queue.rs:1861-1885` | `hardened` | PG auto-queue status query already normalizes `github_issue_number`, `thread_group`, `batch_phase`, and `review_round` to `BIGINT`. |
 
