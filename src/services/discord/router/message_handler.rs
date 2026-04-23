@@ -840,7 +840,6 @@ pub(in crate::services::discord) async fn start_headless_turn(
             resume_offset,
             pause_epoch,
             turn_delivered,
-            super::super::tmux::WatcherSpawnOrigin::LiveTurn,
         ));
     }
 
