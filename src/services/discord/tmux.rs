@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
-use serenity::ChannelId;
+use serenity::{ChannelId, MessageId, UserId};
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
@@ -44,6 +44,9 @@ pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
+const SUPPRESSED_OUTPUT_LABEL: &str = "_(보류된 출력)_";
+const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
+const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WatcherLineOutcome {
@@ -56,29 +59,6 @@ pub(super) struct WatcherLineOutcome {
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatcherSpawnOrigin {
-    LiveTurn,
-    StartupRestore,
-    RecoveryRestore,
-    // `/api/inflight/rebind` deliberately starts the watcher at EOF, so
-    // pre-existing ready prompts must not count as post-work idle.
-    InflightRebind,
-}
-
-impl WatcherSpawnOrigin {
-    fn ready_for_input_tracker(self) -> crate::services::provider::ReadyForInputIdleTracker {
-        match self {
-            Self::RecoveryRestore => {
-                crate::services::provider::ReadyForInputIdleTracker::primed_for_recovery()
-            }
-            Self::LiveTurn | Self::StartupRestore | Self::InflightRebind => {
-                crate::services::provider::ReadyForInputIdleTracker::default()
-            }
-        }
-    }
 }
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
@@ -165,7 +145,7 @@ fn terminal_relay_decision(
             should_direct_send: has_assistant_response,
             should_tag_monitor_origin: has_assistant_response,
             should_enqueue_notify_outbox: false,
-            suppressed: false,
+            suppressed: !has_assistant_response,
         },
         Some(TaskNotificationKind::Subagent | TaskNotificationKind::Background) => {
             TerminalRelayDecision {
@@ -181,6 +161,220 @@ fn terminal_relay_decision(
             should_enqueue_notify_outbox: false,
             suppressed: false,
         },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SuppressedPlaceholderAction {
+    None,
+    Delete,
+    Edit(String),
+}
+
+fn append_suppressed_output_label(text: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.ends_with(SUPPRESSED_OUTPUT_LABEL) {
+        return text.to_string();
+    }
+    if trimmed.is_empty() {
+        return SUPPRESSED_OUTPUT_LABEL.to_string();
+    }
+
+    let suffix = format!("\n\n{SUPPRESSED_OUTPUT_LABEL}");
+    let max_base_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
+    let base = if trimmed.len() > max_base_len {
+        truncate_str(trimmed, max_base_len)
+    } else {
+        trimmed.to_string()
+    };
+    format!("{base}{suffix}")
+}
+
+fn suppressed_placeholder_action(
+    has_placeholder: bool,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+) -> SuppressedPlaceholderAction {
+    if !has_placeholder {
+        return SuppressedPlaceholderAction::None;
+    }
+
+    let placeholder_was_exposed = response_sent_offset > 0 || !last_edit_text.trim().is_empty();
+    if placeholder_was_exposed {
+        SuppressedPlaceholderAction::Edit(append_suppressed_output_label(last_edit_text))
+    } else {
+        SuppressedPlaceholderAction::Delete
+    }
+}
+
+fn monitor_auto_turn_label(tmux_session_name: &str) -> String {
+    parse_provider_and_channel_from_tmux_name(tmux_session_name)
+        .map(|(_, channel_name)| channel_name)
+        .filter(|channel_name| !channel_name.trim().is_empty())
+        .unwrap_or_else(|| tmux_session_name.to_string())
+}
+
+fn monitor_auto_turn_session_key(channel_id: ChannelId, data_start_offset: u64) -> String {
+    format!(
+        "monitor_auto_turn:ch:{}:off:{}",
+        channel_id.get(),
+        data_start_offset
+    )
+}
+
+fn monitor_auto_turn_completion_notice(label: &str, event_count: usize) -> String {
+    format!("🔔 Monitor 완료: {label} (events={event_count})")
+}
+
+fn enqueue_monitor_auto_turn_suppressed_notification(
+    pg_pool: Option<&sqlx::PgPool>,
+    db: Option<&crate::db::Db>,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    event_count: usize,
+) -> bool {
+    let target = format!("channel:{}", channel_id.get());
+    let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
+    let label = monitor_auto_turn_label(tmux_session_name);
+    let content = monitor_auto_turn_completion_notice(&label, event_count);
+    enqueue_lifecycle_notification_best_effort(
+        db,
+        pg_pool,
+        target.as_str(),
+        Some(session_key.as_str()),
+        MONITOR_AUTO_TURN_REASON_CODE,
+        content.as_str(),
+    )
+}
+
+fn enqueue_monitor_auto_turn_deferred_notification(
+    pg_pool: Option<&sqlx::PgPool>,
+    db: Option<&crate::db::Db>,
+    channel_id: ChannelId,
+    data_start_offset: u64,
+) -> bool {
+    let target = format!("channel:{}", channel_id.get());
+    let session_key = format!(
+        "monitor_auto_turn_deferred:ch:{}:off:{}",
+        channel_id.get(),
+        data_start_offset
+    );
+    enqueue_lifecycle_notification_best_effort(
+        db,
+        pg_pool,
+        target.as_str(),
+        Some(session_key.as_str()),
+        MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
+        "🔔 Monitor 트리거 유예 (유저 턴 종료 후 처리)",
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorAutoTurnStart {
+    acquired: bool,
+    deferred: bool,
+}
+
+async fn start_monitor_auto_turn_when_available(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    data_start_offset: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> MonitorAutoTurnStart {
+    let mut deferred = false;
+    let synthetic_message_id = MessageId::new(data_start_offset.max(1));
+
+    loop {
+        if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
+            return MonitorAutoTurnStart {
+                acquired: false,
+                deferred,
+            };
+        }
+
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let started = super::mailbox_try_start_turn(
+            shared,
+            channel_id,
+            token,
+            UserId::new(1),
+            synthetic_message_id,
+        )
+        .await;
+        if started {
+            shared
+                .global_active
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            shared
+                .turn_start_times
+                .insert(channel_id, std::time::Instant::now());
+            return MonitorAutoTurnStart {
+                acquired: true,
+                deferred,
+            };
+        }
+
+        if !deferred {
+            deferred = true;
+            let _ = enqueue_monitor_auto_turn_deferred_notification(
+                shared.pg_pool.as_ref(),
+                sqlite_runtime_db(shared),
+                channel_id,
+                data_start_offset,
+            );
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🔔 Monitor auto-turn deferred until active user turn completes (channel {}, provider={})",
+                channel_id.get(),
+                provider.as_str()
+            );
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn finish_monitor_auto_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    let finish = super::mailbox_finish_turn(shared, provider, channel_id).await;
+    if let Some(token) = finish.removed_token {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        shared
+            .global_active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    shared.turn_start_times.remove(&channel_id);
+    if let Ok(mut last) = shared.last_turn_at.lock() {
+        *last = Some(chrono::Local::now().to_rfc3339());
+    }
+    if finish.has_pending {
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "monitor auto-turn completed with queued backlog",
+        );
+    }
+}
+
+async fn finish_monitor_auto_turn_if_claimed(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    claimed: &mut bool,
+    finished: &mut bool,
+) {
+    if *claimed {
+        finish_monitor_auto_turn(shared, provider, channel_id).await;
+        *claimed = false;
+        *finished = true;
     }
 }
 
@@ -1517,7 +1711,6 @@ pub(super) async fn tmux_output_watcher(
     resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
-    spawn_origin: WatcherSpawnOrigin,
 ) {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -1797,6 +1990,9 @@ pub(super) async fn tmux_output_watcher(
         let mut placeholder_msg_id: Option<serenity::MessageId> = None;
         let mut last_edit_text = String::new();
         let mut response_sent_offset = 0usize;
+        let mut monitor_auto_turn_claimed = false;
+        let mut monitor_auto_turn_deferred = false;
+        let mut monitor_auto_turn_finished = false;
 
         // Process any complete lines we already have
         let initial_outcome = process_watcher_lines(
@@ -1817,6 +2013,19 @@ pub(super) async fn tmux_output_watcher(
             task_notification_kind,
             Some(TaskNotificationKind::MonitorAutoTurn)
         ) {
+            let start = start_monitor_auto_turn_when_available(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                data_start_offset,
+                cancel.as_ref(),
+            )
+            .await;
+            monitor_auto_turn_claimed = start.acquired;
+            monitor_auto_turn_deferred = monitor_auto_turn_deferred || start.deferred;
+            if !start.acquired {
+                continue;
+            }
             ensure_monitor_auto_turn_inflight(
                 &watcher_provider,
                 channel_id,
@@ -1833,7 +2042,7 @@ pub(super) async fn tmux_output_watcher(
         // Check if a Discord turn claimed this data since our epoch snapshot
         let epoch_changed = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
         let mut was_paused = paused.load(Ordering::Relaxed) || epoch_changed;
-        if was_paused {
+        if was_paused && !monitor_auto_turn_deferred {
             // A Discord turn took over — discard what we read
             continue;
         }
@@ -1841,7 +2050,8 @@ pub(super) async fn tmux_output_watcher(
             let turn_start = tokio::time::Instant::now();
             let turn_timeout = super::turn_watchdog_timeout();
             let mut last_status_update = tokio::time::Instant::now();
-            let mut ready_for_input_tracker = spawn_origin.ready_for_input_tracker();
+            let mut ready_for_input_tracker =
+                crate::services::provider::ReadyForInputIdleTracker::default();
             let mut last_ready_probe_at: Option<std::time::Instant> = None;
             let mut ready_for_input_failure_notice: Option<String> = None;
 
@@ -1911,6 +2121,23 @@ pub(super) async fn tmux_output_watcher(
                             task_notification_kind,
                             Some(TaskNotificationKind::MonitorAutoTurn)
                         ) {
+                            if !monitor_auto_turn_claimed {
+                                let start = start_monitor_auto_turn_when_available(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    data_start_offset,
+                                    cancel.as_ref(),
+                                )
+                                .await;
+                                monitor_auto_turn_claimed = start.acquired;
+                                monitor_auto_turn_deferred =
+                                    monitor_auto_turn_deferred || start.deferred;
+                                if !start.acquired {
+                                    was_paused = true;
+                                    break;
+                                }
+                            }
                             ensure_monitor_auto_turn_inflight(
                                 &watcher_provider,
                                 channel_id,
@@ -2230,14 +2457,23 @@ pub(super) async fn tmux_output_watcher(
 
         // If paused was set while we were reading (even if already unpaused), discard partial data.
         // Also check epoch: if it changed, a Discord turn claimed this data even if paused is now false.
-        if was_paused
-            || paused.load(Ordering::Relaxed)
-            || pause_epoch.load(Ordering::Relaxed) != epoch_snapshot
-        {
+        let paused_now = paused.load(Ordering::Relaxed);
+        let epoch_changed_now = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
+        let deferred_monitor_ready =
+            monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
+        if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
             // Clean up placeholder if we created one
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2284,6 +2520,14 @@ pub(super) async fn tmux_output_watcher(
                 }
             }
             // Don't break — let the watcher exit naturally when session-alive check fails
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2372,6 +2616,14 @@ pub(super) async fn tmux_output_watcher(
                 shared.api_port,
                 dispatch_id.as_deref(),
                 &failure_text,
+            )
+            .await;
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
             )
             .await;
             continue;
@@ -2522,6 +2774,14 @@ pub(super) async fn tmux_output_watcher(
                     .await;
                 }
             }
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2529,10 +2789,12 @@ pub(super) async fn tmux_output_watcher(
         // Closes the race window where a Discord turn starts between the epoch check
         // above (line 277) and this relay — the turn_bridge may have already delivered
         // the same response to its own placeholder.
-        if paused.load(Ordering::Relaxed)
-            || pause_epoch.load(Ordering::Relaxed) != epoch_snapshot
-            || turn_delivered.load(Ordering::Relaxed)
-        {
+        let paused_now = paused.load(Ordering::Relaxed);
+        let epoch_changed_now = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
+        let turn_delivered_now = turn_delivered.load(Ordering::Relaxed);
+        let deferred_monitor_ready =
+            monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
+        if (paused_now || epoch_changed_now || turn_delivered_now) && !deferred_monitor_ready {
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
@@ -2541,6 +2803,14 @@ pub(super) async fn tmux_output_watcher(
                 "  [{ts}] 👁 Late epoch/delivered guard: suppressed duplicate relay for {}",
                 tmux_session_name
             );
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2561,6 +2831,14 @@ pub(super) async fn tmux_output_watcher(
                 data_start_offset,
                 current_offset
             );
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2579,6 +2857,14 @@ pub(super) async fn tmux_output_watcher(
                 if let Some(msg_id) = placeholder_msg_id {
                     let _ = channel_id.delete_message(&http, msg_id).await;
                 }
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut monitor_auto_turn_claimed,
+                    &mut monitor_auto_turn_finished,
+                )
+                .await;
                 continue;
             }
         }
@@ -2719,6 +3005,14 @@ pub(super) async fn tmux_output_watcher(
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
         // CAS the emission slot. `0` = free; any non-zero value = a watcher
@@ -2744,6 +3038,14 @@ pub(super) async fn tmux_output_watcher(
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
         // Re-check confirmed_end inside the slot in case another watcher
@@ -2758,6 +3060,14 @@ pub(super) async fn tmux_output_watcher(
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+            )
+            .await;
             continue;
         }
 
@@ -2847,8 +3157,51 @@ pub(super) async fn tmux_output_watcher(
             }
             relay_ok
         } else if relay_decision.suppressed {
-            if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(&http, msg_id).await;
+            if matches!(
+                task_notification_kind,
+                Some(TaskNotificationKind::MonitorAutoTurn)
+            ) {
+                let _ = enqueue_monitor_auto_turn_suppressed_notification(
+                    shared.pg_pool.as_ref(),
+                    sqlite_runtime_db(shared.as_ref()),
+                    channel_id,
+                    &tmux_session_name,
+                    data_start_offset,
+                    tool_state.transcript_events.len(),
+                );
+            }
+            match suppressed_placeholder_action(
+                placeholder_msg_id.is_some(),
+                response_sent_offset,
+                &last_edit_text,
+            ) {
+                SuppressedPlaceholderAction::None => {}
+                SuppressedPlaceholderAction::Delete => {
+                    if let Some(msg_id) = placeholder_msg_id {
+                        let _ = channel_id.delete_message(&http, msg_id).await;
+                    }
+                }
+                SuppressedPlaceholderAction::Edit(content) => {
+                    if let Some(msg_id) = placeholder_msg_id {
+                        rate_limit_wait(&shared, channel_id).await;
+                        if let Err(error) = channel_id
+                            .edit_message(
+                                &http,
+                                msg_id,
+                                serenity::EditMessage::new().content(&content),
+                            )
+                            .await
+                        {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ suppressed placeholder final edit failed for channel {} msg {}: {}",
+                                channel_id.get(),
+                                msg_id.get(),
+                                error
+                            );
+                        }
+                    }
+                }
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -2896,6 +3249,15 @@ pub(super) async fn tmux_output_watcher(
         relay_coord
             .relay_slot
             .store(0, std::sync::atomic::Ordering::Release);
+
+        finish_monitor_auto_turn_if_claimed(
+            &shared,
+            &watcher_provider,
+            channel_id,
+            &mut monitor_auto_turn_claimed,
+            &mut monitor_auto_turn_finished,
+        )
+        .await;
 
         let provider_kind = watcher_provider.clone();
         let inflight_state = super::inflight::load_inflight_state(&provider_kind, channel_id.get());
@@ -3187,7 +3549,7 @@ pub(super) async fn tmux_output_watcher(
             }
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
-            let should_kickoff_queue = if has_active_turn {
+            let should_kickoff_queue = if monitor_auto_turn_finished || has_active_turn {
                 false
             } else {
                 mailbox
@@ -4288,7 +4650,6 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             resume_offset,
             pause_epoch,
             turn_delivered,
-            WatcherSpawnOrigin::StartupRestore,
         ));
     }
 
@@ -4507,23 +4868,26 @@ async fn sweep_orphan_session_files() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeadSessionCleanupPlan, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
-        TmuxWatcherHandle, WatcherSpawnOrigin, WatcherToolState, build_bg_trigger_session_key,
-        claim_or_replace_watcher, dead_session_cleanup_plan,
+        DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
+        MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
+        SUPPRESSED_OUTPUT_LABEL, SuppressedPlaceholderAction, TmuxWatcherHandle, WatcherToolState,
+        build_bg_trigger_session_key, claim_or_replace_watcher, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox,
-        fail_dispatch_for_ready_for_input_stall, lifecycle_reason_code_for_tmux_exit,
+        enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
+        finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
         load_restored_provider_session_id, notify_path_offset_advance_decision,
         parse_bg_trigger_offset_from_session_key, process_watcher_lines,
         refresh_session_heartbeat_from_tmux_output,
-        rollback_enqueued_offset_for_reconciled_failures, terminal_relay_decision,
-        tmux_death_is_normal_completion, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state,
+        rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
+        suppressed_placeholder_action, terminal_relay_decision, tmux_death_is_normal_completion,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::provider::{ProviderKind, ReadyForInputIdleTracker};
+    use crate::services::discord::runtime_store::test_env_lock;
+    use crate::services::provider::{CancelToken, ProviderKind, ReadyForInputIdleTracker};
     use crate::services::session_backend::StreamLineState;
-    use poise::serenity_prelude::ChannelId;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -4964,130 +5328,6 @@ mod tests {
                 start + std::time::Duration::from_secs(16)
             ),
             crate::services::provider::ReadyForInputIdleState::FreshIdle
-        );
-    }
-
-    #[test]
-    fn watcher_ready_for_input_completion_allows_recovery_priming_without_growth() {
-        let mut tracker = WatcherSpawnOrigin::RecoveryRestore.ready_for_input_tracker();
-        let start = std::time::Instant::now();
-
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                100,
-                true,
-                false,
-                start + std::time::Duration::from_secs(10)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                100,
-                true,
-                false,
-                start + std::time::Duration::from_secs(16)
-            ),
-            crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout
-        );
-    }
-
-    #[test]
-    fn watcher_ready_for_input_rebind_at_eof_requires_new_output() {
-        let mut tracker = WatcherSpawnOrigin::InflightRebind.ready_for_input_tracker();
-        let start = std::time::Instant::now();
-
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                100,
-                true,
-                false,
-                start + std::time::Duration::from_secs(10)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                100,
-                true,
-                false,
-                start + std::time::Duration::from_secs(16)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-    }
-
-    #[test]
-    fn watcher_ready_for_input_completion_recovery_priming_resets_after_output() {
-        let mut tracker = WatcherSpawnOrigin::RecoveryRestore.ready_for_input_tracker();
-        let start = std::time::Instant::now();
-
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-
-        tracker.record_output();
-
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                100,
-                true,
-                true,
-                start + std::time::Duration::from_secs(16)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                120,
-                true,
-                true,
-                start + std::time::Duration::from_secs(17)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                120,
-                true,
-                true,
-                start + std::time::Duration::from_secs(25)
-            ),
-            crate::services::provider::ReadyForInputIdleState::None
-        );
-        assert_eq!(
-            watcher_ready_for_input_turn_completed(
-                &mut tracker,
-                100,
-                120,
-                true,
-                true,
-                start + std::time::Duration::from_secs(33)
-            ),
-            crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout
         );
     }
 
@@ -5589,6 +5829,15 @@ mod tests {
             }
         );
         assert_eq!(
+            terminal_relay_decision(false, Some(TaskNotificationKind::MonitorAutoTurn)),
+            super::TerminalRelayDecision {
+                should_direct_send: false,
+                should_tag_monitor_origin: false,
+                should_enqueue_notify_outbox: false,
+                suppressed: true,
+            }
+        );
+        assert_eq!(
             terminal_relay_decision(true, Some(TaskNotificationKind::Subagent)),
             super::TerminalRelayDecision {
                 should_direct_send: false,
@@ -5606,6 +5855,251 @@ mod tests {
                 suppressed: true,
             }
         );
+    }
+
+    #[test]
+    fn suppressed_placeholder_preserves_exposed_live_edit() {
+        assert_eq!(
+            suppressed_placeholder_action(true, 32, "partial response"),
+            SuppressedPlaceholderAction::Edit(format!(
+                "partial response\n\n{SUPPRESSED_OUTPUT_LABEL}"
+            ))
+        );
+        assert_eq!(
+            suppressed_placeholder_action(true, 0, "status only"),
+            SuppressedPlaceholderAction::Edit(format!("status only\n\n{SUPPRESSED_OUTPUT_LABEL}"))
+        );
+    }
+
+    #[test]
+    fn suppressed_placeholder_deletes_only_clean_placeholder() {
+        assert_eq!(
+            suppressed_placeholder_action(true, 0, ""),
+            SuppressedPlaceholderAction::Delete
+        );
+        assert_eq!(
+            suppressed_placeholder_action(false, 99, "already visible"),
+            SuppressedPlaceholderAction::None
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_suppress_enqueues_notify_outbox_row() {
+        let db = crate::db::test_db();
+        let channel = ChannelId::new(987_000_111);
+
+        let enqueued = enqueue_monitor_auto_turn_suppressed_notification(
+            None,
+            Some(&db),
+            channel,
+            "monitor-session",
+            14_900,
+            7,
+        );
+        assert!(enqueued);
+
+        let row = {
+            if let Ok(conn) = db.lock() {
+                conn.query_row(
+                    "SELECT target, content, bot, source, reason_code, session_key
+                     FROM message_outbox ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .ok()
+            } else {
+                None
+            }
+        };
+
+        assert_eq!(
+            row,
+            Some((
+                format!("channel:{}", channel.get()),
+                "🔔 Monitor 완료: monitor-session (events=7)".to_string(),
+                "notify".to_string(),
+                "system".to_string(),
+                Some(MONITOR_AUTO_TURN_REASON_CODE.to_string()),
+                Some(format!("monitor_auto_turn:ch:{}:off:14900", channel.get())),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_normal_relay_does_not_request_notify_outbox() {
+        let db = crate::db::test_db();
+        let decision = terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn));
+
+        assert!(decision.should_direct_send);
+        assert!(!decision.suppressed);
+
+        let count = {
+            if let Ok(conn) = db.lock() {
+                conn.query_row("SELECT COUNT(*) FROM message_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .ok()
+            } else {
+                None
+            }
+        };
+        assert_eq!(count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_defers_until_user_turn_finishes_and_notifies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir()?;
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let db = crate::db::test_db();
+        let shared = super::super::make_shared_data_for_tests_with_storage(Some(db.clone()), None);
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(987_000_222);
+        let user_started = super::super::mailbox_try_start_turn(
+            &shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            UserId::new(42),
+            MessageId::new(100),
+        )
+        .await;
+        assert!(user_started);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let shared_for_task = shared.clone();
+        let cancel_for_task = cancel.clone();
+        let provider_for_task = provider.clone();
+        let handle = tokio::spawn(async move {
+            start_monitor_auto_turn_when_available(
+                &shared_for_task,
+                &provider_for_task,
+                channel,
+                24_000,
+                cancel_for_task.as_ref(),
+            )
+            .await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+        let deferred_count = {
+            if let Ok(conn) = db.lock() {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM message_outbox WHERE reason_code = ?1",
+                    [MONITOR_AUTO_TURN_DEFERRED_REASON_CODE],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok()
+            } else {
+                None
+            }
+        };
+        assert_eq!(deferred_count, Some(1));
+
+        let finish = super::super::mailbox_finish_turn(&shared, &provider, channel).await;
+        assert!(finish.removed_token.is_some());
+
+        let start = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await??;
+        assert_eq!(
+            start,
+            super::MonitorAutoTurnStart {
+                acquired: true,
+                deferred: true,
+            }
+        );
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.active_request_owner, Some(UserId::new(1)));
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(MessageId::new(24_000))
+        );
+
+        finish_monitor_auto_turn(&shared, &provider, channel).await;
+        assert!(
+            !super::super::mailbox_has_active_turn(&shared, channel).await,
+            "monitor mailbox claim must clear after the monitor turn finishes"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_message_queues_while_monitor_auto_turn_is_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir()?;
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(987_000_333);
+        let cancel = AtomicBool::new(false);
+        let start =
+            start_monitor_auto_turn_when_available(&shared, &provider, channel, 31_000, &cancel)
+                .await;
+        assert_eq!(
+            start,
+            super::MonitorAutoTurnStart {
+                acquired: true,
+                deferred: false,
+            }
+        );
+        assert!(super::super::mailbox_has_active_turn(&shared, channel).await);
+
+        let queued = super::super::mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel,
+            super::super::Intervention {
+                author_id: UserId::new(99),
+                message_id: MessageId::new(200),
+                source_message_ids: vec![MessageId::new(200)],
+                text: "queued behind monitor".to_string(),
+                mode: super::super::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+        )
+        .await;
+        assert!(queued);
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+
+        finish_monitor_auto_turn(&shared, &provider, channel).await;
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel).await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        let next = super::super::mailbox_take_next_soft_intervention(&shared, &provider, channel)
+            .await
+            .map(|(intervention, _)| intervention.text);
+        assert_eq!(next.as_deref(), Some("queued behind monitor"));
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        Ok(())
     }
 
     #[test]
