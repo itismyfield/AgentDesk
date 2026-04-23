@@ -585,8 +585,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
 // ── Followup & verdict helpers ──────────────────────────────────
 
 pub(super) fn extract_review_verdict(result_json: Option<&str>) -> String {
-    result_json
-        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+    parse_json_value(result_json, "result_json")
         .and_then(|v| {
             v.get("verdict")
                 .and_then(|s| s.as_str())
@@ -603,8 +602,17 @@ pub(super) fn extract_review_verdict(result_json: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn parse_json_value(raw: Option<&str>) -> Option<serde_json::Value> {
-    raw.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+fn parse_json_value(raw: Option<&str>, field_name: &'static str) -> Option<serde_json::Value> {
+    let value = raw?;
+    match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(
+                "[dispatch-outbox] malformed JSON in {field_name}; ignoring payload: {error}"
+            );
+            None
+        }
+    }
 }
 
 fn json_string_field<'a>(value: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
@@ -813,8 +821,8 @@ fn build_dispatch_completion_summary(info: &CompletedDispatchInfo) -> Option<Str
         return None;
     }
 
-    let result_json = parse_json_value(info.result_json.as_deref());
-    let context_json = parse_json_value(info.context_json.as_deref());
+    let result_json = parse_json_value(info.result_json.as_deref(), "result_json");
+    let context_json = parse_json_value(info.context_json.as_deref(), "context_json");
     let completed_without_changes = dispatch_completed_without_changes(result_json.as_ref());
     let worktree_path = resolve_worktree_path(result_json.as_ref(), context_json.as_ref());
     let completed_commit = resolve_completed_commit(result_json.as_ref());
@@ -1035,7 +1043,7 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
     if info.status != "completed" {
         return Ok(()); // Not an error — dispatch not yet completed
     }
-    let context_json_value = parse_json_value(info.context_json.as_deref());
+    let context_json_value = parse_json_value(info.context_json.as_deref(), "context_json");
     info.thread_id = resolve_thread_id(info.thread_id.as_deref(), context_json_value.as_ref());
 
     if info.dispatch_type == "review" {
@@ -1544,8 +1552,7 @@ pub(super) fn build_minimal_dispatch_message(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> String {
-    let context_json = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+    let context_json = parse_json_value(dispatch_context, "dispatch_context")
         .unwrap_or_else(|| serde_json::json!({}));
     let message = render_dispatch_message(
         dispatch_id,
@@ -1569,8 +1576,7 @@ pub(super) fn format_dispatch_message(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> String {
-    let context_json = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+    let context_json = parse_json_value(dispatch_context, "dispatch_context")
         .unwrap_or_else(|| serde_json::json!({}));
 
     let primary = render_dispatch_message(
@@ -1832,7 +1838,41 @@ pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>) {
 mod tests {
     use super::*;
     use crate::server::routes::dispatches::discord_delivery;
+    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
 
     fn test_db() -> crate::db::Db {
         let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
@@ -1934,6 +1974,52 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    #[test]
+    fn parse_json_value_logs_warn_and_returns_none_for_malformed_json() {
+        let (value, logs) = capture_logs(|| parse_json_value(Some("{"), "result_json"));
+        assert!(value.is_none());
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in result_json"));
+    }
+
+    #[test]
+    fn extract_review_verdict_logs_warn_and_defaults_to_unknown_for_malformed_json() {
+        let (verdict, logs) = capture_logs(|| extract_review_verdict(Some("{")));
+        assert_eq!(verdict, "unknown");
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in result_json"));
+    }
+
+    #[test]
+    fn build_minimal_dispatch_message_logs_warn_for_malformed_dispatch_context() {
+        let (message, logs) = capture_logs(|| {
+            build_minimal_dispatch_message(
+                "dispatch-123",
+                "Title",
+                Some("https://example.invalid/issues/948"),
+                Some(948),
+                Some("review"),
+                Some("{"),
+            )
+        });
+        assert!(!message.trim().is_empty());
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in dispatch_context"));
+    }
+
+    #[test]
+    fn format_dispatch_message_logs_warn_for_malformed_dispatch_context() {
+        let (message, logs) = capture_logs(|| {
+            format_dispatch_message(
+                "dispatch-123",
+                "Title",
+                Some("https://example.invalid/issues/948"),
+                Some(948),
+                Some("review"),
+                Some("{"),
+            )
+        });
+        assert!(!message.trim().is_empty());
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in dispatch_context"));
     }
 
     #[derive(Clone, Default)]
