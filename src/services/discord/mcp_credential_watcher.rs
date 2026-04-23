@@ -273,6 +273,314 @@ async fn broadcast_credential_change(
     );
 }
 
+fn build_notification_from_changes(
+    changes: &[CredentialChange],
+    snapshots: &mut HashMap<PathBuf, FileSnapshot>,
+    fallback_message: &str,
+) -> Option<String> {
+    let mut latest_by_path = HashMap::<PathBuf, CredentialChange>::new();
+    for change in changes {
+        latest_by_path
+            .entry(change.path.clone())
+            .and_modify(|existing| {
+                if change.timestamp > existing.timestamp {
+                    *existing = change.clone();
+                }
+            })
+            .or_insert_with(|| change.clone());
+    }
+
+    let mut changes_by_path: Vec<CredentialChange> = latest_by_path.into_values().collect();
+    changes_by_path.sort_by(|a, b| file_label(&a.path).cmp(&file_label(&b.path)));
+
+    let mut summaries = Vec::new();
+    let mut needs_fallback = false;
+    for change in changes_by_path {
+        let previous = snapshots.get(&change.path).cloned();
+        let current = match snapshot_file(&change.path) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::warn!(
+                    "MCP credential watcher: failed to snapshot {} after {:?}: {err}",
+                    change.path.display(),
+                    change.kind
+                );
+                needs_fallback = true;
+                continue;
+            }
+        };
+
+        match previous {
+            None => {
+                let summary = match summarize_initial_create(
+                    &change.path,
+                    &change.kind,
+                    current.as_ref(),
+                ) {
+                    Ok(summary) => summary,
+                    Err(err) => {
+                        tracing::warn!(
+                            "MCP credential watcher: failed to summarize first observation for {} after {:?}: {err}",
+                            change.path.display(),
+                            change.kind
+                        );
+                        needs_fallback = true;
+                        None
+                    }
+                };
+
+                if let Some(snapshot) = current {
+                    snapshots.insert(change.path.clone(), snapshot);
+                }
+
+                if let Some(summary) = summary {
+                    summaries.push(summary);
+                } else if matches!(change.kind, EventKind::Create(_)) {
+                    needs_fallback = true;
+                }
+            }
+            Some(previous_snapshot) => {
+                let summary = match summarize_change(
+                    &change.path,
+                    &change.kind,
+                    &previous_snapshot,
+                    current.as_ref(),
+                ) {
+                    Ok(summary) => summary,
+                    Err(err) => {
+                        tracing::warn!(
+                            "MCP credential watcher: failed to summarize {} after {:?}: {err}",
+                            change.path.display(),
+                            change.kind
+                        );
+                        needs_fallback = true;
+                        None
+                    }
+                };
+
+                if let Some(snapshot) = current {
+                    snapshots.insert(change.path.clone(), snapshot);
+                } else {
+                    snapshots.remove(&change.path);
+                }
+
+                if let Some(summary) = summary {
+                    summaries.push(summary);
+                } else {
+                    needs_fallback = true;
+                }
+            }
+        }
+    }
+
+    if summaries.is_empty() {
+        needs_fallback.then(|| fallback_message.to_string())
+    } else {
+        Some(format!(
+            "🔔 MCP 변화 감지: {}. `/mcp-reload` 로 적용.",
+            summaries
+                .iter()
+                .map(FileChangeSummary::render)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    }
+}
+
+fn summarize_initial_create(
+    path: &Path,
+    kind: &EventKind,
+    current: Option<&FileSnapshot>,
+) -> Result<Option<FileChangeSummary>, String> {
+    match current {
+        Some(FileSnapshot::Config(contents)) => {
+            let diff = diff_mcp_servers("{}", Some(contents))?;
+            if diff.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(FileChangeSummary::Config {
+                    file: file_label(path),
+                    diff,
+                }))
+            }
+        }
+        Some(FileSnapshot::CredentialsPresent) => Ok(Some(FileChangeSummary::Credentials {
+            file: file_label(path),
+            detail: match kind {
+                EventKind::Remove(_) => "OAuth 토큰 파일 제거",
+                EventKind::Create(_) => "OAuth 토큰 파일 생성",
+                _ => "OAuth 토큰 갱신",
+            },
+        })),
+        None => Ok(None),
+    }
+}
+
+fn snapshot_existing_files(paths: &[PathBuf]) -> HashMap<PathBuf, FileSnapshot> {
+    let mut snapshots = HashMap::new();
+    for path in paths {
+        match snapshot_file(path) {
+            Ok(Some(snapshot)) => {
+                snapshots.insert(path.clone(), snapshot);
+            }
+            Ok(None) => {}
+            Err(err) => tracing::debug!(
+                "MCP credential watcher: could not snapshot {} at startup: {err}",
+                path.display()
+            ),
+        }
+    }
+    snapshots
+}
+
+fn snapshot_file(path: &Path) -> std::io::Result<Option<FileSnapshot>> {
+    if is_credentials_file(path) {
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => Ok(Some(FileSnapshot::CredentialsPresent)),
+            Ok(_) => Ok(None),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => Ok(Some(FileSnapshot::Config(contents))),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn summarize_change(
+    path: &Path,
+    kind: &EventKind,
+    previous: &FileSnapshot,
+    current: Option<&FileSnapshot>,
+) -> Result<Option<FileChangeSummary>, String> {
+    match previous {
+        FileSnapshot::Config(previous_contents) => {
+            let current_contents = match current {
+                Some(FileSnapshot::Config(contents)) => Some(contents.as_str()),
+                Some(FileSnapshot::CredentialsPresent) => {
+                    return Err("snapshot kind changed unexpectedly".into());
+                }
+                None => None,
+            };
+            let diff = diff_mcp_servers(previous_contents, current_contents)?;
+            if diff.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(FileChangeSummary::Config {
+                    file: file_label(path),
+                    diff,
+                }))
+            }
+        }
+        FileSnapshot::CredentialsPresent => Ok(Some(FileChangeSummary::Credentials {
+            file: file_label(path),
+            detail: match kind {
+                EventKind::Create(_) => "OAuth 토큰 파일 생성",
+                EventKind::Remove(_) => "OAuth 토큰 파일 제거",
+                _ => "OAuth 토큰 갱신",
+            },
+        })),
+    }
+}
+
+fn diff_mcp_servers(previous: &str, current: Option<&str>) -> Result<McpConfigDiff, String> {
+    let previous_servers = parse_mcp_servers(previous)?;
+    let current_servers = match current {
+        Some(current) => parse_mcp_servers(current)?,
+        None => HashMap::new(),
+    };
+
+    let previous_names: BTreeSet<String> = previous_servers.keys().cloned().collect();
+    let current_names: BTreeSet<String> = current_servers.keys().cloned().collect();
+
+    let added = current_names.difference(&previous_names).cloned().collect();
+    let removed = previous_names.difference(&current_names).cloned().collect();
+    let changed = previous_names
+        .intersection(&current_names)
+        .filter_map(|name| {
+            (previous_servers.get(name) != current_servers.get(name)).then(|| name.clone())
+        })
+        .collect();
+
+    Ok(McpConfigDiff {
+        added,
+        removed,
+        changed,
+    })
+}
+
+fn parse_mcp_servers(contents: &str) -> Result<HashMap<String, Value>, String> {
+    let root: Value = serde_json::from_str(contents).map_err(|err| err.to_string())?;
+    let Some(mcp_servers) = root.get("mcpServers") else {
+        return Ok(HashMap::new());
+    };
+    let Some(servers) = mcp_servers.as_object() else {
+        return Err("mcpServers must be a JSON object".into());
+    };
+
+    Ok(servers
+        .iter()
+        .map(|(name, value)| (name.clone(), redact_sensitive_fields(value)))
+        .collect())
+}
+
+fn redact_sensitive_fields(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_fields).collect()),
+        Value::Object(map) => {
+            let mut redacted = serde_json::Map::new();
+            for (key, value) in map {
+                if is_sensitive_config_key(key) {
+                    continue;
+                }
+                redacted.insert(key.clone(), redact_sensitive_fields(value));
+            }
+            Value::Object(redacted)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn is_sensitive_config_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "env"
+            | "headers"
+            | "authorization"
+            | "access_token"
+            | "accesstoken"
+            | "refresh_token"
+            | "refreshtoken"
+            | "token"
+            | "api_key"
+            | "apikey"
+            | "bearer_token"
+            | "bearertoken"
+    )
+}
+
+fn is_credentials_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".credentials.json")
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn prefix_names(prefix: &str, names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("{prefix}{name}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 #[cfg(test)]
 mod tests {
     use super::{CredentialNotifyDedupe, credential_paths_with_overrides};
@@ -346,5 +654,208 @@ mod tests {
         assert!(dedupe.try_record_at(ChannelId::new(2), window, t0));
         // First channel still inside its own window.
         assert!(!dedupe.try_record_at(ChannelId::new(1), window, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn diff_mcp_servers_reports_added_removed_and_changed_names_without_secret_values() {
+        let previous = r#"{
+            "mcpServers": {
+                "memento": {
+                    "transport": "stdio",
+                    "command": "memento",
+                    "env": { "MEMENTO_TOKEN": "old-secret" }
+                },
+                "slack": {
+                    "transport": "http",
+                    "url": "https://old.example.com",
+                    "headers": { "Authorization": "Bearer old-token" }
+                }
+            }
+        }"#;
+        let current = r#"{
+            "mcpServers": {
+                "slack": {
+                    "transport": "http",
+                    "url": "https://new.example.com",
+                    "headers": { "Authorization": "Bearer new-token" }
+                },
+                "brave-search": {
+                    "transport": "stdio",
+                    "command": "brave"
+                }
+            }
+        }"#;
+
+        let diff = diff_mcp_servers(previous, Some(current)).unwrap();
+        assert_eq!(diff.added, vec!["brave-search".to_string()]);
+        assert_eq!(diff.removed, vec!["memento".to_string()]);
+        assert_eq!(diff.changed, vec!["slack".to_string()]);
+    }
+
+    #[test]
+    fn first_created_file_emits_notification_and_snapshots() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".claude.json");
+        let mut snapshots = HashMap::new();
+        let changes = vec![CredentialChange {
+            path: config_path.clone(),
+            kind: EventKind::Create(CreateKind::File),
+            timestamp: SystemTime::now(),
+        }];
+
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"memento":{"transport":"stdio","command":"memento"}}}"#,
+        )
+        .unwrap();
+
+        let message =
+            build_notification_from_changes(&changes, &mut snapshots, "fallback notification");
+
+        let message = message.unwrap();
+        assert!(message.contains(".claude.json: +memento"));
+        assert!(matches!(
+            snapshots.get(&config_path),
+            Some(FileSnapshot::Config(contents))
+                if contents.contains("\"memento\"")
+        ));
+    }
+
+    #[test]
+    fn credentials_update_notification_never_includes_file_contents() {
+        let temp = tempdir().unwrap();
+        let credentials_path = temp.path().join(".credentials.json");
+        std::fs::write(
+            &credentials_path,
+            r#"{"memento":{"access_token":"super-secret-token"}}"#,
+        )
+        .unwrap();
+
+        let mut snapshots = snapshot_existing_files(std::slice::from_ref(&credentials_path));
+        std::fs::write(
+            &credentials_path,
+            r#"{"memento":{"access_token":"even-more-secret-token"}}"#,
+        )
+        .unwrap();
+
+        let changes = vec![CredentialChange {
+            path: credentials_path,
+            kind: EventKind::Modify(ModifyKind::Any),
+            timestamp: SystemTime::now(),
+        }];
+
+        let message =
+            build_notification_from_changes(&changes, &mut snapshots, "fallback notification")
+                .unwrap();
+
+        assert!(message.contains(".credentials.json: OAuth 토큰 갱신"));
+        assert!(!message.contains("super-secret-token"));
+        assert!(!message.contains("even-more-secret-token"));
+    }
+
+    #[test]
+    fn unchanged_mcp_server_diff_falls_back_to_static_notification() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".claude.json");
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"memento":{"transport":"stdio","env":{"TOKEN":"secret"}}}}"#,
+        )
+        .unwrap();
+        let mut snapshots = snapshot_existing_files(std::slice::from_ref(&config_path));
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"memento":{"transport":"stdio","env":{"TOKEN":"rotated-secret"}}}}"#,
+        )
+        .unwrap();
+
+        let changes = vec![CredentialChange {
+            path: config_path,
+            kind: EventKind::Modify(ModifyKind::Any),
+            timestamp: SystemTime::now(),
+        }];
+
+        let message =
+            build_notification_from_changes(&changes, &mut snapshots, "fallback notification")
+                .unwrap();
+
+        assert_eq!(message, "fallback notification");
+    }
+
+    #[test]
+    fn mixed_burst_keeps_later_summaries_and_updates_snapshots_after_fallback_file() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join(".claude.json");
+        let credentials_path = temp.path().join(".credentials.json");
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"memento":{"transport":"stdio","env":{"TOKEN":"secret"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &credentials_path,
+            r#"{"memento":{"access_token":"old-secret-token"}}"#,
+        )
+        .unwrap();
+
+        let mut snapshots =
+            snapshot_existing_files(&[config_path.clone(), credentials_path.clone()]);
+
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"memento":{"transport":"stdio","env":{"TOKEN":"rotated-secret"}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &credentials_path,
+            r#"{"memento":{"access_token":"new-secret-token"}}"#,
+        )
+        .unwrap();
+
+        let changes = vec![
+            CredentialChange {
+                path: config_path.clone(),
+                kind: EventKind::Modify(ModifyKind::Any),
+                timestamp: SystemTime::now(),
+            },
+            CredentialChange {
+                path: credentials_path.clone(),
+                kind: EventKind::Modify(ModifyKind::Any),
+                timestamp: SystemTime::now(),
+            },
+        ];
+
+        let message =
+            build_notification_from_changes(&changes, &mut snapshots, "fallback notification")
+                .unwrap();
+
+        assert!(message.contains(".credentials.json: OAuth 토큰 갱신"));
+        assert!(!message.contains("fallback notification"));
+        assert!(matches!(
+            snapshots.get(&config_path),
+            Some(FileSnapshot::Config(contents))
+                if contents.contains("rotated-secret")
+        ));
+        assert!(matches!(
+            snapshots.get(&credentials_path),
+            Some(FileSnapshot::CredentialsPresent)
+        ));
+    }
+
+    #[test]
+    fn change_summary_render_includes_file_and_server_names() {
+        let summary = FileChangeSummary::Config {
+            file: ".claude.json".into(),
+            diff: super::McpConfigDiff {
+                added: vec!["brave-search".into()],
+                removed: vec!["memento".into()],
+                changed: vec!["slack".into()],
+            },
+        };
+
+        assert_eq!(
+            summary.render(),
+            ".claude.json: +brave-search, -memento, 변경 slack"
+        );
     }
 }
