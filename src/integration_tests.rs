@@ -6927,7 +6927,6 @@ mod tests {
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_repo(&db, "test/repo");
-        set_kv(&db, "merge_strategy_mode", "pr-always");
         seed_card_with_repo(&db, "card-211-create", "review", "test/repo", 212, None);
         seed_stamped_create_pr_state(
             &db,
