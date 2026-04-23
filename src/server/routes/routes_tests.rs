@@ -877,6 +877,66 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
 }
 
 #[tokio::test]
+async fn health_wait_script_rejects_unhealthy_server_up_response() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_connected(false);
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pg_pool.clone(),
+        ),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let unhealthy_json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unhealthy_json["status"], "unhealthy");
+    assert_eq!(unhealthy_json["server_up"], true);
+    assert_eq!(unhealthy_json["fully_recovered"], true);
+
+    let defaults_path = format!("{}/scripts/_defaults.sh", env!("CARGO_MANIFEST_DIR"));
+    let port = addr.port();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new("bash")
+            .arg("-lc")
+            .arg(format!(
+                ". \"{defaults_path}\"; wait_for_http_service_health test-health {port} 2 0 0 1",
+            ))
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected wait_for_http_service_health to reject unhealthy server_up=true; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn stats_memento_endpoint_reports_hourly_counts_and_dedup_hits() {
     crate::services::memory::reset_memento_throttle_for_tests();
     crate::services::memory::note_memento_tool_request("recall");

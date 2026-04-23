@@ -268,6 +268,7 @@ health_json_is_ready() {
   local health_json="$1"
   local require_dashboard="${2:-0}"
   local allow_reconcile_degraded="${3:-1}"
+  local status=""
 
   [ -n "$health_json" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
@@ -276,12 +277,15 @@ health_json_is_ready() {
     _health_json_field_is_true "$health_json" "dashboard" || return 1
   fi
 
+  status=$(_health_json_status "$health_json")
+
   if _health_json_field_exists "$health_json" "server_up"; then
     _health_json_field_is_true "$health_json" "server_up" || return 1
+    [ "$status" = "unhealthy" ] && return 1
     return 0
   fi
 
-  if [ "$(_health_json_status "$health_json")" = "healthy" ]; then
+  if [ "$status" = "healthy" ]; then
     return 0
   fi
 

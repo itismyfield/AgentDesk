@@ -750,12 +750,10 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
         if !connected {
             status = status.worsen(HealthStatus::Unhealthy);
             degraded_reasons.push(format!("provider:{}:disconnected", entry.name));
-            fully_recovered = false;
         }
         if restart_pending {
             status = status.worsen(HealthStatus::Unhealthy);
             degraded_reasons.push(format!("provider:{}:restart_pending", entry.name));
-            fully_recovered = false;
         }
         if !reconcile_done {
             status = status.worsen(HealthStatus::Degraded);
@@ -926,6 +924,18 @@ impl TestHealthHarness {
         self.shared
             .reconcile_done
             .store(done, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_connected(&self, connected: bool) {
+        self.shared
+            .bot_connected
+            .store(connected, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_restart_pending(&self, restart_pending: bool) {
+        self.shared
+            .restart_pending
+            .store(restart_pending, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn shared(&self) -> Arc<SharedData> {
@@ -2550,6 +2560,44 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|reason| reason == "provider:claude:pending_queue_depth:3")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_keeps_fully_recovered_true_for_disconnected_provider_after_startup() {
+        let harness = TestHealthHarness::new().await;
+        harness.set_connected(false);
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(snapshot.status(), HealthStatus::Unhealthy);
+        assert_eq!(json["fully_recovered"], true);
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "provider:claude:disconnected")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_keeps_fully_recovered_true_for_restart_pending_after_startup() {
+        let harness = TestHealthHarness::new().await;
+        harness.set_restart_pending(true);
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(snapshot.status(), HealthStatus::Unhealthy);
+        assert_eq!(json["fully_recovered"], true);
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "provider:claude:restart_pending")
         );
     }
 
