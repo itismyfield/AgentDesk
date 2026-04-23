@@ -883,7 +883,7 @@ pub(super) async fn bootstrap_thread_session(
     thread_channel_id: ChannelId,
     parent_path: &str,
     serenity_ctx: &serenity::prelude::Context,
-) {
+) -> bool {
     let (thread_title, cat_name) = resolve_channel_category(serenity_ctx, thread_channel_id).await;
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
     let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
@@ -896,7 +896,7 @@ pub(super) async fn bootstrap_thread_session(
     };
     let mut data = shared.core.lock().await;
     if data.sessions.contains_key(&thread_channel_id) {
-        return;
+        return false;
     }
 
     // Session ID comes from DB (sessions.claude_session_id), not from file.
@@ -951,6 +951,7 @@ pub(super) async fn bootstrap_thread_session(
     session.current_path = Some(effective_path.clone());
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
+    true
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
