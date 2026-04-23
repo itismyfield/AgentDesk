@@ -364,8 +364,17 @@ fn render_dispatch_contract(
             } else {
                 DIRECT_FIRST_COMPLETION_CONTRACT
             };
+            let patch_guidance = current_task.dispatch_id.map(|dispatch_id| {
+                format!(
+                    "- 완료 시 `PATCH /api/dispatches/{dispatch_id}` result 에 `completed_commit`(최종 HEAD SHA)을 반드시 포함한다.\n\
+                     - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"summary\":\"결과 요약\",\"completed_commit\":\"<HEAD SHA>\"}}}}`"
+                )
+            });
             Some(format!(
-                "[Dispatch Contract]\n{DISPATCH_CONTRACT_COMMON}\n{mode_contract}"
+                "[Dispatch Contract]\n{DISPATCH_CONTRACT_COMMON}\n{mode_contract}{}",
+                patch_guidance
+                    .map(|guidance| format!("\n{guidance}"))
+                    .unwrap_or_default()
             ))
         }
         Some("review") => {
@@ -1370,6 +1379,7 @@ mod tests {
         });
         let dispatch_context_raw = dispatch_context.to_string();
         let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-direct-1"),
             dispatch_context: Some(&dispatch_context_raw),
             ..CurrentTaskContext::default()
         };
@@ -1392,6 +1402,8 @@ mod tests {
         assert!(prompt.contains("`merge_strategy_mode=direct-first`"));
         assert!(prompt.contains("`git push origin HEAD:main`"));
         assert!(prompt.contains("PR fallback"));
+        assert!(prompt.contains("PATCH /api/dispatches/dispatch-direct-1"));
+        assert!(prompt.contains("\"completed_commit\":\"<HEAD SHA>\""));
         assert!(
             prompt.contains("`▶ Ready for input (type message + Enter)` 는 완료 마커가 아니다.")
         );

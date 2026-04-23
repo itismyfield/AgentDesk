@@ -2757,6 +2757,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn implementation_completion_accepts_direct_main_commit_from_baseline_and_triggers_review() {
+        let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-935-main", "in_progress", "test/repo", 935, None);
+
+        let expected_baseline = run_git_output(repo.path(), &["rev-parse", "origin/main"]);
+        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
+            &db,
+            "card-935-main",
+            "agent-1",
+            "implementation",
+            "[Impl]",
+            &serde_json::json!({
+                "target_repo": repo.path().to_string_lossy(),
+            }),
+            dispatch::DispatchCreateOptions::default(),
+        )
+        .unwrap();
+
+        {
+            let conn = db.lock().unwrap();
+            let context_json: String = conn
+                .query_row(
+                    "SELECT context FROM task_dispatches WHERE id = ?1",
+                    [&dispatch_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let context: serde_json::Value = serde_json::from_str(&context_json).unwrap();
+            assert_eq!(
+                context["baseline_commit"].as_str(),
+                Some(expected_baseline.as_str())
+            );
+        }
+
+        run_git(
+            repo.path(),
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "#935 direct main completion",
+            ],
+        );
+        let main_commit = run_git_output(repo.path(), &["rev-parse", "HEAD"]);
+
+        let result = crate::services::discord::build_work_dispatch_completion_result(
+            Some(&db),
+            None,
+            &dispatch_id,
+            "test_harness",
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            result["completed_commit"].as_str(),
+            Some(main_commit.as_str())
+        );
+
+        let completion = dispatch::complete_dispatch(&db, &engine, &dispatch_id, &result);
+        assert!(
+            completion.is_ok(),
+            "complete_dispatch should accept mainline completion evidence: {:?}",
+            completion.err()
+        );
+
+        assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
+        assert_eq!(get_card_status(&db, "card-935-main"), "review");
+
+        let conn = db.lock().unwrap();
+        let review_dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches
+                 WHERE kanban_card_id = 'card-935-main'
+                   AND dispatch_type = 'review'
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_dispatch_count, 1);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn scenario_6b_review_verdict_pass_completes_roundtrip_to_done() {
         let (_repo, runtime_root, _env_guard) = setup_test_repo_with_runtime_root();

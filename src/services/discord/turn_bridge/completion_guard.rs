@@ -814,33 +814,48 @@ struct DispatchCompletionHints {
     issue_number: Option<i64>,
     dispatch_created_at: Option<String>,
     target_repo: Option<String>,
+    baseline_commit: Option<String>,
     /// Commit SHA extracted directly from agent output (most reliable).
     output_commit: Option<String>,
     output_commit_repo_dir: Option<String>,
 }
 
-fn resolve_completion_target_repo(
+#[derive(Default)]
+struct ParsedCompletionHintContext {
+    target_repo: Option<String>,
+    baseline_commit: Option<String>,
+}
+
+fn parse_completion_hint_context(
     dispatch_id: &str,
     context_raw: Option<&str>,
     fallback_repo: Option<String>,
-) -> Option<String> {
-    context_raw
-        .and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                tracing::warn!(
-                    dispatch_id = %dispatch_id,
-                    error = %error,
-                    "failed to parse postgres completion hint context JSON"
-                );
-                None
-            }
-        })
-        .as_ref()
-        .and_then(|value| value.get("target_repo"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .or(fallback_repo)
+) -> ParsedCompletionHintContext {
+    let parsed = context_raw.and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(
+                dispatch_id = %dispatch_id,
+                error = %error,
+                "failed to parse postgres completion hint context JSON"
+            );
+            None
+        }
+    });
+
+    ParsedCompletionHintContext {
+        target_repo: parsed
+            .as_ref()
+            .and_then(|value| value.get("target_repo"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or(fallback_repo),
+        baseline_commit: parsed
+            .as_ref()
+            .and_then(|value| value.get("baseline_commit"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    }
 }
 
 fn lookup_dispatch_completion_hints(
@@ -891,24 +906,27 @@ fn lookup_dispatch_completion_hints(
                         &dispatch_id_owned,
                         "repo_id",
                     );
+                    let parsed_context = parse_completion_hint_context(
+                        &dispatch_id_owned,
+                        context_raw.as_deref(),
+                        fallback_repo,
+                    );
                     (
                         issue_number,
                         dispatch_created_at,
-                        resolve_completion_target_repo(
-                            &dispatch_id_owned,
-                            context_raw.as_deref(),
-                            fallback_repo,
-                        ),
+                        parsed_context.target_repo,
+                        parsed_context.baseline_commit,
                     )
                 }))
             },
             |error| error,
         ) {
-            Ok(Some((issue_number, dispatch_created_at, target_repo))) => {
+            Ok(Some((issue_number, dispatch_created_at, target_repo, baseline_commit))) => {
                 return DispatchCompletionHints {
                     issue_number,
                     dispatch_created_at,
                     target_repo,
+                    baseline_commit,
                     output_commit: None,
                     output_commit_repo_dir: None,
                 };
@@ -924,7 +942,7 @@ fn lookup_dispatch_completion_hints(
     }
 
     let conn = db.and_then(|db| db.separate_conn().ok());
-    let (issue_number, dispatch_created_at, target_repo) = conn
+    let (issue_number, dispatch_created_at, target_repo, baseline_commit) = conn
         .as_ref()
         .and_then(|conn| {
             conn.query_row(
@@ -935,7 +953,7 @@ fn lookup_dispatch_completion_hints(
                 [dispatch_id],
                 |row| {
                     let context_raw: Option<String> = row.get(2)?;
-                    let target_repo = resolve_completion_target_repo(
+                    let parsed_context = parse_completion_hint_context(
                         dispatch_id,
                         context_raw.as_deref(),
                         row.get::<_, Option<String>>(3).ok().flatten(),
@@ -943,17 +961,19 @@ fn lookup_dispatch_completion_hints(
                     Ok((
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        target_repo,
+                        parsed_context.target_repo,
+                        parsed_context.baseline_commit,
                     ))
                 },
             )
             .ok()
         })
-        .unwrap_or((None, None, None));
+        .unwrap_or((None, None, None, None));
     DispatchCompletionHints {
         issue_number,
         dispatch_created_at,
         target_repo,
+        baseline_commit,
         output_commit: None,
         output_commit_repo_dir: None,
     }
@@ -991,41 +1011,74 @@ fn extract_output_commit_from_repo_dirs(
     })
 }
 
+fn completion_main_repo_dir(
+    adk_cwd: Option<&str>,
+    repo_dirs: &[String],
+    hints: &DispatchCompletionHints,
+) -> Option<String> {
+    crate::services::platform::shell::resolve_repo_dir_for_target(hints.target_repo.as_deref())
+        .ok()
+        .flatten()
+        .or_else(|| adk_cwd.map(str::to_string))
+        .or_else(|| repo_dirs.first().cloned())
+}
+
 fn work_dispatch_completion_context(
     adk_cwd: Option<&str>,
     hints: &DispatchCompletionHints,
 ) -> Option<serde_json::Value> {
     let repo_dirs = completion_repo_dirs(adk_cwd, hints);
+    let main_repo_dir = completion_main_repo_dir(adk_cwd, &repo_dirs, hints);
     // Commit resolution priority:
     // 1) Agent's own commit extracted from turn output (most reliable — direct evidence)
     // 2) Time-scoped: newest commit since dispatch start, preferring issue-number match
-    // 3) Issue grep: recent commits matching (#issue_number)
-    let (cwd, completed_commit) = if let Some(commit) = hints.output_commit.clone() {
+    // 3) Mainline range scan from dispatch baseline with revert filtering
+    // 4) Issue grep: recent commits matching (#issue_number)
+    let output_commit = hints.output_commit.clone().and_then(|commit| {
         let repo_dir = hints
             .output_commit_repo_dir
             .clone()
             .or_else(|| repo_dirs.first().cloned())?;
-        (repo_dir, commit)
-    } else if let Some((repo_dir, commit)) =
-        hints.dispatch_created_at.as_deref().and_then(|since| {
-            repo_dirs.iter().find_map(|repo_dir| {
-                crate::services::platform::shell::git_best_commit_for_dispatch(
-                    repo_dir,
-                    since,
-                    hints.issue_number,
-                )
-                .map(|commit| (repo_dir.clone(), commit))
-            })
+        Some((repo_dir, commit))
+    });
+    let time_scoped_commit = hints.dispatch_created_at.as_deref().and_then(|since| {
+        repo_dirs.iter().find_map(|repo_dir| {
+            crate::services::platform::shell::git_best_commit_for_dispatch(
+                repo_dir,
+                since,
+                hints.issue_number,
+            )
+            .map(|commit| (repo_dir.clone(), commit))
         })
-    {
-        (repo_dir, commit)
-    } else {
-        let issue_number = hints.issue_number?;
+    });
+    let mainline_commit =
+        if let (Some(issue_number), Some(repo_dir)) = (hints.issue_number, main_repo_dir) {
+            let baseline_commit = hints
+                .baseline_commit
+                .clone()
+                .or_else(|| crate::services::platform::shell::git_mainline_head_commit(&repo_dir));
+            baseline_commit.and_then(|baseline_commit| {
+                crate::services::platform::shell::git_mainline_commit_for_issue_since(
+                    &repo_dir,
+                    &baseline_commit,
+                    issue_number,
+                )
+                .map(|commit| (repo_dir, commit))
+            })
+        } else {
+            None
+        };
+    let issue_grep_commit = hints.issue_number.and_then(|issue_number| {
         repo_dirs.iter().find_map(|repo_dir| {
             crate::services::platform::shell::git_latest_commit_for_issue(repo_dir, issue_number)
                 .map(|commit| (repo_dir.clone(), commit))
-        })?
-    };
+        })
+    });
+
+    let (cwd, completed_commit) = output_commit
+        .or(time_scoped_commit)
+        .or(mainline_commit)
+        .or(issue_grep_commit)?;
     let mut obj = serde_json::Map::new();
     obj.insert(
         "completed_worktree_path".to_string(),
@@ -1070,7 +1123,7 @@ fn completion_result_with_context(
     result
 }
 
-pub(in crate::services::discord) fn build_work_dispatch_completion_result(
+pub(crate) fn build_work_dispatch_completion_result(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
@@ -1433,6 +1486,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                     issue_number: None,
                     dispatch_created_at: None,
                     target_repo: None,
+                    baseline_commit: None,
                     output_commit: None,
                     output_commit_repo_dir: None,
                 },
@@ -1534,6 +1588,25 @@ mod tests {
         repo
     }
 
+    fn init_repo_with_origin() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        run_git(origin.path(), &["init", "--bare", "--initial-branch=main"]);
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.name", "AgentDesk Test"]);
+        run_git(
+            repo.path(),
+            &["config", "user.email", "agentdesk@example.com"],
+        );
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        (repo, origin)
+    }
+
     #[derive(Clone)]
     struct TestLogWriter {
         buffer: Arc<Mutex<Vec<u8>>>,
@@ -1597,13 +1670,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_completion_target_repo_logs_context_parse_failures() {
+    fn parse_completion_hint_context_logs_context_parse_failures() {
         let fallback_repo = Some("agentdesk".to_string());
         let (value, logs) = capture_logs(|| {
-            resolve_completion_target_repo("dispatch-1", Some("{not-json"), fallback_repo.clone())
+            parse_completion_hint_context("dispatch-1", Some("{not-json"), fallback_repo.clone())
         });
 
-        assert_eq!(value, fallback_repo);
+        assert_eq!(value.target_repo, fallback_repo);
+        assert_eq!(value.baseline_commit, None);
         assert!(logs.contains("failed to parse postgres completion hint context JSON"));
         assert!(logs.contains("dispatch_id=dispatch-1"));
     }
@@ -1630,6 +1704,7 @@ mod tests {
                 issue_number: None,
                 dispatch_created_at: None,
                 target_repo: None,
+                baseline_commit: None,
                 output_commit: None,
                 output_commit_repo_dir: None,
             },
@@ -1650,6 +1725,7 @@ mod tests {
                 issue_number: None,
                 dispatch_created_at: None,
                 target_repo: None,
+                baseline_commit: None,
                 output_commit: Some(head.clone()),
                 output_commit_repo_dir: repo_dir.to_str().map(str::to_string),
             },
@@ -1687,6 +1763,7 @@ mod tests {
                 issue_number: Some(627),
                 dispatch_created_at: None,
                 target_repo: Some(target_repo_dir.to_string_lossy().to_string()),
+                baseline_commit: None,
                 output_commit: None,
                 output_commit_repo_dir: None,
             },
@@ -1708,6 +1785,96 @@ mod tests {
         );
         assert_eq!(actual_completed_worktree, expected_target_repo);
         assert_eq!(actual_target_repo, expected_target_repo);
+    }
+
+    #[test]
+    fn work_dispatch_completion_context_falls_back_to_mainline_commit_since_baseline() {
+        let (repo, _origin) = init_repo_with_origin();
+        let repo_dir = repo.path();
+        let _repo_dir_override = crate::services::discord::runtime_store::lock_test_env();
+        let previous_repo_dir = std::env::var_os("AGENTDESK_REPO_DIR");
+        unsafe { std::env::set_var("AGENTDESK_REPO_DIR", repo_dir) };
+
+        let baseline_commit = crate::services::platform::shell::git_dispatch_baseline_commit(
+            repo_dir.to_str().unwrap(),
+        )
+        .expect("baseline commit");
+        run_git(
+            repo_dir,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "#935 direct main attribution",
+            ],
+        );
+        let direct_commit = run_git(repo_dir, &["rev-parse", "HEAD"]);
+
+        let context = work_dispatch_completion_context(
+            None,
+            &DispatchCompletionHints {
+                issue_number: Some(935),
+                dispatch_created_at: None,
+                target_repo: None,
+                baseline_commit: Some(baseline_commit),
+                output_commit: None,
+                output_commit_repo_dir: None,
+            },
+        )
+        .expect("mainline direct commit should be detected");
+
+        assert_eq!(
+            context["completed_commit"].as_str(),
+            Some(direct_commit.as_str())
+        );
+        assert_eq!(
+            std::fs::canonicalize(context["completed_worktree_path"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(repo_dir).unwrap()
+        );
+        match previous_repo_dir {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") },
+        }
+    }
+
+    #[test]
+    fn work_dispatch_completion_context_rejects_reverted_mainline_commit() {
+        let (repo, _origin) = init_repo_with_origin();
+        let repo_dir = repo.path();
+        let _repo_dir_override = crate::services::discord::runtime_store::lock_test_env();
+        let previous_repo_dir = std::env::var_os("AGENTDESK_REPO_DIR");
+        unsafe { std::env::set_var("AGENTDESK_REPO_DIR", repo_dir) };
+
+        let baseline_commit = crate::services::platform::shell::git_dispatch_baseline_commit(
+            repo_dir.to_str().unwrap(),
+        )
+        .expect("baseline commit");
+        std::fs::write(repo_dir.join("reverted.txt"), "direct main\n").unwrap();
+        run_git(repo_dir, &["add", "reverted.txt"]);
+        run_git(
+            repo_dir,
+            &["commit", "-m", "#935 reverted direct main attribution"],
+        );
+        let issue_commit = run_git(repo_dir, &["rev-parse", "HEAD"]);
+        run_git(repo_dir, &["revert", "--no-edit", issue_commit.as_str()]);
+
+        let context = work_dispatch_completion_context(
+            None,
+            &DispatchCompletionHints {
+                issue_number: Some(935),
+                dispatch_created_at: None,
+                target_repo: None,
+                baseline_commit: Some(baseline_commit),
+                output_commit: None,
+                output_commit_repo_dir: None,
+            },
+        );
+
+        assert!(context.is_none());
+        match previous_repo_dir {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") },
+        }
     }
 
     #[test]
