@@ -10,8 +10,6 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Row};
-#[cfg(test)]
-use std::io::ErrorKind;
 
 use crate::config::{AgentChannel, AgentDef, Config};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
@@ -390,10 +388,6 @@ const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
 const TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
-const TEST_POSTGRES_ADMIN_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(test)]
-const TEST_POSTGRES_ADMIN_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
-#[cfg(test)]
 static POSTGRES_TEST_SETUP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
@@ -495,58 +489,15 @@ async fn connect_test_admin_connection(
 ) -> Result<PgConnection, String> {
     let options = PgConnectOptions::from_str(database_url)
         .map_err(|error| format!("{label} parse postgres url: {error}"))?;
-    let connect_label = format!("{label} connect postgres");
-    let started_at = tokio::time::Instant::now();
-    let mut last_retryable_error: Option<String> = None;
-
-    loop {
-        let elapsed = started_at.elapsed();
-        if elapsed >= TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT {
-            return Err(match last_retryable_error {
-                Some(error) => format!(
-                    "{connect_label} timed out after {}s; last error: {error}",
-                    TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT.as_secs()
-                ),
-                None => format!(
-                    "{connect_label} timed out after {}s",
-                    TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT.as_secs()
-                ),
-            });
-        }
-
-        let remaining = TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT.saturating_sub(elapsed);
-        let attempt_timeout = remaining.min(TEST_POSTGRES_ADMIN_CONNECT_ATTEMPT_TIMEOUT);
-        match tokio::time::timeout(attempt_timeout, PgConnection::connect_with(&options)).await {
-            Ok(Ok(connection)) => return Ok(connection),
-            Ok(Err(error)) if is_retryable_test_admin_connect_error(&error) => {
-                last_retryable_error = Some(error.to_string());
-            }
-            Ok(Err(error)) => return Err(format!("{connect_label}: {error}")),
-            Err(_) => {
-                last_retryable_error = Some(format!(
-                    "connect attempt timed out after {}s",
-                    attempt_timeout.as_secs()
-                ));
-            }
-        }
-
-        tokio::time::sleep(TEST_POSTGRES_ADMIN_CONNECT_RETRY_DELAY.min(remaining)).await;
-    }
-}
-
-#[cfg(test)]
-fn is_retryable_test_admin_connect_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Io(io_error) => matches!(
-            io_error.kind(),
-            ErrorKind::ConnectionRefused
-                | ErrorKind::ConnectionReset
-                | ErrorKind::TimedOut
-                | ErrorKind::NotConnected
-        ),
-        sqlx::Error::Database(db_error) => db_error.code().as_deref() == Some("57P03"),
-        _ => false,
-    }
+    // Admin create/drop helpers need only one dedicated connection. Avoid the
+    // pool acquire path entirely so slow CI runners do not fail before the
+    // first connection is even established.
+    run_test_postgres_sqlx_op_with_timeout(
+        TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT,
+        &format!("{label} connect postgres"),
+        PgConnection::connect_with(&options),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -990,24 +941,5 @@ mod tests {
             err.contains("timed out"),
             "expected timeout wording, got {err}"
         );
-    }
-
-    #[test]
-    fn postgres_test_admin_connect_retry_detects_transient_startup_errors() {
-        assert!(super::is_retryable_test_admin_connect_error(
-            &sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "startup race",
-            ))
-        ));
-        assert!(super::is_retryable_test_admin_connect_error(
-            &sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "slow startup",
-            ))
-        ));
-        assert!(!super::is_retryable_test_admin_connect_error(
-            &sqlx::Error::InvalidArgument("bad url".to_string())
-        ));
     }
 }

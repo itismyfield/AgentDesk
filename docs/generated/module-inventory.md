@@ -4,7 +4,7 @@
 
 - Production Rust modules: `260`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `84`
+- Giant files: `83`
 
 ## Namespace Summary
 
@@ -64,7 +64,7 @@
 | `db::auto_queue` | `src/db/auto_queue.rs` | 6265 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 487 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::postgres` | `src/db/postgres.rs` | 1013 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 945 |  |
 | `db::schema` | `src/db/schema.rs` | 2942 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1246 | giant-file |
