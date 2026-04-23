@@ -1940,27 +1940,27 @@ pub async fn handle_rebind_inflight<'a>(
             .to_string(),
         ),
         Err(err) => {
-            let (status, message) = match &err {
-                super::recovery_engine::RebindError::TmuxNotAlive { .. } => {
-                    ("404 Not Found", err.to_string())
-                }
-                super::recovery_engine::RebindError::InflightAlreadyExists => {
-                    ("409 Conflict", err.to_string())
-                }
-                super::recovery_engine::RebindError::ChannelNotBound
-                | super::recovery_engine::RebindError::ChannelNameMissing => {
-                    ("400 Bad Request", err.to_string())
-                }
-                super::recovery_engine::RebindError::Internal(_) => {
-                    ("500 Internal Server Error", err.to_string())
-                }
-            };
+            let (status, message) = rebind_error_status_and_message(&err);
             (
                 status,
                 serde_json::json!({ "ok": false, "error": message }).to_string(),
             )
         }
     }
+}
+
+fn rebind_error_status_and_message(
+    err: &super::recovery_engine::RebindError,
+) -> (&'static str, String) {
+    let status = match err {
+        super::recovery_engine::RebindError::TmuxNotAlive { .. } => "404 Not Found",
+        super::recovery_engine::RebindError::InflightAlreadyExists
+        | super::recovery_engine::RebindError::StaleOutputPath { .. } => "409 Conflict",
+        super::recovery_engine::RebindError::ChannelNotBound
+        | super::recovery_engine::RebindError::ChannelNameMissing => "400 Bad Request",
+        super::recovery_engine::RebindError::Internal(_) => "500 Internal Server Error",
+    };
+    (status, err.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2700,5 +2700,22 @@ mod tests {
             parsed.tmux_session.is_none(),
             "whitespace-only override must fall back to auto-derivation"
         );
+    }
+
+    #[test]
+    fn rebind_stale_output_path_surfaces_as_conflict() {
+        let err = crate::services::discord::recovery_engine::RebindError::StaleOutputPath {
+            tmux_session: "AgentDesk-codex-adk-cdx".to_string(),
+            output_path: "/tmp/current.jsonl".to_string(),
+            live_fd: "5w".to_string(),
+            live_inode: Some(4_242),
+            live_path: "/tmp/current.jsonl (deleted)".to_string(),
+        };
+
+        let (status, message) = rebind_error_status_and_message(&err);
+
+        assert_eq!(status, "409 Conflict");
+        assert!(message.contains("StaleOutputPath"));
+        assert!(message.contains("fd 5w"));
     }
 }
