@@ -384,6 +384,8 @@ const TEST_POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
 const TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS: u32 = 1;
 #[cfg(test)]
+const TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
 static POSTGRES_TEST_SETUP_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
@@ -447,14 +449,44 @@ async fn connect_test_pool_with_max_connections(
     label: &str,
     max_connections: u32,
 ) -> Result<PgPool, String> {
+    connect_test_pool_with_timeout(
+        database_url,
+        label,
+        max_connections,
+        TEST_POSTGRES_OP_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn connect_test_pool_with_timeout(
+    database_url: &str,
+    label: &str,
+    max_connections: u32,
+    acquire_timeout: Duration,
+) -> Result<PgPool, String> {
     let options = PgConnectOptions::from_str(database_url)
         .map_err(|error| format!("{label} parse postgres url: {error}"))?;
     run_test_postgres_sqlx_op(
         &format!("{label} connect postgres"),
         PgPoolOptions::new()
             .max_connections(max_connections.max(1))
-            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
+            .acquire_timeout(acquire_timeout)
             .connect_with(options),
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn connect_test_admin_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
+    // Admin create/drop helpers can race with slow pool teardown in PG-heavy CI
+    // lanes. Give only this setup/teardown path a longer acquisition window
+    // instead of weakening runtime or general test-pool behavior.
+    connect_test_pool_with_timeout(
+        database_url,
+        label,
+        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
+        TEST_POSTGRES_ADMIN_CONNECT_TIMEOUT,
     )
     .await
 }
@@ -478,12 +510,7 @@ pub(crate) async fn create_test_database(
     // isolated databases at the same time. Serialize setup/teardown at the
     // shared helper boundary so every test module benefits from the guard.
     let _guard = lock_test_setup();
-    let admin_pool = connect_test_pool_with_max_connections(
-        admin_url,
-        &format!("{label} admin"),
-        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
-    )
-    .await?;
+    let admin_pool = connect_test_admin_pool(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} create postgres test db {database_name}"),
         sqlx::query(&format!("CREATE DATABASE \"{database_name}\"")).execute(&admin_pool),
@@ -517,12 +544,7 @@ pub(crate) async fn drop_test_database(
     label: &str,
 ) -> Result<(), String> {
     let _guard = lock_test_setup();
-    let admin_pool = connect_test_pool_with_max_connections(
-        admin_url,
-        &format!("{label} admin"),
-        TEST_POSTGRES_ADMIN_POOL_MAX_CONNECTIONS,
-    )
-    .await?;
+    let admin_pool = connect_test_admin_pool(admin_url, &format!("{label} admin")).await?;
     run_test_postgres_sqlx_op(
         &format!("{label} terminate postgres test db sessions {database_name}"),
         sqlx::query(
