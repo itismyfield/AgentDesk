@@ -455,8 +455,12 @@ mod tests {
         emit_json_line(&mut output, json!({"type":"assistant","message":"after"})).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains(r#"{"type":"assistant","message":"kept"}"#));
-        assert!(content.contains(r#"{"type":"assistant","message":"after"}"#));
+        let lines = content
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(lines.contains(&json!({"type":"assistant","message":"kept"})));
+        assert!(lines.contains(&json!({"type":"assistant","message":"after"})));
     }
 
     #[test]

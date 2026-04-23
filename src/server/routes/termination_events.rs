@@ -27,14 +27,14 @@ pub async fn list_termination_events(
 ) -> Json<serde_json::Value> {
     let limit = params.limit.min(500);
 
-    if let Some(pool) = state.pg_pool_ref() {
+    if let Some(pool) = state.pg_pool.as_ref() {
         return match list_termination_events_pg(pool, &params, limit).await {
             Ok(events) => Json(json!({"events": events})),
             Err(error) => Json(json!({"error": format!("Query error: {error}"), "events": []})),
         };
     }
 
-    let conn = match state.sqlite_db().read_conn() {
+    let conn = match state.db.read_conn() {
         Ok(c) => c,
         Err(e) => {
             return Json(json!({"error": format!("DB error: {e}"), "events": []}));
@@ -229,7 +229,7 @@ async fn list_termination_events_pg(
                 "reason_text": row.try_get::<Option<String>, _>("reason_text").map_err(|error| format!("{error}"))?,
                 "probe_snapshot": row.try_get::<Option<String>, _>("probe_snapshot").map_err(|error| format!("{error}"))?,
                 "last_offset": row.try_get::<Option<i64>, _>("last_offset").map_err(|error| format!("{error}"))?,
-                "tmux_alive": row.try_get::<Option<i32>, _>("tmux_alive").map_err(|error| format!("{error}"))?.map(|value| value != 0),
+                "tmux_alive": row.try_get::<Option<i64>, _>("tmux_alive").map_err(|error| format!("{error}"))?.map(|value| value != 0),
                 "created_at": row.try_get::<String, _>("created_at").map_err(|error| format!("{error}"))?,
             }))
         })
