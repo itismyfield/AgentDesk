@@ -42,6 +42,34 @@ fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
             .is_some()
 }
 
+fn inject_work_dispatch_baseline_commit(dispatch_type: &str, context: &mut serde_json::Value) {
+    if !matches!(dispatch_type, "implementation" | "rework") {
+        return;
+    }
+    let Some(obj) = context.as_object_mut() else {
+        return;
+    };
+    if obj.contains_key("baseline_commit") {
+        return;
+    }
+
+    let target_repo = obj
+        .get("target_repo")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty());
+    let baseline_commit =
+        crate::services::platform::shell::resolve_repo_dir_for_target(target_repo)
+            .ok()
+            .flatten()
+            .and_then(|repo_dir| {
+                crate::services::platform::shell::git_dispatch_baseline_commit(&repo_dir)
+            });
+
+    if let Some(baseline_commit) = baseline_commit {
+        obj.insert("baseline_commit".to_string(), json!(baseline_commit));
+    }
+}
+
 #[cfg(test)]
 fn load_existing_thread_for_channel(
     conn: &libsql_rusqlite::Connection,
@@ -524,6 +552,7 @@ async fn create_dispatch_core_internal(
         obj.entry("target_repo".to_string())
             .or_insert_with(|| json!(target_repo));
     }
+    inject_work_dispatch_baseline_commit(dispatch_type, &mut context_with_session_strategy);
     let context_str = if dispatch_type == "review" {
         build_review_context(
             pg_pool,
@@ -826,6 +855,7 @@ pub(crate) fn create_dispatch_record_with_id_sqlite_test(
         obj.entry("target_repo".to_string())
             .or_insert_with(|| json!(target_repo));
     }
+    inject_work_dispatch_baseline_commit(dispatch_type, &mut context_with_session_strategy);
     let context_str = if dispatch_type == "review" {
         build_review_context_sqlite_test(
             db,

@@ -909,6 +909,24 @@ mod tests {
         (repo, override_guard)
     }
 
+    fn setup_test_repo_with_origin() -> (tempfile::TempDir, tempfile::TempDir, RepoDirOverride) {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let origin_dir = origin.path().to_str().unwrap();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        run_git(origin_dir, &["init", "--bare", "--initial-branch=main"]);
+        run_git(repo_dir, &["init", "-b", "main"]);
+        run_git(repo_dir, &["config", "user.email", "test@test.com"]);
+        run_git(repo_dir, &["config", "user.name", "Test"]);
+        run_git(repo_dir, &["remote", "add", "origin", origin_dir]);
+        run_git(repo_dir, &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(repo_dir, &["push", "-u", "origin", "main"]);
+
+        let override_guard = RepoDirOverride::new(repo_dir);
+        (repo, origin, override_guard)
+    }
+
     fn git_commit(repo_dir: &str, message: &str) -> String {
         run_git(repo_dir, &["commit", "--allow-empty", "-m", message]);
         crate::services::platform::git_head_commit(repo_dir).unwrap()
@@ -1186,6 +1204,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn create_dispatch_records_origin_main_baseline_commit() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-baseline", "ready");
+        let (repo, _origin, _override_guard) = setup_test_repo_with_origin();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        run_git(
+            repo_dir,
+            &["commit", "--allow-empty", "-m", "local main only"],
+        );
+        let expected_baseline =
+            crate::services::platform::shell::git_dispatch_baseline_commit(repo_dir)
+                .expect("origin/main baseline");
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-baseline",
+            "agent-1",
+            "implementation",
+            "title",
+            &json!({}),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dispatch["context"]["baseline_commit"].as_str(),
+            Some(expected_baseline.as_str())
+        );
     }
 
     #[test]

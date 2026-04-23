@@ -46,6 +46,8 @@ pub(in crate::services::discord) use recovery_engine as recovery;
 pub(crate) use restart_mode::InflightRestartMode;
 pub(crate) use router::HeadlessTurnStartError;
 pub(crate) use turn_bridge::TmuxCleanupPolicy;
+#[cfg(test)]
+pub(crate) use turn_bridge::build_work_dispatch_completion_result;
 
 use std::borrow::Cow;
 use std::collections::HashMap;

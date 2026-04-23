@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use regex::Regex;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
@@ -398,6 +398,102 @@ pub fn git_head_commit(repo_dir: &str) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+fn git_commit_for_ref(repo_dir: &str, git_ref: &str) -> Option<String> {
+    git_command()
+        .args(["rev-parse", git_ref])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn git_ref_exists(repo_dir: &str, git_ref: &str) -> bool {
+    git_command()
+        .args(["rev-parse", "--verify", git_ref])
+        .current_dir(repo_dir)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn mainline_ref_for_range_search(repo_dir: &str) -> Option<&'static str> {
+    ["main", "master", "origin/main", "origin/master"]
+        .into_iter()
+        .find(|candidate| git_ref_exists(repo_dir, candidate))
+}
+
+fn baseline_ref_for_dispatch(repo_dir: &str) -> Option<&'static str> {
+    ["origin/main", "origin/master", "main", "master"]
+        .into_iter()
+        .find(|candidate| git_ref_exists(repo_dir, candidate))
+}
+
+pub fn git_dispatch_baseline_commit(repo_dir: &str) -> Option<String> {
+    let baseline_ref = baseline_ref_for_dispatch(repo_dir)?;
+    git_commit_for_ref(repo_dir, baseline_ref)
+}
+
+pub fn git_mainline_head_commit(repo_dir: &str) -> Option<String> {
+    let main_ref = mainline_ref_for_range_search(repo_dir)?;
+    git_commit_for_ref(repo_dir, main_ref)
+}
+
+pub fn git_mainline_commit_for_issue_since(
+    repo_dir: &str,
+    baseline_commit: &str,
+    issue_number: i64,
+) -> Option<String> {
+    let main_ref = mainline_ref_for_range_search(repo_dir)?;
+    let revert_re = Regex::new(r"(?m)^This reverts commit ([0-9a-fA-F]{7,40})\.?$")
+        .expect("valid revert regex");
+    let range = format!("{baseline_commit}..{main_ref}");
+    let output = git_command()
+        .args(["log", "--format=%H%x1f%s%x1f%B%x1e", &range])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let log = String::from_utf8_lossy(&output.stdout);
+    if log.trim().is_empty() {
+        return None;
+    }
+
+    let issue_re = issue_number_matcher(issue_number)?;
+    let mut reverted_commits = HashSet::new();
+    let mut candidates = Vec::new();
+
+    for entry in log.split('\x1e') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(3, '\x1f');
+        let sha = parts.next()?.trim().to_string();
+        let subject = parts.next().unwrap_or_default().trim().to_string();
+        let body = parts.next().unwrap_or_default().to_string();
+
+        for capture in revert_re.captures_iter(&body) {
+            if let Some(reverted_sha) = capture.get(1) {
+                reverted_commits.insert(reverted_sha.as_str().to_ascii_lowercase());
+            }
+        }
+
+        if !issue_re.is_match(&subject) && !issue_re.is_match(&body) {
+            continue;
+        }
+        if subject.starts_with("Revert ") || revert_re.is_match(&body) {
+            continue;
+        }
+        candidates.push(sha);
+    }
+
+    candidates
+        .into_iter()
+        .find(|sha| !reverted_commits.contains(&sha.to_ascii_lowercase()))
+}
+
 /// List tracked paths with local modifications in a git repo/worktree.
 ///
 /// Untracked files are ignored because they do not participate in commit
@@ -427,12 +523,12 @@ pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// Find the most recent commit whose subject matches `(#issue_number)`.
+/// Find the most recent commit whose subject references `#issue_number`.
 ///
 /// Searches the last 20 commits to avoid expensive log scans.  Returns `None`
 /// when no matching commit is found or git is unavailable.
 pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<String> {
-    let pattern = format!("(#{})", issue_number);
+    let issue_re = issue_number_matcher(issue_number)?;
     git_command()
         .args(["log", "--format=%H %s", "-20"])
         .current_dir(repo_dir)
@@ -442,7 +538,7 @@ pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<
         .and_then(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .find(|line| line.contains(&pattern))
+                .find(|line| issue_re.is_match(line))
                 .and_then(|line| line.split_whitespace().next())
                 .map(str::to_string)
         })
@@ -452,7 +548,7 @@ pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<
 ///
 /// Strategy (most reliable first):
 /// 1. If `issue_number` is set, find the newest commit **after** `since_iso`
-///    whose subject contains `(#issue_number)`.
+///    whose subject references `#issue_number`.
 /// 2. Otherwise, find the newest commit after `since_iso` (any subject).
 /// 3. If nothing was committed since `since_iso`, return `None` so the caller
 ///    can fall back to `git_head_commit`.
@@ -477,10 +573,10 @@ pub fn git_best_commit_for_dispatch(
 
     // 1) Issue-scoped match within the time window
     if let Some(issue_number) = issue_number {
-        let pattern = format!("(#{})", issue_number);
+        let issue_re = issue_number_matcher(issue_number)?;
         if let Some(sha) = lines
             .iter()
-            .find(|line| line.contains(&pattern))
+            .find(|line| issue_re.is_match(line))
             .and_then(|line| line.split_whitespace().next())
         {
             return Some(sha.to_string());
@@ -492,6 +588,10 @@ pub fn git_best_commit_for_dispatch(
         .first()
         .and_then(|line| line.split_whitespace().next())
         .map(str::to_string)
+}
+
+fn issue_number_matcher(issue_number: i64) -> Option<Regex> {
+    Regex::new(&format!(r"#{}\b", issue_number)).ok()
 }
 
 /// Get the current branch name from a git directory (repo or worktree).
@@ -963,6 +1063,115 @@ mod tests {
         );
 
         (repo, origin)
+    }
+
+    #[test]
+    fn git_dispatch_baseline_commit_prefers_origin_main() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        let local_commit = git_command()
+            .args(["commit", "--allow-empty", "-m", "local only"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            local_commit.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&local_commit.stderr)
+        );
+
+        let baseline = git_dispatch_baseline_commit(repo_dir).expect("baseline commit");
+        let origin_main = git_commit_for_ref(repo_dir, "origin/main").expect("origin/main");
+        let local_main = git_commit_for_ref(repo_dir, "main").expect("main");
+
+        assert_eq!(baseline, origin_main);
+        assert_ne!(baseline, local_main);
+    }
+
+    #[test]
+    fn git_mainline_commit_for_issue_since_skips_reverted_commits() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let baseline = git_dispatch_baseline_commit(repo_dir).expect("baseline commit");
+
+        std::fs::write(repo.path().join("direct-main.txt"), "mainline\n").unwrap();
+        let add_output = git_command()
+            .args(["add", "direct-main.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            add_output.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&add_output.stderr)
+        );
+
+        let issue_commit_output = git_command()
+            .args(["commit", "-m", "#935 direct main attribution"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            issue_commit_output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&issue_commit_output.stderr)
+        );
+        let issue_commit = git_head_commit(repo_dir).expect("issue commit");
+
+        assert_eq!(
+            git_mainline_commit_for_issue_since(repo_dir, &baseline, 935),
+            Some(issue_commit.clone())
+        );
+
+        let revert_output = git_command()
+            .args(["revert", "--no-edit", &issue_commit])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            revert_output.status.success(),
+            "git revert failed: {}",
+            String::from_utf8_lossy(&revert_output.stderr)
+        );
+
+        assert_eq!(
+            git_mainline_commit_for_issue_since(repo_dir, &baseline, 935),
+            None
+        );
+    }
+
+    #[test]
+    fn worktree_issue_matchers_accept_bare_issue_subjects() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        git_command()
+            .args(["commit", "--allow-empty", "-m", "#935 worktree attribution"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let issue_commit = git_head_commit(repo_dir).expect("issue commit");
+
+        git_command()
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                "chore: unrelated follow-up",
+            ])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            git_best_commit_for_dispatch(repo_dir, "1970-01-01T00:00:00Z", Some(935)),
+            Some(issue_commit.clone())
+        );
+        assert_eq!(
+            git_latest_commit_for_issue(repo_dir, 935),
+            Some(issue_commit)
+        );
     }
 
     #[test]
