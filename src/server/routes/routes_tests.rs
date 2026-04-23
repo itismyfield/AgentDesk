@@ -723,6 +723,8 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
     assert_eq!(healthy_response.status(), reqwest::StatusCode::OK);
     let healthy_json: serde_json::Value = healthy_response.json().await.unwrap();
     assert_eq!(healthy_json["status"], "healthy");
+    assert_eq!(healthy_json["server_up"], true);
+    assert_eq!(healthy_json["fully_recovered"], true);
     assert_eq!(healthy_json["deferred_hooks"], 0);
     assert_eq!(healthy_json["queue_depth"], 0);
     assert_eq!(healthy_json["watcher_count"], 0);
@@ -747,6 +749,8 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
     assert_eq!(degraded_response.status(), reqwest::StatusCode::OK);
     let degraded_json: serde_json::Value = degraded_response.json().await.unwrap();
     assert_eq!(degraded_json["status"], "degraded");
+    assert_eq!(degraded_json["server_up"], true);
+    assert_eq!(degraded_json["fully_recovered"], true);
     assert!(
         degraded_json["outbox_age"].as_i64().unwrap() >= 299,
         "expected an outbox age close to 300s, got {}",
@@ -762,6 +766,114 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
         "expected dispatch_outbox_oldest_pending_age reason, got {:?}",
         degraded_json["degraded_reasons"]
     );
+}
+
+#[tokio::test]
+async fn health_api_reports_server_up_before_full_recovery_on_postgres() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_reconcile_done(false);
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pg_pool.clone(),
+        ),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let json: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["server_up"], true);
+    assert_eq!(json["fully_recovered"], false);
+    assert!(
+        json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|reason| reason == "provider:claude:reconcile_in_progress"),
+        "expected reconcile_in_progress degraded reason, got {:?}",
+        json["degraded_reasons"]
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_reconcile_done(false);
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pg_pool.clone(),
+        ),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let warmup_json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(warmup_json["server_up"], true);
+    assert_eq!(warmup_json["fully_recovered"], false);
+
+    let defaults_path = format!("{}/scripts/_defaults.sh", env!("CARGO_MANIFEST_DIR"));
+    let port = addr.port();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new("bash")
+            .arg("-lc")
+            .arg(format!(
+                ". \"{defaults_path}\"; wait_for_http_service_health test-health {port} 2 0 0 1",
+            ))
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected wait_for_http_service_health to pass on server_up=true before full recovery; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -5865,6 +5977,44 @@ async fn github_docs_include_issue_creation_endpoint() {
     assert_eq!(create_issue["params"]["repo"]["required"], true);
     assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
     assert_eq!(create_issue["params"]["agent_id"]["required"], false);
+}
+
+#[tokio::test]
+async fn health_docs_describe_server_up_and_fully_recovered() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs/health must return endpoint array");
+    let health = endpoints
+        .iter()
+        .find(|endpoint| endpoint["method"] == "GET" && endpoint["path"] == "/api/health")
+        .expect("health docs must include GET /api/health");
+
+    let description = health["description"]
+        .as_str()
+        .expect("health endpoint description must be present");
+    assert!(description.contains("server_up"));
+    assert!(description.contains("fully_recovered"));
+    assert_eq!(health["example"]["response"]["server_up"], true);
+    assert_eq!(health["example"]["response"]["fully_recovered"], true);
 }
 
 #[tokio::test]

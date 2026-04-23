@@ -186,7 +186,27 @@ fn category_summaries(endpoints: &[EndpointDoc]) -> Vec<CategorySummary> {
 
 fn all_endpoints() -> Vec<EndpointDoc> {
     vec![
-        ep("GET", "/api/health", "health", "Health check"),
+        ep(
+            "GET",
+            "/api/health",
+            "health",
+            "Health check with `server_up` minimum readiness and `fully_recovered` startup recovery completion.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "status": "healthy",
+                "server_up": true,
+                "fully_recovered": true,
+                "db": true,
+                "dashboard": true,
+                "deferred_hooks": 0,
+                "queue_depth": 0,
+                "watcher_count": 0,
+                "outbox_age": 0,
+                "recovery_duration": 0.12
+            }),
+        ),
         ep("POST", "/api/send", "discord", "Send a Discord channel message"),
         ep(
             "POST",

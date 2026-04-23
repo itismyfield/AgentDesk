@@ -46,11 +46,7 @@ fn discord_control_endpoints_allowed(
 /// When HealthRegistry is present, returns Discord provider status.
 /// Always includes DB status and dashboard availability.
 pub async fn health_handler(State(state): State<AppState>) -> Response {
-    let db_ok = state
-        .db
-        .lock()
-        .map(|conn| conn.execute_batch("SELECT 1").is_ok())
-        .unwrap_or(false);
+    let server_up = probe_server_up(&state.db, state.pg_pool.as_ref()).await;
 
     // Check if dashboard dist is available
     let dashboard_ok = {
@@ -93,7 +89,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
             .cloned()
             .unwrap_or_default();
 
-        if !db_ok {
+        if !server_up {
             status = status.worsen(health::HealthStatus::Unhealthy);
             degraded_reasons.push(serde_json::json!("db_unavailable"));
         }
@@ -119,8 +115,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         json["status"] =
             serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!("unhealthy"));
         json["degraded_reasons"] = serde_json::Value::Array(degraded_reasons);
-        json["db"] = serde_json::json!(db_ok);
+        json["db"] = serde_json::json!(server_up);
         json["dashboard"] = serde_json::json!(dashboard_ok);
+        json["server_up"] = serde_json::json!(server_up);
         json["outbox_age"] = serde_json::json!(outbox_age);
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
@@ -140,16 +137,18 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         (http_status, Json(json)).into_response()
     } else {
         // Standalone mode — no Discord providers
-        let status = if db_ok {
+        let status = if server_up {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
         let mut json = serde_json::json!({
-            "ok": db_ok,
+            "ok": server_up,
             "version": env!("CARGO_PKG_VERSION"),
-            "db": db_ok,
+            "db": server_up,
             "dashboard": dashboard_ok,
+            "server_up": server_up,
+            "fully_recovered": server_up,
             "deferred_hooks": 0,
             "outbox_age": outbox_age,
             "queue_depth": 0,
@@ -372,6 +371,19 @@ async fn load_dispatch_outbox_stats(
     }
 
     load_dispatch_outbox_stats_sqlite(db)
+}
+
+async fn probe_server_up(db: &crate::db::Db, pg_pool: Option<&PgPool>) -> bool {
+    if let Some(pool) = pg_pool {
+        return sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(pool)
+            .await
+            .is_ok();
+    }
+
+    db.lock()
+        .map(|conn| conn.execute_batch("SELECT 1").is_ok())
+        .unwrap_or(false)
 }
 
 async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxStats> {
