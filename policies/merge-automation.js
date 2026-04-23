@@ -321,6 +321,7 @@ function appendMergeCandidateReason(details, code, message) {
 function buildWorkTargetFromDispatchRow(row) {
   var result = parseJsonObject(row.result);
   var context = parseJsonObject(row.context);
+  var dispatchStatus = row && row.status ? String(row.status) : null;
   var worktreePath = firstPresent(
     result.completed_worktree_path,
     result.worktree_path,
@@ -358,7 +359,12 @@ function buildWorkTargetFromDispatchRow(row) {
   return {
     worktree_path: worktreePath,
     branch: branch,
-    head_sha: headSha
+    head_sha: headSha,
+    dispatch_status: dispatchStatus,
+    requires_pr_tracking: dispatchStatus === "cancelled",
+    pr_tracking_reason: dispatchStatus === "cancelled"
+      ? "cancelled live work dispatch requires PR + CI before merge"
+      : null
   };
 }
 
@@ -721,7 +727,9 @@ function resolveTerminalMergeCandidate(cardId, tracking, details) {
     repo_id: repoId,
     worktree_path: worktreePath,
     branch: branch,
-    head_sha: headSha
+    head_sha: headSha,
+    requires_pr_tracking: !!(latestWork && latestWork.requires_pr_tracking),
+    pr_tracking_reason: latestWork && latestWork.pr_tracking_reason
   };
   if (details) {
     details.candidate = candidate;
@@ -859,9 +867,12 @@ function buildTrackedPrBody(card, options) {
   var mode = options && options.mode ? options.mode : "direct-first";
   var mergeResult = options && options.merge_result ? options.merge_result : null;
   var mainBranch = options && options.main_branch ? options.main_branch : "main";
+  var forcePrReason = options && options.force_pr_reason ? options.force_pr_reason : null;
   var lines = [];
 
-  if (mode === "pr-always") {
+  if (forcePrReason) {
+    lines.push("Automated PR created because " + forcePrReason + ".");
+  } else if (mode === "pr-always") {
     lines.push("Automated PR created because `merge_strategy_mode` is set to `pr-always`.");
   } else if (mergeResult && mergeResult.conflict) {
     lines.push(
@@ -992,6 +1003,24 @@ function tryDirectMergeOrTrackPr(cardId, tracking) {
 
   var mergeMode = resolveTrackedMergeStrategyMode(cardId);
   persistTrackedMergeStrategyMode(cardId, mergeMode);
+
+  if (candidate.requires_pr_tracking) {
+    var forcedPr = tryCreateTrackedPr(cardId, tracking, candidate, {
+      mode: mergeMode,
+      main_branch: resolveTrackedPrBaseBranch(candidate),
+      force_pr_reason: candidate.pr_tracking_reason
+    });
+    if (forcedPr.ok) {
+      agentdesk.log.info(
+        "[merge] Card " + cardId + " requires PR+CI fallback — PR #" + forcedPr.pr.number + " is now tracked"
+      );
+    } else {
+      agentdesk.log.warn(
+        "[merge] Required PR+CI fallback failed for card " + cardId + ": " + forcedPr.error
+      );
+    }
+    return;
+  }
 
   if (mergeMode === "pr-always") {
     var trackedPrResult = tryCreateTrackedPr(cardId, tracking, candidate, {

@@ -10239,7 +10239,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["forced"], true);
     assert_eq!(json["cancelled_dispatches"], serde_json::json!(1));
-    assert_eq!(json["skipped_auto_queue_entries"], serde_json::json!(2));
+    assert_eq!(json["skipped_auto_queue_entries"], serde_json::json!(1));
 
     let conn = db.lock().unwrap();
     let (
@@ -10336,6 +10336,17 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         .unwrap()
         .collect::<std::result::Result<_, _>>()
         .unwrap();
+    let run_rows: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT id, status FROM auto_queue_runs
+             WHERE id IN ('run-ft-clean', 'run-ft-clean-pending')
+             ORDER BY id ASC",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
     let (session_status, active_dispatch_id): (String, Option<String>) = conn
         .query_row(
             "SELECT status, active_dispatch_id
@@ -10404,8 +10415,19 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
     );
     assert_eq!(
         entry_rows,
-        vec![("skipped".to_string(), None), ("skipped".to_string(), None),],
-        "force-transition cleanup must skip live auto-queue entries and clear dispatch links"
+        vec![
+            ("skipped".to_string(), Some("dispatch-ft-clean".to_string())),
+            ("skipped".to_string(), None),
+        ],
+        "force-transition cleanup must skip live auto-queue entries while preserving abandoned dispatch lineage"
+    );
+    assert_eq!(
+        run_rows,
+        vec![
+            ("run-ft-clean".to_string(), "completed".to_string()),
+            ("run-ft-clean-pending".to_string(), "completed".to_string()),
+        ],
+        "force-transition cleanup must finalize runs once every linked entry is terminal"
     );
     assert_eq!(
         session_status, "idle",
@@ -10728,6 +10750,17 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     .fetch_all(&pg_pool)
     .await
     .unwrap();
+    let run_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status
+         FROM auto_queue_runs
+         WHERE id IN ($1, $2)
+         ORDER BY id ASC",
+    )
+    .bind("run-ft-clean-pg")
+    .bind("run-ft-clean-pg-pending")
+    .fetch_all(&pg_pool)
+    .await
+    .unwrap();
     let (session_status, active_dispatch_id): (String, Option<String>) = sqlx::query_as(
         "SELECT status, active_dispatch_id
          FROM sessions
@@ -10752,7 +10785,23 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     assert_eq!(dispatch_status, "cancelled");
     assert_eq!(
         entry_rows,
-        vec![("skipped".to_string(), None), ("skipped".to_string(), None),]
+        vec![
+            (
+                "skipped".to_string(),
+                Some("dispatch-ft-clean-pg".to_string()),
+            ),
+            ("skipped".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        run_rows,
+        vec![
+            ("run-ft-clean-pg".to_string(), "completed".to_string()),
+            (
+                "run-ft-clean-pg-pending".to_string(),
+                "completed".to_string()
+            ),
+        ]
     );
     assert_eq!(session_status, "idle");
     assert!(active_dispatch_id.is_none());
