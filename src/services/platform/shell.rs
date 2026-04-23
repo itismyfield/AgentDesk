@@ -446,7 +446,6 @@ pub fn git_mainline_commit_for_issue_since(
     issue_number: i64,
 ) -> Option<String> {
     let main_ref = mainline_ref_for_range_search(repo_dir)?;
-    let issue_pattern = format!(r"#{}\b", issue_number);
     let revert_re = Regex::new(r"(?m)^This reverts commit ([0-9a-fA-F]{7,40})\.?$")
         .expect("valid revert regex");
     let range = format!("{baseline_commit}..{main_ref}");
@@ -461,7 +460,7 @@ pub fn git_mainline_commit_for_issue_since(
         return None;
     }
 
-    let issue_re = Regex::new(&issue_pattern).ok()?;
+    let issue_re = issue_number_matcher(issue_number)?;
     let mut reverted_commits = HashSet::new();
     let mut candidates = Vec::new();
 
@@ -524,12 +523,12 @@ pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// Find the most recent commit whose subject matches `(#issue_number)`.
+/// Find the most recent commit whose subject references `#issue_number`.
 ///
 /// Searches the last 20 commits to avoid expensive log scans.  Returns `None`
 /// when no matching commit is found or git is unavailable.
 pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<String> {
-    let pattern = format!("(#{})", issue_number);
+    let issue_re = issue_number_matcher(issue_number)?;
     git_command()
         .args(["log", "--format=%H %s", "-20"])
         .current_dir(repo_dir)
@@ -539,7 +538,7 @@ pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<
         .and_then(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .lines()
-                .find(|line| line.contains(&pattern))
+                .find(|line| issue_re.is_match(line))
                 .and_then(|line| line.split_whitespace().next())
                 .map(str::to_string)
         })
@@ -549,7 +548,7 @@ pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<
 ///
 /// Strategy (most reliable first):
 /// 1. If `issue_number` is set, find the newest commit **after** `since_iso`
-///    whose subject contains `(#issue_number)`.
+///    whose subject references `#issue_number`.
 /// 2. Otherwise, find the newest commit after `since_iso` (any subject).
 /// 3. If nothing was committed since `since_iso`, return `None` so the caller
 ///    can fall back to `git_head_commit`.
@@ -574,10 +573,10 @@ pub fn git_best_commit_for_dispatch(
 
     // 1) Issue-scoped match within the time window
     if let Some(issue_number) = issue_number {
-        let pattern = format!("(#{})", issue_number);
+        let issue_re = issue_number_matcher(issue_number)?;
         if let Some(sha) = lines
             .iter()
-            .find(|line| line.contains(&pattern))
+            .find(|line| issue_re.is_match(line))
             .and_then(|line| line.split_whitespace().next())
         {
             return Some(sha.to_string());
@@ -589,6 +588,10 @@ pub fn git_best_commit_for_dispatch(
         .first()
         .and_then(|line| line.split_whitespace().next())
         .map(str::to_string)
+}
+
+fn issue_number_matcher(issue_number: i64) -> Option<Regex> {
+    Regex::new(&format!(r"#{}\b", issue_number)).ok()
 }
 
 /// Get the current branch name from a git directory (repo or worktree).
@@ -1135,6 +1138,39 @@ mod tests {
         assert_eq!(
             git_mainline_commit_for_issue_since(repo_dir, &baseline, 935),
             None
+        );
+    }
+
+    #[test]
+    fn worktree_issue_matchers_accept_bare_issue_subjects() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        git_command()
+            .args(["commit", "--allow-empty", "-m", "#935 worktree attribution"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let issue_commit = git_head_commit(repo_dir).expect("issue commit");
+
+        git_command()
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                "chore: unrelated follow-up",
+            ])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            git_best_commit_for_dispatch(repo_dir, "1970-01-01T00:00:00Z", Some(935)),
+            Some(issue_commit.clone())
+        );
+        assert_eq!(
+            git_latest_commit_for_issue(repo_dir, 935),
+            Some(issue_commit)
         );
     }
 
