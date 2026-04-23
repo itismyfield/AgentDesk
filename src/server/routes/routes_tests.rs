@@ -4986,7 +4986,9 @@ async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provide
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
 
     let db = test_db();
-    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
     {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -5021,8 +5023,62 @@ async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provide
         )
         .unwrap();
     }
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, provider, discord_channel_id, discord_channel_alt,
+            discord_channel_cc, discord_channel_cdx, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+         )",
+    )
+    .bind("agent-parallel-provider")
+    .bind("Agent Parallel Provider")
+    .bind("claude")
+    .bind("111")
+    .bind("222")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, NOW(), NOW()
+         )",
+    )
+    .bind("card-parallel-impl")
+    .bind("Parallel implementation")
+    .bind("ready")
+    .bind("medium")
+    .bind("agent-parallel-provider")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, NOW(), NOW()
+         )",
+    )
+    .bind("card-parallel-consult")
+    .bind("Parallel consultation")
+    .bind("ready")
+    .bind("medium")
+    .bind("agent-parallel-provider")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
     let impl_response = app
         .clone()
         .oneshot(
@@ -5070,31 +5126,28 @@ async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provide
         .expect("consultation dispatch id")
         .to_string();
 
-    let (impl_result, consult_result) = tokio::join!(
-        crate::server::routes::dispatches::send_dispatch_to_discord(
-            &db,
-            "agent-parallel-provider",
-            "Parallel implementation",
-            "card-parallel-impl",
-            &impl_dispatch_id,
-        ),
-        crate::server::routes::dispatches::send_dispatch_to_discord(
-            &db,
-            "agent-parallel-provider",
-            "Parallel consultation",
-            "card-parallel-consult",
-            &consult_dispatch_id,
-        ),
+    let pending_notify_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT
+           FROM dispatch_outbox
+          WHERE dispatch_id = ANY($1)
+            AND action = 'notify'
+            AND status = 'pending'",
+    )
+    .bind(vec![impl_dispatch_id.clone(), consult_dispatch_id.clone()])
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending_notify_count, 2,
+        "route create must enqueue both notify rows before delivery"
     );
 
-    assert!(
-        impl_result.is_ok(),
-        "implementation delivery should succeed: {impl_result:?}"
-    );
-    assert!(
-        consult_result.is_ok(),
-        "consultation delivery should succeed: {consult_result:?}"
-    );
+    let processed = crate::server::routes::dispatches::process_outbox_batch_with_real_notifier(
+        Some(&db),
+        &pg_pool,
+    )
+    .await;
+    assert_eq!(processed, 2, "outbox worker should drain both notify rows");
 
     server_handle.abort();
 
@@ -5129,23 +5182,77 @@ async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provide
     );
     drop(state);
 
-    let conn = db.lock().unwrap();
-    let impl_thread_id: Option<String> = conn
-        .query_row(
-            "SELECT thread_id FROM task_dispatches WHERE id = ?1",
-            [&impl_dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let impl_thread_id: Option<String> = sqlx::query_scalar(
+        "SELECT thread_id
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(&impl_dispatch_id)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
     assert_eq!(impl_thread_id.as_deref(), Some("thread-111"));
-    let consult_thread_id: Option<String> = conn
-        .query_row(
-            "SELECT thread_id FROM task_dispatches WHERE id = ?1",
-            [&consult_dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let impl_status: String = sqlx::query_scalar(
+        "SELECT status
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(&impl_dispatch_id)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(impl_status, "dispatched");
+    let consult_thread_id: Option<String> = sqlx::query_scalar(
+        "SELECT thread_id
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(&consult_dispatch_id)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
     assert_eq!(consult_thread_id.as_deref(), Some("thread-222"));
+    let consult_status: String = sqlx::query_scalar(
+        "SELECT status
+           FROM task_dispatches
+          WHERE id = $1",
+    )
+    .bind(&consult_dispatch_id)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(consult_status, "dispatched");
+
+    let done_notify_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT
+           FROM dispatch_outbox
+          WHERE dispatch_id = ANY($1)
+            AND action = 'notify'
+            AND status = 'done'",
+    )
+    .bind(vec![impl_dispatch_id.clone(), consult_dispatch_id.clone()])
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(done_notify_count, 2, "notify rows must complete via outbox");
+    let pending_status_reactions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT
+           FROM dispatch_outbox
+          WHERE dispatch_id = ANY($1)
+            AND action = 'status_reaction'
+            AND status = 'pending'",
+    )
+    .bind(vec![impl_dispatch_id, consult_dispatch_id])
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending_status_reactions, 2,
+        "notify delivery must enqueue one status_reaction follow-up per dispatch"
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]

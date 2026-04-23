@@ -17,7 +17,9 @@ pub(crate) use discord_delivery::send_dispatch_to_discord;
 pub use outbox::resolve_channel_alias_pub;
 pub(crate) use outbox::use_counter_model_channel;
 #[cfg(test)]
-pub(crate) use outbox::{OutboxNotifier, process_outbox_batch};
+pub(crate) use outbox::{
+    OutboxNotifier, process_outbox_batch, process_outbox_batch_with_real_notifier,
+};
 pub(crate) use outbox::{
     dispatch_outbox_loop, queue_dispatch_followup, queue_dispatch_followup_pg,
     queue_dispatch_followup_sync, requeue_dispatch_notify_pg,

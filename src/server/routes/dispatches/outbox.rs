@@ -582,6 +582,15 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     count
 }
 
+#[cfg(test)]
+pub(crate) async fn process_outbox_batch_with_real_notifier(
+    db: Option<&crate::db::Db>,
+    pg_pool: &PgPool,
+) -> usize {
+    let notifier = RealOutboxNotifier::new(Arc::new(pg_pool.clone()));
+    process_outbox_batch_with_pg(db, Some(pg_pool), &notifier).await
+}
+
 // ── Followup & verdict helpers ──────────────────────────────────
 
 pub(super) fn extract_review_verdict(result_json: Option<&str>) -> String {
