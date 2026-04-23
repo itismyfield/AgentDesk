@@ -29,6 +29,37 @@ fn should_enqueue_status_reaction(to_status: &str, transition_source: &str) -> b
     }
 }
 
+fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
+    result.is_some_and(|value| {
+        value.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
+            || value
+                .get("completed_without_changes")
+                .and_then(|entry| entry.as_bool())
+                == Some(true)
+    })
+}
+
+fn should_skip_auto_queue_terminal_sync(
+    dispatch_type: Option<&str>,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    sync_auto_queue_terminal_entries: bool,
+) -> bool {
+    if !sync_auto_queue_terminal_entries {
+        return true;
+    }
+
+    if to_status != "completed" {
+        return false;
+    }
+
+    match dispatch_type {
+        Some("consultation") => true,
+        Some("implementation" | "rework") => is_noop_completion_result(result),
+        _ => false,
+    }
+}
+
 fn block_on_dispatch_pg<F, T>(
     pool: &PgPool,
     future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
@@ -122,7 +153,7 @@ async fn validate_dispatch_completion_evidence_on_pg(
     ))
 }
 
-async fn set_dispatch_status_on_pg(
+async fn set_dispatch_status_on_pg_with_sync(
     pool: &PgPool,
     dispatch_id: &str,
     to_status: &str,
@@ -130,6 +161,7 @@ async fn set_dispatch_status_on_pg(
     transition_source: &str,
     allowed_from: Option<&[&str]>,
     touch_completed_at: bool,
+    sync_auto_queue_terminal_entries: bool,
 ) -> Result<usize> {
     let mut tx = pool
         .begin()
@@ -317,7 +349,15 @@ async fn set_dispatch_status_on_pg(
         // implementation dispatch typically completes into `review`, leaving
         // the entry stuck at `dispatched` until the card eventually reaches
         // `done`. Mirror dispatch terminal here so the slot frees promptly.
-        if matches!(to_status, "completed" | "failed" | "cancelled") {
+        let skip_auto_queue_terminal_sync = should_skip_auto_queue_terminal_sync(
+            dispatch_type.as_deref(),
+            to_status,
+            result,
+            sync_auto_queue_terminal_entries,
+        );
+        if matches!(to_status, "completed" | "failed" | "cancelled")
+            && !skip_auto_queue_terminal_sync
+        {
             let entry_status = match to_status {
                 "completed" => crate::db::auto_queue::ENTRY_STATUS_DONE,
                 "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
@@ -345,6 +385,28 @@ async fn set_dispatch_status_on_pg(
         .await
         .map_err(|error| anyhow::anyhow!("commit postgres dispatch status tx: {error}"))?;
     Ok(changed)
+}
+
+async fn set_dispatch_status_on_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_pg_with_sync(
+        pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
+    )
+    .await
 }
 
 async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<bool> {
@@ -562,7 +624,7 @@ pub(crate) fn record_dispatch_status_event_on_conn(
     Ok(())
 }
 
-pub(crate) fn set_dispatch_status_on_conn(
+fn set_dispatch_status_on_conn_with_sync(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
     to_status: &str,
@@ -570,15 +632,16 @@ pub(crate) fn set_dispatch_status_on_conn(
     transition_source: &str,
     allowed_from: Option<&[&str]>,
     touch_completed_at: bool,
+    sync_auto_queue_terminal_entries: bool,
 ) -> Result<usize> {
-    let current_status: Option<String> = conn
+    let current_row: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
+            "SELECT status, dispatch_type FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some(current_status) = current_status else {
+    let Some((current_status, dispatch_type)) = current_row else {
         return Ok(0);
     };
 
@@ -681,7 +744,15 @@ pub(crate) fn set_dispatch_status_on_conn(
             // Sync any auto_queue_entry bound to this dispatch when the
             // dispatch reaches a terminal status. See PG twin in
             // set_dispatch_status_on_pg for the rationale.
-            if matches!(to_status, "completed" | "failed" | "cancelled") {
+            let skip_auto_queue_terminal_sync = should_skip_auto_queue_terminal_sync(
+                dispatch_type.as_deref(),
+                to_status,
+                result,
+                sync_auto_queue_terminal_entries,
+            );
+            if matches!(to_status, "completed" | "failed" | "cancelled")
+                && !skip_auto_queue_terminal_sync
+            {
                 let entry_status = match to_status {
                     "completed" => crate::db::auto_queue::ENTRY_STATUS_DONE,
                     "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
@@ -712,6 +783,27 @@ pub(crate) fn set_dispatch_status_on_conn(
             Err(err)
         }
     }
+}
+
+pub(crate) fn set_dispatch_status_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_conn_with_sync(
+        conn,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
+    )
 }
 
 /// Single authority for dispatch completion.
@@ -830,6 +922,30 @@ pub fn set_dispatch_status_with_backends(
     allowed_from: Option<&[&str]>,
     touch_completed_at: bool,
 ) -> Result<usize> {
+    set_dispatch_status_with_backends_and_sync(
+        db,
+        pg_pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        true,
+    )
+}
+
+fn set_dispatch_status_with_backends_and_sync(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+    sync_auto_queue_terminal_entries: bool,
+) -> Result<usize> {
     if let Some(pool) = pg_pool {
         let dispatch_id = dispatch_id.to_string();
         let to_status = to_status.to_string();
@@ -845,7 +961,7 @@ pub fn set_dispatch_status_with_backends(
             let allowed_from_refs = allowed_from_owned
                 .as_ref()
                 .map(|statuses| statuses.iter().map(String::as_str).collect::<Vec<_>>());
-            set_dispatch_status_on_pg(
+            set_dispatch_status_on_pg_with_sync(
                 &pool,
                 &dispatch_id,
                 &to_status,
@@ -853,6 +969,7 @@ pub fn set_dispatch_status_with_backends(
                 &transition_source,
                 allowed_from_refs.as_deref(),
                 touch_completed_at,
+                sync_auto_queue_terminal_entries,
             )
             .await
         });
@@ -866,7 +983,7 @@ pub fn set_dispatch_status_with_backends(
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-    set_dispatch_status_on_conn(
+    set_dispatch_status_on_conn_with_sync(
         &conn,
         dispatch_id,
         to_status,
@@ -874,6 +991,51 @@ pub fn set_dispatch_status_with_backends(
         transition_source,
         allowed_from,
         touch_completed_at,
+        sync_auto_queue_terminal_entries,
+    )
+}
+
+pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_with_backends_and_sync(
+        db,
+        pg_pool,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        false,
+    )
+}
+
+pub(crate) fn set_dispatch_status_without_queue_sync_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    transition_source: &str,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    set_dispatch_status_on_conn_with_sync(
+        conn,
+        dispatch_id,
+        to_status,
+        result,
+        transition_source,
+        allowed_from,
+        touch_completed_at,
+        false,
     )
 }
 

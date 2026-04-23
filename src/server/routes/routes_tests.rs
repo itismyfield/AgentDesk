@@ -9747,6 +9747,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
             "fix: second force-transition merge target (#575)",
         ],
     );
+    run_git(repo.path(), &["push", "-u", "origin", "wt/card-575-force"]);
     let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
 
     let db = test_db();
@@ -9787,6 +9788,11 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_strategy_mode', 'pr-always')",
             [],
         )
         .unwrap();
@@ -10409,7 +10415,6 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         active_dispatch_id.is_none(),
         "force-transition cleanup must clear stale session active_dispatch_id"
     );
-
     drop(conn);
 
     {
@@ -18643,20 +18648,6 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
         "agent-pause-slot",
     );
     seed_auto_queue_card(&db, "card-pause-orphan", 4499, "ready", "agent-pause-slot");
-    seed_auto_queue_card(
-        &db,
-        "card-pause-phase-gate-anchor",
-        4498,
-        "reviewing",
-        "agent-pause-slot",
-    );
-    seed_auto_queue_card(
-        &db,
-        "card-pause-orphan",
-        4499,
-        "in_progress",
-        "agent-pause-slot",
-    );
 
     {
         let conn = db.lock().unwrap();
@@ -19596,7 +19587,7 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
     assert_eq!(json["cancelled_dispatches"], 1);
     assert_eq!(json["deleted_phase_gates"], 0);
     assert_eq!(json["remaining_live_dispatches"], 0);
@@ -20263,7 +20254,7 @@ async fn auto_queue_cancel_pg_cancels_live_dispatches_skips_entries_and_releases
     );
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
     assert_eq!(json["cancelled_dispatches"], 1);
     assert_eq!(json["deleted_phase_gates"], 0);
     assert_eq!(json["remaining_live_dispatches"], 0);
@@ -20885,7 +20876,7 @@ async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_r
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["cancelled_runs"], 1);
-    assert_eq!(json["cancelled_entries"], 1);
+    assert_eq!(json["cancelled_entries"], 2);
     assert_eq!(json["cancelled_dispatches"], 2);
     assert_eq!(json["deleted_phase_gates"], 1);
     assert_eq!(json["remaining_live_dispatches"], 0);

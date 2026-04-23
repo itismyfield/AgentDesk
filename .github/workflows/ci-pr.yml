@@ -242,6 +242,9 @@ jobs:
           done < <(find . -name '*.sh' -not -path './target/*' -not -path './.git/*')
           exit $FAILED
 
+      - name: PG audit guard
+        run: ./scripts/pg-audit.sh
+
       - name: Check hardcoded port/path drift
         shell: bash
         run: |

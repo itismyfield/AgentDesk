@@ -1784,6 +1784,13 @@ async fn force_pause_with_pg(
             &active_run_ids,
         )
         .await?;
+    let _skipped_entries =
+        crate::services::auto_queue::cancel_run::skip_dispatched_entries_for_runs_pg(
+            pool,
+            &active_run_ids,
+            "run_pause",
+        )
+        .await?;
     let paused = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'paused',
@@ -1828,6 +1835,12 @@ fn force_pause_with_conn(
         crate::services::auto_queue::cancel_run::delete_phase_gate_rows_for_runs(
             conn,
             &active_run_ids,
+        );
+    let _skipped_entries =
+        crate::services::auto_queue::cancel_run::skip_dispatched_entries_for_runs(
+            conn,
+            &active_run_ids,
+            "run_pause",
         );
     let paused = conn
         .execute(

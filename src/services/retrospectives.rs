@@ -88,6 +88,9 @@ fn record_card_retrospective(
         return Err("terminal_status is required".to_string());
     }
 
+    // PG card_retrospectives rows are authoritative once a pool is attached.
+    // Keeping a SQLite mirror would only drift because live readers/sync-state
+    // updates in PG mode already target the PG row exclusively.
     if let Some(pg_pool) = pg_pool.cloned() {
         return run_async_bridge_pg(&pg_pool, move |pool| async move {
             record_card_retrospective_pg(&pool, &card_id, &terminal_status).await
@@ -1214,6 +1217,18 @@ mod tests {
         assert!(stored.1.contains("AgentDesk 이슈 #478"));
         assert!(stored.1.contains("sqlx"));
         assert!(stored.2);
+
+        let sqlite_count: i64 = sqlite_db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM card_retrospectives", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            sqlite_count, 0,
+            "PG mode keeps card_retrospectives authoritative in PG only"
+        );
 
         pg_pool.close().await;
         pg_db.drop().await;

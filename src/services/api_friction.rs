@@ -136,6 +136,29 @@ struct EventMemoryDraft {
     request: MementoRememberRequest,
 }
 
+#[derive(Clone, Debug)]
+struct PreparedEventRow {
+    event_id: String,
+    fingerprint: String,
+    endpoint: String,
+    friction_type: String,
+    summary: String,
+    workaround: Option<String>,
+    suggested_fix: Option<String>,
+    docs_category: Option<String>,
+    keywords_json_text: String,
+    keywords_json_value: serde_json::Value,
+    payload_json_text: String,
+    payload_json_value: serde_json::Value,
+    card_id: Option<String>,
+    repo_id: String,
+    github_issue_number_sqlite: Option<i64>,
+    github_issue_number_pg: Option<i32>,
+    task_summary: Option<String>,
+    agent_id: Option<String>,
+    request: MementoRememberRequest,
+}
+
 pub(crate) fn extract_api_friction_reports(full_response: &str) -> ApiFrictionExtraction {
     let mut cleaned_lines = Vec::new();
     let mut reports = Vec::new();
@@ -178,10 +201,26 @@ pub(crate) async fn record_api_friction_reports(
         return Ok(ApiFrictionRecordResult::default());
     }
 
-    let inserted_events = if let Some(pg_pool) = pg_pool {
+    let inserted_events: Vec<EventMemoryDraft> = if let Some(pg_pool) = pg_pool {
         let source_context =
             load_source_context_pg(pg_pool, context.dispatch_id, context.session_key).await?;
-        persist_event_rows_pg(pg_pool, &source_context, &context, reports).await?
+        let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
+        persist_event_rows_pg(pg_pool, &context, &prepared_rows).await?;
+
+        // Temporary dual-write: policy-tick aggregation still reads SQLite-only state.
+        // Keep SQLite mirrored while PG remains the runtime authority for capture.
+        if let Some(db) = db {
+            let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
+            persist_event_rows(&mut conn, &context, &prepared_rows)?;
+        }
+
+        prepared_rows
+            .into_iter()
+            .map(|row| EventMemoryDraft {
+                event_id: row.event_id,
+                request: row.request,
+            })
+            .collect()
     } else {
         let db = db.ok_or_else(|| "no runtime database handle for API friction".to_string())?;
         let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
@@ -191,7 +230,15 @@ pub(crate) async fn record_api_friction_reports(
             context.session_key,
             context.channel_id,
         )?;
-        persist_event_rows(&mut conn, &source_context, &context, reports)?
+        let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
+        persist_event_rows(&mut conn, &context, &prepared_rows)?;
+        prepared_rows
+            .into_iter()
+            .map(|row| EventMemoryDraft {
+                event_id: row.event_id,
+                request: row.request,
+            })
+            .collect()
     };
 
     let memory_backend = match resolve_memory_backend_for_friction(memory_settings) {
@@ -691,23 +738,71 @@ async fn load_source_context_pg(
     Ok(SourceContext::default())
 }
 
-fn persist_event_rows(
-    conn: &mut Connection,
+fn prepare_event_rows(
     source_context: &SourceContext,
     context: &ApiFrictionRecordContext<'_>,
     reports: &[ApiFrictionReport],
-) -> Result<Vec<EventMemoryDraft>, String> {
+) -> Result<Vec<PreparedEventRow>, String> {
+    reports
+        .iter()
+        .map(|report| {
+            let fingerprint = build_fingerprint(&report.endpoint, &report.friction_type);
+            let event_id = uuid::Uuid::new_v4().to_string();
+            let payload_json_text = serde_json::to_string(report)
+                .map_err(|err| format!("serialize api_friction payload: {err}"))?;
+            let payload_json_value = serde_json::to_value(report)
+                .map_err(|err| format!("serialize api_friction payload: {err}"))?;
+            let keywords_json_text = serde_json::to_string(&report.keywords)
+                .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
+            let keywords_json_value = serde_json::to_value(&report.keywords)
+                .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
+            let repo_id = source_context
+                .repo_id
+                .clone()
+                .unwrap_or_else(|| DEFAULT_API_FRICTION_REPO.to_string());
+
+            Ok(PreparedEventRow {
+                event_id: event_id.clone(),
+                fingerprint: fingerprint.clone(),
+                endpoint: report.endpoint.clone(),
+                friction_type: report.friction_type.clone(),
+                summary: report.summary.clone(),
+                workaround: report.workaround.clone(),
+                suggested_fix: report.suggested_fix.clone(),
+                docs_category: report.docs_category.clone(),
+                keywords_json_text,
+                keywords_json_value,
+                payload_json_text,
+                payload_json_value,
+                card_id: source_context.card_id.clone(),
+                repo_id,
+                github_issue_number_sqlite: source_context.issue_number,
+                github_issue_number_pg: source_context
+                    .issue_number
+                    .and_then(|value| i32::try_from(value).ok()),
+                task_summary: source_context.task_summary.clone(),
+                agent_id: source_context.agent_id.clone(),
+                request: build_memento_request(
+                    source_context,
+                    report,
+                    &fingerprint,
+                    context.dispatch_id,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn persist_event_rows(
+    conn: &mut Connection,
+    context: &ApiFrictionRecordContext<'_>,
+    rows: &[PreparedEventRow],
+) -> Result<(), String> {
     let tx = conn
         .transaction()
         .map_err(|err| format!("begin api_friction transaction: {err}"))?;
-    let mut memory_drafts = Vec::new();
 
-    for report in reports {
-        let fingerprint = build_fingerprint(&report.endpoint, &report.friction_type);
-        let id = uuid::Uuid::new_v4().to_string();
-        let payload_json = serde_json::to_string(report)
-            .map_err(|err| format!("serialize api_friction payload: {err}"))?;
-
+    for row in rows {
         tx.execute(
             "INSERT INTO api_friction_events (
                 id, fingerprint, endpoint, friction_type, summary, workaround, suggested_fix,
@@ -721,77 +816,47 @@ fn persist_event_rows(
                 ?20, 'pending', NULL, datetime('now')
              )",
             params![
-                id,
-                fingerprint,
-                report.endpoint,
-                report.friction_type,
-                report.summary,
-                report.workaround,
-                report.suggested_fix,
-                report.docs_category,
-                serde_json::to_string(&report.keywords)
-                    .map_err(|err| format!("serialize api_friction keywords: {err}"))?,
-                payload_json,
+                row.event_id,
+                row.fingerprint,
+                row.endpoint,
+                row.friction_type,
+                row.summary,
+                row.workaround,
+                row.suggested_fix,
+                row.docs_category,
+                row.keywords_json_text,
+                row.payload_json_text,
                 context.session_key,
                 context.channel_id.to_string(),
                 context.provider,
                 context.dispatch_id,
-                source_context.card_id,
-                source_context
-                    .repo_id
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_API_FRICTION_REPO.to_string()),
-                source_context.issue_number,
-                source_context.task_summary,
-                source_context.agent_id,
+                row.card_id,
+                row.repo_id,
+                row.github_issue_number_sqlite,
+                row.task_summary,
+                row.agent_id,
                 "memento",
             ],
         )
         .map_err(|err| format!("insert api_friction_events: {err}"))?;
-
-        memory_drafts.push(EventMemoryDraft {
-            event_id: id,
-            request: build_memento_request(
-                source_context,
-                report,
-                &fingerprint,
-                context.dispatch_id,
-            ),
-        });
     }
 
     tx.commit()
         .map_err(|err| format!("commit api_friction transaction: {err}"))?;
-    Ok(memory_drafts)
+    Ok(())
 }
 
 async fn persist_event_rows_pg(
     pg_pool: &PgPool,
-    source_context: &SourceContext,
     context: &ApiFrictionRecordContext<'_>,
-    reports: &[ApiFrictionReport],
-) -> Result<Vec<EventMemoryDraft>, String> {
+    rows: &[PreparedEventRow],
+) -> Result<(), String> {
     let mut tx = pg_pool
         .begin()
         .await
         .map_err(|err| format!("begin api_friction transaction: {err}"))?;
-    let mut memory_drafts = Vec::new();
 
-    for report in reports {
-        let fingerprint = build_fingerprint(&report.endpoint, &report.friction_type);
-        let id = uuid::Uuid::new_v4().to_string();
-        let payload_json = serde_json::to_value(report)
-            .map_err(|err| format!("serialize api_friction payload: {err}"))?;
-        let keywords_json = serde_json::to_value(&report.keywords)
-            .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
-        let repo_id = source_context
-            .repo_id
-            .clone()
-            .unwrap_or_else(|| DEFAULT_API_FRICTION_REPO.to_string());
-        let github_issue_number = source_context
-            .issue_number
-            .and_then(|value| i32::try_from(value).ok());
-
+    for row in rows {
         sqlx::query(
             "INSERT INTO api_friction_events (
                 id, fingerprint, endpoint, friction_type, summary, workaround, suggested_fix,
@@ -805,45 +870,35 @@ async fn persist_event_rows_pg(
                 $20
              )",
         )
-        .bind(&id)
-        .bind(&fingerprint)
-        .bind(&report.endpoint)
-        .bind(&report.friction_type)
-        .bind(&report.summary)
-        .bind(report.workaround.as_deref())
-        .bind(report.suggested_fix.as_deref())
-        .bind(report.docs_category.as_deref())
-        .bind(keywords_json)
-        .bind(payload_json)
+        .bind(&row.event_id)
+        .bind(&row.fingerprint)
+        .bind(&row.endpoint)
+        .bind(&row.friction_type)
+        .bind(&row.summary)
+        .bind(row.workaround.as_deref())
+        .bind(row.suggested_fix.as_deref())
+        .bind(row.docs_category.as_deref())
+        .bind(&row.keywords_json_value)
+        .bind(&row.payload_json_value)
         .bind(context.session_key)
         .bind(context.channel_id.to_string())
         .bind(context.provider)
         .bind(context.dispatch_id)
-        .bind(source_context.card_id.as_deref())
-        .bind(repo_id)
-        .bind(github_issue_number)
-        .bind(source_context.task_summary.as_deref())
-        .bind(source_context.agent_id.as_deref())
+        .bind(row.card_id.as_deref())
+        .bind(&row.repo_id)
+        .bind(row.github_issue_number_pg)
+        .bind(row.task_summary.as_deref())
+        .bind(row.agent_id.as_deref())
         .bind("memento")
         .execute(&mut *tx)
         .await
         .map_err(|err| format!("insert api_friction_events: {err}"))?;
-
-        memory_drafts.push(EventMemoryDraft {
-            event_id: id,
-            request: build_memento_request(
-                source_context,
-                report,
-                &fingerprint,
-                context.dispatch_id,
-            ),
-        });
     }
 
     tx.commit()
         .await
         .map_err(|err| format!("commit api_friction transaction: {err}"))?;
-    Ok(memory_drafts)
+    Ok(())
 }
 
 fn build_memento_request(
@@ -959,7 +1014,6 @@ async fn mark_event_memory_status(
         .bind(event_id)
         .execute(pg_pool)
         .await;
-        return;
     }
 
     let Some(db) = db else {
@@ -1564,6 +1618,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(memory_status, "stored");
+    }
+
+    #[tokio::test]
+    async fn record_api_friction_reports_dual_writes_sqlite_shadow_when_pg_present() {
+        fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {
+            match previous {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let config_dir = temp.path().join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("agentdesk.yaml"),
+            "server:\n  port: 8791\nmemory:\n  backend: file\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", temp.path());
+        }
+
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+        let sqlite_db = crate::db::test_db();
+
+        let result = record_api_friction_reports(
+            Some(&sqlite_db),
+            Some(&pg_pool),
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::File,
+                ..ResolvedMemorySettings::default()
+            },
+            ApiFrictionRecordContext {
+                channel_id: 1,
+                session_key: Some("host:session"),
+                dispatch_id: None,
+                provider: "codex",
+            },
+            &[ApiFrictionReport {
+                endpoint: "/api/docs/kanban".to_string(),
+                friction_type: "docs-bypass".to_string(),
+                summary: "category guessing".to_string(),
+                workaround: Some("sqlite3".to_string()),
+                suggested_fix: Some("document a single endpoint".to_string()),
+                docs_category: Some("kanban".to_string()),
+                keywords: vec!["/api/docs/kanban".to_string(), "sqlite3".to_string()],
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stored_event_count, 1);
+        assert_eq!(result.memory_stored_count, 0);
+        assert!(result.memory_errors.is_empty(), "{result:?}");
+
+        let sqlite_row: (String, String) = sqlite_db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id, memory_status FROM api_friction_events LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let pg_row = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, memory_status
+             FROM api_friction_events
+             LIMIT 1",
+        )
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
+        assert_eq!(sqlite_row.0, pg_row.0);
+        assert_eq!(sqlite_row.1, "skipped_backend");
+        assert_eq!(pg_row.1, "skipped_backend");
+
+        restore_env("AGENTDESK_ROOT_DIR", previous_root);
+        pg_pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

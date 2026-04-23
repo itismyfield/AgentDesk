@@ -83,6 +83,9 @@ pub(crate) async fn register_pending_dm_reply_db(
     let (source_agent, user_id, channel_id) =
         normalize_register_args(source_agent, user_id, channel_id)?;
 
+    // PG pending_dm_replies rows are authoritative in mixed mode. The DM
+    // intake/consume paths query PG when a pool exists, so mirroring writes to
+    // SQLite would only create unread legacy rows.
     let Some(pool) = pg_pool else {
         return register_pending_dm_reply(
             sqlite,
@@ -152,6 +155,8 @@ pub(crate) async fn load_oldest_pending_dm_reply_db(
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<Option<PendingDmReplyRecord>, String> {
+    // Mixed mode reads from PG first because pending reply ownership has
+    // already moved there for runtime DM routing.
     if let Some(pool) = pg_pool {
         let row = sqlx::query(
             "SELECT id, source_agent, context::text AS context_json, channel_id
@@ -254,6 +259,8 @@ pub(crate) async fn mark_pending_dm_reply_consumed_db(
     reply_id: i64,
     updated_context_json: &str,
 ) -> Result<bool, String> {
+    // Consumption updates follow the same authority split as reads/writes:
+    // PG when configured, SQLite only for legacy no-PG runtime/tests.
     if let Some(pool) = pg_pool {
         let updated = sqlx::query(
             "UPDATE pending_dm_replies

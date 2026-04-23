@@ -158,6 +158,9 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
     reason_code: &str,
     content: &str,
 ) -> bool {
+    // PG outbox rows are authoritative whenever a pool is configured. The
+    // release worker drains PG only in that mode, so writing a "fallback"
+    // lifecycle row to SQLite would create an undeliverable ghost message.
     if let Some(pool) = pg_pool {
         let target_owned = target.to_string();
         let session_key_owned = session_key.map(str::to_string);
