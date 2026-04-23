@@ -113,7 +113,7 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
 
     let cancel_payload = reason.map(|reason| json!({ "reason": reason }));
     let cancelled = if let Some(payload) = cancel_payload.as_ref() {
-        set_dispatch_status_on_conn(
+        set_dispatch_status_without_queue_sync_on_conn(
             conn,
             dispatch_id,
             "cancelled",
@@ -128,7 +128,7 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
             )))
         })?
     } else {
-        set_dispatch_status_on_conn(
+        set_dispatch_status_without_queue_sync_on_conn(
             conn,
             dispatch_id,
             "cancelled",

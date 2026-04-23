@@ -1099,6 +1099,122 @@ pub async fn update_entry_status_on_pg_tx(
     })
 }
 
+/// Route dispatch-linked terminal transitions through the canonical entry
+/// helper so PG transition bookkeeping and run finalization stay consistent.
+///
+/// Some operator flows still need the historical dispatch link on the terminal
+/// row for audit/debug lineage. `preserve_dispatch_link` restores that pointer
+/// after the helper records the status change and finalizes the run.
+pub fn sync_dispatch_terminal_entries_on_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    preserve_dispatch_link: bool,
+) -> Result<usize, EntryStatusUpdateError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, dispatch_id, slot_index
+         FROM auto_queue_entries
+         WHERE dispatch_id = ?1
+           AND status = 'dispatched'",
+    )?;
+    let rows: Vec<(String, String, Option<i64>)> = stmt
+        .query_map([dispatch_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut changed = 0usize;
+    for (entry_id, linked_dispatch_id, slot_index) in rows {
+        let result = update_entry_status_on_conn(
+            conn,
+            &entry_id,
+            new_status,
+            trigger_source,
+            &EntryStatusUpdateOptions::default(),
+        )?;
+        if result.changed {
+            if preserve_dispatch_link {
+                conn.execute(
+                    "UPDATE auto_queue_entries
+                     SET dispatch_id = ?1,
+                         slot_index = ?2
+                     WHERE id = ?3",
+                    libsql_rusqlite::params![linked_dispatch_id, slot_index, entry_id],
+                )?;
+            }
+            changed += 1;
+        }
+    }
+
+    Ok(changed)
+}
+
+/// Transaction-scoped PG twin of [`sync_dispatch_terminal_entries_on_conn`].
+pub async fn sync_dispatch_terminal_entries_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    new_status: &str,
+    trigger_source: &str,
+    preserve_dispatch_link: bool,
+) -> Result<usize, String> {
+    let rows = sqlx::query(
+        "SELECT id, dispatch_id, slot_index
+         FROM auto_queue_entries
+         WHERE dispatch_id = $1
+           AND status = 'dispatched'",
+    )
+    .bind(dispatch_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("load postgres auto-queue entries for dispatch {dispatch_id}: {error}")
+    })?;
+
+    let mut changed = 0usize;
+    for row in rows {
+        let entry_id: String = row.try_get("id").map_err(|error| {
+            format!("decode postgres auto-queue entry id for {dispatch_id}: {error}")
+        })?;
+        let linked_dispatch_id: String = row.try_get("dispatch_id").map_err(|error| {
+            format!("decode postgres auto-queue entry dispatch_id for {dispatch_id}: {error}")
+        })?;
+        let slot_index: Option<i64> = row.try_get("slot_index").map_err(|error| {
+            format!("decode postgres auto-queue entry slot_index for {dispatch_id}: {error}")
+        })?;
+        let result = update_entry_status_on_pg_tx(
+            tx,
+            &entry_id,
+            new_status,
+            trigger_source,
+            &EntryStatusUpdateOptions::default(),
+        )
+        .await?;
+        if result.changed {
+            if preserve_dispatch_link {
+                sqlx::query(
+                    "UPDATE auto_queue_entries
+                     SET dispatch_id = $1,
+                         slot_index = $2
+                     WHERE id = $3",
+                )
+                .bind(&linked_dispatch_id)
+                .bind(slot_index)
+                .bind(&entry_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(|error| {
+                    format!("restore postgres auto-queue entry lineage for {entry_id}: {error}")
+                })?;
+            }
+            changed += 1;
+        }
+    }
+
+    Ok(changed)
+}
+
 /// Transaction-scoped equivalent of [`load_entry_status_row_pg`] used by
 /// [`update_entry_status_on_pg_tx`].
 ///
