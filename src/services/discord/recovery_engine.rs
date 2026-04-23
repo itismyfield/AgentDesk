@@ -1225,6 +1225,7 @@ pub(super) async fn restore_inflight_turns(
                                     resume_offset,
                                     pause_epoch,
                                     turn_delivered,
+                                    super::tmux::WatcherSpawnOrigin::RecoveryRestore,
                                 ));
                             }
                         }
@@ -2067,6 +2068,7 @@ pub(super) async fn restore_inflight_turns(
                             resume_offset,
                             pause_epoch,
                             turn_delivered,
+                            super::tmux::WatcherSpawnOrigin::RecoveryRestore,
                         ));
                     }
                 }
@@ -2742,6 +2744,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                 resume_offset,
                 pause_epoch,
                 turn_delivered,
+                super::tmux::WatcherSpawnOrigin::InflightRebind,
             ));
             (true, !fresh)
         }
