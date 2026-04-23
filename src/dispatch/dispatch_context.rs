@@ -1506,17 +1506,33 @@ struct CardDispatchInfoPg {
     repo_id: Option<String>,
 }
 
+fn warn_and_flatten_pg_optional<T>(
+    result: Result<Option<T>, sqlx::Error>,
+    card_id: &str,
+    context: &'static str,
+) -> Option<T> {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(card_id = %card_id, "{context}: {error}");
+            None
+        }
+    }
+}
+
 async fn load_card_dispatch_info_pg(pool: &PgPool, card_id: &str) -> Option<CardDispatchInfoPg> {
     // PG schema: kanban_cards.github_issue_number is BIGINT after migration
     // 0008. Decode natively as i64 for parity with the rusqlite signature.
-    let row = sqlx::query_as::<_, (Option<i64>, Option<String>)>(
-        "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
+    let row = warn_and_flatten_pg_optional(
+        sqlx::query_as::<_, (Option<i64>, Option<String>)>(
+            "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await,
+        card_id,
+        "failed to load postgres card dispatch info",
+    )?;
     Some(CardDispatchInfoPg {
         issue_number: row.0,
         repo_id: row.1,
@@ -1534,13 +1550,15 @@ async fn load_card_issue_repo_pg(
 
 async fn load_card_pr_number_pg(pool: &PgPool, card_id: &str) -> Option<i64> {
     // PG schema: pr_tracking.pr_number is BIGINT after migration 0008.
-    sqlx::query_as::<_, (Option<i64>,)>("SELECT pr_number FROM pr_tracking WHERE card_id = $1")
-        .bind(card_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|row| row.0)
+    warn_and_flatten_pg_optional(
+        sqlx::query_as::<_, (Option<i64>,)>("SELECT pr_number FROM pr_tracking WHERE card_id = $1")
+            .bind(card_id)
+            .fetch_optional(pool)
+            .await,
+        card_id,
+        "failed to load postgres card pr number",
+    )
+    .and_then(|row| row.0)
 }
 
 /// PG-native variant of [`resolve_parent_dispatch_context`].
@@ -2449,8 +2467,10 @@ mod tests {
     use crate::db::Db;
     use crate::engine::PolicyEngine;
     use serde_json::json;
+    use std::io::{self, Write};
     use std::process::Command;
     use std::sync::MutexGuard;
+    use std::sync::{Arc, Mutex};
 
     struct RepoDirOverride {
         _lock: MutexGuard<'static, ()>,
@@ -2539,6 +2559,39 @@ mod tests {
             .into_owned()
     }
 
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
+
     fn seed_card(db: &Db, card_id: &str, issue_number: i64, status: &str) {
         let conn = db.separate_conn().unwrap();
         conn.execute(
@@ -2550,6 +2603,23 @@ mod tests {
             libsql_rusqlite::params![card_id, status, issue_number],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn warn_and_flatten_pg_optional_logs_lookup_errors() {
+        let (value, logs) = capture_logs(|| {
+            warn_and_flatten_pg_optional::<(Option<i64>, Option<String>)>(
+                Err(sqlx::Error::ColumnNotFound(
+                    "github_issue_number".to_string(),
+                )),
+                "card-1",
+                "failed to load postgres card dispatch info",
+            )
+        });
+
+        assert!(value.is_none());
+        assert!(logs.contains("failed to load postgres card dispatch info"));
+        assert!(logs.contains("card_id=card-1"));
     }
 
     fn set_card_repo_id(db: &Db, card_id: &str, repo_id: &str) {

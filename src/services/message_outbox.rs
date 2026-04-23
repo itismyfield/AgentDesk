@@ -26,6 +26,44 @@ fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<Str
         })
 }
 
+fn warn_outbox_enqueue_failure(
+    backend: &'static str,
+    message: OutboxMessage<'_>,
+    error: impl std::fmt::Display,
+) {
+    let reason_code = message
+        .reason_code
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session_key = normalized_session_key(message.target, message.session_key);
+    tracing::warn!(
+        backend,
+        target = message.target,
+        bot = message.bot,
+        source = message.source,
+        reason_code,
+        session_key = session_key.as_deref(),
+        "failed to enqueue outbox message: {error}"
+    );
+}
+
+fn warn_lifecycle_enqueue_failure(
+    backend: &'static str,
+    target: &str,
+    session_key: Option<&str>,
+    reason_code: &str,
+    error: impl std::fmt::Display,
+) {
+    let session_key = normalized_session_key(target, session_key);
+    tracing::warn!(
+        backend,
+        target,
+        reason_code,
+        session_key = session_key.as_deref(),
+        "failed to enqueue lifecycle notification: {error}"
+    );
+}
+
 pub(crate) fn enqueue(
     conn: &Connection,
     message: OutboxMessage<'_>,
@@ -142,10 +180,12 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
         ) {
             Ok(enqueued) => return enqueued,
             Err(error) => {
-                tracing::warn!(
+                warn_lifecycle_enqueue_failure(
+                    "postgres",
                     target,
+                    session_key,
                     reason_code,
-                    "failed to enqueue lifecycle notification via postgres: {error}"
+                    &error,
                 );
                 return false;
             }
@@ -227,12 +267,7 @@ pub(crate) async fn enqueue_outbox_best_effort(
         return match enqueue_outbox_pg(pool, message).await {
             Ok(enqueued) => enqueued,
             Err(error) => {
-                tracing::warn!(
-                    target = message.target,
-                    bot = message.bot,
-                    source = message.source,
-                    "failed to enqueue outbox message via postgres: {error}"
-                );
+                warn_outbox_enqueue_failure("postgres", message, &error);
                 false
             }
         };
@@ -245,22 +280,12 @@ pub(crate) async fn enqueue_outbox_best_effort(
         Ok(conn) => match enqueue(&conn, message) {
             Ok(enqueued) => enqueued,
             Err(error) => {
-                tracing::warn!(
-                    target = message.target,
-                    bot = message.bot,
-                    source = message.source,
-                    "failed to enqueue outbox message via sqlite: {error}"
-                );
+                warn_outbox_enqueue_failure("sqlite", message, &error);
                 false
             }
         },
         Err(error) => {
-            tracing::warn!(
-                target = message.target,
-                bot = message.bot,
-                source = message.source,
-                "failed to open sqlite outbox connection: {error}"
-            );
+            warn_outbox_enqueue_failure("sqlite", message, format!("open connection: {error}"));
             false
         }
     }
@@ -326,12 +351,49 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 
 #[cfg(test)]
 mod tests {
-    use super::{OutboxMessage, enqueue};
+    use super::{
+        OutboxMessage, enqueue, warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure,
+    };
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
 
     fn test_conn() -> libsql_rusqlite::Connection {
         let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         conn
+    }
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
     }
 
     #[test]
@@ -406,5 +468,45 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn warn_outbox_enqueue_failure_logs_reason_code_and_session_key() {
+        let (_, logs) = capture_logs(|| {
+            warn_outbox_enqueue_failure(
+                "postgres",
+                OutboxMessage {
+                    target: "channel:123",
+                    content: "msg",
+                    bot: "notify",
+                    source: "system",
+                    reason_code: Some("lifecycle.force_kill"),
+                    session_key: Some("session-a"),
+                },
+                "boom",
+            )
+        });
+
+        assert!(logs.contains("failed to enqueue outbox message"));
+        assert!(logs.contains("postgres"));
+        assert!(logs.contains("reason_code=\"lifecycle.force_kill\""));
+        assert!(logs.contains("session_key=\"session-a\""));
+    }
+
+    #[test]
+    fn warn_lifecycle_enqueue_failure_logs_normalized_session_key() {
+        let (_, logs) = capture_logs(|| {
+            warn_lifecycle_enqueue_failure(
+                "postgres",
+                "channel:123",
+                None,
+                "lifecycle.force_kill",
+                "boom",
+            )
+        });
+
+        assert!(logs.contains("failed to enqueue lifecycle notification"));
+        assert!(logs.contains("postgres"));
+        assert!(logs.contains("session_key=\"channel:123\""));
     }
 }

@@ -477,8 +477,12 @@ pub async fn add_agent(
     Json(body): Json<AddAgentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool.as_ref() {
-        return if office_exists_pg(pool, &office_id).await.unwrap_or(false) {
-            match sqlx::query(
+        return match office_exists_or_response(
+            office_exists_pg(pool, &office_id).await,
+            &office_id,
+            "add office agent",
+        ) {
+            Ok(true) => match sqlx::query(
                 "INSERT INTO office_agents (office_id, agent_id, department_id)
                  VALUES ($1, $2, $3)
                  ON CONFLICT (office_id, agent_id)
@@ -495,12 +499,12 @@ pub async fn add_agent(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{error}")})),
                 ),
-            }
-        } else {
-            (
+            },
+            Ok(false) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "office not found"})),
-            )
+            ),
+            Err(response) => response,
         };
     }
 
@@ -655,50 +659,56 @@ pub async fn batch_add_agents(
     Json(body): Json<BatchAddAgentsBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool.as_ref() {
-        return if office_exists_pg(pool, &office_id).await.unwrap_or(false) {
-            let mut tx = match pool.begin().await {
-                Ok(tx) => tx,
-                Err(error) => {
+        return match office_exists_or_response(
+            office_exists_pg(pool, &office_id).await,
+            &office_id,
+            "batch add office agents",
+        ) {
+            Ok(true) => {
+                let mut tx = match pool.begin().await {
+                    Ok(tx) => tx,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{error}")})),
+                        );
+                    }
+                };
+
+                for agent_id in &body.agent_ids {
+                    if let Err(error) = sqlx::query(
+                        "INSERT INTO office_agents (office_id, agent_id, department_id)
+                         VALUES ($1, $2, NULL)
+                         ON CONFLICT (office_id, agent_id)
+                         DO UPDATE SET department_id = NULL",
+                    )
+                    .bind(&office_id)
+                    .bind(agent_id)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{error}")})),
+                        );
+                    }
+                }
+
+                if let Err(error) = tx.commit().await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(json!({"error": format!("{error}")})),
                     );
                 }
-            };
 
-            for agent_id in &body.agent_ids {
-                if let Err(error) = sqlx::query(
-                    "INSERT INTO office_agents (office_id, agent_id, department_id)
-                     VALUES ($1, $2, NULL)
-                     ON CONFLICT (office_id, agent_id)
-                     DO UPDATE SET department_id = NULL",
-                )
-                .bind(&office_id)
-                .bind(agent_id)
-                .execute(&mut *tx)
-                .await
-                {
-                    let _ = tx.rollback().await;
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
+                (StatusCode::OK, Json(json!({"ok": true})))
             }
-
-            if let Err(error) = tx.commit().await {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-
-            (StatusCode::OK, Json(json!({"ok": true})))
-        } else {
-            (
+            Ok(false) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "office not found"})),
-            )
+            ),
+            Err(response) => response,
         };
     }
 
@@ -781,4 +791,87 @@ async fn office_exists_pg(pool: &PgPool, office_id: &str) -> Result<bool, sqlx::
         .fetch_one(pool)
         .await
         .map(|count| count > 0)
+}
+
+fn office_exists_or_response(
+    result: Result<bool, sqlx::Error>,
+    office_id: &str,
+    action: &'static str,
+) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+    match result {
+        Ok(exists) => Ok(exists),
+        Err(error) => {
+            tracing::warn!(
+                office_id = %office_id,
+                action,
+                "failed to look up office via postgres: {error}"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::office_exists_or_response;
+    use axum::{Json, http::StatusCode};
+    use serde_json::json;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
+
+    #[test]
+    fn office_exists_or_response_logs_pg_lookup_errors() {
+        let (result, logs) = capture_logs(|| {
+            office_exists_or_response(
+                Err(sqlx::Error::ColumnNotFound("id".to_string())),
+                "office-1",
+                "add office agent",
+            )
+        });
+
+        let Err((status, Json(body))) = result else {
+            panic!("expected error response");
+        };
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, json!({"error": "no column found for name: id"}));
+        assert!(logs.contains("failed to look up office via postgres"));
+        assert!(logs.contains("office_id=office-1"));
+        assert!(logs.contains("action=\"add office agent\""));
+    }
 }
