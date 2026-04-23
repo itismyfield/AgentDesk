@@ -239,8 +239,8 @@ async fn record_card_retrospective_pg(
     let retrospective_id = uuid::Uuid::new_v4().to_string();
     let memory_payload_json = serde_json::to_value(&draft.memory_payload)
         .map_err(|err| format!("serialize memory payload: {err}"))?;
-    let result_json_value = serde_json::from_str::<Value>(&draft.result_json)
-        .unwrap_or_else(|_| Value::String(normalize_whitespace(&draft.result_json)));
+    let result_json_value =
+        parse_result_json_value(&draft.result_json, "retrospective draft result_json");
 
     let inserted = sqlx::query(
         "INSERT INTO card_retrospectives (
@@ -462,8 +462,8 @@ fn build_retrospective_draft(
         Err(err) => return Err(format!("load latest dispatch result: {err}")),
     };
 
-    let result_value = serde_json::from_str::<Value>(&result_json)
-        .unwrap_or_else(|_| Value::String(normalize_whitespace(&result_json)));
+    let result_value =
+        parse_result_json_value(&result_json, "sqlite dispatch retrospective result");
     let title = normalize_whitespace(&card.0);
     let review_notes = card
         .4
@@ -614,8 +614,8 @@ async fn build_retrospective_draft_pg(
         .try_get::<Option<i64>, _>("duration_seconds")
         .map_err(|err| format!("decode retrospective dispatch duration: {err}"))?;
 
-    let result_value = serde_json::from_str::<Value>(&result_json)
-        .unwrap_or_else(|_| Value::String(normalize_whitespace(&result_json)));
+    let result_value =
+        parse_result_json_value(&result_json, "postgres dispatch retrospective result");
     let title = normalize_whitespace(&title_raw);
     let review_notes = review_notes_raw
         .as_deref()
@@ -808,6 +808,18 @@ fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn parse_result_json_value(raw: &str, context: &'static str) -> Value {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                "[retrospectives] malformed JSON in {context}; falling back to string value: {error}"
+            );
+            Value::String(normalize_whitespace(raw))
+        }
+    }
+}
+
 fn trim_trailing_punctuation(value: &str) -> String {
     value
         .trim()
@@ -848,6 +860,41 @@ fn format_duration(duration_seconds: Option<i64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
 
     fn test_db() -> Db {
         let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
@@ -951,6 +998,18 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
+    #[test]
+    fn parse_result_json_value_logs_warn_and_preserves_string_fallback() {
+        let (value, logs) = capture_logs(|| {
+            parse_result_json_value("{bad json", "retrospective draft result_json")
+        });
+
+        assert_eq!(value, Value::String("{bad json".to_string()));
+        assert!(
+            logs.contains("[retrospectives] malformed JSON in retrospective draft result_json")
+        );
     }
 
     #[test]

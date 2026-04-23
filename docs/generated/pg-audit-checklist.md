@@ -27,9 +27,9 @@ Status legend:
 | `src/db/schema.rs:158-164,914-915` | `baseline` | In-repo inventory comment explicitly calls out `metadata`, `channel_thread_map`, and `thread_id_map` as PG `JSONB` fields that break string decoders without `::text`. |
 | `src/services/auto_queue/runtime.rs:126-139` | `hardened` | PG slot-clear loader avoids string decoding entirely by fetching `thread_id_map` as `Option<serde_json::Value>`. |
 | `src/server/routes/dispatches/discord_delivery.rs:1266-1294,1334-1354` | `hardened` | PG slot-thread helpers fetch `thread_id_map::text` and rebind with `$1::jsonb`; good reference for later repairs. |
-| `src/engine/ops/cards_ops.rs:627-655` | `follow-up` | `metadata`, `channel_thread_map`, and `deferred_dod_json` decode through `parse_json_value`; invalid JSON collapses to `Null` with no surfaced error. |
-| `src/services/retrospectives.rs:242-243,465-466,617-618` | `follow-up` | Invalid `result_json` is silently rewritten as a plain string `Value`, masking malformed JSON payloads. |
-| `src/server/routes/dispatches/outbox.rs:606-608,816-818` | `follow-up` | `parse_json_value` returns `None` on bad JSON; completion summary logic continues with partial data. |
+| `src/engine/ops/cards_ops.rs:627-655` | `hardened` | Card JSON decode fallback still returns `Null` for malformed `metadata`, `channel_thread_map`, and `deferred_dod_json`, but now emits `tracing::warn!` instead of silently swallowing the bad payload. |
+| `src/services/retrospectives.rs:242-243,465-466,617-618` | `hardened` | Retrospective `result_json` fallback still rewrites malformed JSON into a normalized string `Value`, and now logs `tracing::warn!` so bad dispatch payloads are observable. |
+| `src/server/routes/dispatches/outbox.rs:606-608,816-818` | `hardened` | Dispatch completion summary still tolerates malformed `result_json` / `context_json` by dropping invalid payloads, and now logs `tracing::warn!` on the malformed decode path. |
 
 ## 3. TIMESTAMPTZ decode sites using `Option<String>` or alternate decode types
 
