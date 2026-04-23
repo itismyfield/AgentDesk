@@ -10728,6 +10728,17 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     .fetch_all(&pg_pool)
     .await
     .unwrap();
+    let run_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status
+         FROM auto_queue_runs
+         WHERE id IN ($1, $2)
+         ORDER BY id ASC",
+    )
+    .bind("run-ft-clean-pg")
+    .bind("run-ft-clean-pg-pending")
+    .fetch_all(&pg_pool)
+    .await
+    .unwrap();
     let (session_status, active_dispatch_id): (String, Option<String>) = sqlx::query_as(
         "SELECT status, active_dispatch_id
          FROM sessions
@@ -10752,7 +10763,23 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     assert_eq!(dispatch_status, "cancelled");
     assert_eq!(
         entry_rows,
-        vec![("skipped".to_string(), None), ("skipped".to_string(), None),]
+        vec![
+            (
+                "skipped".to_string(),
+                Some("dispatch-ft-clean-pg".to_string()),
+            ),
+            ("skipped".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        run_rows,
+        vec![
+            ("run-ft-clean-pg".to_string(), "completed".to_string()),
+            (
+                "run-ft-clean-pg-pending".to_string(),
+                "completed".to_string()
+            ),
+        ]
     );
     assert_eq!(session_status, "idle");
     assert!(active_dispatch_id.is_none());

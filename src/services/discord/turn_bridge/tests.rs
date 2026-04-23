@@ -377,6 +377,57 @@ fn turn_end_memory_plan_skips_only_cleared_sessions() {
 }
 
 #[test]
+fn turn_end_memory_plan_records_final_turn_before_memento_reflect_request() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let mut session = sample_session();
+    let memory_plan = plan_turn_end_memory(
+        &session,
+        MemoryBackendKind::Memento,
+        false,
+        false,
+        true,
+        true,
+    )
+    .expect("turn end memory plan should exist");
+
+    assert_eq!(
+        memory_plan.session_end_reason,
+        Some(SessionEndReason::LocalSessionReset)
+    );
+
+    if memory_plan.persist_transcript {
+        session.history.push(HistoryItem {
+            item_type: HistoryType::User,
+            content: "current user".to_string(),
+        });
+        session.history.push(HistoryItem {
+            item_type: HistoryType::Assistant,
+            content: "current assistant".to_string(),
+        });
+    }
+
+    let request = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        memory_plan.session_end_reason.expect("session end reason"),
+    )
+    .expect("final turn should be included in reflect request");
+
+    assert!(request.transcript.contains("[User]: current user"));
+    assert!(
+        request
+            .transcript
+            .contains("[Assistant]: current assistant")
+    );
+}
+
+#[test]
 fn turn_end_memory_plan_keeps_memento_feedback_analysis_when_prompt_is_too_long() {
     let prompt_too_long = sample_session();
     assert_eq!(

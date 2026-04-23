@@ -363,15 +363,13 @@ async fn set_dispatch_status_on_pg_with_sync(
                 "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
                 _ => crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
             };
-            sqlx::query(
-                "UPDATE auto_queue_entries
-                    SET status = $1
-                  WHERE dispatch_id = $2
-                    AND status = 'dispatched'",
+            crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
+                &mut tx,
+                dispatch_id,
+                entry_status,
+                transition_source,
+                true,
             )
-            .bind(entry_status)
-            .bind(dispatch_id)
-            .execute(&mut *tx)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -758,12 +756,12 @@ fn set_dispatch_status_on_conn_with_sync(
                     "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
                     _ => crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
                 };
-                conn.execute(
-                    "UPDATE auto_queue_entries
-                        SET status = ?1
-                      WHERE dispatch_id = ?2
-                        AND status = 'dispatched'",
-                    libsql_rusqlite::params![entry_status, dispatch_id],
+                crate::db::auto_queue::sync_dispatch_terminal_entries_on_conn(
+                    conn,
+                    dispatch_id,
+                    entry_status,
+                    transition_source,
+                    true,
                 )?;
             }
         }

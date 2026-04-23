@@ -1158,6 +1158,7 @@ impl MemoryBackend for MementoBackend {
                     store_recall_response(dedup_key, result.external_recall.clone());
                     RecallResponse {
                         external_recall: result.external_recall,
+                        memento_context_loaded: true,
                         token_usage: result.token_usage,
                         ..RecallResponse::default()
                     }
@@ -1504,6 +1505,7 @@ mod tests {
         assert!(external_recall.contains("Remember to clear resolved errors."));
         assert!(recall.shared_knowledge.is_none());
         assert!(recall.longterm_catalog.is_none());
+        assert!(recall.memento_context_loaded);
         assert!(recall.warnings.is_empty());
         assert_eq!(
             recall.token_usage,
@@ -1590,6 +1592,8 @@ mod tests {
 
         assert_eq!(requests.len(), 2);
         assert_eq!(first.external_recall, second.external_recall);
+        assert!(first.memento_context_loaded);
+        assert!(!second.memento_context_loaded);
         assert_eq!(
             first.token_usage,
             crate::services::memory::TokenUsage {
@@ -1601,6 +1605,77 @@ mod tests {
             second.token_usage,
             crate::services::memory::TokenUsage::default()
         );
+    }
+
+    #[tokio::test]
+    async fn test_memento_recall_marks_context_loaded_even_when_payload_is_empty() {
+        let context_content = serde_json::to_string(&json!({
+            "success": true,
+            "structured": true
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 1
+                },
+                "content": [
+                    {
+                        "type": "text",
+                        "text": context_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-empty")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-empty")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
+        let backend = MementoBackend::new(memento_settings());
+
+        let recall = backend
+            .recall(RecallRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                session_id: "session-1".to_string(),
+                dispatch_profile: DispatchProfile::Full,
+                user_text: "What is empty?".to_string(),
+            })
+            .await;
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 2);
+        assert!(recall.external_recall.is_none());
+        assert!(recall.memento_context_loaded);
+        assert!(recall.warnings.is_empty());
     }
 
     #[tokio::test]
@@ -1629,6 +1704,7 @@ mod tests {
         restore_memento_runtime(previous_root, previous_key, previous_workspace);
 
         assert!(recall.external_recall.is_none());
+        assert!(!recall.memento_context_loaded);
         assert!(
             recall
                 .warnings
@@ -1653,6 +1729,7 @@ mod tests {
             .await;
 
         assert!(recall.external_recall.is_none());
+        assert!(!recall.memento_context_loaded);
         assert!(recall.warnings.is_empty());
     }
 

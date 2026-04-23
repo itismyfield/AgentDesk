@@ -399,7 +399,7 @@ async fn cancel_active_dispatches_for_card_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
     reason: Option<&str>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<PgTransitionCleanupCounts> {
     let rows = sqlx::query(
         "SELECT id
          FROM task_dispatches
@@ -419,7 +419,7 @@ async fn cancel_active_dispatches_for_card_on_pg_tx(
         })?;
 
     if dispatch_ids.is_empty() {
-        return Ok(0);
+        return Ok(PgTransitionCleanupCounts::default());
     }
 
     sqlx::query(
@@ -438,7 +438,7 @@ async fn cancel_active_dispatches_for_card_on_pg_tx(
     let cancel_payload = reason
         .map(|value| json!({ "reason": value, "completion_source": "force_transition" }))
         .unwrap_or_else(|| json!({ "completion_source": "force_transition" }));
-    let mut cancelled = 0usize;
+    let mut counts = PgTransitionCleanupCounts::default();
     for dispatch_id in dispatch_ids {
         let rows_affected = sqlx::query(
             "UPDATE task_dispatches
@@ -455,10 +455,28 @@ async fn cancel_active_dispatches_for_card_on_pg_tx(
         .await
         .map_err(|error| anyhow::anyhow!("cancel postgres dispatch {dispatch_id}: {error}"))?
         .rows_affected();
-        cancelled += rows_affected as usize;
+        counts.cancelled_dispatches += rows_affected as usize;
+
+        // Route the force-skip through the shared entry transition helper so
+        // PG bookkeeping mirrors SQLite: transition rows are recorded and
+        // single-entry runs can finalize. Preserve the dispatch link afterward
+        // for abandoned-dispatch lineage.
+        counts.skipped_auto_queue_entries += crate::db::auto_queue::sync_dispatch_terminal_entries_on_pg_tx(
+            tx,
+            &dispatch_id,
+            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+            "force_transition_cleanup",
+            true,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "mark postgres live auto-queue entry skipped during force-transition cancel {dispatch_id}: {error}"
+            )
+        })?;
     }
 
-    Ok(cancelled)
+    Ok(counts)
 }
 
 async fn cleanup_force_transition_revert_fields_on_pg_tx(
@@ -891,13 +909,14 @@ async fn execute_allowed_cleanup_on_pg_tx(
             let reason = format!("force-transition to {new_status}");
             // Model 2: generic cancel keeps the dispatch pointer for
             // provenance. Force-transition cleanup is the explicit terminal
-            // cleanup path, so it snapshots live entries before cancel and
-            // then clears any skipped links that cancel's side-effect left.
-            counts.skipped_auto_queue_entries =
-                count_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
-            counts.cancelled_dispatches =
+            // cleanup path, so it preserves the detailed cancel bookkeeping
+            // and then clears any skipped links that cancel's side-effect left.
+            let cancelled_counts =
                 cancel_active_dispatches_for_card_on_pg_tx(tx, card_id, Some(&reason)).await?;
-            skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
+            counts.cancelled_dispatches = cancelled_counts.cancelled_dispatches;
+            counts.skipped_auto_queue_entries = cancelled_counts.skipped_auto_queue_entries;
+            counts.skipped_auto_queue_entries +=
+                skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
             clear_force_transition_terminalized_links_on_pg_tx(tx, card_id).await?;
             cleanup_force_transition_revert_fields_on_pg_tx(tx, card_id).await?;
         }

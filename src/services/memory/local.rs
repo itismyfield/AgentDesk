@@ -14,6 +14,7 @@ impl MemoryBackend for LocalMemoryBackend {
                 shared_knowledge: load_shared_knowledge(),
                 longterm_catalog: load_longterm_memory_catalog(&request.role_id),
                 external_recall: None,
+                memento_context_loaded: false,
                 warnings: Vec::new(),
                 token_usage: Default::default(),
             }

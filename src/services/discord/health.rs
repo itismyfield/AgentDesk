@@ -988,7 +988,9 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             super::DiscordSession {
                 session_id: session_id.map(str::to_string),
-                memento_context_loaded: session_id.is_some(),
+                memento_context_loaded: super::session_runtime::restored_memento_context_loaded(
+                    false, None, session_id,
+                ),
                 memento_reflected: false,
                 current_path: None,
                 history: Vec::new(),
