@@ -39,6 +39,9 @@ function makePipeline(): PipelineConfigFull {
         on_exit: [],
       },
     },
+    events: {
+      on_dispatch_completed: ["OnDispatchCompleted"],
+    },
     clocks: {
       review: {
         set: "review_entered_at",
