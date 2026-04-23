@@ -7923,8 +7923,8 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
                     r#"{
                         "repo":"owner/pg-pipeline-stages",
                         "stages":[
-                            {"stage_name":"Build","stage_order":1,"entry_skill":"build","timeout_minutes":30},
-                            {"stage_name":"Review","stage_order":2,"entry_skill":"review","parallel_with":"lint"}
+                            {"stage_name":"Build","stage_order":3000000000,"entry_skill":"build","timeout_minutes":3000000002,"max_retries":3000000003},
+                            {"stage_name":"Review","stage_order":3000000001,"entry_skill":"review","parallel_with":"lint","timeout_minutes":3000000004}
                         ]
                     }"#,
                 ))
@@ -7982,7 +7982,27 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .unwrap();
     let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
     assert_eq!(get_json["stages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        get_json["stages"][0]["stage_order"],
+        json!(3_000_000_000_i64)
+    );
+    assert_eq!(
+        get_json["stages"][0]["timeout_minutes"],
+        json!(3_000_000_002_i64)
+    );
+    assert_eq!(
+        get_json["stages"][0]["max_retries"],
+        json!(3_000_000_003_i64)
+    );
     assert_eq!(get_json["stages"][1]["stage_name"], "Review");
+    assert_eq!(
+        get_json["stages"][1]["stage_order"],
+        json!(3_000_000_001_i64)
+    );
+    assert_eq!(
+        get_json["stages"][1]["timeout_minutes"],
+        json!(3_000_000_004_i64)
+    );
 
     let delete_response = app
         .oneshot(
