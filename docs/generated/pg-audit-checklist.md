@@ -29,7 +29,7 @@ Status legend:
 | `src/server/routes/dispatches/discord_delivery.rs:1266-1294,1334-1354` | `hardened` | PG slot-thread helpers fetch `thread_id_map::text` and rebind with `$1::jsonb`; good reference for later repairs. |
 | `src/engine/ops/cards_ops.rs:627-655` | `hardened` | Card JSON decode fallback still returns `Null` for malformed `metadata`, `channel_thread_map`, and `deferred_dod_json`, but now emits `tracing::warn!` instead of silently swallowing the bad payload. |
 | `src/services/retrospectives.rs:242-243,465-466,617-618` | `hardened` | Retrospective `result_json` fallback still rewrites malformed JSON into a normalized string `Value`, and now logs `tracing::warn!` so bad dispatch payloads are observable. |
-| `src/server/routes/dispatches/outbox.rs:606-608,816-818` | `hardened` | Dispatch completion summary still tolerates malformed `result_json` / `context_json` by dropping invalid payloads, and now logs `tracing::warn!` on the malformed decode path. |
+| `src/server/routes/dispatches/outbox.rs:587-603,606-608,816-818,1556-1583` | `hardened` | Outbox review verdict extraction plus dispatch completion/message formatting still tolerate malformed `result_json`, `context_json`, and `dispatch_context` by falling back to safe defaults, and now log `tracing::warn!` on those malformed decode paths. |
 
 ## 3. TIMESTAMPTZ decode sites using `Option<String>` or alternate decode types
 

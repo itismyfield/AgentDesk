@@ -585,8 +585,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
 // ── Followup & verdict helpers ──────────────────────────────────
 
 pub(super) fn extract_review_verdict(result_json: Option<&str>) -> String {
-    result_json
-        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+    parse_json_value(result_json, "result_json")
         .and_then(|v| {
             v.get("verdict")
                 .and_then(|s| s.as_str())
@@ -1553,8 +1552,7 @@ pub(super) fn build_minimal_dispatch_message(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> String {
-    let context_json = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+    let context_json = parse_json_value(dispatch_context, "dispatch_context")
         .unwrap_or_else(|| serde_json::json!({}));
     let message = render_dispatch_message(
         dispatch_id,
@@ -1578,8 +1576,7 @@ pub(super) fn format_dispatch_message(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> String {
-    let context_json = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+    let context_json = parse_json_value(dispatch_context, "dispatch_context")
         .unwrap_or_else(|| serde_json::json!({}));
 
     let primary = render_dispatch_message(
@@ -1984,6 +1981,45 @@ mod tests {
         let (value, logs) = capture_logs(|| parse_json_value(Some("{"), "result_json"));
         assert!(value.is_none());
         assert!(logs.contains("[dispatch-outbox] malformed JSON in result_json"));
+    }
+
+    #[test]
+    fn extract_review_verdict_logs_warn_and_defaults_to_unknown_for_malformed_json() {
+        let (verdict, logs) = capture_logs(|| extract_review_verdict(Some("{")));
+        assert_eq!(verdict, "unknown");
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in result_json"));
+    }
+
+    #[test]
+    fn build_minimal_dispatch_message_logs_warn_for_malformed_dispatch_context() {
+        let (message, logs) = capture_logs(|| {
+            build_minimal_dispatch_message(
+                "dispatch-123",
+                "Title",
+                Some("https://example.invalid/issues/948"),
+                Some(948),
+                Some("review"),
+                Some("{"),
+            )
+        });
+        assert!(!message.trim().is_empty());
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in dispatch_context"));
+    }
+
+    #[test]
+    fn format_dispatch_message_logs_warn_for_malformed_dispatch_context() {
+        let (message, logs) = capture_logs(|| {
+            format_dispatch_message(
+                "dispatch-123",
+                "Title",
+                Some("https://example.invalid/issues/948"),
+                Some(948),
+                Some("review"),
+                Some("{"),
+            )
+        });
+        assert!(!message.trim().is_empty());
+        assert!(logs.contains("[dispatch-outbox] malformed JSON in dispatch_context"));
     }
 
     #[derive(Clone, Default)]
