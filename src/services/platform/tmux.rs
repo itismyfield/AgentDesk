@@ -187,7 +187,9 @@ pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
             "capture-pane",
             "-p",
             "-t",
-            &exact_target(session_name),
+            // `capture-pane` expects a session target here, not an exact-match
+            // pane target, so pass the plain session name.
+            session_name,
             "-S",
             &scroll,
         ])

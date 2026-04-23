@@ -712,10 +712,19 @@ pub(crate) enum ReadyForInputIdleState {
 pub(crate) struct ReadyForInputIdleTracker {
     first_ready_at: Option<std::time::Instant>,
     consecutive_ready_probes: u32,
+    recovery_primed: bool,
 }
 
 impl ReadyForInputIdleTracker {
+    pub(crate) fn primed_for_recovery() -> Self {
+        Self {
+            recovery_primed: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn record_output(&mut self) {
+        self.recovery_primed = false;
         self.reset();
     }
 
@@ -726,7 +735,8 @@ impl ReadyForInputIdleTracker {
         post_work_observed: bool,
         now: std::time::Instant,
     ) -> ReadyForInputIdleState {
-        if !output_ever_grew || !ready_for_input {
+        let output_ready = output_ever_grew || self.recovery_primed;
+        if !output_ready || !ready_for_input {
             self.reset();
             return ReadyForInputIdleState::None;
         }
@@ -746,7 +756,7 @@ impl ReadyForInputIdleTracker {
             return ReadyForInputIdleState::None;
         }
 
-        if post_work_observed {
+        if self.recovery_primed || post_work_observed {
             ReadyForInputIdleState::PostWorkIdleTimeout
         } else {
             ReadyForInputIdleState::FreshIdle

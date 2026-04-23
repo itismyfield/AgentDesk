@@ -58,6 +58,29 @@ pub(super) struct WatcherLineOutcome {
     pub task_notification_kind: Option<TaskNotificationKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatcherSpawnOrigin {
+    LiveTurn,
+    StartupRestore,
+    RecoveryRestore,
+    // `/api/inflight/rebind` deliberately starts the watcher at EOF, so
+    // pre-existing ready prompts must not count as post-work idle.
+    InflightRebind,
+}
+
+impl WatcherSpawnOrigin {
+    fn ready_for_input_tracker(self) -> crate::services::provider::ReadyForInputIdleTracker {
+        match self {
+            Self::RecoveryRestore => {
+                crate::services::provider::ReadyForInputIdleTracker::primed_for_recovery()
+            }
+            Self::LiveTurn | Self::StartupRestore | Self::InflightRebind => {
+                crate::services::provider::ReadyForInputIdleTracker::default()
+            }
+        }
+    }
+}
+
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     let lower = reason.to_ascii_lowercase();
     if tmux_exit_reason_is_normal_completion(reason) {
@@ -1494,6 +1517,7 @@ pub(super) async fn tmux_output_watcher(
     resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    spawn_origin: WatcherSpawnOrigin,
 ) {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -1817,8 +1841,7 @@ pub(super) async fn tmux_output_watcher(
             let turn_start = tokio::time::Instant::now();
             let turn_timeout = super::turn_watchdog_timeout();
             let mut last_status_update = tokio::time::Instant::now();
-            let mut ready_for_input_tracker =
-                crate::services::provider::ReadyForInputIdleTracker::default();
+            let mut ready_for_input_tracker = spawn_origin.ready_for_input_tracker();
             let mut last_ready_probe_at: Option<std::time::Instant> = None;
             let mut ready_for_input_failure_notice: Option<String> = None;
 
@@ -4265,6 +4288,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             resume_offset,
             pause_epoch,
             turn_delivered,
+            WatcherSpawnOrigin::StartupRestore,
         ));
     }
 
@@ -4484,7 +4508,7 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
-        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
+        TmuxWatcherHandle, WatcherSpawnOrigin, WatcherToolState, build_bg_trigger_session_key,
         claim_or_replace_watcher, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox,
         fail_dispatch_for_ready_for_input_stall, lifecycle_reason_code_for_tmux_exit,
@@ -4940,6 +4964,130 @@ mod tests {
                 start + std::time::Duration::from_secs(16)
             ),
             crate::services::provider::ReadyForInputIdleState::FreshIdle
+        );
+    }
+
+    #[test]
+    fn watcher_ready_for_input_completion_allows_recovery_priming_without_growth() {
+        let mut tracker = WatcherSpawnOrigin::RecoveryRestore.ready_for_input_tracker();
+        let start = std::time::Instant::now();
+
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                100,
+                true,
+                false,
+                start + std::time::Duration::from_secs(10)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                100,
+                true,
+                false,
+                start + std::time::Duration::from_secs(16)
+            ),
+            crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout
+        );
+    }
+
+    #[test]
+    fn watcher_ready_for_input_rebind_at_eof_requires_new_output() {
+        let mut tracker = WatcherSpawnOrigin::InflightRebind.ready_for_input_tracker();
+        let start = std::time::Instant::now();
+
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                100,
+                true,
+                false,
+                start + std::time::Duration::from_secs(10)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                100,
+                true,
+                false,
+                start + std::time::Duration::from_secs(16)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+    }
+
+    #[test]
+    fn watcher_ready_for_input_completion_recovery_priming_resets_after_output() {
+        let mut tracker = WatcherSpawnOrigin::RecoveryRestore.ready_for_input_tracker();
+        let start = std::time::Instant::now();
+
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(&mut tracker, 100, 100, true, false, start),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+
+        tracker.record_output();
+
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                100,
+                true,
+                true,
+                start + std::time::Duration::from_secs(16)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                true,
+                start + std::time::Duration::from_secs(17)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                true,
+                start + std::time::Duration::from_secs(25)
+            ),
+            crate::services::provider::ReadyForInputIdleState::None
+        );
+        assert_eq!(
+            watcher_ready_for_input_turn_completed(
+                &mut tracker,
+                100,
+                120,
+                true,
+                true,
+                start + std::time::Duration::from_secs(33)
+            ),
+            crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout
         );
     }
 

@@ -1030,6 +1030,7 @@ pub(super) fn spawn_turn_bridge(
                                             resume_offset,
                                             pause_epoch,
                                             turn_delivered,
+                                            super::tmux::WatcherSpawnOrigin::LiveTurn,
                                         ));
                                     } else {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
