@@ -2,14 +2,14 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::time::Duration;
 
-#[cfg(test)]
-use sqlx::Connection;
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
-#[cfg(test)]
-use sqlx::postgres::PgConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Row};
+#[cfg(test)]
+use sqlx::postgres::PgConnection;
+#[cfg(test)]
+use sqlx::Connection;
 
 use crate::config::{AgentChannel, AgentDef, Config};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
