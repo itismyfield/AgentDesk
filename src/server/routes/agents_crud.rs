@@ -292,14 +292,14 @@ pub(super) async fn list_agents(
     State(state): State<AppState>,
     Query(params): Query<ListAgentsQuery>,
 ) -> Json<serde_json::Value> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let agents = list_agents_pg(pool, params.office_id.as_deref())
             .await
             .unwrap_or_default();
         return Json(json!({ "agents": agents }));
     }
 
-    let agents = match state.db.lock() {
+    let agents = match state.sqlite_db().lock() {
         Ok(conn) => {
             let (sql, bind_values): (String, Vec<String>) = if let Some(ref oid) = params.office_id
             {
@@ -404,7 +404,7 @@ pub(super) async fn get_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match load_agent_pg(pool, &id).await {
             Ok(Some(agent)) => Json(json!({ "agent": agent })),
             Ok(None) => Json(json!({ "error": "agent not found" })),
@@ -412,7 +412,7 @@ pub(super) async fn get_agent(
         };
     }
 
-    match state.db.lock() {
+    match state.sqlite_db().lock() {
         Ok(conn) => {
             let result = conn.query_row(
                 "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
@@ -483,7 +483,7 @@ pub(super) async fn create_agent(
     State(state): State<AppState>,
     Json(body): Json<CreateAgentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
             merged_channel_values(
                 body.discord_channel_id.clone(),
@@ -548,7 +548,7 @@ pub(super) async fn create_agent(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -638,7 +638,7 @@ pub(super) async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut updated_any = false;
         let channel_patch_requested = body.discord_channel_id.is_some()
             || body.discord_channel_alt.is_some()
@@ -794,7 +794,7 @@ pub(super) async fn update_agent(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -966,7 +966,7 @@ pub(super) async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM agents WHERE id = $1")
             .bind(&id)
             .execute(pool)
@@ -994,7 +994,7 @@ pub(super) async fn delete_agent(
         }
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1021,7 +1021,7 @@ pub(super) async fn delete_agent(
 }
 
 pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let sessions = match state.db.lock() {
+    let sessions = match state.sqlite_db().lock() {
         Ok(conn) => {
             let mut stmt = match conn.prepare(
                 "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,

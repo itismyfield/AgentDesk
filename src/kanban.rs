@@ -1198,6 +1198,28 @@ async fn transition_status_with_opts_pg_inner(
     ))
 }
 
+pub async fn transition_status_with_opts_pg_only(
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+) -> Result<TransitionResult> {
+    transition_status_with_opts_pg_inner(
+        None,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        None,
+    )
+    .await
+    .map(|(result, _)| result)
+}
+
 pub async fn transition_status_with_opts_pg(
     db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
@@ -1219,6 +1241,28 @@ pub async fn transition_status_with_opts_pg(
     )
     .await
     .map(|(result, _)| result)
+}
+
+pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+    on_pg_policy: AllowedOnConnMutation,
+) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
+    transition_status_with_opts_pg_inner(
+        None,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        Some(on_pg_policy),
+    )
+    .await
 }
 
 pub async fn transition_status_with_opts_and_allowed_cleanup_pg(

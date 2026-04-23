@@ -290,9 +290,7 @@ pub async fn create_issue(
     match github::create_issue_with_labels(&repo, &title, &issue_body, &applied_labels).await {
         Ok(created) => {
             let metadata_json = labels_metadata_json(&applied_labels);
-            let (kanban_card_id, kanban_card_sync_error) = if let Some(pool) =
-                state.pg_pool.as_ref()
-            {
+            let (kanban_card_id, kanban_card_sync_error) = if let Some(pool) = state.pg_pool_ref() {
                 let assigned_agent_id = match resolve_known_agent_id_pg(
                     pool,
                     body.agent_id.as_deref(),
@@ -352,7 +350,7 @@ pub async fn create_issue(
                 }
             } else {
                 let card_id = uuid::Uuid::new_v4().to_string();
-                match state.db.lock() {
+                match state.sqlite_db().lock() {
                     Ok(conn) => {
                         let assigned_agent_id =
                             resolve_known_agent_id(&conn, body.agent_id.as_deref());
@@ -434,7 +432,7 @@ pub async fn create_issue(
 
 /// GET /api/github/repos
 pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let rows = match sqlx::query(
             "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at
              FROM github_repos
@@ -465,7 +463,7 @@ pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serd
         return (StatusCode::OK, Json(json!({"repos": items})));
     }
 
-    match github::list_repos(&state.db) {
+    match github::list_repos(state.sqlite_db()) {
         Ok(repos) => {
             let items: Vec<serde_json::Value> = repos
                 .into_iter()
@@ -496,7 +494,7 @@ pub async fn register_repo(
         );
     }
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Err(error) = crate::db::postgres::register_repo(pool, &body.id).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -531,7 +529,7 @@ pub async fn register_repo(
         };
     }
 
-    match github::register_repo(&state.db, &body.id) {
+    match github::register_repo(state.sqlite_db(), &body.id) {
         Ok(repo) => (
             StatusCode::CREATED,
             Json(json!({
@@ -555,7 +553,7 @@ pub async fn sync_repo(
     let repo_id = format!("{owner}/{repo}");
 
     // Check repo exists
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let exists =
             match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM github_repos WHERE id = $1")
                 .bind(&repo_id)
@@ -578,7 +576,7 @@ pub async fn sync_repo(
             );
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -623,7 +621,7 @@ pub async fn sync_repo(
         }
     };
 
-    let (triaged, sync_result) = if let Some(pool) = state.pg_pool.as_ref() {
+    let (triaged, sync_result) = if let Some(pool) = state.pg_pool_ref() {
         let triaged = match github::triage::triage_new_issues_pg(pool, &repo_id, &issues).await {
             Ok(count) => count,
             Err(error) => {
@@ -645,9 +643,10 @@ pub async fn sync_repo(
             };
         (triaged, sync_result)
     } else {
-        let triaged = github::triage::triage_new_issues(&state.db, &repo_id, &issues).unwrap_or(0);
+        let triaged =
+            github::triage::triage_new_issues(state.sqlite_db(), &repo_id, &issues).unwrap_or(0);
         let sync_result = match github::sync::sync_github_issues_for_repo(
-            &state.db,
+            state.sqlite_db(),
             &state.engine,
             &repo_id,
             &issues,

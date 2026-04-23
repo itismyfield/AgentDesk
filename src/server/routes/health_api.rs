@@ -46,7 +46,7 @@ fn discord_control_endpoints_allowed(
 /// When HealthRegistry is present, returns Discord provider status.
 /// Always includes DB status and dashboard availability.
 pub async fn health_handler(State(state): State<AppState>) -> Response {
-    let server_up = probe_server_up(&state.db, state.pg_pool.as_ref()).await;
+    let server_up = probe_server_up(state.sqlite_db(), state.pg_pool_ref()).await;
 
     // Check if dashboard dist is available
     let dashboard_ok = {
@@ -56,7 +56,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
-    let outbox_stats = load_dispatch_outbox_stats(&state.db, state.pg_pool.as_ref()).await;
+    let outbox_stats = load_dispatch_outbox_stats(state.sqlite_db(), state.pg_pool_ref()).await;
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
             "pending": stats.pending,
@@ -70,14 +70,16 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
     let config_audit_report = crate::services::discord_config_audit::load_persisted_report(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
     )
     .and_then(|report| serde_json::to_value(report).ok());
-    let pipeline_override_report =
-        crate::pipeline::load_persisted_override_health_report(&state.db, state.pg_pool.as_ref())
-            .await
-            .and_then(|report| serde_json::to_value(report).ok());
+    let pipeline_override_report = crate::pipeline::load_persisted_override_health_report(
+        state.sqlite_db(),
+        state.pg_pool_ref(),
+    )
+    .await
+    .and_then(|report| serde_json::to_value(report).ok());
 
     if let Some(ref registry) = state.health_registry {
         let discord_snapshot = health::build_health_snapshot(registry).await;
@@ -200,7 +202,8 @@ pub async fn send_handler(
     };
 
     let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) = health::handle_send(registry, &state.db, &body_str).await;
+    let (status_str, response_body) =
+        health::handle_send(registry, state.sqlite_db(), &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
@@ -273,7 +276,7 @@ pub async fn send_to_agent_handler(
 
     let body_str = String::from_utf8_lossy(&body);
     let (status_str, response_body) =
-        health::handle_send_to_agent(registry, &state.db, &body_str).await;
+        health::handle_send_to_agent(registry, state.sqlite_db(), &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));

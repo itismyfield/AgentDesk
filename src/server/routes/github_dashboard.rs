@@ -137,7 +137,7 @@ pub async fn close_issue(
 
 /// Returns kanban cards marked "done" today that have a github_issue_url.
 pub async fn closed_today(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return Json(json!({

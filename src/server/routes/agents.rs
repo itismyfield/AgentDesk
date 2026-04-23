@@ -509,7 +509,7 @@ pub async fn agent_offices(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -577,7 +577,7 @@ pub async fn agent_cron(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -611,7 +611,7 @@ pub async fn agent_skills(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -688,7 +688,7 @@ pub async fn agent_dispatched_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -791,7 +791,7 @@ pub async fn agent_turn(
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let session = {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -945,7 +945,7 @@ pub async fn start_agent_turn(
         .map(|s| s.to_string());
 
     let (provider, primary_channel) = {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(conn) => conn,
             Err(error) => {
                 return (
@@ -1112,7 +1112,7 @@ pub async fn stop_agent_turn(
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let session = {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -1175,7 +1175,7 @@ pub async fn stop_agent_turn(
     )
     .await;
 
-    if let Ok(conn) = state.db.lock() {
+    if let Ok(conn) = state.sqlite_db().lock() {
         conn.execute(
             "UPDATE sessions
              SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
@@ -1211,7 +1211,7 @@ pub async fn agent_timeline(
     Path(id): Path<String>,
     Query(params): Query<TimelineQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1331,7 +1331,7 @@ pub async fn agent_transcripts(
     Path(id): Path<String>,
     Query(params): Query<TranscriptQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let agent_exists = if let Some(pool) = state.pg_pool.as_ref() {
+    let agent_exists = if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM agents WHERE id = $1")
             .bind(&id)
             .fetch_one(pool)
@@ -1346,7 +1346,7 @@ pub async fn agent_transcripts(
             }
         }
     } else {
-        let conn = match state.db.read_conn() {
+        let conn = match state.sqlite_db().read_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -1366,8 +1366,8 @@ pub async fn agent_transcripts(
     }
 
     match crate::db::session_transcripts::list_transcripts_for_agent_db(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
         &id,
         params.limit.unwrap_or(8),
     )
@@ -1405,7 +1405,7 @@ pub async fn agent_signal(
     }
 
     // Find active card for this agent
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

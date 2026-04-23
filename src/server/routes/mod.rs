@@ -62,6 +62,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn pg_pool_ref(&self) -> Option<&sqlx::PgPool> {
+        self.pg_pool.as_ref()
+    }
+
+    pub fn sqlite_db(&self) -> &Db {
+        &self.db
+    }
+
     pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
         crate::services::auto_queue::AutoQueueService::new(
             Some(self.db.clone()),

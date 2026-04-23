@@ -50,7 +50,10 @@ fn resolve_resume_card_id_pg_first(
         );
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     conn.query_row(
         "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 \
          ORDER BY updated_at DESC LIMIT 1",
@@ -122,7 +125,10 @@ fn load_resume_card_snapshot_pg_first(
         );
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     conn.query_row(
         "SELECT status, review_status, latest_dispatch_id, \
          assigned_agent_id, title, blocked_reason, repo_id \
@@ -168,7 +174,10 @@ fn resolve_effective_pipeline_pg_first(
         );
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     Ok(crate::pipeline::resolve_for_card(&conn, repo_id, agent_id))
 }
 
@@ -198,7 +207,10 @@ fn load_active_dispatch_pg_first(
         );
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     conn.query_row(
         "SELECT id, status FROM task_dispatches \
          WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
@@ -371,7 +383,7 @@ pub async fn resume_card(
                 }
             }
 
-            let conn = match state.db.lock() {
+            let conn = match state.sqlite_db().lock() {
                 Ok(c) => c,
                 Err(e) => {
                     return (
@@ -544,7 +556,7 @@ fn resume_from_in_progress(
         Some("completed") | Some("failed") | Some("cancelled") | None => {
             // Transition to review via kanban transition
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 "review",
@@ -581,7 +593,7 @@ fn resume_from_in_progress_manual_intervention(
     clear_manual_intervention_markers(state, card_id)?;
 
     crate::kanban::transition_status_with_opts(
-        &state.db,
+        state.sqlite_db(),
         &state.engine,
         card_id,
         "requested",
@@ -675,7 +687,7 @@ fn resume_from_review(
 
             // Transition card to rework target
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 &rework_target,
@@ -766,7 +778,7 @@ fn resume_from_review_dilemma_pending(
             let rework_target =
                 resolve_rework_resume_target(state, card_id, "review", Some("pending_decision"))?;
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 &rework_target,
@@ -819,7 +831,7 @@ fn resume_from_review_dilemma_pending(
         }
         _ => {
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 "requested",
@@ -878,7 +890,7 @@ fn resume_from_pending_decision_legacy(
                 resolve_rework_resume_target(state, card_id, "review", Some("pending_decision"))?;
 
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 &rework_target,
@@ -911,7 +923,7 @@ fn resume_from_pending_decision_legacy(
         // Review/review-decision was stuck → back to review flow
         Some("review") | Some("review-decision") => {
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 "review",
@@ -931,7 +943,7 @@ fn resume_from_pending_decision_legacy(
         // Default: back to requested → implementation
         _ => {
             crate::kanban::transition_status_with_opts(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 card_id,
                 "requested",
@@ -982,7 +994,7 @@ fn resume_from_blocked_legacy(
     clear_manual_intervention_markers(state, card_id)?;
 
     crate::kanban::transition_status_with_opts(
-        &state.db,
+        state.sqlite_db(),
         &state.engine,
         card_id,
         "requested",
@@ -1084,7 +1096,7 @@ fn cancel_and_clear(state: &AppState, card_id: &str) -> Result<(), String> {
         );
     }
 
-    let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+    let conn = state.sqlite_db().lock().map_err(|e| format!("{e}"))?;
 
     // Collect all active dispatch IDs for proper cancellation + auto-queue reset
     let mut stmt = conn
@@ -1141,7 +1153,7 @@ fn create_and_notify(
     context: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let dispatch = crate::dispatch::create_dispatch(
-        &state.db,
+        state.sqlite_db(),
         &state.engine,
         card_id,
         agent_id,
@@ -1181,7 +1193,7 @@ fn get_last_terminal_dispatch_type(state: &AppState, card_id: &str) -> Option<St
         }
     }
 
-    let conn = state.db.lock().ok()?;
+    let conn = state.sqlite_db().lock().ok()?;
     conn.query_row(
         "SELECT dispatch_type FROM task_dispatches \
          WHERE kanban_card_id = ?1 AND status IN ('completed', 'failed', 'cancelled') \
@@ -1214,7 +1226,7 @@ fn get_dispatch_status(state: &AppState, dispatch_id: &Option<String>) -> Option
         }
     }
 
-    let conn = state.db.lock().ok()?;
+    let conn = state.sqlite_db().lock().ok()?;
     conn.query_row(
         "SELECT status FROM task_dispatches WHERE id = ?1",
         [did.as_str()],
@@ -1299,7 +1311,7 @@ fn resolve_rework_resume_target(
         );
     }
 
-    let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+    let conn = state.sqlite_db().lock().map_err(|e| format!("{e}"))?;
     let (repo_id, card_agent): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
@@ -1367,7 +1379,10 @@ fn clear_manual_intervention_markers(state: &AppState, card_id: &str) -> Result<
         return sync_review_state(state, card_id, None, "idle");
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     conn.execute(
         "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
         [card_id],
@@ -1419,7 +1434,10 @@ fn sync_review_state(
         );
     }
 
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
 
     execute_intent_on_conn(
@@ -1470,7 +1488,7 @@ fn write_audit_log(state: &AppState, card_id: &str, from_status: &str, reason: &
         return;
     }
 
-    if let Ok(conn) = state.db.lock() {
+    if let Ok(conn) = state.sqlite_db().lock() {
         conn.execute(
             "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) \
              VALUES (?1, ?2, ?2, 'resume', ?3)",

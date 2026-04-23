@@ -7,6 +7,12 @@ use super::super::AppState;
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
+fn legacy_db(state: &AppState) -> &crate::db::Db {
+    match state {
+        AppState { db, .. } => db,
+    }
+}
+
 /// PG-first wrapper around `crate::kanban::transition_status_with_opts`.
 ///
 /// SQLite-only callers fail with `card not found` after the PG cutover when
@@ -20,9 +26,8 @@ async fn transition_status_pg_first(
     source: &str,
     force_intent: crate::engine::transition::ForceIntent,
 ) -> anyhow::Result<crate::kanban::TransitionResult> {
-    if let Some(pool) = state.pg_pool.as_ref() {
-        crate::kanban::transition_status_with_opts_pg(
-            Some(&state.db),
+    if let Some(pool) = state.pg_pool_ref() {
+        crate::kanban::transition_status_with_opts_pg_only(
             pool,
             &state.engine,
             card_id,
@@ -33,13 +38,21 @@ async fn transition_status_pg_first(
         .await
     } else {
         crate::kanban::transition_status_with_opts(
-            &state.db,
+            legacy_db(state),
             &state.engine,
             card_id,
             new_status,
             source,
             force_intent,
         )
+    }
+}
+
+fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
+    if let Some(pool) = state.pg_pool_ref() {
+        spawn_aggregate_if_needed_with_pg(None, Some(pool.clone()));
+    } else {
+        spawn_aggregate_if_needed_with_pg(Some(legacy_db(state)), None);
     }
 }
 
@@ -147,7 +160,7 @@ async fn active_accept_followups_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> ActiveAcceptFollowups {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok((review, rework, review_decision)) =
             sqlx::query_as::<_, (i64, i64, i64)>(
                 "SELECT \
@@ -169,7 +182,7 @@ async fn active_accept_followups_pg_first(
         }
     }
 
-    active_accept_followups(&state.db, card_id)
+    active_accept_followups(legacy_db(state), card_id)
 }
 
 fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
@@ -184,7 +197,7 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
 }
 
 async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option<String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(status) =
             sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
                 .bind(card_id)
@@ -195,7 +208,7 @@ async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option
         }
     }
 
-    current_card_status(&state.db, card_id)
+    current_card_status(legacy_db(state), card_id)
 }
 
 #[derive(Debug, Default)]
@@ -210,7 +223,7 @@ async fn load_review_decision_card_context_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> ReviewDecisionCardContext {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(row) = sqlx::query_as::<
             _,
             (
@@ -270,11 +283,11 @@ async fn resolve_effective_pipeline_pg_first(
 ) -> crate::pipeline::PipelineConfig {
     crate::pipeline::ensure_loaded();
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return crate::pipeline::resolve_for_card_pg(pool, repo_id, agent_id).await;
     }
 
-    match state.db.lock() {
+    match legacy_db(state).lock() {
         Ok(conn) => crate::pipeline::resolve_for_card(&conn, repo_id, agent_id),
         Err(error) => {
             tracing::warn!(
@@ -286,7 +299,7 @@ async fn resolve_effective_pipeline_pg_first(
 }
 
 async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(exists) =
             sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM kanban_cards WHERE id = $1)")
                 .bind(card_id)
@@ -316,7 +329,7 @@ async fn pending_review_decision_dispatch_id_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Option<String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(dispatch_id) = sqlx::query_scalar::<_, String>(
             "SELECT td.id
              FROM task_dispatches td
@@ -350,7 +363,7 @@ async fn pending_review_decision_dispatch_id_pg_first(
         }
     }
 
-    state.db.lock().ok().and_then(|conn| {
+    legacy_db(state).lock().ok().and_then(|conn| {
         conn.query_row(
             "SELECT td.id FROM task_dispatches td \
              JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
@@ -375,7 +388,7 @@ async fn pending_review_decision_dispatch_id_pg_first(
 }
 
 async fn emit_card_updated(state: &AppState, card_id: &str) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match super::super::kanban::load_card_json_pg(pool, card_id).await {
             Ok(Some(card)) => {
                 crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
@@ -392,7 +405,7 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
         }
     }
 
-    if let Ok(conn) = state.db.lock() {
+    if let Ok(conn) = legacy_db(state).lock() {
         if let Ok(card) = conn.query_row(
             &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
             [card_id],
@@ -448,7 +461,7 @@ async fn mark_next_review_round_advance_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Result<bool, String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let metadata_raw = sqlx::query_scalar::<_, Option<String>>(
             "SELECT metadata FROM kanban_cards WHERE id = $1",
         )
@@ -514,7 +527,7 @@ async fn dispatch_status_and_result_pg_first(
     state: &AppState,
     dispatch_id: &str,
 ) -> Option<(String, Option<String>)> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(row) = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT status, result FROM task_dispatches WHERE id = $1",
         )
@@ -526,7 +539,7 @@ async fn dispatch_status_and_result_pg_first(
         }
     }
 
-    dispatch_status_and_result(&state.db, dispatch_id)
+    dispatch_status_and_result(legacy_db(state), dispatch_id)
 }
 
 #[derive(Debug, Clone)]
@@ -628,7 +641,7 @@ async fn latest_active_review_dispatch_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Option<ActiveReviewDispatch> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(row) = sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT id, context
              FROM task_dispatches
@@ -646,14 +659,14 @@ async fn latest_active_review_dispatch_pg_first(
         }
     }
 
-    latest_active_review_dispatch(&state.db, card_id)
+    latest_active_review_dispatch(legacy_db(state), card_id)
 }
 
 async fn latest_completed_review_context_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Option<serde_json::Value> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(context_raw) = sqlx::query_scalar::<_, Option<String>>(
             "SELECT context
              FROM task_dispatches
@@ -693,7 +706,7 @@ async fn latest_completed_review_context_pg_first(
 }
 
 async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i64> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(issue_number) = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT github_issue_number::BIGINT FROM kanban_cards WHERE id = $1",
         )
@@ -705,7 +718,7 @@ async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i
         }
     }
 
-    state.db.lock().ok().and_then(|c| {
+    legacy_db(state).lock().ok().and_then(|c| {
         c.query_row(
             "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
             [card_id],
@@ -716,7 +729,7 @@ async fn card_issue_number_pg_first(state: &AppState, card_id: &str) -> Option<i
 }
 
 async fn stale_review_dispatch_ids_pg_first(state: &AppState, card_id: &str) -> Vec<String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Ok(ids) = sqlx::query_scalar::<_, String>(
             "SELECT id
              FROM task_dispatches
@@ -759,7 +772,7 @@ async fn prepare_dispute_review_entry_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut tx = pool
             .begin()
             .await
@@ -820,7 +833,7 @@ async fn finalize_accept_cleanup_pg_first(
     card_id: &str,
     clear_review_status: bool,
 ) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut tx = pool
             .begin()
             .await
@@ -846,7 +859,7 @@ async fn finalize_accept_cleanup_pg_first(
         return Ok(());
     }
 
-    if let Ok(c) = state.db.lock() {
+    if let Ok(c) = legacy_db(state).lock() {
         if clear_review_status {
             use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
             execute_intent_on_conn(
@@ -873,7 +886,7 @@ async fn commit_belongs_to_card_issue_pg_first(
     commit_sha: &str,
     target_repo: Option<&str>,
 ) -> bool {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return crate::dispatch::commit_belongs_to_card_issue_pg(
             pool,
             card_id,
@@ -883,7 +896,12 @@ async fn commit_belongs_to_card_issue_pg_first(
         .await;
     }
 
-    crate::dispatch::commit_belongs_to_card_issue(&state.db, card_id, commit_sha, target_repo)
+    crate::dispatch::commit_belongs_to_card_issue(
+        legacy_db(state),
+        card_id,
+        commit_sha,
+        target_repo,
+    )
 }
 
 async fn cancel_dispatch_pg_first(
@@ -891,7 +909,7 @@ async fn cancel_dispatch_pg_first(
     dispatch_id: &str,
     reason: Option<&str>,
 ) -> Result<usize, String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
             pool,
             dispatch_id,
@@ -909,7 +927,7 @@ async fn cancel_dispatch_pg_first(
 }
 
 async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut tx = pool
             .begin()
             .await
@@ -1225,7 +1243,7 @@ pub async fn submit_review_decision(
                                     // auto-approval to terminal) before checking
                                     // whether a live review dispatch exists.
                                     crate::kanban::drain_hook_side_effects(
-                                        &state.db,
+                                        legacy_db(&state),
                                         &state.engine,
                                     );
                                     let followups =
@@ -1340,7 +1358,7 @@ pub async fn submit_review_decision(
                             card_title.as_deref().unwrap_or(&body.card_id)
                         );
                         match crate::dispatch::create_dispatch_with_options(
-                            &state.db,
+                            legacy_db(&state),
                             state.engine.pg_pool(),
                             &state.engine,
                             &body.card_id,
@@ -1436,8 +1454,8 @@ pub async fn submit_review_decision(
 
             if let Some(ref rd_id) = pending_rd_id {
                 match crate::dispatch::mark_dispatch_completed_pg_first(
-                    &state.db,
-                    state.pg_pool.as_ref(),
+                    legacy_db(&state),
+                    state.pg_pool_ref(),
                     rd_id,
                     &json!({"decision": "accept", "completion_source": "review_decision_api"}),
                 ) {
@@ -1540,22 +1558,22 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome
             record_decision_tuning(
-                &state.db,
-                state.pg_pool.as_ref(),
+                legacy_db(&state),
+                state.pg_pool_ref(),
                 &body.card_id,
                 "accept",
                 pending_rd_id.as_deref(),
             )
             .await;
-            spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
+            spawn_review_tuning_aggregate_pg_first(&state);
 
             // #117: Update canonical review state.
             // For direct review: OnReviewEnter already set the state, so skip the
             // rework_pending override that would conflict with the live review dispatch.
             if !direct_review_created && !terminal_auto_approved {
                 update_card_review_state(
-                    &state.db,
-                    state.pg_pool.as_ref(),
+                    state.pg_pool_ref().is_none().then_some(legacy_db(&state)),
+                    state.pg_pool_ref(),
                     &body.card_id,
                     "accept",
                     pending_rd_id.as_deref(),
@@ -1593,14 +1611,14 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
             record_decision_tuning(
-                &state.db,
-                state.pg_pool.as_ref(),
+                legacy_db(&state),
+                state.pg_pool_ref(),
                 &body.card_id,
                 "dispute",
                 pending_rd_id.as_deref(),
             )
             .await;
-            spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
+            spawn_review_tuning_aggregate_pg_first(&state);
 
             // #229: Cancel stale pending/dispatched review dispatches for this card.
             // Without this, the dispatch-core dedup guard blocks
@@ -1633,7 +1651,7 @@ pub async fn submit_review_decision(
                 .await
                 .unwrap_or_else(|| "review".to_string());
             crate::kanban::fire_enter_hooks(
-                &state.db,
+                legacy_db(&state),
                 &state.engine,
                 &body.card_id,
                 &dispute_status,
@@ -1644,7 +1662,7 @@ pub async fn submit_review_decision(
             // for review/manual-intervention follow-up on max rounds) and Discord notifications for any
             // dispatches created by the hooks, eliminating the previous manual drain loop
             // that only handled transitions and missed dispatch notifications.
-            crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+            crate::kanban::drain_hook_side_effects(legacy_db(&state), &state.engine);
 
             // #229: Safety net — if card is still in a review-like state but no
             // pending review dispatch exists (OnReviewEnter hook may have failed
@@ -1652,7 +1670,7 @@ pub async fn submit_review_decision(
             {
                 let card_ctx =
                     load_review_decision_card_context_pg_first(&state, &body.card_id).await;
-                let has_review_dispatch = if let Some(pool) = state.pg_pool.as_ref() {
+                let has_review_dispatch = if let Some(pool) = state.pg_pool_ref() {
                     sqlx::query_scalar::<_, bool>(
                         "SELECT COUNT(*) > 0
                          FROM task_dispatches
@@ -1704,7 +1722,7 @@ pub async fn submit_review_decision(
                         "OnReviewEnter",
                         json!({ "card_id": body.card_id }),
                     );
-                    crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+                    crate::kanban::drain_hook_side_effects(legacy_db(&state), &state.engine);
                 }
             }
 
@@ -1766,8 +1784,8 @@ pub async fn submit_review_decision(
 
             if let Some(ref rd_id) = pending_rd_id {
                 match crate::dispatch::mark_dispatch_completed_pg_first(
-                    &state.db,
-                    state.pg_pool.as_ref(),
+                    legacy_db(&state),
+                    state.pg_pool_ref(),
                     rd_id,
                     &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
                 ) {
@@ -1812,8 +1830,8 @@ pub async fn submit_review_decision(
 
             // #117: Update canonical review state before returning
             update_card_review_state(
-                &state.db,
-                state.pg_pool.as_ref(),
+                state.pg_pool_ref().is_none().then_some(legacy_db(&state)),
+                state.pg_pool_ref(),
                 &body.card_id,
                 "dispute",
                 pending_rd_id.as_deref(),
@@ -1872,22 +1890,22 @@ pub async fn submit_review_decision(
 
     // #117: Update canonical review state for all decision paths
     update_card_review_state(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.pg_pool_ref().is_none().then_some(legacy_db(&state)),
+        state.pg_pool_ref(),
         &body.card_id,
         &body.decision,
         pending_rd_id.as_deref(),
     );
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
     record_decision_tuning(
-        &state.db,
-        state.pg_pool.as_ref(),
+        legacy_db(&state),
+        state.pg_pool_ref(),
         &body.card_id,
         &body.decision,
         pending_rd_id.as_deref(),
     )
     .await;
-    spawn_aggregate_if_needed_with_pg(Some(&state.db), state.pg_pool.clone());
+    spawn_review_tuning_aggregate_pg_first(&state);
 
     emit_card_updated(&state, &body.card_id).await;
 

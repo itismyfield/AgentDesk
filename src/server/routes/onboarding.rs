@@ -245,7 +245,7 @@ fn onboarding_draft_secret_policy_value() -> serde_json::Value {
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
 pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -400,7 +400,7 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
 /// GET /api/onboarding/draft
 /// Returns the in-progress onboarding draft, distinct from completed setup summary.
 pub async fn draft_get(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let completed = match state.db.lock() {
+    let completed = match state.sqlite_db().lock() {
         Ok(conn) => conn
             .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
             .unwrap_or(false),
@@ -590,7 +590,7 @@ async fn load_channels(
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Use provided token or saved token
     let token = token.or_else(|| {
-        state.db.lock().ok().and_then(|conn| {
+        state.sqlite_db().lock().ok().and_then(|conn| {
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
                 [],
@@ -2437,7 +2437,7 @@ async fn complete_with_options(
         );
     }
 
-    let mut conn = match state.db.lock() {
+    let mut conn = match state.sqlite_db().lock() {
         Ok(conn) => conn,
         Err(error) => {
             completion_state.last_error = Some(format!("{error}"));

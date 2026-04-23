@@ -1245,7 +1245,7 @@ pub async fn link_dispatch_thread(
     State(state): State<AppState>,
     Json(body): Json<LinkDispatchThreadBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1315,7 +1315,7 @@ pub async fn get_card_thread(
         }
     };
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1454,7 +1454,7 @@ pub async fn get_pending_dispatch_for_thread(
         }
     };
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

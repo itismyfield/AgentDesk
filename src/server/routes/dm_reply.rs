@@ -39,8 +39,8 @@ pub async fn register_handler(
     let ttl_seconds = body.ttl_seconds.unwrap_or(3600);
 
     match register_pending_dm_reply_db(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
         &source_agent,
         &user_id,
         channel_id.as_deref(),

@@ -1377,7 +1377,7 @@ async fn emit_escalation_with_base_url(
     }
 
     let (settings, summary, context, parent_channels, cached_thread_id) = if let Some(pool) =
-        state.pg_pool.as_ref()
+        state.pg_pool_ref()
     {
         match load_escalation_emit_inputs_pg(pool, &state.config, &card_id) {
             Ok(loaded) => loaded,
@@ -1386,7 +1386,7 @@ async fn emit_escalation_with_base_url(
                     %error,
                     "[escalation] postgres load failed for {card_id}; falling back to sqlite"
                 );
-                let conn = match state.db.separate_conn() {
+                let conn = match state.sqlite_db().separate_conn() {
                     Ok(conn) => conn,
                     Err(err) => {
                         return (
@@ -1423,7 +1423,7 @@ async fn emit_escalation_with_base_url(
             }
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(conn) => conn,
             Err(err) => {
                 return (
@@ -1512,27 +1512,27 @@ async fn emit_escalation_with_base_url(
                         );
                     }
                     Ok(false) => {
-                        if let Some(pool) = state.pg_pool.as_ref() {
+                        if let Some(pool) = state.pg_pool_ref() {
                             if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
                                 tracing::warn!(
                                     %error,
                                     "[escalation] failed to clear postgres cached thread for {card_id}"
                                 );
                             }
-                        } else if let Ok(conn) = state.db.separate_conn() {
+                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
                             let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
                     Err(err) => {
                         tracing::warn!("[escalation] thread reuse failed for {card_id}: {err}");
-                        if let Some(pool) = state.pg_pool.as_ref() {
+                        if let Some(pool) = state.pg_pool_ref() {
                             if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
                                 tracing::warn!(
                                     %error,
                                     "[escalation] failed to clear postgres cached thread for {card_id}"
                                 );
                             }
-                        } else if let Ok(conn) = state.db.separate_conn() {
+                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
                             let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
@@ -1582,7 +1582,7 @@ async fn emit_escalation_with_base_url(
                         // before saving. If another concurrent escalation already
                         // created and saved a thread, use the existing one instead
                         // of overwriting it with our newly created thread.
-                        let effective_thread_id = if let Some(pool) = state.pg_pool.as_ref() {
+                        let effective_thread_id = if let Some(pool) = state.pg_pool_ref() {
                             match claim_cached_thread_id_pg(pool, &card_id, &thread_id) {
                                 Ok(existing_or_saved) => {
                                     if existing_or_saved != thread_id {
@@ -1601,7 +1601,7 @@ async fn emit_escalation_with_base_url(
                                     thread_id
                                 }
                             }
-                        } else if let Ok(conn) = state.db.separate_conn() {
+                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
                             if let Some(existing) = load_cached_thread_id(&conn, &card_id) {
                                 tracing::info!(
                                     "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
@@ -1747,7 +1747,7 @@ pub async fn get_escalation_settings(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let defaults = escalation_defaults(&state.config);
-    let current = if let Some(pool) = state.pg_pool.as_ref() {
+    let current = if let Some(pool) = state.pg_pool_ref() {
         match merged_settings_pg(pool, &state.config) {
             Ok(current) => current,
             Err(error) => {
@@ -1755,7 +1755,7 @@ pub async fn get_escalation_settings(
                     %error,
                     "[escalation] postgres settings load failed; falling back to sqlite"
                 );
-                let conn = match state.db.read_conn() {
+                let conn = match state.sqlite_db().read_conn() {
                     Ok(conn) => conn,
                     Err(err) => {
                         return (
@@ -1768,7 +1768,7 @@ pub async fn get_escalation_settings(
             }
         }
     } else {
-        let conn = match state.db.read_conn() {
+        let conn = match state.sqlite_db().read_conn() {
             Ok(conn) => conn,
             Err(err) => {
                 return (
@@ -1808,7 +1808,7 @@ pub async fn put_escalation_settings(
     }
 
     let defaults = escalation_defaults(&state.config);
-    let store_result = if let Some(pool) = state.pg_pool.as_ref() {
+    let store_result = if let Some(pool) = state.pg_pool_ref() {
         let pg_result = if body == defaults {
             clear_override_pg(pool)
         } else {
@@ -1826,7 +1826,7 @@ pub async fn put_escalation_settings(
     };
 
     let current = if store_result.is_ok() {
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             match merged_settings_pg(pool, &state.config) {
                 Ok(current) => current,
                 Err(error) => {
@@ -1834,7 +1834,7 @@ pub async fn put_escalation_settings(
                         %error,
                         "[escalation] postgres settings reload failed; falling back to sqlite"
                     );
-                    let conn = match state.db.separate_conn() {
+                    let conn = match state.sqlite_db().separate_conn() {
                         Ok(conn) => conn,
                         Err(err) => {
                             return (
@@ -1847,7 +1847,7 @@ pub async fn put_escalation_settings(
                 }
             }
         } else {
-            let conn = match state.db.separate_conn() {
+            let conn = match state.sqlite_db().separate_conn() {
                 Ok(conn) => conn,
                 Err(err) => {
                     return (
@@ -1859,7 +1859,7 @@ pub async fn put_escalation_settings(
             merged_settings(&conn, &state.config)
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(conn) => conn,
             Err(err) => {
                 return (
