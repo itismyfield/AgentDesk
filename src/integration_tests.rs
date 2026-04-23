@@ -38,6 +38,14 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        crate::pipeline::ensure_loaded();
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
     fn test_engine_with_dir(db: &db::Db, dir: &std::path::Path) -> PolicyEngine {
         let mut config = crate::config::Config::default();
         config.policies.dir = dir.to_path_buf();

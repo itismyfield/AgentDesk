@@ -463,6 +463,37 @@ mod failure_recovery {
                         .expect("connect startup postgres pool")
                         .expect("startup postgres pool");
 
+                    let sqlite = test_db();
+                    seed_agent(&sqlite);
+                    seed_card(&sqlite, "card-969-review", "review");
+
+                    sqlx::query(
+                        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+                         VALUES ('agent-1', 'Test Agent', '111', '222')",
+                    )
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed postgres agent");
+                    sqlx::query(
+                        "INSERT INTO kanban_cards (
+                            id,
+                            title,
+                            status,
+                            assigned_agent_id,
+                            created_at,
+                            updated_at
+                         ) VALUES (
+                            'card-969-review',
+                            'Test Card',
+                            'review',
+                            'agent-1',
+                            NOW(),
+                            NOW()
+                         )",
+                    )
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed postgres review card");
                     sqlx::query(
                         "INSERT INTO dispatch_outbox (dispatch_id, action, status)
                          VALUES ('dispatch-969', 'notify', 'processing')",
@@ -483,8 +514,7 @@ mod failure_recovery {
                         .await
                         .expect("exhaust single runtime pool connection");
 
-                    let sqlite = test_db();
-                    let engine = test_engine(&sqlite);
+                    let engine = test_engine_with_pg(startup_pool.clone());
                     let stats = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         crate::reconcile::reconcile_boot_runtime(
@@ -523,6 +553,10 @@ mod failure_recovery {
         assert_eq!(
             stats.stale_dispatch_reservations_cleared, 1,
             "boot reconcile must clear stale reservations through the startup pool"
+        );
+        assert_eq!(
+            stats.missing_review_dispatches_refired, 1,
+            "boot reconcile must re-fire OnReviewEnter through the startup pool"
         );
         assert!(
             !logs.contains("pool timed out while waiting for an open connection"),

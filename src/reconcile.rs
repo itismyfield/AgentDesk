@@ -433,18 +433,38 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
         }
         crate::kanban::drain_hook_side_effects(db, engine);
 
-        let has_review_dispatch = db
-            .lock()
-            .map_err(|e| anyhow!("boot reconcile DB lock poisoned: {e}"))?
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM task_dispatches
-                 WHERE kanban_card_id = ?1
-                   AND dispatch_type IN ('review', 'review-decision')
-                   AND status IN ('pending', 'dispatched')",
-                [&card_id],
-                |row| row.get::<_, bool>(0),
+        let has_review_dispatch = if let Some(pool) = engine.pg_pool() {
+            let card_id_pg = card_id.clone();
+            crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT COUNT(*) > 0 FROM task_dispatches
+                         WHERE kanban_card_id = $1
+                           AND dispatch_type IN ('review', 'review-decision')
+                           AND status IN ('pending', 'dispatched')",
+                    )
+                    .bind(&card_id_pg)
+                    .fetch_one(&bridge_pool)
+                    .await
+                    .map_err(anyhow::Error::from)
+                },
+                |error| anyhow!(error),
             )
-            .unwrap_or(false);
+            .unwrap_or(false)
+        } else {
+            db.lock()
+                .map_err(|e| anyhow!("boot reconcile DB lock poisoned: {e}"))?
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM task_dispatches
+                     WHERE kanban_card_id = ?1
+                       AND dispatch_type IN ('review', 'review-decision')
+                       AND status IN ('pending', 'dispatched')",
+                    [&card_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+        };
         if has_review_dispatch {
             refired += 1;
         } else {

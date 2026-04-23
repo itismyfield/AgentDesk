@@ -173,7 +173,20 @@ pub async fn run(
         seed_startup_runtime_state(&db, &config);
     }
     crate::pipeline::refresh_override_health_report(&db, pg_pool.as_ref()).await;
-    crate::reconcile::reconcile_boot_runtime(&db, &engine, startup_pool).await?;
+    let boot_reconcile_engine = match startup_pg_pool.as_ref() {
+        Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+        )?),
+        None => None,
+    };
+    crate::reconcile::reconcile_boot_runtime(
+        &db,
+        boot_reconcile_engine.as_ref().unwrap_or(&engine),
+        startup_pool,
+    )
+    .await?;
+    drop(boot_reconcile_engine);
     drop(startup_pg_pool);
 
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(

@@ -1336,7 +1336,16 @@ fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
                     $6,
                     $7,
                     $8,
-                    COALESCE($9, CASE WHEN $2 = 'reviewing' THEN NOW()::TEXT ELSE NULL END),
+                    COALESCE(
+                        CASE
+                            WHEN $9 = 'now' THEN NOW()
+                            ELSE $9::timestamptz
+                        END,
+                        CASE
+                            WHEN $2 = 'reviewing' THEN NOW()
+                            ELSE NULL
+                        END
+                    ),
                     NOW()
                  )
                  ON CONFLICT(card_id) DO UPDATE SET
@@ -1360,7 +1369,7 @@ fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
                     review_entered_at = COALESCE(
                         EXCLUDED.review_entered_at,
                         CASE
-                            WHEN EXCLUDED.state = 'reviewing' THEN NOW()::TEXT
+                            WHEN EXCLUDED.state = 'reviewing' THEN NOW()
                             ELSE card_review_state.review_entered_at
                         END
                     ),
