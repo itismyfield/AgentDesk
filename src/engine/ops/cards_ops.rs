@@ -587,7 +587,7 @@ fn card_row_to_json(row: &Row<'_>) -> libsql_rusqlite::Result<Value> {
         "github_issue_number": row.get::<_, Option<i64>>(7)?,
         "latest_dispatch_id": row.get::<_, Option<String>>(8)?,
         "review_round": row.get::<_, Option<i64>>(9)?,
-        "metadata": parse_json_value(row.get::<_, Option<String>>(10)?),
+        "metadata": parse_json_value(row.get::<_, Option<String>>(10)?, "metadata"),
         "created_at": row.get::<_, Option<String>>(11)?,
         "updated_at": row.get::<_, Option<String>>(12)?,
         "description": row.get::<_, Option<String>>(13)?,
@@ -602,11 +602,17 @@ fn card_row_to_json(row: &Row<'_>) -> libsql_rusqlite::Result<Value> {
         "depth": row.get::<_, Option<i64>>(22)?,
         "sort_order": row.get::<_, Option<i64>>(23)?,
         "active_thread_id": row.get::<_, Option<String>>(24)?,
-        "channel_thread_map": parse_json_value(row.get::<_, Option<String>>(25)?),
+        "channel_thread_map": parse_json_value(
+            row.get::<_, Option<String>>(25)?,
+            "channel_thread_map",
+        ),
         "suggestion_pending_at": row.get::<_, Option<String>>(26)?,
         "review_entered_at": row.get::<_, Option<String>>(27)?,
         "awaiting_dod_at": row.get::<_, Option<String>>(28)?,
-        "deferred_dod_json": parse_json_value(row.get::<_, Option<String>>(29)?),
+        "deferred_dod_json": parse_json_value(
+            row.get::<_, Option<String>>(29)?,
+            "deferred_dod_json",
+        ),
         "started_at": row.get::<_, Option<String>>(30)?,
         "completed_at": row.get::<_, Option<String>>(31)?,
     }))
@@ -624,7 +630,11 @@ fn card_row_to_json_pg(row: &sqlx::postgres::PgRow) -> Result<Value, String> {
         "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").map_err(|error| format!("decode github_issue_number: {error}"))?,
         "latest_dispatch_id": row.try_get::<Option<String>, _>("latest_dispatch_id").map_err(|error| format!("decode latest_dispatch_id: {error}"))?,
         "review_round": row.try_get::<Option<i64>, _>("review_round").map_err(|error| format!("decode review_round: {error}"))?,
-        "metadata": parse_json_value(row.try_get::<Option<String>, _>("metadata").map_err(|error| format!("decode metadata: {error}"))?),
+        "metadata": parse_json_value(
+            row.try_get::<Option<String>, _>("metadata")
+                .map_err(|error| format!("decode metadata: {error}"))?,
+            "metadata",
+        ),
         "created_at": row.try_get::<Option<String>, _>("created_at").map_err(|error| format!("decode created_at: {error}"))?,
         "updated_at": row.try_get::<Option<String>, _>("updated_at").map_err(|error| format!("decode updated_at: {error}"))?,
         "description": row.try_get::<Option<String>, _>("description").map_err(|error| format!("decode description: {error}"))?,
@@ -639,19 +649,38 @@ fn card_row_to_json_pg(row: &sqlx::postgres::PgRow) -> Result<Value, String> {
         "depth": row.try_get::<Option<i64>, _>("depth").map_err(|error| format!("decode depth: {error}"))?,
         "sort_order": row.try_get::<Option<i64>, _>("sort_order").map_err(|error| format!("decode sort_order: {error}"))?,
         "active_thread_id": row.try_get::<Option<String>, _>("active_thread_id").map_err(|error| format!("decode active_thread_id: {error}"))?,
-        "channel_thread_map": parse_json_value(row.try_get::<Option<String>, _>("channel_thread_map").map_err(|error| format!("decode channel_thread_map: {error}"))?),
+        "channel_thread_map": parse_json_value(
+            row.try_get::<Option<String>, _>("channel_thread_map")
+                .map_err(|error| format!("decode channel_thread_map: {error}"))?,
+            "channel_thread_map",
+        ),
         "suggestion_pending_at": row.try_get::<Option<String>, _>("suggestion_pending_at").map_err(|error| format!("decode suggestion_pending_at: {error}"))?,
         "review_entered_at": row.try_get::<Option<String>, _>("review_entered_at").map_err(|error| format!("decode review_entered_at: {error}"))?,
         "awaiting_dod_at": row.try_get::<Option<String>, _>("awaiting_dod_at").map_err(|error| format!("decode awaiting_dod_at: {error}"))?,
-        "deferred_dod_json": parse_json_value(row.try_get::<Option<String>, _>("deferred_dod_json").map_err(|error| format!("decode deferred_dod_json: {error}"))?),
+        "deferred_dod_json": parse_json_value(
+            row.try_get::<Option<String>, _>("deferred_dod_json")
+                .map_err(|error| format!("decode deferred_dod_json: {error}"))?,
+            "deferred_dod_json",
+        ),
         "started_at": row.try_get::<Option<String>, _>("started_at").map_err(|error| format!("decode started_at: {error}"))?,
         "completed_at": row.try_get::<Option<String>, _>("completed_at").map_err(|error| format!("decode completed_at: {error}"))?,
     }))
 }
 
-fn parse_json_value(raw: Option<String>) -> Value {
-    raw.and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(Value::Null)
+fn parse_json_value(raw: Option<String>, field_name: &'static str) -> Value {
+    let Some(text) = raw else {
+        return Value::Null;
+    };
+
+    match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                "[cards_ops] malformed JSON in {field_name}; falling back to null: {error}"
+            );
+            Value::Null
+        }
+    }
 }
 
 fn json_result(result: anyhow::Result<Value>) -> String {
@@ -659,5 +688,52 @@ fn json_result(result: anyhow::Result<Value>) -> String {
         Ok(value) => serde_json::to_string(&value)
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize: {e}"}}"#)),
         Err(err) => json!({ "error": err.to_string() }).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestLogWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || TestLogWriter {
+                buffer: log_buffer.clone(),
+            })
+            .finish();
+
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let captured = buffer.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&captured).to_string())
+    }
+
+    #[test]
+    fn parse_json_value_logs_warn_and_returns_null_for_malformed_json() {
+        let (value, logs) = capture_logs(|| parse_json_value(Some("{".to_string()), "metadata"));
+        assert_eq!(value, Value::Null);
+        assert!(logs.contains("[cards_ops] malformed JSON in metadata"));
     }
 }
