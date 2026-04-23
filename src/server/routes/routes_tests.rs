@@ -9123,6 +9123,7 @@ fn ensure_auto_queue_tables(db: &Db) {
             id          TEXT PRIMARY KEY,
             repo        TEXT,
             agent_id    TEXT,
+            review_mode TEXT NOT NULL DEFAULT 'enabled',
             status      TEXT DEFAULT 'active',
             ai_model    TEXT,
             ai_rationale TEXT,
@@ -12972,6 +12973,61 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
             .collect()
     };
     assert_eq!(entry_layout, vec![(405, 0, 1), (407, 1, 0), (423, 0, 0)]);
+}
+
+#[tokio::test]
+async fn auto_queue_dispatch_persists_review_mode_in_run() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-review-mode");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-review-mode", 4966, "ready", "agent-review-mode");
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-review-mode",
+                        "groups": [
+                            {"issues": [4966]}
+                        ],
+                        "review_mode": "disabled",
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["run"]["review_mode"], "disabled");
+
+    let run_id = json["run"]["id"]
+        .as_str()
+        .expect("dispatch run id must be present");
+    let conn = db.lock().unwrap();
+    let stored_review_mode: String = conn
+        .query_row(
+            "SELECT review_mode FROM auto_queue_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_review_mode, "disabled");
 }
 
 #[tokio::test]

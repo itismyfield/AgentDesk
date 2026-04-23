@@ -563,6 +563,8 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
 ) -> Result<(), String> {
+    // Keep this sync limited to entry cleanup. Run completion and phase-gate
+    // decisions are handled by the auto-queue policy hook after terminal sync.
     let dispatched_rows = sqlx::query(
         "SELECT id
          FROM auto_queue_entries
@@ -598,7 +600,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     }
 
     let pending_rows = sqlx::query(
-        "SELECT id, run_id
+        "SELECT id
          FROM auto_queue_entries
          WHERE kanban_card_id = $1
            AND status = 'pending'
@@ -611,14 +613,10 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     .await
     .map_err(|error| format!("load pending auto-queue entries for {card_id}: {error}"))?;
 
-    let mut finalize_run_ids = std::collections::BTreeSet::new();
     for row in pending_rows {
         let entry_id: String = row
             .try_get("id")
             .map_err(|error| format!("read pending auto-queue entry id: {error}"))?;
-        let run_id: String = row
-            .try_get("run_id")
-            .map_err(|error| format!("read pending auto-queue run id: {error}"))?;
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'skipped',
@@ -639,11 +637,6 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
             "card_terminal_pending_cleanup",
         )
         .await?;
-        finalize_run_ids.insert(run_id);
-    }
-
-    for run_id in finalize_run_ids {
-        maybe_finalize_run_after_terminal_entry_pg(tx, &run_id).await?;
     }
 
     Ok(())
@@ -669,62 +662,6 @@ async fn record_auto_queue_transition_on_pg(
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))?;
-    Ok(())
-}
-
-async fn maybe_finalize_run_after_terminal_entry_pg(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-) -> Result<(), String> {
-    let blocking_gate_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)
-         FROM auto_queue_phase_gates
-         WHERE run_id = $1 AND status IN ('pending', 'failed')",
-    )
-    .bind(run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("check blocking phase gates for run {run_id}: {error}"))?;
-    if blocking_gate_count > 0 {
-        return Ok(());
-    }
-
-    let remaining = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)
-         FROM auto_queue_entries
-         WHERE run_id = $1 AND status IN ('pending', 'dispatched')",
-    )
-    .bind(run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))?;
-    if remaining > 0 {
-        return Ok(());
-    }
-
-    sqlx::query(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = NOW()
-         WHERE assigned_run_id = $1",
-    )
-    .bind(run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("release auto-queue slots for run {run_id}: {error}"))?;
-
-    sqlx::query(
-        "UPDATE auto_queue_runs
-         SET status = 'completed',
-             completed_at = NOW()
-         WHERE id = $1 AND status IN ('active', 'paused', 'generated', 'pending')",
-    )
-    .bind(run_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?;
-
     Ok(())
 }
 
@@ -839,6 +776,98 @@ mod tests {
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
         crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_github_sync_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "github sync tests",
+            )
+            .await
+            .unwrap();
+
+            Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "github sync tests",
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "github sync tests",
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     #[test]
@@ -1080,5 +1109,136 @@ mod tests {
             .unwrap();
         assert_eq!(new_card_status, "backlog");
         assert_eq!(closed_card_status, "done");
+    }
+
+    #[tokio::test]
+    async fn pg_terminal_sync_marks_entries_without_finalizing_before_policy_hooks() {
+        let test_pg = TestPostgresDb::create().await;
+        let pool = test_pg.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ('agent-1', 'Agent 1', '123')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, created_at, updated_at
+             ) VALUES (
+                'card-pg-terminal-sync',
+                'PG terminal sync',
+                'done',
+                'agent-1',
+                NOW(),
+                NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
+             VALUES ('run-pg-sync', 'repo-1', 'agent-1', 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id,
+                run_id,
+                kanban_card_id,
+                agent_id,
+                priority_rank,
+                status,
+                dispatch_id,
+                slot_index,
+                dispatched_at,
+                created_at
+             ) VALUES (
+                'entry-pg-sync',
+                'run-pg-sync',
+                'card-pg-terminal-sync',
+                'agent-1',
+                0,
+                'dispatched',
+                'dispatch-pg-sync',
+                0,
+                NOW(),
+                NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (
+                agent_id,
+                slot_index,
+                assigned_run_id,
+                assigned_thread_group,
+                thread_id_map,
+                created_at,
+                updated_at
+             ) VALUES (
+                'agent-1',
+                0,
+                'run-pg-sync',
+                0,
+                '{}'::jsonb,
+                NOW(),
+                NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        sync_auto_queue_terminal_on_pg(&mut tx, "card-pg-terminal-sync")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'run-pg-sync'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(run_status, "active");
+
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-pg-sync'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(entry_status, "done");
+
+        let assigned_run_id: Option<String> = sqlx::query_scalar(
+            "SELECT assigned_run_id
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(assigned_run_id.as_deref(), Some("run-pg-sync"));
+
+        let notify_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM message_outbox
+             WHERE target = 'channel:123' AND bot = 'notify'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(notify_count, 0);
+
+        crate::db::postgres::close_test_pool(pool, "github sync tests")
+            .await
+            .unwrap();
+        test_pg.drop().await;
     }
 }

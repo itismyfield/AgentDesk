@@ -1494,6 +1494,7 @@ mod tests {
                 id          TEXT PRIMARY KEY,
                 repo        TEXT,
                 agent_id    TEXT,
+                review_mode TEXT NOT NULL DEFAULT 'enabled',
                 status      TEXT DEFAULT 'active',
                 ai_model    TEXT,
                 ai_rationale TEXT,
@@ -2851,6 +2852,286 @@ mod tests {
             )
             .unwrap();
         assert_eq!(review_dispatch_count, 1);
+    }
+
+    #[test]
+    fn implementation_completion_for_auto_queue_review_mode_enabled_still_enters_review() {
+        let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(
+            &db,
+            "card-966-review-enabled",
+            "in_progress",
+            "test/repo",
+            9661,
+            None,
+        );
+
+        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
+            &db,
+            "card-966-review-enabled",
+            "agent-1",
+            "implementation",
+            "[Impl]",
+            &serde_json::json!({
+                "target_repo": repo.path().to_string_lossy(),
+            }),
+            dispatch::DispatchCreateOptions::default(),
+        )
+        .unwrap();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
+                 VALUES ('run-966-review-enabled', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at, created_at
+                 ) VALUES (
+                    'entry-966-review-enabled', 'run-966-review-enabled', 'card-966-review-enabled', 'agent-1', 'dispatched', 0, ?1, datetime('now'), datetime('now')
+                 )",
+                [dispatch_id.as_str()],
+            )
+            .unwrap();
+        }
+
+        run_git(
+            repo.path(),
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "#9661 auto-queue review-required path",
+            ],
+        );
+
+        let result = crate::services::discord::build_work_dispatch_completion_result(
+            Some(&db),
+            None,
+            &dispatch_id,
+            "test_harness",
+            false,
+            None,
+            None,
+        );
+        dispatch::complete_dispatch(&db, &engine, &dispatch_id, &result).unwrap();
+
+        assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
+        assert_eq!(get_card_status(&db, "card-966-review-enabled"), "review");
+
+        let conn = db.lock().unwrap();
+        let review_dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches
+                 WHERE kanban_card_id = 'card-966-review-enabled'
+                   AND dispatch_type = 'review'
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_review_mode: String = conn
+            .query_row(
+                "SELECT review_mode FROM auto_queue_runs WHERE id = 'run-966-review-enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_dispatch_count, 1);
+        assert_eq!(entry_status, "done");
+        assert_eq!(stored_review_mode, "enabled");
+    }
+
+    #[test]
+    fn implementation_completion_for_auto_queue_review_mode_disabled_skips_review_and_mainline_sync_completes_entry()
+     {
+        let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
+        let repo_id = repo.path().to_string_lossy().to_string();
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, &repo_id);
+        ensure_auto_queue_tables(&db);
+        seed_card_with_repo(
+            &db,
+            "card-966-review-disabled",
+            "in_progress",
+            &repo_id,
+            9662,
+            None,
+        );
+
+        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
+            &db,
+            "card-966-review-disabled",
+            "agent-1",
+            "implementation",
+            "[Impl]",
+            &serde_json::json!({
+                "target_repo": repo.path().to_string_lossy(),
+            }),
+            dispatch::DispatchCreateOptions::default(),
+        )
+        .unwrap();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
+                 VALUES ('run-966-review-disabled', ?1, 'agent-1', 'active', datetime('now'))",
+                [repo_id.as_str()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, slot_index, dispatched_at, created_at
+                 ) VALUES (
+                    'entry-966-review-disabled', 'run-966-review-disabled', 'card-966-review-disabled', 'agent-1', 'dispatched', 0, ?1, 0, datetime('now'), datetime('now')
+                 )",
+                [dispatch_id.as_str()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_slots (
+                    agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at
+                 ) VALUES (
+                    'agent-1', 0, 'run-966-review-disabled', 0, '{}', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE auto_queue_runs
+                 SET review_mode = 'disabled'
+                 WHERE id = 'run-966-review-disabled'",
+                [],
+            )
+            .unwrap();
+        }
+
+        run_git(
+            repo.path(),
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "#9662 auto-queue review-off merge",
+            ],
+        );
+
+        let result = crate::services::discord::build_work_dispatch_completion_result(
+            Some(&db),
+            None,
+            &dispatch_id,
+            "test_harness",
+            false,
+            None,
+            None,
+        );
+        dispatch::complete_dispatch(&db, &engine, &dispatch_id, &result).unwrap();
+
+        assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
+        assert_eq!(
+            get_card_status(&db, "card-966-review-disabled"),
+            "in_progress"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            let review_dispatch_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM task_dispatches
+                     WHERE kanban_card_id = 'card-966-review-disabled'
+                       AND dispatch_type = 'review'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let entry_status: String = conn
+                .query_row(
+                    "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let run_status: String = conn
+                .query_row(
+                    "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let slot_run_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_run_id FROM auto_queue_slots
+                     WHERE agent_id = 'agent-1' AND slot_index = 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(review_dispatch_count, 0);
+            assert_eq!(entry_status, "dispatched");
+            assert_eq!(run_status, "active");
+            assert_eq!(slot_run_id.as_deref(), Some("run-966-review-disabled"));
+        }
+
+        crate::github::sync::sync_github_issues_for_repo(
+            &db,
+            &engine,
+            &repo_id,
+            &[crate::github::sync::GhIssue {
+                number: 9662,
+                state: "OPEN".to_string(),
+                title: "Issue #9662".to_string(),
+                labels: vec![],
+                body: Some("review-off mainline sync".to_string()),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(get_card_status(&db, "card-966-review-disabled"), "done");
+
+        let conn = db.lock().unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let slot_binding: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group FROM auto_queue_slots
+                 WHERE agent_id = 'agent-1' AND slot_index = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(entry_status, "done");
+        assert_eq!(run_status, "completed");
+        assert_eq!(slot_binding, (None, None));
     }
 
     #[tokio::test(flavor = "current_thread")]

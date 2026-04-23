@@ -918,6 +918,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             id          TEXT PRIMARY KEY,
             repo        TEXT,
             agent_id    TEXT,
+            review_mode TEXT NOT NULL DEFAULT 'enabled',
             status      TEXT DEFAULT 'active',
             ai_model    TEXT,
             ai_rationale TEXT,
@@ -1002,6 +1003,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
     )?;
     ensure_auto_queue_phase_gate_table_shape(conn)?;
 
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "review_mode",
+        "ALTER TABLE auto_queue_runs ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'enabled';",
+    )?;
     ensure_auto_queue_column(
         conn,
         "auto_queue_runs",

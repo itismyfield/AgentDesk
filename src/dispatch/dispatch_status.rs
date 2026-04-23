@@ -39,11 +39,190 @@ fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
     })
 }
 
+fn auto_queue_review_disabled_for_dispatch_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM auto_queue_entries e
+         JOIN auto_queue_runs r ON r.id = e.run_id
+         WHERE e.dispatch_id = ?1
+           AND e.status = 'dispatched'
+           AND r.status IN ('active', 'paused')
+           AND COALESCE(r.review_mode, 'enabled') = 'disabled'",
+        [dispatch_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn restore_auto_queue_mainline_after_review_skip_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<()> {
+    let (repo_id, agent_id): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| anyhow::anyhow!("load card scope for {card_id}: {error}"))?;
+    let effective =
+        crate::pipeline::resolve_for_card(conn, repo_id.as_deref(), agent_id.as_deref());
+    let target_status = effective
+        .kickoff_for(effective.initial_state())
+        .filter(|status| status != "review")
+        .unwrap_or_else(|| "in_progress".to_string());
+
+    conn.execute(
+        "DELETE FROM task_dispatches
+         WHERE kanban_card_id = ?1
+           AND dispatch_type IN ('review', 'review-decision')
+           AND status IN ('pending', 'dispatched')",
+        [card_id],
+    )
+    .map_err(|error| anyhow::anyhow!("delete skipped review dispatches for {card_id}: {error}"))?;
+    let _ = conn.execute(
+        "DELETE FROM card_review_state WHERE card_id = ?1",
+        [card_id],
+    );
+    conn.execute(
+        "UPDATE kanban_cards
+         SET status = ?1,
+             latest_dispatch_id = ?2,
+             review_status = NULL,
+             review_round = NULL,
+             review_entered_at = NULL,
+             awaiting_dod_at = NULL,
+             blocked_reason = NULL,
+             suggestion_pending_at = NULL,
+             deferred_dod_json = NULL,
+             updated_at = datetime('now')
+         WHERE id = ?3",
+        libsql_rusqlite::params![target_status, dispatch_id, card_id],
+    )
+    .map_err(|error| anyhow::anyhow!("restore mainline card state for {card_id}: {error}"))?;
+    Ok(())
+}
+
+async fn auto_queue_review_disabled_for_dispatch_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM auto_queue_entries e
+            JOIN auto_queue_runs r ON r.id = e.run_id
+            WHERE e.dispatch_id = $1
+              AND e.status = 'dispatched'
+              AND r.status IN ('active', 'paused')
+              AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+        )",
+    )
+    .bind(dispatch_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load auto-queue review_mode for dispatch {dispatch_id}: {error}")
+    })
+}
+
+async fn auto_queue_review_disabled_for_dispatch_pg(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM auto_queue_entries e
+            JOIN auto_queue_runs r ON r.id = e.run_id
+            WHERE e.dispatch_id = $1
+              AND e.status = 'dispatched'
+              AND r.status IN ('active', 'paused')
+              AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+        )",
+    )
+    .bind(dispatch_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("load auto-queue review_mode for dispatch {dispatch_id}: {error}")
+    })
+}
+
+async fn restore_auto_queue_mainline_after_review_skip_on_pg(
+    pool: &PgPool,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT repo_id, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load card scope for {card_id}: {error}"))?;
+    let repo_id: Option<String> = row
+        .try_get("repo_id")
+        .map_err(|error| anyhow::anyhow!("decode repo_id for {card_id}: {error}"))?;
+    let agent_id: Option<String> = row
+        .try_get("assigned_agent_id")
+        .map_err(|error| anyhow::anyhow!("decode assigned_agent_id for {card_id}: {error}"))?;
+    let effective =
+        crate::pipeline::resolve_for_card_pg(pool, repo_id.as_deref(), agent_id.as_deref()).await;
+    let target_status = effective
+        .kickoff_for(effective.initial_state())
+        .filter(|status| status != "review")
+        .unwrap_or_else(|| "in_progress".to_string());
+
+    sqlx::query(
+        "DELETE FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('review', 'review-decision')
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("delete skipped review dispatches for {card_id}: {error}"))?;
+    let _ = sqlx::query("DELETE FROM card_review_state WHERE card_id = $1")
+        .bind(card_id)
+        .execute(pool)
+        .await;
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET status = $1,
+             latest_dispatch_id = $2,
+             review_status = NULL,
+             review_round = NULL,
+             review_entered_at = NULL,
+             awaiting_dod_at = NULL,
+             blocked_reason = NULL,
+             suggestion_pending_at = NULL,
+             deferred_dod_json = NULL,
+             updated_at = NOW()
+         WHERE id = $3",
+    )
+    .bind(&target_status)
+    .bind(dispatch_id)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("restore mainline card state for {card_id}: {error}"))?;
+    Ok(())
+}
+
 fn should_skip_auto_queue_terminal_sync(
     dispatch_type: Option<&str>,
     to_status: &str,
     result: Option<&serde_json::Value>,
     sync_auto_queue_terminal_entries: bool,
+    auto_queue_review_disabled: bool,
 ) -> bool {
     if !sync_auto_queue_terminal_entries {
         return true;
@@ -55,7 +234,9 @@ fn should_skip_auto_queue_terminal_sync(
 
     match dispatch_type {
         Some("consultation") => true,
-        Some("implementation" | "rework") => is_noop_completion_result(result),
+        Some("implementation" | "rework") => {
+            is_noop_completion_result(result) || auto_queue_review_disabled
+        }
         _ => false,
     }
 }
@@ -349,11 +530,18 @@ async fn set_dispatch_status_on_pg_with_sync(
         // implementation dispatch typically completes into `review`, leaving
         // the entry stuck at `dispatched` until the card eventually reaches
         // `done`. Mirror dispatch terminal here so the slot frees promptly.
+        let auto_queue_review_disabled =
+            if matches!(dispatch_type.as_deref(), Some("implementation" | "rework")) {
+                auto_queue_review_disabled_for_dispatch_on_pg(&mut tx, dispatch_id).await?
+            } else {
+                false
+            };
         let skip_auto_queue_terminal_sync = should_skip_auto_queue_terminal_sync(
             dispatch_type.as_deref(),
             to_status,
             result,
             sync_auto_queue_terminal_entries,
+            auto_queue_review_disabled,
         );
         if matches!(to_status, "completed" | "failed" | "cancelled")
             && !skip_auto_queue_terminal_sync
@@ -742,11 +930,15 @@ fn set_dispatch_status_on_conn_with_sync(
             // Sync any auto_queue_entry bound to this dispatch when the
             // dispatch reaches a terminal status. See PG twin in
             // set_dispatch_status_on_pg for the rationale.
+            let auto_queue_review_disabled =
+                matches!(dispatch_type.as_deref(), Some("implementation" | "rework"))
+                    && auto_queue_review_disabled_for_dispatch_on_conn(conn, dispatch_id);
             let skip_auto_queue_terminal_sync = should_skip_auto_queue_terminal_sync(
                 dispatch_type.as_deref(),
                 to_status,
                 result,
                 sync_auto_queue_terminal_entries,
+                auto_queue_review_disabled,
             );
             if matches!(to_status, "completed" | "failed" | "cancelled")
                 && !skip_auto_queue_terminal_sync
@@ -1089,92 +1281,32 @@ fn complete_dispatch_inner_with_backends(
     let dispatch_span =
         crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
-    let (dispatch, kanban_card_id, needs_review_dispatch, effective_result, skip_hooks) =
-        if let Some(pool) = engine.pg_pool() {
-            let db_owned = db.cloned();
-            let dispatch_id = dispatch_id.to_string();
-            let input_result = result.clone();
-            block_on_dispatch_pg(pool, move |pool| async move {
-                validate_dispatch_completion_evidence_on_pg(
-                    &pool,
-                    db_owned.as_ref(),
-                    &dispatch_id,
-                    &input_result,
-                )
-                .await?;
+    let (
+        dispatch,
+        kanban_card_id,
+        needs_review_dispatch,
+        effective_result,
+        skip_dispatch_completed_hooks,
+    ) = if let Some(pool) = engine.pg_pool() {
+        let db_owned = db.cloned();
+        let dispatch_id = dispatch_id.to_string();
+        let input_result = result.clone();
+        block_on_dispatch_pg(pool, move |pool| async move {
+            validate_dispatch_completion_evidence_on_pg(
+                &pool,
+                db_owned.as_ref(),
+                &dispatch_id,
+                &input_result,
+            )
+            .await?;
 
-                let result_owned =
-                    maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id, &input_result).await;
-                let effective_result = result_owned.unwrap_or(input_result);
+            let result_owned =
+                maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id, &input_result).await;
+            let effective_result = result_owned.unwrap_or(input_result);
 
-                let changed = set_dispatch_status_on_pg(
-                    &pool,
-                    &dispatch_id,
-                    "completed",
-                    Some(&effective_result),
-                    effective_result
-                        .get("completion_source")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("complete_dispatch"),
-                    Some(&["pending", "dispatched"]),
-                    true,
-                )
-                .await?;
-
-                if changed == 0 {
-                    if dispatch_exists_pg(&pool, &dispatch_id).await? {
-                        tracing::info!(
-                            "skipping completion hooks because dispatch is already finalized"
-                        );
-                        let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
-                        return Ok((dispatch, None, false, effective_result, true));
-                    }
-                    return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
-                }
-
-                let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
-                let kanban_card_id = dispatch
-                    .get("kanban_card_id")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string());
-                let needs_review_dispatch = if let Some(card_id) = kanban_card_id.as_deref() {
-                    card_needs_review_dispatch_pg(&pool, card_id).await?
-                } else {
-                    false
-                };
-
-                Ok((
-                    dispatch,
-                    kanban_card_id,
-                    needs_review_dispatch,
-                    effective_result,
-                    false,
-                ))
-            })?
-        } else {
-            let Some(db) = db else {
-                return Err(anyhow::anyhow!(
-                    "dispatch completion backend unavailable for {dispatch_id}"
-                ));
-            };
-            let conn = db
-                .separate_conn()
-                .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-
-            validate_dispatch_completion_evidence_on_conn(
-                &conn,
-                db,
-                engine.pg_pool(),
-                dispatch_id,
-                result,
-            )?;
-
-            let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
-            let effective_result = result_owned.unwrap_or_else(|| result.clone());
-
-            let changed = set_dispatch_status_on_conn(
-                &conn,
-                dispatch_id,
+            let changed = set_dispatch_status_on_pg(
+                &pool,
+                &dispatch_id,
                 "completed",
                 Some(&effective_result),
                 effective_result
@@ -1183,93 +1315,185 @@ fn complete_dispatch_inner_with_backends(
                     .unwrap_or("complete_dispatch"),
                 Some(&["pending", "dispatched"]),
                 true,
-            )?;
+            )
+            .await?;
 
             if changed == 0 {
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
-                        [dispatch_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                if exists {
+                if dispatch_exists_pg(&pool, &dispatch_id).await? {
                     tracing::info!(
                         "skipping completion hooks because dispatch is already finalized"
                     );
-                    let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-                    drop(conn);
-                    return Ok(dispatch);
+                    let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
+                    return Ok((dispatch, None, false, effective_result, true));
                 }
                 return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
             }
 
-            let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-            let kanban_card_id: Option<String> = conn
-                .query_row(
-                    "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-                    [dispatch_id],
-                    |row| row.get(0),
-                )
-                .ok();
+            let dispatch = query_dispatch_row_pg(&pool, &dispatch_id).await?;
+            let kanban_card_id = dispatch
+                .get("kanban_card_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+            let dispatch_type = dispatch
+                .get("dispatch_type")
+                .and_then(|value| value.as_str());
+            let skip_dispatch_completed_hooks =
+                matches!(dispatch_type, Some("implementation" | "rework"))
+                    && auto_queue_review_disabled_for_dispatch_pg(&pool, &dispatch_id).await?;
+            let needs_review_dispatch = if skip_dispatch_completed_hooks {
+                false
+            } else if let Some(card_id) = kanban_card_id.as_deref() {
+                card_needs_review_dispatch_pg(&pool, card_id).await?
+            } else {
+                false
+            };
 
-            let needs_review_dispatch = db
-                .lock()
-                .ok()
-                .map(|conn| {
-                    let (card_status, repo_id, agent_id): (
-                        Option<String>,
-                        Option<String>,
-                        Option<String>,
-                    ) = conn
-                        .query_row(
-                            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                            [&kanban_card_id],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
-                        .unwrap_or((None, None, None));
-                    let has_review_dispatch: bool = conn
-                        .query_row(
-                            "SELECT COUNT(*) > 0 FROM task_dispatches \
-                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
-                             AND status IN ('pending', 'dispatched')",
-                            [&kanban_card_id],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(false);
-                    let has_active_work: bool = conn
-                        .query_row(
-                            "SELECT COUNT(*) > 0 FROM task_dispatches \
-                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
-                             AND status IN ('pending', 'dispatched')",
-                            [&kanban_card_id],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or(false);
-                    let is_review_state = card_status.as_deref().is_some_and(|status| {
-                        let eff = crate::pipeline::resolve_for_card(
-                            &conn,
-                            repo_id.as_deref(),
-                            agent_id.as_deref(),
-                        );
-                        eff.hooks_for_state(status)
-                            .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
-                    });
-                    is_review_state && !has_review_dispatch && !has_active_work
-                })
-                .unwrap_or(false);
+            if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
+                restore_auto_queue_mainline_after_review_skip_on_pg(&pool, card_id, &dispatch_id)
+                    .await?;
+            }
 
-            drop(conn);
-            (
+            Ok((
                 dispatch,
                 kanban_card_id,
                 needs_review_dispatch,
                 effective_result,
-                false,
+                skip_dispatch_completed_hooks,
+            ))
+        })?
+    } else {
+        let Some(db) = db else {
+            return Err(anyhow::anyhow!(
+                "dispatch completion backend unavailable for {dispatch_id}"
+            ));
+        };
+        let conn = db
+            .separate_conn()
+            .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+
+        validate_dispatch_completion_evidence_on_conn(
+            &conn,
+            db,
+            engine.pg_pool(),
+            dispatch_id,
+            result,
+        )?;
+
+        let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
+        let effective_result = result_owned.unwrap_or_else(|| result.clone());
+
+        let changed = set_dispatch_status_on_conn(
+            &conn,
+            dispatch_id,
+            "completed",
+            Some(&effective_result),
+            effective_result
+                .get("completion_source")
+                .and_then(|value| value.as_str())
+                .unwrap_or("complete_dispatch"),
+            Some(&["pending", "dispatched"]),
+            true,
+        )?;
+
+        if changed == 0 {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                tracing::info!("skipping completion hooks because dispatch is already finalized");
+                let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+                drop(conn);
+                return Ok(dispatch);
+            }
+            return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+        }
+
+        let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+        let kanban_card_id: Option<String> = conn
+            .query_row(
+                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
             )
+            .ok();
+        let dispatch_type = dispatch
+            .get("dispatch_type")
+            .and_then(|value| value.as_str());
+        let skip_dispatch_completed_hooks =
+            matches!(dispatch_type, Some("implementation" | "rework"))
+                && auto_queue_review_disabled_for_dispatch_on_conn(&conn, dispatch_id);
+
+        let needs_review_dispatch = if skip_dispatch_completed_hooks {
+            false
+        } else {
+            db.lock()
+                    .ok()
+                    .map(|conn| {
+                        let (card_status, repo_id, agent_id): (
+                            Option<String>,
+                            Option<String>,
+                            Option<String>,
+                        ) = conn
+                            .query_row(
+                                "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                                [&kanban_card_id],
+                                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                            )
+                            .unwrap_or((None, None, None));
+                        let has_review_dispatch: bool = conn
+                            .query_row(
+                                "SELECT COUNT(*) > 0 FROM task_dispatches \
+                                 WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
+                                 AND status IN ('pending', 'dispatched')",
+                                [&kanban_card_id],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(false);
+                        let has_active_work: bool = conn
+                            .query_row(
+                                "SELECT COUNT(*) > 0 FROM task_dispatches \
+                                 WHERE kanban_card_id = ?1 AND dispatch_type IN ('implementation', 'rework') \
+                                 AND status IN ('pending', 'dispatched')",
+                                [&kanban_card_id],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(false);
+                        let is_review_state = card_status.as_deref().is_some_and(|status| {
+                            let eff = crate::pipeline::resolve_for_card(
+                                &conn,
+                                repo_id.as_deref(),
+                                agent_id.as_deref(),
+                            );
+                            eff.hooks_for_state(status)
+                                .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
+                        });
+                        is_review_state && !has_review_dispatch && !has_active_work
+                    })
+                    .unwrap_or(false)
         };
 
-    if skip_hooks {
+        if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
+            restore_auto_queue_mainline_after_review_skip_on_conn(&conn, card_id, dispatch_id)?;
+        }
+
+        drop(conn);
+        (
+            dispatch,
+            kanban_card_id,
+            needs_review_dispatch,
+            effective_result,
+            skip_dispatch_completed_hooks,
+        )
+    };
+
+    // Auto-queue review_mode=disabled keeps implementation/rework completions on
+    // the mainline path. The generic OnDispatchCompleted policy always routes
+    // work completions into review, so skip that hook entirely for this narrow case.
+    if skip_dispatch_completed_hooks {
         return Ok(dispatch);
     }
 

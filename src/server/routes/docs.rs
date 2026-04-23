@@ -1707,6 +1707,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     .with_default(1),
             ),
             (
+                "review_mode",
+                body_param(
+                    "string",
+                    false,
+                    "Run review mode: 'enabled' keeps the normal review gate; 'disabled' skips review dispatch creation and waits for main-merge detection before moving to done",
+                )
+                .with_default("enabled"),
+            ),
+            (
                 "max_concurrent_per_agent",
                 body_param(
                     "number",
@@ -1716,8 +1725,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "unified_thread": true, "max_concurrent_threads": 2}}),
-            json!({"run": {"id": "run-1", "status": "generated", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}]}),
+            json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "review_mode": "disabled", "unified_thread": true, "max_concurrent_threads": 2}}),
+            json!({"run": {"id": "run-1", "status": "generated", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}]}),
         ),
         ep(
             "POST",
@@ -1761,6 +1770,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     .with_default(true),
             ),
             (
+                "review_mode",
+                body_param(
+                    "string",
+                    false,
+                    "Run review mode: 'enabled' keeps the normal review gate; 'disabled' skips review dispatch creation and relies on main-merge detection to advance the card and queue entry to done",
+                )
+                .with_default("enabled"),
+            ),
+            (
                 "auto_assign_agent",
                 body_param(
                     "boolean",
@@ -1775,8 +1793,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"body": {"repo": "test-repo", "agent_id": "project-agentdesk", "groups": [{"issues": [423, 405], "sequential": true}, {"issues": [407]}], "unified_thread": true, "activate": true, "auto_assign_agent": true, "max_concurrent_threads": 2}}),
-            json!({"run": {"id": "run-1", "status": "active", "thread_group_count": 2, "max_concurrent_threads": 2}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "dispatched"}], "thread_groups": {"0": {"status": "active"}, "1": {"status": "pending"}}, "activated": true, "dispatch": {"count": 1}}),
+            json!({"body": {"repo": "test-repo", "agent_id": "project-agentdesk", "groups": [{"issues": [423, 405], "sequential": true}, {"issues": [407]}], "review_mode": "disabled", "unified_thread": true, "activate": true, "auto_assign_agent": true, "max_concurrent_threads": 2}}),
+            json!({"run": {"id": "run-1", "status": "active", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "dispatched"}], "thread_groups": {"0": {"status": "active"}, "1": {"status": "pending"}}, "activated": true, "dispatch": {"count": 1}}),
         ),
         ep(
             "POST",
@@ -1842,7 +1860,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"query": {"repo": "test-repo"}}),
-            json!({"run": {"id": "run-1", "status": "active"}, "entries": [{"id": "entry-1", "status": "pending", "github_issue_number": 423}], "agents": {"agent-1": {"pending": 1, "dispatched": 0, "done": 0, "skipped": 0}}, "thread_groups": {"0": {"status": "pending", "pending": 1, "dispatched": 0, "done": 0, "skipped": 0, "entries": [{"id": "entry-1", "card_id": "card-423", "status": "pending", "github_issue_number": 423, "batch_phase": 0}]}}}),
+            json!({"run": {"id": "run-1", "status": "active", "review_mode": "enabled"}, "entries": [{"id": "entry-1", "status": "pending", "github_issue_number": 423}], "agents": {"agent-1": {"pending": 1, "dispatched": 0, "done": 0, "skipped": 0}}, "thread_groups": {"0": {"status": "pending", "pending": 1, "dispatched": 0, "done": 0, "skipped": 0, "entries": [{"id": "entry-1", "card_id": "card-423", "status": "pending", "github_issue_number": 423, "batch_phase": 0}]}}}),
         ),
         ep(
             "GET",

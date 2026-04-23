@@ -1780,6 +1780,7 @@ pub struct AutoQueueRunRecord {
     pub id: String,
     pub repo: Option<String>,
     pub agent_id: Option<String>,
+    pub review_mode: String,
     pub status: String,
     pub timeout_minutes: i64,
     pub ai_model: Option<String>,
@@ -1890,7 +1891,7 @@ pub fn get_run(
 ) -> libsql_rusqlite::Result<Option<AutoQueueRunRecord>> {
     // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.query_row(
-        "SELECT id, repo, agent_id, status, timeout_minutes,
+        "SELECT id, repo, agent_id, COALESCE(review_mode, 'enabled'), status, timeout_minutes,
                 ai_model, ai_rationale,
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
@@ -1904,14 +1905,15 @@ pub fn get_run(
                 id: row.get(0)?,
                 repo: row.get(1)?,
                 agent_id: row.get(2)?,
-                status: row.get(3)?,
-                timeout_minutes: row.get(4)?,
-                ai_model: row.get(5)?,
-                ai_rationale: row.get(6)?,
-                created_at: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                completed_at: row.get(8)?,
-                max_concurrent_threads: row.get(9)?,
-                thread_group_count: row.get(10)?,
+                review_mode: row.get(3)?,
+                status: row.get(4)?,
+                timeout_minutes: row.get(5)?,
+                ai_model: row.get(6)?,
+                ai_rationale: row.get(7)?,
+                created_at: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                completed_at: row.get(9)?,
+                max_concurrent_threads: row.get(10)?,
+                thread_group_count: row.get(11)?,
             })
         },
     )
@@ -1926,6 +1928,7 @@ pub async fn get_run_pg(
         "SELECT id,
                 repo,
                 agent_id,
+                COALESCE(review_mode, 'enabled') AS review_mode,
                 status,
                 timeout_minutes::BIGINT AS timeout_minutes,
                 ai_model,
@@ -4203,6 +4206,13 @@ async fn maybe_finalize_run_after_terminal_entry_pg(
         return Ok(false);
     }
 
+    maybe_finalize_run_if_ready_pg(tx, run_id).await
+}
+
+async fn maybe_finalize_run_if_ready_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
     let blocking_phase_gate_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)
          FROM auto_queue_phase_gates
@@ -4699,6 +4709,7 @@ fn auto_queue_run_record_from_pg_row(
         id: row.try_get("id")?,
         repo: row.try_get("repo")?,
         agent_id: row.try_get("agent_id")?,
+        review_mode: row.try_get("review_mode")?,
         status: row.try_get("status")?,
         timeout_minutes: row.try_get("timeout_minutes")?,
         ai_model: row.try_get("ai_model")?,

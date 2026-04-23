@@ -429,6 +429,7 @@ CREATE TABLE IF NOT EXISTS auto_queue_runs (
     id                        TEXT PRIMARY KEY,
     repo                      TEXT,
     agent_id                  TEXT,
+    review_mode               TEXT NOT NULL DEFAULT 'enabled',
     status                    TEXT DEFAULT 'active',
     ai_model                  TEXT,
     ai_rationale              TEXT,

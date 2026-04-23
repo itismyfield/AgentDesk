@@ -8,6 +8,71 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 // and fires appropriate hooks (OnCardTransition, OnCardTerminal, OnReviewEnter).
 // This replaces direct SQL UPDATEs in policies to ensure hooks always fire.
 
+fn enters_review_state(pipeline: &crate::pipeline::PipelineConfig, status: &str) -> bool {
+    pipeline
+        .hooks_for_state(status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
+}
+
+fn auto_queue_review_disabled_for_card_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    card_id: &str,
+) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM auto_queue_entries e
+         JOIN auto_queue_runs r ON r.id = e.run_id
+         JOIN kanban_cards c ON c.id = e.kanban_card_id
+         LEFT JOIN task_dispatches d ON d.id = e.dispatch_id
+         WHERE e.kanban_card_id = ?1
+           AND r.status IN ('active', 'paused')
+           AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+           AND (
+                e.status = 'dispatched'
+                OR (
+                    e.status = 'done'
+                    AND c.latest_dispatch_id = d.id
+                    AND d.status = 'completed'
+                    AND d.dispatch_type IN ('implementation', 'rework')
+                )
+           )",
+        [card_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+async fn auto_queue_review_disabled_for_card_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM auto_queue_entries e
+            JOIN auto_queue_runs r ON r.id = e.run_id
+            JOIN kanban_cards c ON c.id = e.kanban_card_id
+            LEFT JOIN task_dispatches d ON d.id = e.dispatch_id
+            WHERE e.kanban_card_id = $1
+              AND r.status IN ('active', 'paused')
+              AND COALESCE(r.review_mode, 'enabled') = 'disabled'
+              AND (
+                    e.status = 'dispatched'
+                    OR (
+                        e.status = 'done'
+                        AND c.latest_dispatch_id = d.id
+                        AND d.status = 'completed'
+                        AND d.dispatch_type IN ('implementation', 'rework')
+                    )
+              )
+        )",
+    )
+    .bind(card_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue review_mode for {card_id}: {error}"))
+}
+
 pub(super) fn register_kanban_ops<'js>(
     ctx: &Ctx<'js>,
     db: Option<Db>,
@@ -143,6 +208,17 @@ pub(super) fn register_kanban_ops<'js>(
                     }
                 }
 
+                let is_review_enter = enters_review_state(pipeline, &new_status);
+                if !force
+                    && is_review_enter
+                    && auto_queue_review_disabled_for_card_on_conn(&conn, &card_id)
+                {
+                    return format!(
+                        r#"{{"ok":true,"changed":false,"status":"{}","skipped":"auto_queue_review_disabled"}}"#,
+                        old_status
+                    );
+                }
+
                 // Clock fields from pipeline config
                 let clock_extra = match pipeline.clock_for_state(&new_status) {
                     Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
@@ -199,9 +275,6 @@ pub(super) fn register_kanban_ops<'js>(
                 let has_hooks = pipeline
                     .hooks_for_state(&new_status)
                     .is_some_and(|h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
-                let is_review_enter = pipeline
-                    .hooks_for_state(&new_status)
-                    .is_some_and(|h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
                 if pipeline.is_terminal(&new_status) || !has_hooks {
                     let mut payload = serde_json::json!({"card_id": card_id, "state": "idle"});
                     if pipeline.is_terminal(&new_status)
@@ -758,6 +831,19 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             }
         }
 
+        let is_review_enter = enters_review_state(&effective, &new_status);
+        if !force
+            && is_review_enter
+            && auto_queue_review_disabled_for_card_on_pg(&mut tx, &card_id).await?
+        {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "changed": false,
+                "status": old_status,
+                "skipped": "auto_queue_review_disabled",
+            }));
+        }
+
         let clock_extra = match effective.clock_for_state(&new_status) {
             Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
                 format!(", {} = COALESCE({}, NOW())", clock.set, clock.set)
@@ -804,9 +890,6 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
         let has_hooks = effective
             .hooks_for_state(&new_status)
             .is_some_and(|h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
-        let is_review_enter = effective
-            .hooks_for_state(&new_status)
-            .is_some_and(|h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
         if effective.is_terminal(&new_status) || !has_hooks {
             crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "idle").await?;
         } else if is_review_enter {
@@ -1087,22 +1170,23 @@ pub(super) fn review_state_sync_with_backends(
 ///
 /// When a card finishes, its active dispatch entry should become `done` and any
 /// stale pending copies in active or paused runs should be skipped so they do
-/// not block other runs.
+/// not block other runs. Run completion and phase-gate decisions stay in the
+/// auto-queue policy hook, which runs after this sync.
 pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connection, card_id: &str) {
     // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let dispatched_ids: Vec<String> = conn
+    let dispatched_rows: Vec<String> = conn
         .prepare(
             "SELECT id FROM auto_queue_entries
              WHERE kanban_card_id = ?1 AND status = 'dispatched'",
         )
         .ok()
         .and_then(|mut stmt| {
-            stmt.query_map([card_id], |row| row.get::<_, String>(0))
+            stmt.query_map([card_id], |row| row.get(0))
                 .ok()
                 .map(|rows| rows.filter_map(|row| row.ok()).collect())
         })
         .unwrap_or_default();
-    for entry_id in dispatched_ids {
+    for entry_id in dispatched_rows {
         if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
             conn,
             &entry_id,
@@ -1118,7 +1202,7 @@ pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connectio
         }
     }
 
-    let pending_ids: Vec<String> = conn
+    let pending_rows: Vec<String> = conn
         .prepare(
             "SELECT id FROM auto_queue_entries
              WHERE kanban_card_id = ?1
@@ -1129,12 +1213,12 @@ pub(super) fn sync_auto_queue_terminal_on_conn(conn: &libsql_rusqlite::Connectio
         )
         .ok()
         .and_then(|mut stmt| {
-            stmt.query_map([card_id], |row| row.get::<_, String>(0))
+            stmt.query_map([card_id], |row| row.get(0))
                 .ok()
                 .map(|rows| rows.filter_map(|row| row.ok()).collect())
         })
         .unwrap_or_default();
-    for entry_id in pending_ids {
+    for entry_id in pending_rows {
         if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
             conn,
             &entry_id,

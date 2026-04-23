@@ -923,7 +923,26 @@ function loadPhaseGateDispatches(dispatchIds) {
 }
 
 function _phaseGateRequired(runId, phase) {
-  // General phase gates are always required after a phase completes.
+  try {
+    var rows = agentdesk.db.query(
+      "SELECT COALESCE(review_mode, 'enabled') as review_mode FROM auto_queue_runs WHERE id = ?",
+      [runId]
+    );
+    if (rows.length > 0 && rows[0].review_mode === "disabled") {
+      autoQueueLog("info", "Skipping phase gate for review-disabled auto-queue run", {
+        run_id: runId,
+        batch_phase: phase
+      });
+      return false;
+    }
+  } catch (e) {
+    autoQueueLog("warn", "Failed to load auto-queue review mode for phase gate decision: " + e, {
+      run_id: runId,
+      batch_phase: phase
+    });
+  }
+
+  // General phase gates are required unless the run explicitly disabled review.
   return true;
 }
 

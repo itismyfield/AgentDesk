@@ -30,6 +30,7 @@ pub struct GenerateBody {
     pub agent_id: Option<String>,
     pub issue_numbers: Option<Vec<i64>>,
     pub entries: Option<Vec<GenerateEntryBody>>,
+    pub review_mode: Option<String>,
     // Legacy compatibility only. Accepted from callers, but ignored.
     #[allow(dead_code)]
     pub mode: Option<String>,
@@ -97,6 +98,7 @@ pub struct DispatchBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub groups: Vec<DispatchGroupBody>,
+    pub review_mode: Option<String>,
     pub unified_thread: Option<bool>,
     pub activate: Option<bool>,
     pub auto_assign_agent: Option<bool>,
@@ -170,6 +172,9 @@ struct DependencyParseResult {
     numbers: Vec<i64>,
     signals: Vec<String>,
 }
+
+const AUTO_QUEUE_REVIEW_MODE_ENABLED: &str = "enabled";
+const AUTO_QUEUE_REVIEW_MODE_DISABLED: &str = "disabled";
 
 fn deploy_phase_api_enabled(state: &AppState) -> bool {
     state
@@ -3862,6 +3867,16 @@ fn normalize_generate_entries(
     Ok(Some(normalized))
 }
 
+fn normalize_auto_queue_review_mode(review_mode: Option<&str>) -> Result<&'static str, String> {
+    match review_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some(AUTO_QUEUE_REVIEW_MODE_ENABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_ENABLED),
+        Some(AUTO_QUEUE_REVIEW_MODE_DISABLED) => Ok(AUTO_QUEUE_REVIEW_MODE_DISABLED),
+        Some(other) => Err(format!(
+            "review_mode must be '{AUTO_QUEUE_REVIEW_MODE_ENABLED}' or '{AUTO_QUEUE_REVIEW_MODE_DISABLED}', got '{other}'"
+        )),
+    }
+}
+
 fn normalize_dispatch_entries(body: &DispatchBody) -> Result<Vec<GenerateEntryBody>, String> {
     if body.groups.is_empty() {
         return Err("groups must contain at least one issue group".to_string());
@@ -5404,6 +5419,10 @@ pub async fn generate(
     let guild_id = state.config.discord.guild_id.as_deref();
     let _ignored_unified_thread = body.unified_thread.is_some();
     let force = body.force.unwrap_or(false);
+    let review_mode = match normalize_auto_queue_review_mode(body.review_mode.as_deref()) {
+        Ok(mode) => mode,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+    };
     let requested_entries = match normalize_generate_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
@@ -5880,14 +5899,15 @@ pub async fn generate(
         };
         if let Err(error) = sqlx::query(
             "INSERT INTO auto_queue_runs (
-                id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count
+                id, repo, agent_id, review_mode, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count
              ) VALUES (
-                $1, $2, $3, 'generated', $4, $5, FALSE, $6, $7
+                $1, $2, $3, $4, 'generated', $5, $6, FALSE, $7, $8
              )",
         )
         .bind(&run_id)
         .bind(body.repo.as_deref())
         .bind(body.agent_id.as_deref())
+        .bind(review_mode)
         .bind(&ai_model_str)
         .bind(&ai_rationale)
         .bind(max_concurrent)
@@ -5964,12 +5984,13 @@ pub async fn generate(
             }
         };
         if let Err(error) = tx.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count) \
-             VALUES (?1, ?2, ?3, 'generated', ?4, ?5, 0, ?6, ?7)",
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, review_mode, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count) \
+             VALUES (?1, ?2, ?3, ?4, 'generated', ?5, ?6, 0, ?7, ?8)",
             libsql_rusqlite::params![
                 run_id,
                 body.repo,
                 body.agent_id,
+                review_mode,
                 ai_model_str,
                 ai_rationale,
                 max_concurrent,
@@ -8278,6 +8299,10 @@ pub async fn dispatch(
     }
 
     let force = body.force.unwrap_or(false);
+    let review_mode = match normalize_auto_queue_review_mode(body.review_mode.as_deref()) {
+        Ok(mode) => mode,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+    };
     let requested_entries = match normalize_dispatch_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
@@ -8431,6 +8456,7 @@ pub async fn dispatch(
         agent_id: body.agent_id.clone(),
         issue_numbers: None,
         entries: Some(requested_entries.clone()),
+        review_mode: Some(review_mode.to_string()),
         mode: None,
         unified_thread: body.unified_thread,
         parallel: None,
