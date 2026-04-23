@@ -1529,7 +1529,8 @@ agents:
 
     #[test]
     fn codex_catalog_includes_spark_preview_entry() {
-        let spark = known_models(&ProviderKind::Codex)
+        let codex_models = known_models(&ProviderKind::Codex);
+        let spark = codex_models
             .iter()
             .find(|entry| entry.value == "gpt-5.3-codex-spark")
             .expect("spark entry missing");

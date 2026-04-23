@@ -26,17 +26,20 @@ use super::stale_resume::{
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
 use crate::db::turns::TurnTokenUsage;
+use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::MessageId;
+use crate::services::discord::gateway::HeadlessGateway;
 use crate::services::discord::make_shared_data_for_tests;
+use crate::services::discord::make_shared_data_for_tests_with_storage;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::memory::{SessionEndReason, TokenUsage};
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -115,6 +118,126 @@ fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
     );
+}
+
+#[tokio::test]
+async fn active_turn_output_offset_refreshes_session_heartbeat_before_done() {
+    let db = crate::db::test_db();
+    let shared = make_shared_data_for_tests_with_storage(Some(db.clone()), None);
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168011);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        &provider,
+        &tmux_name,
+    );
+    let thread_channel_id = channel_id.get().to_string();
+
+    db.lock()
+        .expect("test db lock")
+        .execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+             VALUES (?1, ?2, 'working', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+            [
+                session_key.as_str(),
+                provider.as_str(),
+                thread_channel_id.as_str(),
+            ],
+        )
+        .expect("insert session row");
+
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let mut inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        343742347365974026,
+        1487795113240559788,
+        1487799916758827138,
+        "ping".to_string(),
+        None,
+        Some(tmux_name),
+        Some("/tmp/agentdesk-test-output.jsonl".to_string()),
+        Some("/tmp/agentdesk-test-input.fifo".to_string()),
+        0,
+    );
+    inflight_state.session_key = Some(session_key.clone());
+
+    super::spawn_turn_bridge(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        stream_rx,
+        super::TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: Arc::new(HeadlessGateway),
+            channel_id,
+            user_msg_id: MessageId::new(1487795113240559788),
+            user_text_owned: "ping".to_string(),
+            request_owner_name: "tester".to_string(),
+            role_binding: None,
+            adk_session_key: Some(session_key.clone()),
+            adk_session_name: Some(channel_name),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            memory_recall_usage: TokenUsage::default(),
+            current_msg_id: MessageId::new(1487799916758827138),
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            completion_tx: Some(completion_tx),
+            inflight_state,
+        },
+    );
+
+    stream_tx
+        .send(StreamMessage::OutputOffset { offset: 128 })
+        .expect("send output offset");
+
+    let heartbeat_changed = async {
+        loop {
+            let last_heartbeat: String = db
+                .lock()
+                .expect("test db lock")
+                .query_row(
+                    "SELECT last_heartbeat FROM sessions WHERE session_key = ?1",
+                    [session_key.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("select last heartbeat");
+            if last_heartbeat != "2026-04-09 01:02:03" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(4), heartbeat_changed)
+        .await
+        .expect("active turn output offset should refresh last_heartbeat");
+
+    stream_tx
+        .send(StreamMessage::Text {
+            content: "done".to_string(),
+        })
+        .expect("send text");
+    stream_tx
+        .send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        })
+        .expect("send done");
+    drop(stream_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx)
+        .await
+        .expect("turn bridge should finish")
+        .expect("completion sender should complete");
 }
 
 #[test]

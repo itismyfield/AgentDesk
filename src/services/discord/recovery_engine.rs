@@ -131,6 +131,125 @@ fn can_fast_path_captured_full_response(
         && state.last_watcher_relayed_offset.is_none()
 }
 
+fn recovery_worktree_path(state: &inflight::InflightTurnState) -> Option<&str> {
+    state
+        .worktree_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+}
+
+fn recovery_worktree_branch(state: &inflight::InflightTurnState) -> Option<&str> {
+    state
+        .worktree_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+}
+
+fn recovery_dispatch_id(state: &inflight::InflightTurnState) -> Option<&str> {
+    state
+        .dispatch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|dispatch_id| !dispatch_id.is_empty())
+}
+
+fn recovery_requires_worktree_context(state: &inflight::InflightTurnState) -> bool {
+    recovery_worktree_branch(state).is_some()
+        || state
+            .base_commit
+            .as_deref()
+            .is_some_and(|commit| !commit.trim().is_empty())
+}
+
+fn recovery_git_stdout(repo_path: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", repo_path])
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+    Some(stdout)
+}
+
+fn recovery_worktree_original_path(worktree_path: &str) -> Option<String> {
+    let git_common_dir = recovery_git_stdout(worktree_path, &["rev-parse", "--git-common-dir"])?;
+    let common_dir = {
+        let candidate = std::path::PathBuf::from(&git_common_dir);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            std::path::Path::new(worktree_path).join(candidate)
+        }
+    };
+    let canonical = std::fs::canonicalize(common_dir).ok()?;
+    canonical.parent()?.to_str().map(str::to_string)
+}
+
+fn recovery_worktree_info(state: &inflight::InflightTurnState) -> Option<WorktreeInfo> {
+    let worktree_path = recovery_worktree_path(state)?;
+    if !std::path::Path::new(worktree_path).is_dir() {
+        return None;
+    }
+
+    let branch_name = recovery_worktree_branch(state)
+        .map(str::to_string)
+        .or_else(|| recovery_git_stdout(worktree_path, &["branch", "--show-current"]))?;
+    let original_path = recovery_worktree_original_path(worktree_path)?;
+
+    Some(WorktreeInfo {
+        original_path,
+        worktree_path: worktree_path.to_string(),
+        branch_name,
+    })
+}
+
+fn restore_recovered_session_worktree(
+    session: &mut DiscordSession,
+    state: &inflight::InflightTurnState,
+) {
+    if let Some(worktree) = recovery_worktree_info(state) {
+        if session.current_path.is_none() {
+            session.current_path = Some(worktree.worktree_path.clone());
+        }
+        session.worktree = Some(worktree);
+    }
+}
+
+fn recovery_spawn_adk_cwd(
+    state: &inflight::InflightTurnState,
+    persisted_session_path: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(worktree_path) = recovery_worktree_path(state) {
+        if std::path::Path::new(worktree_path).is_dir() {
+            return Ok(Some(worktree_path.to_string()));
+        }
+        return Err(format!(
+            "recovery blocked: inflight worktree missing for channel {}: {}",
+            state.channel_id, worktree_path
+        ));
+    }
+
+    if recovery_requires_worktree_context(state) {
+        let dispatch_suffix = recovery_dispatch_id(state)
+            .map(|dispatch_id| format!(" (dispatch {dispatch_id})"))
+            .unwrap_or_default();
+        return Err(format!(
+            "recovery blocked: inflight worktree state missing for channel {}{}",
+            state.channel_id, dispatch_suffix
+        ));
+    }
+
+    Ok(persisted_session_path)
+}
+
 async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1034,6 +1153,7 @@ pub(super) async fn restore_inflight_turns(
                     if session.channel_name.is_none() {
                         session.channel_name = effective_channel_name;
                     }
+                    restore_recovered_session_worktree(session, &state);
                 }
 
                 // Immediately spawn a tmux watcher instead of deferring to
@@ -1810,12 +1930,48 @@ pub(super) async fn restore_inflight_turns(
                 } else {
                     shared.sqlite.as_ref()
                 };
-                let last_path = load_last_session_path(
+                let persisted_session_path = load_last_session_path(
                     sqlite_settings_db,
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     channel_id.get(),
                 );
+                let recovery_adk_cwd = match recovery_spawn_adk_cwd(&state, persisted_session_path)
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let dispatch_id = state
+                            .dispatch_id
+                            .clone()
+                            .or_else(|| parse_dispatch_id(&state.user_text));
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::error!("  [{ts}] {error}; main-workspace fallback blocked");
+                        crate::services::observability::emit_recovery_fired(
+                            provider.as_str(),
+                            state.channel_id,
+                            dispatch_id.as_deref(),
+                            state.session_key.as_deref(),
+                            "worktree_missing_main_fallback_blocked",
+                        );
+                        let _ = super::formatting::replace_long_message_raw(
+                            http,
+                            channel_id,
+                            current_msg_id,
+                            &format!("❌ {error}\nmain workspace fallback blocked."),
+                            shared,
+                        )
+                        .await;
+                        super::turn_bridge::fail_dispatch_with_retry(
+                            shared.api_port,
+                            dispatch_id.as_deref(),
+                            &error,
+                        )
+                        .await;
+                        super::restart_report::clear_restart_report(provider, state.channel_id);
+                        clear_inflight_state(provider, state.channel_id);
+                        continue;
+                    }
+                };
                 let saved_remote = load_last_remote_profile(
                     sqlite_settings_db,
                     shared.pg_pool.as_ref(),
@@ -1846,11 +2002,12 @@ pub(super) async fn restore_inflight_turns(
                 session.channel_id = Some(channel_id.get());
                 session.last_active = tokio::time::Instant::now();
                 if session.current_path.is_none() {
-                    session.current_path = last_path;
+                    session.current_path = recovery_adk_cwd;
                 }
                 if session.channel_name.is_none() {
                     session.channel_name = effective_channel_name;
                 }
+                restore_recovered_session_worktree(session, &state);
             }
 
             // Immediately spawn watcher to avoid race condition.
@@ -1945,12 +2102,47 @@ pub(super) async fn restore_inflight_turns(
         } else {
             shared.sqlite.as_ref()
         };
-        let last_path = load_last_session_path(
+        let persisted_session_path = load_last_session_path(
             sqlite_settings_db,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             channel_id.get(),
         );
+        let recovery_adk_cwd = match recovery_spawn_adk_cwd(&state, persisted_session_path) {
+            Ok(path) => path,
+            Err(error) => {
+                let dispatch_id = state
+                    .dispatch_id
+                    .clone()
+                    .or_else(|| parse_dispatch_id(&state.user_text));
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::error!("  [{ts}] {error}; main-workspace fallback blocked");
+                crate::services::observability::emit_recovery_fired(
+                    provider.as_str(),
+                    state.channel_id,
+                    dispatch_id.as_deref(),
+                    state.session_key.as_deref(),
+                    "worktree_missing_main_fallback_blocked",
+                );
+                let _ = super::formatting::replace_long_message_raw(
+                    http,
+                    channel_id,
+                    current_msg_id,
+                    &format!("❌ {error}\nmain workspace fallback blocked."),
+                    shared,
+                )
+                .await;
+                super::turn_bridge::fail_dispatch_with_retry(
+                    shared.api_port,
+                    dispatch_id.as_deref(),
+                    &error,
+                )
+                .await;
+                super::restart_report::clear_restart_report(provider, state.channel_id);
+                clear_inflight_state(provider, state.channel_id);
+                continue;
+            }
+        };
         let saved_remote = load_last_remote_profile(
             sqlite_settings_db,
             shared.pg_pool.as_ref(),
@@ -1989,7 +2181,7 @@ pub(super) async fn restore_inflight_turns(
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
             if session.current_path.is_none() {
-                session.current_path = last_path.clone();
+                session.current_path = recovery_adk_cwd.clone();
             }
             if session.channel_name.is_none() {
                 session.channel_name = channel_name.clone();
@@ -1997,6 +2189,7 @@ pub(super) async fn restore_inflight_turns(
             if session.remote_profile_name.is_none() {
                 session.remote_profile_name = saved_remote;
             }
+            restore_recovered_session_worktree(session, &state);
         }
 
         mailbox_recovery_kickoff(
@@ -2013,7 +2206,7 @@ pub(super) async fn restore_inflight_turns(
         let adk_session_info = derive_adk_session_info(
             Some(&state.user_text),
             channel_name.as_deref(),
-            last_path.as_deref(),
+            recovery_adk_cwd.as_deref(),
         );
         let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
         let adk_thread_channel_id = adk_session_name
@@ -2027,7 +2220,7 @@ pub(super) async fn restore_inflight_turns(
             provider,
             Some(&adk_session_info),
             None,
-            last_path.as_deref(),
+            recovery_adk_cwd.as_deref(),
             parse_dispatch_id(&state.user_text)
                 .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await)
                 .as_deref(),
@@ -2133,7 +2326,7 @@ pub(super) async fn restore_inflight_turns(
                 adk_session_key,
                 adk_session_name,
                 adk_session_info: Some(adk_session_info),
-                adk_cwd: last_path.clone(),
+                adk_cwd: recovery_adk_cwd.clone(),
                 dispatch_id: recovery_dispatch_id,
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 current_msg_id,
@@ -2426,7 +2619,9 @@ pub(crate) async fn rebind_inflight_for_channel(
         synthetic_initial_offset
     };
 
-    if existing_inflight.is_none() {
+    let recovered_state_for_session = if let Some(existing) = existing_inflight.clone() {
+        existing
+    } else {
         // Build and persist the new inflight state. No request_owner / msg_ids
         // apply because this recovery has no originating Discord message.
         //
@@ -2466,7 +2661,8 @@ pub(crate) async fn rebind_inflight_for_channel(
                 return Err(RebindError::Internal(msg));
             }
         }
-    }
+        state
+    };
 
     // Register / refresh the in-memory session so downstream handlers can
     // locate this channel after the rebind.
@@ -2497,6 +2693,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         if session.channel_name.is_none() {
             session.channel_name = channel_name.clone();
         }
+        restore_recovered_session_worktree(session, &recovered_state_for_session);
     }
 
     // #897 P2 #2: use `claim_or_replace_watcher` instead of
@@ -3245,6 +3442,9 @@ mod tests {
             tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
+            worktree_path: None,
+            worktree_branch: None,
+            base_commit: None,
             last_offset: 123,
             turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
@@ -3356,6 +3556,9 @@ mod tests {
             tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
             output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
             input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
+            worktree_path: None,
+            worktree_branch: None,
+            base_commit: None,
             last_offset: 123,
             turn_start_offset: Some(123),
             full_response: "중간까지 정리했습니다.".to_string(),
@@ -3439,6 +3642,222 @@ mod tests {
         assert_eq!(offset, 0);
         assert!(current_len < saved_offset);
         assert!(truncated);
+    }
+
+    #[test]
+    fn recovery_spawn_adk_cwd_prefers_inflight_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree_path = temp.path().join("wt");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.worktree_path = Some(worktree_path.to_string_lossy().to_string());
+
+        let resolved = recovery_spawn_adk_cwd(&state, Some("/tmp/main-workspace".to_string()))
+            .expect("existing inflight worktree must win over persisted main workspace cwd");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(worktree_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn recovery_spawn_adk_cwd_uses_legacy_session_path_without_inflight_worktree() {
+        let state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        let resolved = recovery_spawn_adk_cwd(&state, Some("/tmp/main-workspace".to_string()))
+            .expect("legacy recovery should preserve the persisted session cwd");
+        assert_eq!(resolved.as_deref(), Some("/tmp/main-workspace"));
+    }
+
+    #[test]
+    fn recovery_spawn_adk_cwd_blocks_missing_inflight_worktree() {
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.worktree_path = Some("/tmp/missing-worktree".to_string());
+
+        let error = recovery_spawn_adk_cwd(&state, Some("/tmp/main-workspace".to_string()))
+            .expect_err("missing inflight worktree must block main-workspace fallback");
+        assert!(error.contains("missing-worktree"));
+        assert!(error.contains("recovery blocked"));
+    }
+
+    #[test]
+    fn recovery_spawn_adk_cwd_allows_dispatch_fallback_without_worktree_metadata() {
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "DISPATCH:dispatch-42 resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.dispatch_id = Some("dispatch-42".to_string());
+
+        let resolved = recovery_spawn_adk_cwd(&state, Some("/tmp/dispatch-target".to_string()))
+            .expect("dispatch fallback cwd must remain valid when no worktree was tracked");
+        assert_eq!(resolved.as_deref(), Some("/tmp/dispatch-target"));
+    }
+
+    #[test]
+    fn recovery_spawn_adk_cwd_blocks_missing_required_worktree_metadata_for_dispatch_turn() {
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "DISPATCH:dispatch-42 resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.dispatch_id = Some("dispatch-42".to_string());
+        state.worktree_branch = Some("agentdesk/codex/adk-cdx-t42".to_string());
+
+        let error = recovery_spawn_adk_cwd(&state, Some("/tmp/main-workspace".to_string()))
+            .expect_err("dispatch recovery without recorded worktree path must not fall back");
+        assert!(error.contains("dispatch-42"));
+        assert!(error.contains("worktree state missing"));
+    }
+
+    #[test]
+    fn recovery_restores_worktree_identity_into_session_state() {
+        fn run_git(repo_path: &std::path::Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args(["-C", repo_path.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("git {:?} failed to spawn: {error}", args));
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.name", "AgentDesk"]);
+        run_git(
+            repo.path(),
+            &["config", "user.email", "agentdesk@example.com"],
+        );
+        std::fs::write(repo.path().join("README.md"), "seed\n").unwrap();
+        run_git(repo.path(), &["add", "README.md"]);
+        run_git(repo.path(), &["commit", "-m", "seed"]);
+
+        let worktree_path = repo.path().join("wt-recovery");
+        let branch = "wt/recovery-936";
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            1,
+            2,
+            3,
+            "resume".to_string(),
+            Some("session-42".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t42".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.worktree_path = Some(worktree_path.to_string_lossy().to_string());
+        state.worktree_branch = Some(branch.to_string());
+
+        let mut session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: Some(worktree_path.to_string_lossy().to_string()),
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(42),
+            channel_name: Some("adk-cdx-t42".to_string()),
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        };
+
+        restore_recovered_session_worktree(&mut session, &state);
+
+        let restored = session
+            .worktree
+            .as_ref()
+            .expect("recovery should rebuild worktree identity from inflight metadata");
+        let canonical_repo_path = std::fs::canonicalize(repo.path()).unwrap();
+        assert_eq!(restored.worktree_path, worktree_path.to_string_lossy());
+        assert_eq!(restored.branch_name, branch);
+        assert_eq!(
+            restored.original_path,
+            canonical_repo_path.to_string_lossy()
+        );
     }
     #[test]
     fn fast_path_captured_full_response_requires_unsent_response() {

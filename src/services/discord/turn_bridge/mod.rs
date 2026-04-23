@@ -160,6 +160,52 @@ fn advance_tmux_relay_confirmed_end(
     }
 }
 
+fn active_turn_thread_channel_id(
+    adk_session_name: Option<&str>,
+    inflight_state: &InflightTurnState,
+) -> Option<u64> {
+    adk_session_name
+        .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
+        .or_else(|| {
+            inflight_state
+                .channel_name
+                .as_deref()
+                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
+        })
+        .or(inflight_state.thread_id)
+}
+
+fn maybe_refresh_active_turn_activity_heartbeat(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    inflight_state: &InflightTurnState,
+    adk_session_name: Option<&str>,
+    last_heartbeat_at: &mut Option<std::time::Instant>,
+) {
+    let now = std::time::Instant::now();
+    if last_heartbeat_at.is_some_and(|last| {
+        now.duration_since(last) < super::tmux::WATCHER_ACTIVITY_HEARTBEAT_INTERVAL
+    }) {
+        return;
+    }
+
+    let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref() else {
+        return;
+    };
+    let thread_channel_id = active_turn_thread_channel_id(adk_session_name, inflight_state);
+
+    if super::tmux::refresh_session_heartbeat_from_tmux_output(
+        shared.sqlite.as_ref(),
+        shared.pg_pool.as_ref(),
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+        thread_channel_id,
+    ) {
+        *last_heartbeat_at = Some(now);
+    }
+}
+
 async fn enqueue_headless_delivery(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -475,6 +521,7 @@ pub(super) fn spawn_turn_bridge(
         let mut terminal_session_reset_required = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
+        let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
         let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
@@ -1015,6 +1062,13 @@ pub(super) fn spawn_turn_bridge(
                         StreamMessage::OutputOffset { offset } => {
                             tmux_last_offset = Some(offset);
                             inflight_state.last_offset = offset;
+                            maybe_refresh_active_turn_activity_heartbeat(
+                                shared_owned.as_ref(),
+                                &provider,
+                                &inflight_state,
+                                adk_session_name.as_deref(),
+                                &mut last_activity_heartbeat_at,
+                            );
                             state_dirty = true;
                         }
                     },
