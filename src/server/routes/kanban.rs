@@ -4112,16 +4112,68 @@ fn cleanup_force_transition_terminal_on_conn(
     Ok(cancelled_dispatches)
 }
 
+fn count_live_auto_queue_entries_for_card_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM auto_queue_entries
+             WHERE kanban_card_id = ?1
+               AND status IN ('pending', 'dispatched')
+               AND run_id IN (
+                   SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+               )",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| anyhow::anyhow!("count live auto-queue entries for {card_id}: {error}"))?;
+    Ok(count.max(0) as usize)
+}
+
+fn clear_force_transition_terminalized_links_on_conn(
+    conn: &libsql_rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE auto_queue_entries
+         SET dispatch_id = NULL,
+             slot_index = NULL,
+             dispatched_at = NULL,
+             completed_at = COALESCE(completed_at, datetime('now'))
+         WHERE kanban_card_id = ?1
+           AND status = 'skipped'
+           AND dispatch_id IS NOT NULL
+           AND run_id IN (
+               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+           )",
+        [card_id],
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "clear force-transition terminalized auto-queue links for {card_id}: {error}"
+        )
+    })?;
+    Ok(())
+}
+
 fn cleanup_force_transition_revert_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
     target_status: &str,
 ) -> anyhow::Result<(usize, usize)> {
     let reason = format!("force-transition to {target_status}");
+    // Model 2: generic cancel keeps the dispatch pointer for provenance and to
+    // avoid silently re-queuing abandoned work. Force-transition cleanup owns
+    // the explicit terminal cleanup, so it snapshots the live-entry count up
+    // front and then clears any skipped entry links left behind by cancel's
+    // terminal side-effect.
+    let skipped_auto_queue_entries = count_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
     let cancelled_dispatches =
         crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
-    let skipped_auto_queue_entries =
-        crate::engine::ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
+    crate::engine::ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
+    clear_force_transition_terminalized_links_on_conn(conn, card_id)?;
     crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
 
     Ok((cancelled_dispatches, skipped_auto_queue_entries))
