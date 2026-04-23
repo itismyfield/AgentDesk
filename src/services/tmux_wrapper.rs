@@ -257,13 +257,7 @@ pub fn run(
                     "result": format!("Authentication error: {}", line.trim()),
                     "total_cost_usd": 0.0,
                 });
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&output_file_for_stderr)
-                {
-                    let _ = writeln!(f, "{}", err_event);
-                    let _ = f.flush();
-                }
+                let _ = append_jsonl_line_and_sync(&output_file_for_stderr, &err_event.to_string());
                 eprintln!("\x1b[31m[auth error detected — wrote synthetic result]\x1b[0m");
                 break;
             }
@@ -629,9 +623,15 @@ fn append_output_line(
     output.write_line(line)
 }
 
+fn append_jsonl_line_and_sync(path: &str, line: &str) -> std::io::Result<()> {
+    let mut output = crate::services::tmux_common::RotatingJsonlWriter::open(path)?;
+    output.write_line(line)?;
+    output.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{append_output_line, format_tool_detail};
+    use super::{append_jsonl_line_and_sync, append_output_line, format_tool_detail};
     use crate::utils::format::safe_prefix;
     use serde_json::json;
 
@@ -687,5 +687,23 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains(r#"{"type":"assistant","message":"kept"}"#));
         assert!(content.contains(r#"{"type":"assistant","message":"after"}"#));
+    }
+
+    #[test]
+    fn append_jsonl_line_and_sync_creates_file_for_stderr_race() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("auth.jsonl");
+        let event = json!({
+            "type": "result",
+            "is_error": true,
+            "result": "Authentication error: not logged in",
+            "total_cost_usd": 0.0,
+        });
+
+        append_jsonl_line_and_sync(path.to_str().unwrap(), &event.to_string()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#""type":"result""#));
+        assert!(content.contains("not logged in"));
     }
 }

@@ -205,11 +205,25 @@ impl RotatingJsonlWriter {
         self.file.flush()
     }
 
+    pub fn sync_all(&mut self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
     fn reopen_if_path_replaced(&mut self) -> std::io::Result<()> {
         if path_points_to_different_file(&self.file, &self.path)? {
             self.file = open_jsonl_append_file(&self.path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl RotatingJsonlWriter {
+    #[cfg(unix)]
+    fn bound_file_id(&self) -> std::io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+
+        let meta = self.file.metadata()?;
+        Ok((meta.dev(), meta.ino()))
     }
 }
 
@@ -598,5 +612,41 @@ mod tests {
             !content.contains(r#"{"type":"assistant","message":"before"}"#),
             "replaced path should not retain pre-rotation content in this fixture: {content}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotating_jsonl_writer_syncs_old_fd_before_reopening_after_rotation() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("session.jsonl");
+        let stale = tdir.path().join("session.stale.jsonl");
+        let mut writer = RotatingJsonlWriter::open(&path).expect("open writer");
+
+        writer
+            .write_line(r#"{"type":"assistant","message":"before"}"#)
+            .expect("write before");
+        let old_id = writer.bound_file_id().expect("old file id");
+
+        std::fs::rename(&path, &stale).expect("move old file aside");
+        std::fs::write(&path, "{\"type\":\"assistant\",\"message\":\"kept\"}\n")
+            .expect("write replacement");
+
+        writer.sync_all().expect("sync old fd");
+        assert_eq!(
+            writer.bound_file_id().expect("bound file id after sync"),
+            old_id,
+            "sync_all must fsync the original fd before any later reopen"
+        );
+
+        writer
+            .write_line(r#"{"type":"assistant","message":"after"}"#)
+            .expect("write after");
+
+        let replacement = std::fs::read_to_string(&path).expect("read replacement");
+        assert!(replacement.contains(r#"{"type":"assistant","message":"kept"}"#));
+        assert!(replacement.contains(r#"{"type":"assistant","message":"after"}"#));
+
+        let stale_content = std::fs::read_to_string(&stale).expect("read stale");
+        assert!(stale_content.contains(r#"{"type":"assistant","message":"before"}"#));
     }
 }
