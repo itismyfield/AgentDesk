@@ -1,3 +1,4 @@
+use super::advance_tmux_relay_confirmed_end;
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
     extract_review_decision,
@@ -29,11 +30,13 @@ use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::MessageId;
+use crate::services::discord::make_shared_data_for_tests;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::memory::{SessionEndReason, TokenUsage};
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -86,6 +89,31 @@ fn optional_metric_token_fields_preserve_partial_usage() {
             output_tokens: 5,
         }),
         (None, Some(5))
+    );
+}
+
+#[test]
+fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
+    let shared = make_shared_data_for_tests();
+    let channel_id = ChannelId::new(1486333430516945999);
+
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(128));
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+    assert_eq!(
+        relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+        128
+    );
+
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(64));
+    assert_eq!(
+        relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+        128
+    );
+
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, None);
+    assert_eq!(
+        relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+        128
     );
 }
 

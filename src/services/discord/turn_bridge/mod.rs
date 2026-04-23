@@ -133,6 +133,33 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn advance_tmux_relay_confirmed_end(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    confirmed_end_offset: Option<u64>,
+) {
+    let Some(target_end) = confirmed_end_offset.filter(|offset| *offset > 0) else {
+        return;
+    };
+
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+    let mut current = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    while current < target_end {
+        match relay_coord.confirmed_end_offset.compare_exchange(
+            current,
+            target_end,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 async fn enqueue_headless_delivery(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -1346,9 +1373,17 @@ pub(super) fn spawn_turn_bridge(
                 format!("{}\n\n[Stopped]", formatted)
             };
 
-            let _ = gateway
+            if gateway
                 .replace_message(channel_id, current_msg_id, &terminal_response)
-                .await;
+                .await
+                .is_ok()
+            {
+                advance_tmux_relay_confirmed_end(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    tmux_last_offset,
+                );
+            }
 
             if preserved_restart_mode.is_none() {
                 gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
@@ -1364,9 +1399,17 @@ pub(super) fn spawn_turn_bridge(
                  컨텍스트를 줄이려면 `/compact` 또는 `/clear`를 사용해 주세요.",
                 mention
             );
-            let _ = gateway
+            if gateway
                 .replace_message(channel_id, current_msg_id, &full_response)
-                .await;
+                .await
+                .is_ok()
+            {
+                advance_tmux_relay_confirmed_end(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    tmux_last_offset,
+                );
+            }
 
             gateway.add_reaction(channel_id, user_msg_id, '⚠').await;
 
@@ -1620,9 +1663,17 @@ pub(super) fn spawn_turn_bridge(
                     &provider,
                 );
                 if can_chain_locally {
-                    let _ = gateway
+                    if gateway
                         .replace_message(channel_id, current_msg_id, &delivery_response)
-                        .await;
+                        .await
+                        .is_ok()
+                    {
+                        advance_tmux_relay_confirmed_end(
+                            shared_owned.as_ref(),
+                            channel_id,
+                            tmux_last_offset,
+                        );
+                    }
                 } else if let Err(error) = enqueue_headless_delivery(
                     &shared_owned,
                     channel_id,
