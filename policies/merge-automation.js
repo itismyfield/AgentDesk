@@ -874,6 +874,8 @@ function buildTrackedPrBody(card, options) {
     lines.push("Automated PR created because " + forcePrReason + ".");
   } else if (mode === "pr-always") {
     lines.push("Automated PR created because `merge_strategy_mode` is set to `pr-always`.");
+  } else if (forcePrReason) {
+    lines.push("Automated PR created because direct merge is disallowed for this terminal path.");
   } else if (mergeResult && mergeResult.conflict) {
     lines.push(
       "Automated fallback PR after direct merge into `" + mainBranch + "` hit a cherry-pick conflict."
@@ -887,6 +889,12 @@ function buildTrackedPrBody(card, options) {
     lines.push("Issue: " + card.github_issue_url);
   }
   if (mode === "pr-always") {
+    lines.push("");
+    lines.push("Merge path: wait for CI + Codex review approval before auto-merge.");
+  } else if (forcePrReason) {
+    lines.push("");
+    lines.push("Reason:");
+    lines.push(summarizeInlineText(forcePrReason));
     lines.push("");
     lines.push("Merge path: wait for CI + Codex review approval before auto-merge.");
   } else if (mergeResult && mergeResult.error) {
@@ -1025,12 +1033,21 @@ function tryDirectMergeOrTrackPr(cardId, tracking) {
   if (mergeMode === "pr-always") {
     var trackedPrResult = tryCreateTrackedPr(cardId, tracking, candidate, {
       mode: mergeMode,
-      main_branch: resolveTrackedPrBaseBranch(candidate)
+      main_branch: resolveTrackedPrBaseBranch(candidate),
+      force_pr_reason: candidate.pr_tracking_reason
     });
     if (trackedPrResult.ok) {
-      agentdesk.log.info("[merge] Card " + cardId + " is in pr-always mode — PR #" + trackedPrResult.pr.number + " is now tracked for CI");
+      if (candidate.requires_pr_tracking) {
+        agentdesk.log.info("[merge] Card " + cardId + " requires PR tracking — PR #" + trackedPrResult.pr.number + " is now tracked for CI");
+      } else {
+        agentdesk.log.info("[merge] Card " + cardId + " is in pr-always mode — PR #" + trackedPrResult.pr.number + " is now tracked for CI");
+      }
     } else {
-      agentdesk.log.warn("[merge] PR creation failed for pr-always card " + cardId + ": " + trackedPrResult.error);
+      if (candidate.requires_pr_tracking) {
+        agentdesk.log.warn("[merge] PR creation failed for PR-required card " + cardId + ": " + trackedPrResult.error);
+      } else {
+        agentdesk.log.warn("[merge] PR creation failed for pr-always card " + cardId + ": " + trackedPrResult.error);
+      }
     }
     return;
   }

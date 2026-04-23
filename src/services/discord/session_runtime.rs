@@ -57,8 +57,12 @@ impl DiscordSession {
     }
 
     pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
+        self.memento_context_loaded = restored_memento_context_loaded(
+            self.memento_context_loaded,
+            self.session_id.as_deref(),
+            session_id.as_deref(),
+        );
         self.session_id = session_id;
-        self.memento_context_loaded = self.session_id.is_some();
         self.memento_reflected = false;
     }
 
@@ -150,6 +154,14 @@ impl DiscordSession {
         self.worktree = None;
         None
     }
+}
+
+pub(super) fn restored_memento_context_loaded(
+    previous_loaded: bool,
+    previous_session_id: Option<&str>,
+    next_session_id: Option<&str>,
+) -> bool {
+    previous_loaded && previous_session_id == next_session_id && next_session_id.is_some()
 }
 
 /// Worktree info for sessions that were auto-redirected to avoid conflicts
@@ -1685,5 +1697,83 @@ mod tests {
             branch_exists(repo_dir, branch),
             "branch should remain when cleanup cannot verify merge state"
         );
+    }
+
+    #[test]
+    fn restored_memento_context_loaded_preserves_loaded_state_only_when_already_loaded() {
+        assert!(!super::restored_memento_context_loaded(
+            false,
+            None,
+            Some("session-1")
+        ));
+        assert!(super::restored_memento_context_loaded(
+            true,
+            Some("session-1"),
+            Some("session-1")
+        ));
+        assert!(!super::restored_memento_context_loaded(
+            true,
+            Some("session-1"),
+            Some("session-2")
+        ));
+        assert!(!super::restored_memento_context_loaded(
+            true,
+            Some("session-1"),
+            None
+        ));
+    }
+
+    #[test]
+    fn restore_provider_session_keeps_unloaded_memento_state_until_context_reloads() {
+        let mut session = DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: true,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        };
+
+        session.restore_provider_session(Some("session-1".to_string()));
+
+        assert_eq!(session.session_id.as_deref(), Some("session-1"));
+        assert!(!session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+    }
+
+    #[test]
+    fn restore_provider_session_clears_loaded_state_when_session_id_changes() {
+        let mut session = DiscordSession {
+            session_id: Some("session-1".to_string()),
+            memento_context_loaded: true,
+            memento_reflected: true,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+            assistant_turns: 0,
+        };
+
+        session.restore_provider_session(Some("session-2".to_string()));
+
+        assert_eq!(session.session_id.as_deref(), Some("session-2"));
+        assert!(!session.memento_context_loaded);
+        assert!(!session.memento_reflected);
     }
 }

@@ -66,6 +66,7 @@ pub(crate) struct RecallResponse {
     pub shared_knowledge: Option<String>,
     pub longterm_catalog: Option<String>,
     pub external_recall: Option<String>,
+    pub memento_context_loaded: bool,
     pub warnings: Vec<String>,
     pub token_usage: TokenUsage,
 }

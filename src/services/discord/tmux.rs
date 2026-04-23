@@ -4149,7 +4149,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     .entry(*channel_id)
                     .or_insert_with(|| super::DiscordSession {
                         session_id: persisted_session_id.clone(),
-                        memento_context_loaded: persisted_session_id.is_some(),
+                        memento_context_loaded:
+                            super::session_runtime::restored_memento_context_loaded(
+                                false,
+                                None,
+                                persisted_session_id.as_deref(),
+                            ),
                         memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
