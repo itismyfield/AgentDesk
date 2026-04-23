@@ -40,7 +40,8 @@ use super::tmux_restart_handoff::{
 };
 use super::{SharedData, TmuxWatcherHandle, rate_limit_wait};
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
 
@@ -1234,7 +1235,7 @@ pub(super) async fn clear_recovery_handled_channels(shared: &SharedData) {
 
 // Tmux watcher output is activity, but reusing hook_session here would also
 // overwrite status/tokens defaults. Touch only last_heartbeat instead.
-fn refresh_session_heartbeat_from_tmux_output(
+pub(super) fn refresh_session_heartbeat_from_tmux_output(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
