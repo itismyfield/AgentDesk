@@ -885,6 +885,7 @@ pub(super) async fn bootstrap_thread_session(
     serenity_ctx: &serenity::prelude::Context,
 ) -> bool {
     let (thread_title, cat_name) = resolve_channel_category(serenity_ctx, thread_channel_id).await;
+    let provider_kind = shared.settings.read().await.provider.clone();
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
     let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
     let ch_name = if let Some((parent_id, parent_name)) = parent_info {
@@ -926,6 +927,7 @@ pub(super) async fn bootstrap_thread_session(
         let provider_str = shared.settings.read().await.provider.as_str().to_string();
         match create_git_worktree(parent_path, ch, &provider_str) {
             Ok((wt_path, branch)) => {
+                let base_commit = crate::services::platform::git_head_commit(parent_path);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
@@ -935,8 +937,15 @@ pub(super) async fn bootstrap_thread_session(
                 session.worktree = Some(WorktreeInfo {
                     original_path: parent_path.to_string(),
                     worktree_path: wt_path.clone(),
-                    branch_name: branch,
+                    branch_name: branch.clone(),
                 });
+                sync_inflight_worktree_context(
+                    &provider_kind,
+                    thread_channel_id.get(),
+                    Some(wt_path.clone()),
+                    Some(branch),
+                    base_commit,
+                );
                 wt_path
             }
             Err(e) => {
@@ -952,6 +961,19 @@ pub(super) async fn bootstrap_thread_session(
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
     true
+}
+
+fn sync_inflight_worktree_context(
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: u64,
+    worktree_path: Option<String>,
+    worktree_branch: Option<String>,
+    base_commit: Option<String>,
+) {
+    if let Some(mut inflight) = super::inflight::load_inflight_state(provider, channel_id) {
+        inflight.set_worktree_context(worktree_path, worktree_branch, base_commit);
+        let _ = super::inflight::save_inflight_state(&inflight);
+    }
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
@@ -1776,5 +1798,56 @@ mod tests {
         assert_eq!(session.session_id.as_deref(), Some("session-2"));
         assert!(!session.memento_context_loaded);
         assert!(!session.memento_reflected);
+    }
+
+    #[test]
+    fn sync_inflight_worktree_context_persists_bootstrap_worktree_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("agentdesk-root");
+        std::fs::create_dir_all(root.join("runtime").join("state").join("discord")).unwrap();
+
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        let _reset = EnvReset;
+
+        let provider = crate::services::provider::ProviderKind::Codex;
+        let inflight = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            4242,
+            Some("adk-cdx-t4242".to_string()),
+            1,
+            2,
+            3,
+            "resume".to_string(),
+            Some("session-4242".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t4242".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        crate::services::discord::inflight::save_inflight_state(&inflight).unwrap();
+
+        sync_inflight_worktree_context(
+            &provider,
+            4242,
+            Some("/tmp/new-worktree".to_string()),
+            Some("agentdesk/codex/adk-cdx-t4242".to_string()),
+            Some("abc123".to_string()),
+        );
+
+        let saved = crate::services::discord::inflight::load_inflight_state(&provider, 4242)
+            .expect("bootstrap should update existing inflight state");
+        assert_eq!(saved.worktree_path.as_deref(), Some("/tmp/new-worktree"));
+        assert_eq!(
+            saved.worktree_branch.as_deref(),
+            Some("agentdesk/codex/adk-cdx-t4242")
+        );
+        assert_eq!(saved.base_commit.as_deref(), Some("abc123"));
     }
 }

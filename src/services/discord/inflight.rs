@@ -7,7 +7,7 @@ use super::InflightRestartMode;
 use super::runtime_store::{atomic_write, discord_inflight_root};
 use crate::services::provider::ProviderKind;
 
-const INFLIGHT_STATE_VERSION: u32 = 4;
+const INFLIGHT_STATE_VERSION: u32 = 5;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
 const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
@@ -33,6 +33,12 @@ pub(super) struct InflightTurnState {
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
     pub input_fifo_path: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
     pub last_offset: u64,
     /// Stable start offset for the current turn's output JSONL slice.
     #[serde(default)]
@@ -119,6 +125,9 @@ impl InflightTurnState {
             tmux_session_name,
             output_path,
             input_fifo_path,
+            worktree_path: None,
+            worktree_branch: None,
+            base_commit: None,
             last_offset,
             turn_start_offset: Some(last_offset),
             full_response: String::new(),
@@ -151,6 +160,17 @@ impl InflightTurnState {
     pub fn clear_restart_mode(&mut self) {
         self.restart_mode = None;
         self.restart_generation = None;
+    }
+
+    pub fn set_worktree_context(
+        &mut self,
+        worktree_path: Option<String>,
+        worktree_branch: Option<String>,
+        base_commit: Option<String>,
+    ) {
+        self.worktree_path = worktree_path;
+        self.worktree_branch = worktree_branch;
+        self.base_commit = base_commit;
     }
 }
 
@@ -500,6 +520,41 @@ mod tests {
         assert_eq!(loaded[0].current_msg_id, 999);
         assert_eq!(loaded[0].last_offset, 42);
         assert_eq!(loaded[0].turn_start_offset, Some(42));
+    }
+
+    #[test]
+    fn test_save_and_load_inflight_state_preserves_worktree_metadata() {
+        let temp = TempDir::new().unwrap();
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            123,
+            Some("adk-cdx".to_string()),
+            456,
+            789,
+            999,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            42,
+        );
+        state.set_worktree_context(
+            Some("/tmp/worktree".to_string()),
+            Some("agentdesk/codex/adk-cdx".to_string()),
+            Some("abc123".to_string()),
+        );
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].worktree_path.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(
+            loaded[0].worktree_branch.as_deref(),
+            Some("agentdesk/codex/adk-cdx")
+        );
+        assert_eq!(loaded[0].base_commit.as_deref(), Some("abc123"));
     }
 
     #[test]

@@ -778,6 +778,21 @@ pub(in crate::services::discord) async fn start_headless_turn(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    let (worktree_path, worktree_branch, base_commit) = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.worktree.as_ref())
+            .map(|wt| {
+                (
+                    Some(wt.worktree_path.clone()),
+                    Some(wt.branch_name.clone()),
+                    crate::services::platform::git_head_commit(&wt.original_path),
+                )
+            })
+            .unwrap_or((None, None, None))
+    };
+    inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
     inflight_state.logical_channel_id = Some(channel_id.get());
     inflight_state.session_key = adk_session_key.clone();
     if let Err(error) = save_inflight_state(&inflight_state) {
@@ -2573,6 +2588,21 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    let (worktree_path, worktree_branch, base_commit) = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.worktree.as_ref())
+            .map(|wt| {
+                (
+                    Some(wt.worktree_path.clone()),
+                    Some(wt.branch_name.clone()),
+                    crate::services::platform::git_head_commit(&wt.original_path),
+                )
+            })
+            .unwrap_or((None, None, None))
+    };
+    inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
     inflight_state.logical_channel_id = Some(logical_channel_id);
     inflight_state.thread_id = thread_id;
     inflight_state.thread_title = thread_title;
