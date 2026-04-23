@@ -13,7 +13,7 @@ use crate::db::agents::AgentChannelBindings;
 
 /// GET /api/discord-bindings
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

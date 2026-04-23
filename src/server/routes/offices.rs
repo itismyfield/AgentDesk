@@ -50,7 +50,7 @@ pub struct ReorderOfficeItem {
 
 /// GET /api/offices
 pub async fn list_offices(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match list_offices_pg(pool).await {
             Ok(offices) => (StatusCode::OK, Json(json!({"offices": offices}))),
             Err(error) => (
@@ -60,7 +60,7 @@ pub async fn list_offices(State(state): State<AppState>) -> (StatusCode, Json<se
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -115,7 +115,7 @@ pub async fn reorder_offices(
     State(state): State<AppState>,
     Json(body): Json<Vec<ReorderOfficeItem>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -158,7 +158,7 @@ pub async fn reorder_offices(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -212,7 +212,7 @@ pub async fn create_office(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = uuid::Uuid::new_v4().to_string();
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Err(error) = sqlx::query(
             "INSERT INTO offices (id, name, layout, sort_order, created_at)
              VALUES ($1, $2, $3, 0, NOW())",
@@ -241,7 +241,7 @@ pub async fn create_office(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -279,7 +279,7 @@ pub async fn update_office(
     Path(id): Path<String>,
     Json(body): Json<UpdateOfficeBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut updated_any = false;
         let mut builder = QueryBuilder::<sqlx::Postgres>::new("UPDATE offices SET ");
         let mut separated = builder.separated(", ");
@@ -341,7 +341,7 @@ pub async fn update_office(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -419,7 +419,7 @@ pub async fn delete_office(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query("DELETE FROM offices WHERE id = $1")
             .bind(&id)
             .execute(pool)
@@ -443,7 +443,7 @@ pub async fn delete_office(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -476,7 +476,7 @@ pub async fn add_agent(
     Path(office_id): Path<String>,
     Json(body): Json<AddAgentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match office_exists_or_response(
             office_exists_pg(pool, &office_id).await,
             &office_id,
@@ -508,7 +508,7 @@ pub async fn add_agent(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -553,7 +553,7 @@ pub async fn remove_agent(
     State(state): State<AppState>,
     Path((office_id, agent_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query("DELETE FROM office_agents WHERE office_id = $1 AND agent_id = $2")
             .bind(&office_id)
             .bind(&agent_id)
@@ -572,7 +572,7 @@ pub async fn remove_agent(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -604,7 +604,7 @@ pub async fn update_office_agent(
     Path((office_id, agent_id)): Path<(String, String)>,
     Json(body): Json<UpdateOfficeAgentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query(
             "UPDATE office_agents SET department_id = $1 WHERE office_id = $2 AND agent_id = $3",
         )
@@ -626,7 +626,7 @@ pub async fn update_office_agent(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -658,7 +658,7 @@ pub async fn batch_add_agents(
     Path(office_id): Path<String>,
     Json(body): Json<BatchAddAgentsBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match office_exists_or_response(
             office_exists_pg(pool, &office_id).await,
             &office_id,
@@ -712,7 +712,7 @@ pub async fn batch_add_agents(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

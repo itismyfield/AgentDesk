@@ -180,7 +180,7 @@ async fn overview(State(state): State<AppState>) -> Response {
 }
 
 async fn list_agents(State(state): State<AppState>, Query(query): Query<AgentsQuery>) -> Response {
-    let agents = if let Some(pool) = state.pg_pool.as_ref() {
+    let agents = if let Some(pool) = state.pg_pool_ref() {
         match load_agents_pg(pool, query.office_id.as_deref()).await {
             Ok(agents) => agents,
             Err(error) => return internal_error("list_agents_pg", &error),
@@ -291,7 +291,7 @@ async fn stream(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn activity(State(state): State<AppState>, Query(query): Query<ActivityQuery>) -> Response {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let before = query.before.as_deref().and_then(parse_cursor);
-    let mut items = if let Some(pool) = state.pg_pool.as_ref() {
+    let mut items = if let Some(pool) = state.pg_pool_ref() {
         match load_activity_items_pg(pool).await {
             Ok(items) => items,
             Err(error) => return internal_error("activity_pg", &error),
@@ -336,7 +336,7 @@ async fn achievements(
     State(state): State<AppState>,
     Query(query): Query<AchievementsQuery>,
 ) -> Response {
-    let bundle = if let Some(pool) = state.pg_pool.as_ref() {
+    let bundle = if let Some(pool) = state.pg_pool_ref() {
         match build_achievements_pg(pool, query.agent_id.as_deref()).await {
             Ok(bundle) => bundle,
             Err(error) => return internal_error("achievements_pg", &error),
@@ -464,7 +464,7 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
     let mut events = Vec::new();
     let generated_at = utc_now_iso();
 
-    let agents = if let Some(pool) = state.pg_pool.as_ref() {
+    let agents = if let Some(pool) = state.pg_pool_ref() {
         load_agents_pg(pool, None)
             .await
             .map_err(|error| internal_error("stream_agents_pg", &error))?
@@ -506,7 +506,7 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
         compact_ops_health_event(health_status, &health_payload, &generated_at),
     ));
 
-    let achievements = if let Some(pool) = state.pg_pool.as_ref() {
+    let achievements = if let Some(pool) = state.pg_pool_ref() {
         build_achievements_pg(pool, None)
             .await
             .map_err(|error| internal_error("stream_achievements_pg", &error))?
@@ -529,7 +529,7 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
         }
     }
 
-    let activity_items = if let Some(pool) = state.pg_pool.as_ref() {
+    let activity_items = if let Some(pool) = state.pg_pool_ref() {
         load_activity_items_pg(pool)
             .await
             .map_err(|error| internal_error("stream_activity_pg", &error))?
@@ -791,7 +791,7 @@ async fn load_overview_spark(state: AppState) -> Result<Vec<Value>, Response> {
         }
     }
 
-    let completed_map = if let Some(pool) = state.pg_pool.as_ref() {
+    let completed_map = if let Some(pool) = state.pg_pool_ref() {
         load_completed_dispatch_counts_pg(pool, 14)
             .await
             .map_err(|error| internal_error("overview_spark_pg", &error))?
@@ -825,7 +825,7 @@ async fn load_overview_spark(state: AppState) -> Result<Vec<Value>, Response> {
 }
 
 async fn load_session_count(state: AppState) -> Result<i64, Response> {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM sessions WHERE status IS DISTINCT FROM 'disconnected'",
         )
@@ -847,7 +847,7 @@ async fn load_session_count(state: AppState) -> Result<i64, Response> {
 }
 
 async fn load_agent_counts(state: AppState) -> Result<Value, Response> {
-    let (agents, sessions) = if let Some(pool) = state.pg_pool.as_ref() {
+    let (agents, sessions) = if let Some(pool) = state.pg_pool_ref() {
         let agents = sqlx::query("SELECT id, status FROM agents ORDER BY id")
             .fetch_all(pool)
             .await
@@ -974,7 +974,7 @@ async fn load_agent_counts(state: AppState) -> Result<Value, Response> {
 }
 
 async fn load_kanban_summary(state: AppState) -> Result<Value, Response> {
-    let summary = if let Some(pool) = state.pg_pool.as_ref() {
+    let summary = if let Some(pool) = state.pg_pool_ref() {
         load_kanban_summary_pg(pool)
             .await
             .map_err(|error| internal_error("kanban_summary_pg", &error))?
@@ -1079,7 +1079,10 @@ fn load_kanban_summary_sqlite(state: &AppState) -> Result<Value, String> {
         "done",
         "cancelled",
     ];
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let mut by_status = serde_json::Map::new();
     for status in statuses {
         let count: i64 = conn
@@ -1228,7 +1231,10 @@ async fn load_auto_queue_summary_pg(pool: &sqlx::PgPool) -> Result<Value, String
 }
 
 fn load_auto_queue_summary_sqlite(state: &AppState) -> Result<Value, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let run = conn
         .query_row(
             "SELECT id, status, repo, agent_id, created_at
@@ -1435,7 +1441,10 @@ async fn load_agents_pg(
 }
 
 fn load_agents_sqlite(state: &AppState, office_id: Option<&str>) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let (sql, params): (String, Vec<String>) = if let Some(office_id) = office_id {
         (
             "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
@@ -1566,7 +1575,7 @@ fn load_skills_7d_sqlite(state: &AppState, agent_ids: &[String]) -> HashMap<Stri
     if agent_ids.is_empty() {
         return HashMap::new();
     }
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(conn) => conn,
         Err(_) => return HashMap::new(),
     };
@@ -1791,7 +1800,10 @@ async fn load_activity_items_pg(pool: &sqlx::PgPool) -> Result<Vec<ActivityItem>
 }
 
 fn load_activity_items_sqlite(state: &AppState) -> Result<Vec<ActivityItem>, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let mut items = Vec::new();
 
     if let Ok(mut stmt) = conn.prepare(
@@ -2066,7 +2078,10 @@ fn build_achievements_sqlite(
     state: &AppState,
     agent_filter: Option<&str>,
 ) -> Result<AchievementBundle, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let (sql, params): (String, Vec<String>) = if let Some(agent_id) = agent_filter {
         (
             "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), COALESCE(xp, 0), COALESCE(avatar_emoji, '🤖')
@@ -2221,7 +2236,10 @@ async fn build_daily_missions_pg(pool: &sqlx::PgPool) -> Result<Vec<Value>, Stri
 }
 
 fn build_daily_missions_sqlite(state: &AppState) -> Result<Vec<Value>, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let completed_today: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM task_dispatches WHERE status = 'completed' AND date(updated_at) = date('now')",
@@ -2310,7 +2328,10 @@ fn load_completed_dispatch_counts_sqlite(
     state: &AppState,
     days: i64,
 ) -> Result<HashMap<String, i64>, String> {
-    let conn = state.db.lock().map_err(|error| format!("{error}"))?;
+    let conn = state
+        .sqlite_db()
+        .lock()
+        .map_err(|error| format!("{error}"))?;
     let mut stmt = conn
         .prepare(
             "SELECT date(updated_at) AS day, COUNT(*) AS count

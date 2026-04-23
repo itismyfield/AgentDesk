@@ -55,8 +55,8 @@ pub async fn analytics(
     };
 
     match crate::services::observability::query_analytics(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
         &filters,
     )
     .await
@@ -77,7 +77,7 @@ pub async fn analytics(
 
 /// GET /api/streaks
 pub async fn streaks(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -214,7 +214,7 @@ pub async fn achievements(
     State(state): State<AppState>,
     Query(params): Query<AchievementsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -337,7 +337,7 @@ pub async fn activity_heatmap(
     State(state): State<AppState>,
     Query(params): Query<HeatmapQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -414,7 +414,7 @@ pub async fn audit_logs(
     State(state): State<AppState>,
     Query(params): Query<AuditLogsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -639,10 +639,10 @@ pub async fn machine_status(
 /// Returns cached rate limit data from rate_limit_cache table.
 pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let now = chrono::Utc::now().timestamp();
-    let providers = if let Some(pool) = state.pg_pool.as_ref() {
+    let providers = if let Some(pool) = state.pg_pool_ref() {
         build_rate_limit_provider_payloads_pg(pool, now).await
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -961,7 +961,7 @@ pub async fn skills_trend(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let days = params.days.unwrap_or(30).min(90).max(1);
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

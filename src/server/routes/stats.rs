@@ -501,7 +501,7 @@ pub async fn get_stats(
     State(state): State<AppState>,
     Query(params): Query<StatsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match get_stats_pg(pool, params.office_id.as_deref()).await {
             Ok(body) => return (StatusCode::OK, Json(body)),
             Err(error) => {
@@ -510,7 +510,7 @@ pub async fn get_stats(
         }
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

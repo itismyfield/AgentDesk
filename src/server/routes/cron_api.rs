@@ -11,7 +11,7 @@ async fn read_kv_i64(state: &AppState, key: &str) -> i64 {
 
 /// Read a kv_meta value as String.
 async fn read_kv_str(state: &AppState, key: &str) -> String {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("SELECT value FROM kv_meta WHERE key = $1")
             .bind(key)
             .fetch_optional(pool)

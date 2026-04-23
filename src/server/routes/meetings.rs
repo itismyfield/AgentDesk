@@ -526,7 +526,7 @@ fn apply_selection_reason_fallback(
 
 /// GET /api/round-table-meetings
 pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -639,7 +639,7 @@ pub async fn get_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -681,7 +681,7 @@ pub async fn delete_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -716,7 +716,7 @@ pub async fn update_issue_repo(
     Path(id): Path<String>,
     Json(body): Json<IssueRepoBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -796,7 +796,7 @@ pub async fn create_issues(
     Json(body): Json<CreateIssuesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let (repo, summaries) = {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -878,7 +878,7 @@ pub async fn create_issues(
         let key = format!("item-{i}");
         // Check if already discarded
         let discarded = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.sqlite_db().lock().unwrap();
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1",
                 [&format!("meeting:{id}:issue:{key}:discarded")],
@@ -895,7 +895,7 @@ pub async fn create_issues(
 
         // Check if already created
         let already_url: Option<String> = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.sqlite_db().lock().unwrap();
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1",
                 [&format!("meeting:{id}:issue:{key}:url")],
@@ -927,7 +927,7 @@ pub async fn create_issues(
             Ok(issue) => {
                 let url = issue.url;
                 // Store result
-                let conn = state.db.lock().unwrap();
+                let conn = state.sqlite_db().lock().unwrap();
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                     libsql_rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
@@ -988,7 +988,7 @@ pub async fn discard_issue(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1028,7 +1028,7 @@ pub async fn discard_all_issues(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1222,7 +1222,7 @@ pub async fn upsert_meeting(
         .as_deref()
         .and_then(normalize_selection_reason);
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

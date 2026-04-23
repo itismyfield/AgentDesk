@@ -24,7 +24,7 @@ pub async fn list_channel_queue(
         return Json(json!({"error": "invalid channel_id", "queue": []}));
     }
 
-    let dispatches = if let Some(pool) = state.pg_pool.as_ref() {
+    let dispatches = if let Some(pool) = state.pg_pool_ref() {
         sqlx::query(
             "SELECT
                 td.id,
@@ -54,7 +54,7 @@ pub async fn list_channel_queue(
         })
         .unwrap_or_default()
     } else {
-        match state.db.lock() {
+        match state.sqlite_db().lock() {
             Ok(conn) => {
                 let mut stmt = conn
                     .prepare(
@@ -98,7 +98,7 @@ pub async fn list_channel_queue(
 
 /// List all pending dispatches across all agents.
 pub async fn list_pending_dispatches(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let dispatches = if let Some(pool) = state.pg_pool.as_ref() {
+    let dispatches = if let Some(pool) = state.pg_pool_ref() {
         sqlx::query(
             "SELECT
                 td.id,
@@ -127,7 +127,7 @@ pub async fn list_pending_dispatches(State(state): State<AppState>) -> Json<serd
         })
         .unwrap_or_default()
     } else {
-        match state.db.lock() {
+        match state.sqlite_db().lock() {
             Ok(conn) => {
                 let mut stmt = conn
                     .prepare(

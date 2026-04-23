@@ -27,7 +27,7 @@ pub struct UpdateRepoBody {
 
 /// GET /api/kanban-repos
 pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let rows = match sqlx::query(
             "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at,
                     default_agent_id, pipeline_config::text AS pipeline_config
@@ -72,7 +72,7 @@ pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serd
         return (StatusCode::OK, Json(json!({"repos": repos})));
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -140,7 +140,7 @@ pub async fn create_repo(
         );
     }
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let display_name = body
             .repo
             .split('/')
@@ -200,7 +200,7 @@ pub async fn create_repo(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -262,7 +262,7 @@ pub async fn update_repo(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Some(ref agent_id) = body.default_agent_id {
             match sqlx::query("UPDATE github_repos SET default_agent_id = $1 WHERE id = $2")
                 .bind(agent_id)
@@ -334,7 +334,7 @@ pub async fn update_repo(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -411,7 +411,7 @@ pub async fn delete_repo(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query("DELETE FROM github_repos WHERE id = $1")
             .bind(&id)
             .execute(pool)
@@ -429,7 +429,7 @@ pub async fn delete_repo(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

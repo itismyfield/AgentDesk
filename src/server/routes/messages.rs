@@ -42,7 +42,7 @@ pub async fn list_messages(
     State(state): State<AppState>,
     Query(params): Query<ListMessagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match list_messages_pg(pool, &params).await {
             Ok(messages) => (StatusCode::OK, Json(json!({"messages": messages}))),
             Err(error) => (
@@ -52,7 +52,7 @@ pub async fn list_messages(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -138,7 +138,7 @@ pub async fn create_message(
         .clone()
         .unwrap_or_else(|| "chat".to_string());
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match create_message_pg(pool, &body, &sender_type, &message_type).await {
             Ok(message) => (StatusCode::CREATED, Json(message)),
             Err(error) => (
@@ -148,7 +148,7 @@ pub async fn create_message(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

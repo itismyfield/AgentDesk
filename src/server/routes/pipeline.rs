@@ -58,7 +58,7 @@ pub async fn get_stages(
     State(state): State<AppState>,
     Query(params): Query<GetStagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let stages = if let Some(pool) = state.pg_pool.as_ref() {
+    let stages = if let Some(pool) = state.pg_pool_ref() {
         match list_pipeline_stages_pg(pool, params.repo.as_deref(), params.agent_id.as_deref())
             .await
         {
@@ -71,7 +71,7 @@ pub async fn get_stages(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -100,7 +100,7 @@ pub async fn put_stages(
     State(state): State<AppState>,
     Json(body): Json<PutStagesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let stages = if let Some(pool) = state.pg_pool.as_ref() {
+    let stages = if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -177,7 +177,7 @@ pub async fn put_stages(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -266,7 +266,7 @@ pub async fn delete_stages(
     State(state): State<AppState>,
     Query(params): Query<DeleteStagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
             .bind(&params.repo)
             .execute(pool)
@@ -282,7 +282,7 @@ pub async fn delete_stages(
             ),
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -313,7 +313,7 @@ pub async fn get_card_pipeline(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (repo_id, stages, history) = if let Some(pool) = state.pg_pool.as_ref() {
+    let (repo_id, stages, history) = if let Some(pool) = state.pg_pool_ref() {
         let repo_id = match sqlx::query_scalar::<_, Option<String>>(
             "SELECT repo_id FROM kanban_cards WHERE id = $1",
         )
@@ -362,7 +362,7 @@ pub async fn get_card_pipeline(
 
         (repo_id, stages, history)
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -437,7 +437,7 @@ pub async fn get_card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let history = if let Some(pool) = state.pg_pool.as_ref() {
+    let history = if let Some(pool) = state.pg_pool_ref() {
         match list_card_history_pg(pool, &card_id).await {
             Ok(history) => history,
             Err(error) => {
@@ -448,7 +448,7 @@ pub async fn get_card_history(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -477,7 +477,7 @@ pub async fn get_card_transcripts(
     Path(card_id): Path<String>,
     Query(params): Query<TranscriptQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let card_exists = if let Some(pool) = state.pg_pool.as_ref() {
+    let card_exists = if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM kanban_cards WHERE id = $1")
             .bind(&card_id)
             .fetch_one(pool)
@@ -492,7 +492,7 @@ pub async fn get_card_transcripts(
             }
         }
     } else {
-        let conn = match state.db.read_conn() {
+        let conn = match state.sqlite_db().read_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -517,8 +517,8 @@ pub async fn get_card_transcripts(
     }
 
     match crate::db::session_transcripts::list_transcripts_for_card_db(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
         &card_id,
         params.limit.unwrap_or(10),
     )
@@ -571,8 +571,7 @@ pub async fn get_effective_pipeline(
         );
     }
 
-    let (effective, repo_has_override, agent_has_override) = if let Some(pool) =
-        state.pg_pool.as_ref()
+    let (effective, repo_has_override, agent_has_override) = if let Some(pool) = state.pg_pool_ref()
     {
         let effective = crate::pipeline::resolve_for_card_pg(
             pool,
@@ -629,7 +628,7 @@ pub async fn get_effective_pipeline(
 
         (effective, repo_has_override, agent_has_override)
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -690,7 +689,7 @@ pub async fn get_repo_pipeline(
     Path((owner, repo)): Path<(String, String)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
-    let config = if let Some(pool) = state.pg_pool.as_ref() {
+    let config = if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query_scalar::<_, Option<String>>(
             "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
         )
@@ -707,7 +706,7 @@ pub async fn get_repo_pipeline(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -758,7 +757,7 @@ pub async fn set_repo_pipeline(
     };
 
     let response = {
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             match sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = $2")
                 .bind(config_str.as_deref())
                 .bind(&id)
@@ -794,7 +793,7 @@ pub async fn set_repo_pipeline(
                 ),
             }
         } else {
-            let conn = match state.db.lock() {
+            let conn = match state.sqlite_db().lock() {
                 Ok(c) => c,
                 Err(error) => {
                     return (
@@ -837,7 +836,8 @@ pub async fn set_repo_pipeline(
     };
 
     if response.0 == StatusCode::OK {
-        crate::pipeline::refresh_override_health_report(&state.db, state.pg_pool.as_ref()).await;
+        crate::pipeline::refresh_override_health_report(state.sqlite_db(), state.pg_pool_ref())
+            .await;
     }
     response
 }
@@ -847,7 +847,7 @@ pub async fn get_agent_pipeline(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let config = if let Some(pool) = state.pg_pool.as_ref() {
+    let config = if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query_scalar::<_, Option<String>>(
             "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
         )
@@ -864,7 +864,7 @@ pub async fn get_agent_pipeline(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (
@@ -914,7 +914,7 @@ pub async fn set_agent_pipeline(
     };
 
     let response = {
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             match sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = $2")
                 .bind(config_str.as_deref())
                 .bind(&agent_id)
@@ -952,7 +952,7 @@ pub async fn set_agent_pipeline(
                 ),
             }
         } else {
-            let conn = match state.db.lock() {
+            let conn = match state.sqlite_db().lock() {
                 Ok(c) => c,
                 Err(error) => {
                     return (
@@ -998,7 +998,8 @@ pub async fn set_agent_pipeline(
     };
 
     if response.0 == StatusCode::OK {
-        crate::pipeline::refresh_override_health_report(&state.db, state.pg_pool.as_ref()).await;
+        crate::pipeline::refresh_override_health_report(state.sqlite_db(), state.pg_pool_ref())
+            .await;
     }
     response
 }
@@ -1016,7 +1017,7 @@ pub async fn get_pipeline_graph(
         );
     }
 
-    let effective = if let Some(pool) = state.pg_pool.as_ref() {
+    let effective = if let Some(pool) = state.pg_pool_ref() {
         crate::pipeline::resolve_for_card_pg(
             pool,
             params.repo.as_deref(),
@@ -1024,7 +1025,7 @@ pub async fn get_pipeline_graph(
         )
         .await
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(error) => {
                 return (

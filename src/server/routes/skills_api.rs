@@ -372,7 +372,7 @@ pub async fn catalog(
     State(state): State<AppState>,
     Query(params): Query<SkillCatalogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -478,7 +478,7 @@ pub async fn ranking(
     State(state): State<AppState>,
     Query(params): Query<RankingQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -652,7 +652,7 @@ pub async fn prune(
     State(state): State<AppState>,
     Query(params): Query<PruneSkillsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

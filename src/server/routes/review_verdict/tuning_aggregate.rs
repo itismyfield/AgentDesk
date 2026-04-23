@@ -623,10 +623,10 @@ pub async fn aggregate_review_tuning(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let (total_tp, total_fp, total_tn, total_fn, total_disputed, guidance_lines) =
-        if let Some(pg_pool) = state.pg_pool.as_ref() {
+        if let Some(pg_pool) = state.pg_pool_ref() {
             aggregate_review_tuning_core_pg(pg_pool).await
         } else {
-            aggregate_review_tuning_core(&state.db)
+            aggregate_review_tuning_core(state.sqlite_db())
         };
     let total = total_tp + total_fp + total_tn + total_fn + total_disputed;
     (

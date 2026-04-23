@@ -48,7 +48,7 @@ pub async fn list_departments(
     State(state): State<AppState>,
     Query(params): Query<ListDepartmentsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match list_departments_pg(pool, params.office_id.as_deref()).await {
             Ok(departments) => (StatusCode::OK, Json(json!({"departments": departments}))),
             Err(error) => (
@@ -58,7 +58,7 @@ pub async fn list_departments(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -132,7 +132,7 @@ pub async fn create_department(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = uuid::Uuid::new_v4().to_string();
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Err(error) = sqlx::query(
             "INSERT INTO departments (id, name, office_id, sort_order, created_at)
              VALUES ($1, $2, $3, 0, NOW())",
@@ -161,7 +161,7 @@ pub async fn create_department(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -199,7 +199,7 @@ pub async fn update_department(
     Path(id): Path<String>,
     Json(body): Json<UpdateDepartmentBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut has_updates = false;
         let mut query = QueryBuilder::<sqlx::Postgres>::new("UPDATE departments SET ");
         {
@@ -264,7 +264,7 @@ pub async fn update_department(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -346,7 +346,7 @@ pub async fn delete_department(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query("DELETE FROM departments WHERE id = $1")
             .bind(&id)
             .execute(pool)
@@ -364,7 +364,7 @@ pub async fn delete_department(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -392,7 +392,7 @@ pub async fn reorder_departments(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -435,7 +435,7 @@ pub async fn reorder_departments(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

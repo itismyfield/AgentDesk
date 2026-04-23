@@ -149,7 +149,7 @@ pub async fn update_decisions(
         }
     }
 
-    if let Some(pg_pool) = state.pg_pool.as_ref() {
+    if let Some(pg_pool) = state.pg_pool_ref() {
         return match update_decisions_pg(pg_pool, &id, &body.decisions).await {
             Ok(decisions) => (
                 StatusCode::OK,
@@ -162,7 +162,7 @@ pub async fn update_decisions(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -234,7 +234,7 @@ pub async fn trigger_rework(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pg_pool) = state.pg_pool.as_ref() {
+    if let Some(pg_pool) = state.pg_pool_ref() {
         let card_id = match resolve_review_card_id_pg(pg_pool, &id).await {
             Ok(card_id) => card_id,
             Err(error) => {
@@ -256,7 +256,7 @@ pub async fn trigger_rework(
         };
 
         return match crate::kanban::transition_status_with_opts_pg(
-            Some(&state.db),
+            Some(state.sqlite_db()),
             pg_pool,
             &state.engine,
             &card_id,
@@ -274,7 +274,7 @@ pub async fn trigger_rework(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -317,7 +317,7 @@ pub async fn trigger_rework(
 
     drop(conn);
     match crate::kanban::transition_status_with_opts(
-        &state.db,
+        state.sqlite_db(),
         &state.engine,
         &card_id,
         "in_progress",
