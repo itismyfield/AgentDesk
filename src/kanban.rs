@@ -328,6 +328,56 @@ async fn skip_live_auto_queue_entries_for_card_on_pg_tx(
     Ok(changed)
 }
 
+async fn count_live_auto_queue_entries_for_card_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<usize> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM auto_queue_entries
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')
+           AND run_id IN (
+               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+           )",
+    )
+    .bind(card_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("count postgres live auto-queue entries for {card_id}: {error}")
+    })?;
+    Ok(count.max(0) as usize)
+}
+
+async fn clear_force_transition_terminalized_links_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET dispatch_id = NULL,
+             slot_index = NULL,
+             dispatched_at = NULL,
+             completed_at = COALESCE(completed_at, NOW())
+         WHERE kanban_card_id = $1
+           AND status = 'skipped'
+           AND dispatch_id IS NOT NULL
+           AND run_id IN (
+               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+           )",
+    )
+    .bind(card_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "clear postgres force-transition terminalized auto-queue links for {card_id}: {error}"
+        )
+    })?;
+    Ok(())
+}
+
 async fn count_live_dispatches_for_card_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
@@ -839,10 +889,16 @@ async fn execute_allowed_cleanup_on_pg_tx(
     match on_pg_policy {
         AllowedOnConnMutation::ForceTransitionRevertCleanup => {
             let reason = format!("force-transition to {new_status}");
+            // Model 2: generic cancel keeps the dispatch pointer for
+            // provenance. Force-transition cleanup is the explicit terminal
+            // cleanup path, so it snapshots live entries before cancel and
+            // then clears any skipped links that cancel's side-effect left.
+            counts.skipped_auto_queue_entries =
+                count_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
             counts.cancelled_dispatches =
                 cancel_active_dispatches_for_card_on_pg_tx(tx, card_id, Some(&reason)).await?;
-            counts.skipped_auto_queue_entries =
-                skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
+            skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
+            clear_force_transition_terminalized_links_on_pg_tx(tx, card_id).await?;
             cleanup_force_transition_revert_fields_on_pg_tx(tx, card_id).await?;
         }
         AllowedOnConnMutation::ForceTransitionTerminalCleanup => {
