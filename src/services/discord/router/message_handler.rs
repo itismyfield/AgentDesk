@@ -69,6 +69,16 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
+fn should_note_memento_context_loaded(
+    memory_settings: &settings::ResolvedMemorySettings,
+    memento_context_loaded: bool,
+    memory_recall: &RecallResponse,
+) -> bool {
+    memory_settings.backend == settings::MemoryBackendKind::Memento
+        && !memento_context_loaded
+        && memory_recall.memento_context_loaded
+}
+
 fn should_add_turn_pending_reaction(_dispatch_id: Option<&str>) -> bool {
     // #750: announce bot no longer writes lifecycle emojis, so the command bot
     // is now the single source of ⏳ for both regular and dispatch turns.
@@ -444,8 +454,8 @@ pub(in crate::services::discord) async fn start_headless_turn(
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                     session.restore_provider_session(restored.clone());
+                    memento_context_loaded = session.memento_context_loaded;
                 }
-                memento_context_loaded = true;
             }
             session_id = restored;
         }
@@ -488,7 +498,8 @@ pub(in crate::services::discord) async fn start_headless_turn(
             })
             .await
     };
-    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
+    if should_note_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
+    {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.note_memento_context_loaded();
@@ -1968,8 +1979,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                     session.restore_provider_session(restored.clone());
+                    memento_context_loaded = session.memento_context_loaded;
                 }
-                memento_context_loaded = true;
                 // Notify: session restored — send before placeholder so it appears first
                 send_restore_notification(
                     shared,
@@ -2082,7 +2093,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
             .await
     };
-    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
+    if should_note_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
+    {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.note_memento_context_loaded();
@@ -4087,6 +4099,7 @@ mod tests {
             shared_knowledge: Some("[Shared Knowledge]".to_string()),
             longterm_catalog: Some("- notes.md".to_string()),
             external_recall: Some("[External Recall]".to_string()),
+            memento_context_loaded: true,
             warnings: Vec::new(),
             token_usage: crate::services::memory::TokenUsage::default(),
         }
@@ -4335,6 +4348,31 @@ mod tests {
     }
 
     #[test]
+    fn memento_context_loaded_is_not_noted_without_explicit_backend_success() {
+        let settings = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+
+        assert!(!should_note_memento_context_loaded(
+            &settings,
+            false,
+            &RecallResponse::default()
+        ));
+
+        let recall = RecallResponse {
+            memento_context_loaded: true,
+            ..RecallResponse::default()
+        };
+        assert!(should_note_memento_context_loaded(
+            &settings, false, &recall
+        ));
+        assert!(!should_note_memento_context_loaded(
+            &settings, true, &recall
+        ));
+    }
+
+    #[test]
     fn dispatch_turns_add_pending_reaction_as_single_source() {
         // #750: announce bot no longer writes ⏳. Command bot must add it on
         // dispatch turn start so the stop-via-reaction-removal path still
@@ -4391,6 +4429,26 @@ mod tests {
             &memento,
             session.memento_context_loaded
         ));
+    }
+
+    #[test]
+    fn restored_provider_session_does_not_skip_memento_recall_until_context_reloads() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+        let mut session = make_session(Some("/tmp/project".to_string()), None);
+
+        session.restore_provider_session(Some("session-1".to_string()));
+        let mut memento_context_loaded = session.memento_context_loaded;
+        assert!(!should_skip_memento_recall(
+            &memento,
+            memento_context_loaded
+        ));
+
+        session.note_memento_context_loaded();
+        memento_context_loaded = session.memento_context_loaded;
+        assert!(should_skip_memento_recall(&memento, memento_context_loaded));
     }
 
     #[test]

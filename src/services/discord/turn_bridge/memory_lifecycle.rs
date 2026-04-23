@@ -42,7 +42,7 @@ pub(super) fn spawn_memory_reflect_task(
         for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
+                "  [{ts}] [memory] reflect warning for channel {} reason={}: {}",
                 channel_id.get(),
                 reason,
                 warning

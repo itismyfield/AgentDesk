@@ -106,7 +106,7 @@
 | `GET` | `/api/kanban-cards/{id}/audit-log` | `kanban::card_audit_log` | `src/server/routes/kanban.rs:2287` | `src/server/routes/domains/kanban.rs:48` |
 | `GET` | `/api/kanban-cards/{id}/comments` | `kanban::card_github_comments` | `src/server/routes/kanban.rs:2333` | `src/server/routes/domains/kanban.rs:49` |
 | `PATCH` | `/api/kanban-cards/{id}/defer-dod` | `kanban::defer_dod` | `src/server/routes/kanban.rs:1298` | `src/server/routes/domains/kanban.rs:42` |
-| `POST` | `/api/kanban-cards/{id}/force-transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:4451` | `src/server/routes/domains/kanban.rs:32` |
+| `POST` | `/api/kanban-cards/{id}/force-transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:4503` | `src/server/routes/domains/kanban.rs:32` |
 | `POST` | `/api/kanban-cards/{id}/redispatch` | `kanban::redispatch_card` | `src/server/routes/kanban.rs:1180` | `src/server/routes/domains/kanban.rs:37` |
 | `POST` | `/api/kanban-cards/{id}/reopen` | `kanban::reopen_card` | `src/server/routes/kanban.rs:3403` | `src/server/routes/domains/kanban.rs:31` |
 | `POST` | `/api/kanban-cards/{id}/rereview` | `kanban::rereview_card` | `src/server/routes/kanban.rs:2935` | `src/server/routes/domains/kanban.rs:25` |

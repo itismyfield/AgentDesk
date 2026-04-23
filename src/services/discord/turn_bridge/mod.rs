@@ -1701,21 +1701,6 @@ pub(super) fn spawn_turn_bridge(
                 ) {
                     session_end_reason = memory_plan.session_end_reason;
                     clear_provider_session = memory_plan.clear_provider_session;
-                    if let Some(reason) = memory_plan.session_end_reason {
-                        reflect_request = take_memento_reflect_request(
-                            session,
-                            &capture_memory_settings,
-                            &provider,
-                            role_binding.as_ref(),
-                            channel_id.get(),
-                            reason,
-                        );
-                    }
-                    if memory_plan.clear_provider_session {
-                        session.clear_provider_session();
-                    } else if let Some(sid) = new_session_id.as_ref() {
-                        session.restore_provider_session(Some(sid.clone()));
-                    }
                     if memory_plan.persist_transcript {
                         session.history.push(HistoryItem {
                             item_type: HistoryType::User,
@@ -1731,6 +1716,21 @@ pub(super) fn spawn_turn_bridge(
                             retry_context_to_store =
                                 build_session_retry_context_from_history(&session.history);
                         }
+                    }
+                    if let Some(reason) = memory_plan.session_end_reason {
+                        reflect_request = take_memento_reflect_request(
+                            session,
+                            &capture_memory_settings,
+                            &provider,
+                            role_binding.as_ref(),
+                            channel_id.get(),
+                            reason,
+                        );
+                    }
+                    if memory_plan.clear_provider_session {
+                        session.clear_provider_session();
+                    } else if let Some(sid) = new_session_id.as_ref() {
+                        session.restore_provider_session(Some(sid.clone()));
                     }
                     should_spawn_memory_capture = memory_plan.spawn_capture;
                     should_analyze_recall_feedback = memory_plan.analyze_recall_feedback;
