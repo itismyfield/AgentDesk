@@ -65,6 +65,7 @@ struct ProviderHealthSnapshot {
 #[derive(Debug, Serialize)]
 pub struct DiscordHealthSnapshot {
     status: HealthStatus,
+    fully_recovered: bool,
     version: &'static str,
     uptime_secs: u64,
     global_active: usize,
@@ -683,6 +684,7 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
     let mut provider_entries = Vec::new();
     let mut degraded_reasons = Vec::new();
     let mut status = HealthStatus::Healthy;
+    let mut fully_recovered = !providers.is_empty();
     let mut deferred_hooks = 0usize;
     let mut queue_depth = 0usize;
     let mut watcher_count = 0usize;
@@ -691,6 +693,7 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
         status = HealthStatus::Unhealthy;
+        fully_recovered = false;
     }
 
     for entry in providers.iter() {
@@ -747,14 +750,17 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
         if !connected {
             status = status.worsen(HealthStatus::Unhealthy);
             degraded_reasons.push(format!("provider:{}:disconnected", entry.name));
+            fully_recovered = false;
         }
         if restart_pending {
             status = status.worsen(HealthStatus::Unhealthy);
             degraded_reasons.push(format!("provider:{}:restart_pending", entry.name));
+            fully_recovered = false;
         }
         if !reconcile_done {
             status = status.worsen(HealthStatus::Degraded);
             degraded_reasons.push(format!("provider:{}:reconcile_in_progress", entry.name));
+            fully_recovered = false;
         }
         if provider_deferred_hooks > 0 {
             status = status.worsen(HealthStatus::Degraded);
@@ -776,6 +782,7 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
                 "provider:{}:recovering_channels:{}",
                 entry.name, recovering_channels
             ));
+            fully_recovered = false;
         }
 
         provider_entries.push(ProviderHealthSnapshot {
@@ -806,6 +813,7 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
 
     DiscordHealthSnapshot {
         status,
+        fully_recovered,
         version,
         uptime_secs,
         global_active: global_active as usize,
@@ -912,6 +920,12 @@ impl TestHealthHarness {
 
     pub(crate) fn registry(&self) -> Arc<HealthRegistry> {
         self.registry.clone()
+    }
+
+    pub(crate) fn set_reconcile_done(&self, done: bool) {
+        self.shared
+            .reconcile_done
+            .store(done, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn shared(&self) -> Arc<SharedData> {

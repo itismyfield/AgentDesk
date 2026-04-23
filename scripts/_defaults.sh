@@ -210,6 +210,21 @@ _health_json_field_is_true() {
     | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}])"
 }
 
+_health_json_field_exists() {
+  local health_json="$1"
+  local key="$2"
+
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e "has(\"$key\")" >/dev/null 2>&1
+    return
+  fi
+
+  _health_json_compact "$health_json" \
+    | grep -Eq "\"$key\"[[:space:]]*:"
+}
+
 _health_json_status() {
   local health_json="$1"
   _health_json_get_string_field "$health_json" "status"
@@ -259,6 +274,11 @@ health_json_is_ready() {
 
   if [ "$require_dashboard" = "1" ]; then
     _health_json_field_is_true "$health_json" "dashboard" || return 1
+  fi
+
+  if _health_json_field_exists "$health_json" "server_up"; then
+    _health_json_field_is_true "$health_json" "server_up" || return 1
+    return 0
   fi
 
   if [ "$(_health_json_status "$health_json")" = "healthy" ]; then
