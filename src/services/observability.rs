@@ -203,7 +203,7 @@ fn runtime() -> Arc<ObservabilityRuntime> {
 pub fn init_observability(db: Db, pg_pool: Option<PgPool>) {
     let runtime = runtime();
     if let Ok(mut storage) = runtime.storage.lock() {
-        storage.db = Some(db);
+        storage.db = if pg_pool.is_some() { None } else { Some(db) };
         storage.pg_pool = pg_pool;
     }
     ensure_worker(&runtime);
@@ -1196,8 +1196,15 @@ pub(crate) fn test_runtime_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
+fn test_storage_presence() -> (bool, bool) {
+    let handles = storage_handles(&runtime());
+    (handles.db.is_some(), handles.pg_pool.is_some())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     #[tokio::test]
     async fn event_flush_persists_records_and_snapshots() {
@@ -1297,6 +1304,28 @@ mod tests {
         .expect("query analytics");
 
         assert_eq!(response.counters[0].turn_attempts, (iterations * 8) as u64);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_observability_drops_sqlite_fallback_when_pg_pool_is_configured() {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        let pg_pool = PgPoolOptions::new().connect_lazy_with(
+            PgConnectOptions::new()
+                .host("localhost")
+                .username("agentdesk")
+                .database("agentdesk"),
+        );
+
+        init_observability(db, Some(pg_pool));
+
+        let (has_db, has_pg_pool) = test_storage_presence();
+        assert!(
+            !has_db,
+            "PG runtime should not retain sqlite fallback storage"
+        );
+        assert!(has_pg_pool, "PG runtime should retain the postgres pool");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
