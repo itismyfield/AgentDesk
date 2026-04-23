@@ -29,6 +29,13 @@ Usage: $SELF_NAME [--self-test]
 EOF
 }
 
+api_base_url() {
+  local raw="${AGENTDESK_API_URL-}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  printf '%s' "${raw%/}"
+}
+
 require_cmd() {
   local name="$1"
   if ! command -v "$name" >/dev/null 2>&1; then
@@ -320,6 +327,40 @@ comment_for_recovery() {
 EOF
 }
 
+sync_issue_card_now() {
+  local repo="$1"
+  local api_base curl_config status
+
+  api_base="$(api_base_url)"
+  [[ -n "$api_base" ]] || return 0
+
+  require_cmd curl
+
+  curl_config=(
+    --silent
+    --show-error
+    --output /dev/null
+    --write-out '%{http_code}'
+    --request POST
+  )
+  if [[ -n "${AGENTDESK_API_TOKEN-}" ]]; then
+    curl_config+=(--header "Authorization: Bearer ${AGENTDESK_API_TOKEN}")
+  fi
+
+  status="$(
+    curl \
+      "${curl_config[@]}" \
+      "${api_base}/api/github/repos/${repo}/sync"
+  )" || {
+    echo "warn: failed to invoke immediate AgentDesk GitHub sync for ${repo}" >&2
+    return 0
+  }
+
+  if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+    echo "warn: immediate AgentDesk GitHub sync for ${repo} returned HTTP ${status}" >&2
+  fi
+}
+
 create_or_comment_issue() {
   local repo="$1"
   local identifier="$2"
@@ -331,6 +372,7 @@ create_or_comment_issue() {
   number="$(lookup_open_issue_by_title "$title")"
   if [[ -n "$number" ]]; then
     gh issue comment "$number" --repo "$repo" --body "$(comment_for_repeat_failure "$run_url" "$head_sha")" >/dev/null
+    sync_issue_card_now "$repo"
     return 0
   fi
 
@@ -347,6 +389,7 @@ create_or_comment_issue() {
     --body "$body" \
     --label "ci-red" \
     --label "agent:project-agentdesk" >/dev/null
+  sync_issue_card_now "$repo"
 }
 
 close_recovered_issue() {
@@ -525,6 +568,32 @@ EOF
   chmod +x "$scenario_dir/gh"
 }
 
+install_mock_curl() {
+  local scenario_dir="$1"
+  cat >"$scenario_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+scenario_dir="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$*" >>"$scenario_dir/curl.log"
+
+url="${*: -1}"
+status="${MOCK_CURL_STATUS:-200}"
+if [[ -n "${MOCK_CURL_FAIL-}" ]]; then
+  exit 1
+fi
+
+if [[ "$url" == "https://agentdesk.example/api/github/repos/test/repo/sync" ]]; then
+  printf '%s' "$status"
+  exit 0
+fi
+
+echo "unexpected curl args: $*" >&2
+exit 1
+EOF
+  chmod +x "$scenario_dir/curl"
+}
+
 write_event_payload() {
   local path="$1"
   cat >"$path" <<'EOF'
@@ -609,6 +678,40 @@ EOF
   assert_contains "--label agent:project-agentdesk" "$scenario_dir/issue-create.txt"
 }
 
+scenario_new_issue_triggers_immediate_sync() {
+  local scenario_dir="$TMP_DIR/selftest-sync-create"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  install_mock_curl "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":311,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/311"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":312,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/312"}]}
+EOF
+  cat >"$scenario_dir/log-200-311.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-312.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    AGENTDESK_API_URL="https://agentdesk.example" \
+    AGENTDESK_API_TOKEN="sync-token" \
+    bash "$0"
+
+  assert_contains "--request POST --header Authorization: Bearer sync-token https://agentdesk.example/api/github/repos/test/repo/sync" "$scenario_dir/curl.log"
+}
+
 scenario_existing_issue_gets_comment_only() {
   local scenario_dir="$TMP_DIR/selftest-comment"
   mkdir -p "$scenario_dir"
@@ -644,6 +747,41 @@ EOF
     echo "assertion failed: issue create must not run for existing ci-red issue" >&2
     exit 1
   fi
+}
+
+scenario_existing_issue_triggers_immediate_sync() {
+  local scenario_dir="$TMP_DIR/selftest-sync-comment"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  install_mock_curl "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":411,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/411"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":412,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/412"}]}
+EOF
+  cat >"$scenario_dir/log-200-411.txt" <<'EOF'
+test server::routes::routes_tests::transition_to_done_records_true_negative_in_postgres_review_tuning ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-412.txt" <<'EOF'
+test server::routes::routes_tests::transition_to_done_records_true_negative_in_postgres_review_tuning ... FAILED
+EOF
+  cat >"$scenario_dir/open-issues.json" <<'EOF'
+[{"number":9461,"title":"[ci-red] server::routes::routes_tests::transition_to_done_records_true_negative_in_postgres_review_tuning 실패 (main)"}]
+EOF
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    AGENTDESK_API_URL="https://agentdesk.example" \
+    bash "$0"
+
+  assert_contains "--request POST https://agentdesk.example/api/github/repos/test/repo/sync" "$scenario_dir/curl.log"
 }
 
 scenario_two_run_green_closes_issue() {
@@ -774,7 +912,9 @@ EOF
 run_self_test() {
   require_cmd jq
   scenario_two_run_failure_creates_issue
+  scenario_new_issue_triggers_immediate_sync
   scenario_existing_issue_gets_comment_only
+  scenario_existing_issue_triggers_immediate_sync
   scenario_two_run_green_closes_issue
   scenario_cancelled_run_does_not_close_issue
   scenario_skipped_lane_does_not_close_issue

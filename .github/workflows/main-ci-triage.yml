@@ -27,4 +27,6 @@ jobs:
       - name: Run main CI triage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENTDESK_API_URL: ${{ vars.AGENTDESK_API_URL }}
+          AGENTDESK_API_TOKEN: ${{ secrets.AGENTDESK_API_TOKEN }}
         run: ./scripts/main-ci-triage.sh
