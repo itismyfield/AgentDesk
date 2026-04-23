@@ -1,3 +1,5 @@
+use super::AppState;
+use crate::db::agents::AgentChannelBindings;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -6,14 +8,47 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::AppState;
-use crate::db::agents::AgentChannelBindings;
-
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/discord-bindings
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        match crate::db::agents::load_all_agent_channel_bindings_pg(pool).await {
+            Ok(rows) => {
+                let bindings = rows
+                    .into_iter()
+                    .filter_map(|(agent_id, bindings)| {
+                        let has_binding = bindings.discord_channel_id.is_some()
+                            || bindings.discord_channel_alt.is_some()
+                            || bindings.discord_channel_cc.is_some()
+                            || bindings.discord_channel_cdx.is_some();
+                        has_binding.then(|| {
+                            json!({
+                                "agentId": agent_id,
+                                "channelId": bindings.primary_channel(),
+                                "counterModelChannelId": bindings.counter_model_channel(),
+                                "provider": bindings.provider,
+                                "discord_channel_id": bindings.discord_channel_id,
+                                "discord_channel_alt": bindings.discord_channel_alt,
+                                "discord_channel_cc": bindings.discord_channel_cc,
+                                "discord_channel_cdx": bindings.discord_channel_cdx,
+                                "source": "config",
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                return (StatusCode::OK, Json(json!({"bindings": bindings})));
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("postgres query failed: {error}")})),
+                );
+            }
+        }
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

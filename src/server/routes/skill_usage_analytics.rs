@@ -5,6 +5,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use libsql_rusqlite::Connection;
 use regex::Regex;
 use serde_json::Value;
+use sqlx::Row;
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 
@@ -92,6 +93,22 @@ fn collect_known_skills(conn: &Connection) -> libsql_rusqlite::Result<HashSet<St
     let mut skills = HashSet::new();
     for skill_id in rows.flatten() {
         if let Some(normalized) = normalize_skill_id(&skill_id) {
+            skills.insert(normalized);
+        }
+    }
+    Ok(skills)
+}
+
+async fn collect_known_skills_pg(pool: &sqlx::PgPool) -> Result<HashSet<String>, String> {
+    let rows = sqlx::query("SELECT id FROM skills")
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres skills: {error}"))?;
+    let mut skills = HashSet::new();
+    for row in rows {
+        if let Ok(skill_id) = row.try_get::<String, _>("id")
+            && let Some(normalized) = normalize_skill_id(&skill_id)
+        {
             skills.insert(normalized);
         }
     }
@@ -191,6 +208,100 @@ fn load_transcript_skill_usage(
     Ok(records)
 }
 
+async fn load_transcript_skill_usage_pg(
+    pool: &sqlx::PgPool,
+    days: Option<i64>,
+    known_skills: &HashSet<String>,
+) -> Result<Vec<SkillUsageRecord>, String> {
+    let rows = if let Some(days) = days {
+        sqlx::query(
+            "SELECT st.session_key,
+                    st.agent_id,
+                    COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
+                    CAST(EXTRACT(EPOCH FROM st.created_at) * 1000 AS BIGINT) AS used_at_ms,
+                    TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day,
+                    st.assistant_message,
+                    st.events_json
+             FROM session_transcripts st
+             LEFT JOIN agents a ON a.id = st.agent_id
+             WHERE st.created_at >= NOW() - make_interval(days => $1::int)
+               AND (
+                   st.assistant_message LIKE '%SKILL.md%'
+                   OR st.events_json LIKE '%SKILL.md%'
+                   OR st.events_json LIKE '%\"tool_name\":\"Skill\"%'
+               )",
+        )
+        .bind(days as i32)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres transcript skill usage window: {error}"))?
+    } else {
+        sqlx::query(
+            "SELECT st.session_key,
+                    st.agent_id,
+                    COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
+                    CAST(EXTRACT(EPOCH FROM st.created_at) * 1000 AS BIGINT) AS used_at_ms,
+                    TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day,
+                    st.assistant_message,
+                    st.events_json
+             FROM session_transcripts st
+             LEFT JOIN agents a ON a.id = st.agent_id
+             WHERE st.assistant_message LIKE '%SKILL.md%'
+                OR st.events_json LIKE '%SKILL.md%'
+                OR st.events_json LIKE '%\"tool_name\":\"Skill\"%'",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres transcript skill usage: {error}"))?
+    };
+
+    let mut records = Vec::new();
+    for row in rows {
+        let used_at_ms = match row.try_get::<i64, _>("used_at_ms") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let day = match row.try_get::<String, _>("stat_day") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let assistant_message = row
+            .try_get::<Option<String>, _>("assistant_message")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let events_json = row
+            .try_get::<Option<String>, _>("events_json")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "[]".to_string());
+        let events =
+            serde_json::from_str::<Vec<SessionTranscriptEvent>>(&events_json).unwrap_or_default();
+        let session_key = row
+            .try_get::<Option<String>, _>("session_key")
+            .ok()
+            .flatten();
+        let agent_id = row.try_get::<Option<String>, _>("agent_id").ok().flatten();
+        let agent_name = row
+            .try_get::<Option<String>, _>("agent_name")
+            .ok()
+            .flatten();
+
+        for skill_id in infer_skills_from_transcript(&assistant_message, &events, known_skills) {
+            records.push(SkillUsageRecord {
+                skill_id,
+                agent_id: agent_id.clone(),
+                agent_name: agent_name.clone(),
+                session_key: session_key.clone(),
+                used_at_ms,
+                day: day.clone(),
+            });
+        }
+    }
+
+    Ok(records)
+}
+
 fn load_direct_skill_usage(
     conn: &Connection,
     days: Option<i64>,
@@ -260,6 +371,76 @@ fn load_direct_skill_usage(
     } else {
         let mut stmt = conn.prepare(sql_all)?;
         push_rows(&mut stmt, &[])?;
+    }
+
+    Ok(records)
+}
+
+async fn load_direct_skill_usage_pg(
+    pool: &sqlx::PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageRecord>, String> {
+    let rows = if let Some(days) = days {
+        sqlx::query(
+            "SELECT su.skill_id,
+                    su.agent_id,
+                    COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                    su.session_key,
+                    CAST(EXTRACT(EPOCH FROM su.used_at) * 1000 AS BIGINT) AS used_at_ms,
+                    TO_CHAR(su.used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day
+             FROM skill_usage su
+             LEFT JOIN agents a ON a.id = su.agent_id
+             WHERE su.used_at >= NOW() - make_interval(days => $1::int)",
+        )
+        .bind(days as i32)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres direct skill usage window: {error}"))?
+    } else {
+        sqlx::query(
+            "SELECT su.skill_id,
+                    su.agent_id,
+                    COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                    su.session_key,
+                    CAST(EXTRACT(EPOCH FROM su.used_at) * 1000 AS BIGINT) AS used_at_ms,
+                    TO_CHAR(su.used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day
+             FROM skill_usage su
+             LEFT JOIN agents a ON a.id = su.agent_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres direct skill usage: {error}"))?
+    };
+
+    let mut records = Vec::new();
+    for row in rows {
+        let skill_id = match row.try_get::<String, _>("skill_id") {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(skill_id) = normalize_skill_id(&skill_id) else {
+            continue;
+        };
+        let Some(day) = row.try_get::<Option<String>, _>("stat_day").ok().flatten() else {
+            continue;
+        };
+        let Some(used_at_ms) = row.try_get::<Option<i64>, _>("used_at_ms").ok().flatten() else {
+            continue;
+        };
+        records.push(SkillUsageRecord {
+            skill_id,
+            agent_id: row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            agent_name: row
+                .try_get::<Option<String>, _>("agent_name")
+                .ok()
+                .flatten(),
+            session_key: row
+                .try_get::<Option<String>, _>("session_key")
+                .ok()
+                .flatten(),
+            used_at_ms,
+            day,
+        });
     }
 
     Ok(records)
@@ -344,6 +525,24 @@ pub(super) fn collect_skill_usage(
     let known_skills = collect_known_skills(conn)?;
     let mut transcript_records = load_transcript_skill_usage(conn, days, &known_skills)?;
     let direct_records = load_direct_skill_usage(conn, days)?;
+    let mut matcher = TranscriptUsageMatcher::new(&transcript_records);
+
+    transcript_records.extend(
+        direct_records
+            .into_iter()
+            .filter(|record| !matcher.matches_transcript(record)),
+    );
+    transcript_records.sort_by_key(|record| record.used_at_ms);
+    Ok(transcript_records)
+}
+
+pub(super) async fn collect_skill_usage_pg(
+    pool: &sqlx::PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageRecord>, String> {
+    let known_skills = collect_known_skills_pg(pool).await?;
+    let mut transcript_records = load_transcript_skill_usage_pg(pool, days, &known_skills).await?;
+    let direct_records = load_direct_skill_usage_pg(pool, days).await?;
     let mut matcher = TranscriptUsageMatcher::new(&transcript_records);
 
     transcript_records.extend(

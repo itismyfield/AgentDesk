@@ -30,16 +30,18 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
         }
     };
 
-    // SQLite remains a temporary compatibility seam during config audit, but
-    // bootstrap no longer exports it as part of the runtime state.
-    let audit_db = crate::db::init(&loaded.config).context("Failed to init DB")?;
+    let audit_db = if crate::db::postgres::database_enabled(&loaded.config) {
+        None
+    } else {
+        Some(crate::db::init(&loaded.config).context("Failed to init legacy SQLite DB")?)
+    };
     let config = if let Some(root) = runtime_root.as_ref() {
         crate::services::discord_config_audit::audit_and_reconcile(
             root,
             loaded.config,
             loaded.path,
             loaded.existed,
-            &audit_db,
+            audit_db.as_ref(),
             &legacy_scan,
             false,
         )

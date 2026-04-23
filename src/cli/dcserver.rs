@@ -1230,7 +1230,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         ad_config,
                         loaded.path,
                         loaded.existed,
-                        &ad_db,
+                        Some(&ad_db),
                         &legacy_scan,
                         false,
                     ) {

@@ -1825,6 +1825,15 @@ pub async fn handle_send<'a>(
     sqlite: &Db,
     body: &str,
 ) -> (&'a str, String) {
+    handle_send_with_backends(registry, Some(sqlite), None, body).await
+}
+
+pub async fn handle_send_with_backends<'a>(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    body: &str,
+) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
         return (
             "400 Bad Request",
@@ -1844,7 +1853,7 @@ pub async fn handle_send<'a>(
         .unwrap_or("announce");
     let summary = json.get("summary").and_then(|v| v.as_str());
 
-    send_message(registry, sqlite, target, content, source, bot, summary).await
+    send_message_with_backends(registry, db, pg_pool, target, content, source, bot, summary).await
 }
 
 /// #896: Parsed `/api/inflight/rebind` body, extracted for unit-test
@@ -2040,6 +2049,15 @@ pub async fn handle_send_to_agent(
     sqlite: &Db,
     body: &str,
 ) -> (&'static str, String) {
+    handle_send_to_agent_with_backends(registry, Some(sqlite), None, body).await
+}
+
+pub async fn handle_send_to_agent_with_backends(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    body: &str,
+) -> (&'static str, String) {
     let request = match parse_send_to_agent_body(body) {
         Ok(request) => request,
         Err(error) => {
@@ -2051,9 +2069,10 @@ pub async fn handle_send_to_agent(
     };
 
     let target = format!("agent:{}", request.role_id);
-    send_message(
+    send_message_with_backends(
         registry,
-        sqlite,
+        db,
+        pg_pool,
         &target,
         &request.message,
         "system",

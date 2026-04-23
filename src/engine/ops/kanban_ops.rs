@@ -236,6 +236,9 @@ pub(super) fn register_kanban_ops<'js>(
     kanban_obj.set(
         "__reopenRaw",
         Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+            if let Some(pool) = pg_reopen.as_ref() {
+                return reopen_raw_pg(pool, &card_id, &new_status);
+            }
             let Some(db_reopen) = db_reopen.as_ref() else {
                 return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
             };
@@ -328,7 +331,11 @@ pub(super) fn register_kanban_ops<'js>(
                 }
             }
 
-            crate::kanban::correct_tn_to_fn_on_reopen(db_reopen, pg_reopen.as_ref(), &card_id);
+            crate::kanban::correct_tn_to_fn_on_reopen(
+                Some(db_reopen),
+                pg_reopen.as_ref(),
+                &card_id,
+            );
 
             let has_hooks = pipeline
                 .hooks_for_state(&new_status)
@@ -625,6 +632,150 @@ pub(super) fn register_kanban_ops<'js>(
     )?;
 
     Ok(())
+}
+
+fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
+    let card_id_owned = card_id.to_string();
+    let new_status_owned = new_status.to_string();
+    match run_async_bridge_pg(pool, {
+        let card_id = card_id_owned.clone();
+        let new_status = new_status_owned.clone();
+        move |pool| async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|error| format!("open postgres reopen transaction: {error}"))?;
+
+            let row = sqlx::query(
+                "SELECT status, repo_id, assigned_agent_id
+                 FROM kanban_cards
+                 WHERE id = $1",
+            )
+            .bind(&card_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("load postgres kanban card {card_id}: {error}"))?
+            .ok_or_else(|| "card not found".to_string())?;
+
+            let old_status: String = row
+                .try_get("status")
+                .map_err(|error| format!("decode old status for {card_id}: {error}"))?;
+            let repo_id: Option<String> = row
+                .try_get("repo_id")
+                .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?;
+            let assigned_agent_id: Option<String> = row
+                .try_get("assigned_agent_id")
+                .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
+
+            let effective =
+                resolve_pipeline_with_pg(&pool, repo_id.as_deref(), assigned_agent_id.as_deref())
+                    .await?;
+
+            if !effective.is_terminal(&old_status) {
+                return Err(format!(
+                    "reopen requires terminal card (current: {old_status})"
+                ));
+            }
+            if effective.is_terminal(&new_status) {
+                return Err(format!(
+                    "reopen target must be non-terminal (target: {new_status})"
+                ));
+            }
+            if old_status == new_status {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "changed": false,
+                    "status": new_status,
+                }));
+            }
+
+            let clock_extra = match effective.clock_for_state(&new_status) {
+                Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
+                    format!(", {} = COALESCE({}, NOW())", clock.set, clock.set)
+                }
+                Some(clock) => format!(", {} = NOW()", clock.set),
+                None => String::new(),
+            };
+
+            let sql = format!(
+                "UPDATE kanban_cards
+                 SET status = $1,
+                     completed_at = NULL,
+                     updated_at = NOW(){}
+                 WHERE id = $2",
+                clock_extra
+            );
+            sqlx::query(&sql)
+                .bind(&new_status)
+                .bind(&card_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("update reopened kanban card {card_id}: {error}"))?;
+
+            let entry_ids = sqlx::query_scalar::<_, String>(
+                "SELECT id
+                 FROM auto_queue_entries
+                 WHERE kanban_card_id = $1
+                   AND status = 'done'",
+            )
+            .bind(&card_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| format!("load done auto-queue entries for {card_id}: {error}"))?;
+            for entry_id in entry_ids {
+                crate::db::auto_queue::update_entry_status_on_pg_tx(
+                    &mut tx,
+                    &entry_id,
+                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
+                    "js_reopen",
+                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                )
+                .await?;
+            }
+
+            let has_hooks = effective
+                .hooks_for_state(&new_status)
+                .is_some_and(|hooks| !hooks.on_enter.is_empty() || !hooks.on_exit.is_empty());
+            let is_review_enter = effective
+                .hooks_for_state(&new_status)
+                .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
+            if !has_hooks {
+                crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "idle").await?;
+            } else if is_review_enter {
+                crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "reviewing")
+                    .await?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit postgres reopen for {card_id}: {error}"))?;
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "changed": true,
+                "from": old_status,
+                "to": new_status,
+                "card_id": card_id,
+                "reopened": true,
+            }))
+        }
+    }) {
+        Ok(response) => {
+            if response
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+                && response
+                    .get("changed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            {
+                crate::kanban::correct_tn_to_fn_on_reopen(None, Some(pool), &card_id_owned);
+            }
+            response.to_string()
+        }
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
 }
 
 fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool) -> String {

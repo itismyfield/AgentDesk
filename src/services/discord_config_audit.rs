@@ -176,7 +176,7 @@ pub(crate) fn audit_and_reconcile(
     mut config: Config,
     yaml_path: PathBuf,
     yaml_present: bool,
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     legacy_scan: &LegacySourceScan,
     dry_run: bool,
 ) -> Result<AuditRunOutcome, String> {
@@ -283,7 +283,7 @@ fn persist_report_pg(config: &Config, rendered: &str) -> bool {
 }
 
 pub(crate) fn load_persisted_report(
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> Option<ConfigAuditReport> {
     match internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
@@ -296,7 +296,7 @@ pub(crate) fn load_persisted_report(
     let raw = if pg_pool.is_some() {
         load_persisted_report_pg(pg_pool)
     } else {
-        load_persisted_report_sqlite(sqlite)
+        sqlite.and_then(load_persisted_report_sqlite)
     }?;
     serde_json::from_str(&raw).ok()
 }
@@ -311,7 +311,7 @@ fn persist_report_sqlite(sqlite: &Db, rendered: &str) {
     );
 }
 
-fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
+fn persist_report(config: &Config, sqlite: Option<&Db>, report: &ConfigAuditReport) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
@@ -326,7 +326,9 @@ fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
         return;
     }
 
-    persist_report_sqlite(sqlite, &rendered);
+    if let Some(sqlite) = sqlite {
+        persist_report_sqlite(sqlite, &rendered);
+    }
 }
 
 fn audit_role_map(
@@ -597,18 +599,26 @@ fn audit_bot_settings(
 fn audit_db_agents(
     config: &Config,
     yaml_present: bool,
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     dry_run: bool,
     report: &mut ConfigAuditReport,
 ) -> Result<(), String> {
     let db_agents = match load_db_agents_pg(config) {
         Ok(Some(agents)) => agents,
-        Ok(None) => load_db_agents_sqlite(sqlite)?,
+        Ok(None) => load_db_agents_sqlite(sqlite.ok_or_else(|| {
+            "SQLite agent audit backend is unavailable while PostgreSQL is disabled".to_string()
+        })?)?,
         Err(error) => {
-            report.warnings.push(format!(
-                "Failed to load agents from PostgreSQL during config audit: {error}; falling back to sqlite"
-            ));
-            load_db_agents_sqlite(sqlite)?
+            if let Some(sqlite) = sqlite {
+                report.warnings.push(format!(
+                    "Failed to load agents from PostgreSQL during config audit: {error}; falling back to sqlite"
+                ));
+                load_db_agents_sqlite(sqlite)?
+            } else {
+                return Err(format!(
+                    "Failed to load agents from PostgreSQL during config audit: {error}"
+                ));
+            }
         }
     };
     let yaml_agents = config
@@ -678,17 +688,24 @@ fn audit_db_agents(
         )),
     }
 
-    match crate::db::agents::sync_agents_from_config(sqlite, &config.agents) {
-        Ok(count) => {
-            report.storage.synced_agents = Some(count);
-            report.actions.push(format!(
-                "synced {} agent definitions from agentdesk.yaml into the sqlite agents table",
-                count
-            ));
+    if let Some(sqlite) = sqlite {
+        match crate::db::agents::sync_agents_from_config(sqlite, &config.agents) {
+            Ok(count) => {
+                report.storage.synced_agents = Some(count);
+                report.actions.push(format!(
+                    "synced {} agent definitions from agentdesk.yaml into the sqlite agents table",
+                    count
+                ));
+            }
+            Err(err) => report.warnings.push(format!(
+                "Failed to sync agents from agentdesk.yaml into DB: {err}"
+            )),
         }
-        Err(err) => report.warnings.push(format!(
-            "Failed to sync agents from agentdesk.yaml into DB: {err}"
-        )),
+    } else {
+        report.warnings.push(
+            "PostgreSQL agent sync failed during config audit and no SQLite fallback is available"
+                .to_string(),
+        );
     }
 
     Ok(())
@@ -1221,7 +1238,7 @@ discord:
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
+            Some(&db),
             &LegacySourceScan::default(),
             false,
         )
@@ -1288,7 +1305,7 @@ discord:
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
+            Some(&db),
             &scan,
             true,
         )

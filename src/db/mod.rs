@@ -19,14 +19,20 @@ use crate::config::Config;
 /// A lightweight mutex serializes write openings while readers and separate
 /// writers reopen their own connections against the same WAL-backed store.
 pub struct DbPool {
-    path: std::path::PathBuf,
+    backend: DbBackend,
     write_gate: Mutex<()>,
+}
+
+enum DbBackend {
+    Sqlite { path: std::path::PathBuf },
+    Unavailable { reason: String },
 }
 
 #[derive(Debug)]
 pub enum DbLockError {
     Poisoned,
     Open(libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    Unavailable(String),
 }
 
 impl std::fmt::Display for DbLockError {
@@ -34,6 +40,7 @@ impl std::fmt::Display for DbLockError {
         match self {
             Self::Poisoned => write!(f, "db write gate poisoned"),
             Self::Open(error) => write!(f, "open sqlite write connection: {error}"),
+            Self::Unavailable(reason) => write!(f, "sqlite backend is unavailable: {reason}"),
         }
     }
 }
@@ -63,11 +70,18 @@ impl std::ops::DerefMut for DbWriteGuard<'_> {
 }
 
 impl DbPool {
+    fn sqlite_path(&self) -> std::result::Result<&Path, DbLockError> {
+        match &self.backend {
+            DbBackend::Sqlite { path } => Ok(path.as_path()),
+            DbBackend::Unavailable { reason } => Err(DbLockError::Unavailable(reason.clone())),
+        }
+    }
+
     /// Acquire the write connection (exclusive).
     /// Backward compatible with existing `db.lock()` calls.
     pub fn lock(&self) -> std::result::Result<DbWriteGuard<'_>, DbLockError> {
         let write_gate = self.write_gate.lock().map_err(|_| DbLockError::Poisoned)?;
-        let conn = open_write_connection(&self.path).map_err(DbLockError::Open)?;
+        let conn = open_write_connection(self.sqlite_path()?).map_err(DbLockError::Open)?;
         Ok(DbWriteGuard {
             conn,
             _write_gate: write_gate,
@@ -78,7 +92,10 @@ impl DbPool {
     /// SQLite WAL mode allows concurrent readers without blocking writers.
     pub fn read_conn(&self) -> std::result::Result<Connection, libsql_rusqlite::Error> {
         // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        open_read_only_connection(&self.path)
+        let path = self
+            .sqlite_path()
+            .map_err(|error| unavailable_sqlite_error(&error.to_string()))?;
+        open_read_only_connection(path)
     }
 
     /// Open a new read-write connection that bypasses the Mutex.
@@ -86,8 +103,17 @@ impl DbPool {
     /// SQLite WAL serializes concurrent writers via busy_timeout.
     pub fn separate_conn(&self) -> std::result::Result<Connection, libsql_rusqlite::Error> {
         // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        open_write_connection(&self.path)
+        let path = self
+            .sqlite_path()
+            .map_err(|error| unavailable_sqlite_error(&error.to_string()))?;
+        open_write_connection(path)
     }
+}
+
+fn unavailable_sqlite_error(message: &str) -> libsql_rusqlite::Error {
+    libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+        message.to_string(),
+    )))
 }
 
 pub(crate) fn open_read_only_connection(
@@ -122,6 +148,15 @@ pub(crate) fn open_write_connection(
 
 pub type Db = Arc<DbPool>;
 
+pub fn unavailable(reason: impl Into<String>) -> Db {
+    Arc::new(DbPool {
+        backend: DbBackend::Unavailable {
+            reason: reason.into(),
+        },
+        write_gate: Mutex::new(()),
+    })
+}
+
 /// Create an in-memory Db for tests.
 /// The wrapped Db uses a unique file-backed SQLite path so `read_conn()` and
 /// `separate_conn()` can reopen it without keeping a shared-memory anchor alive.
@@ -151,7 +186,7 @@ pub fn wrap_conn(conn: Connection) -> Db {
     drop(reopened);
 
     Arc::new(DbPool {
-        path,
+        backend: DbBackend::Sqlite { path },
         write_gate: Mutex::new(()),
     })
 }
@@ -170,7 +205,7 @@ pub fn init(config: &Config) -> Result<Db> {
 
     tracing::info!("Database initialized at {}", db_path.display());
     Ok(Arc::new(DbPool {
-        path: db_path,
+        backend: DbBackend::Sqlite { path: db_path },
         write_gate: Mutex::new(()),
     }))
 }

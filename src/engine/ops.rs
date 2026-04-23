@@ -182,3 +182,12 @@ pub(crate) fn skip_live_auto_queue_entries_for_card_on_conn(
 pub fn review_state_sync_on_conn(conn: &libsql_rusqlite::Connection, json_str: &str) -> String {
     kanban_ops::review_state_sync_on_conn(conn, json_str)
 }
+
+pub(crate) fn execute_policy_sql_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<u64, String> {
+    db_ops::execute_policy_sql_with_backends(db, pg_pool, sql, params)
+}

@@ -32,7 +32,7 @@ pub(crate) enum KvSeedAction {
 
 /// GET /api/settings
 pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let value =
             match sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
                 .bind("settings")
@@ -53,7 +53,7 @@ pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<se
         return (StatusCode::OK, Json(parsed));
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -95,7 +95,7 @@ pub async fn put_settings(
     let normalized = prune_retired_settings_keys(body);
     let value_str = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string());
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Err(error) = sqlx::query(
             "INSERT INTO kv_meta (key, value)
              VALUES ($1, $2)
@@ -114,7 +114,7 @@ pub async fn put_settings(
         return (StatusCode::OK, Json(json!({"ok": true})));
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -368,7 +368,7 @@ fn config_entry_restart_behavior(
 pub async fn get_config_entries(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let pg_values = if let Some(pool) = state.pg_pool.as_ref() {
+    let pg_values = if let Some(pool) = state.pg_pool_ref() {
         match load_pg_kv_values(pool).await {
             Ok(values) => Some(values),
             Err(error) => {
@@ -382,7 +382,7 @@ pub async fn get_config_entries(
         None
     };
     let sqlite_conn = if pg_values.is_none() {
-        match state.db.lock() {
+        match state.sqlite_db().lock() {
             Ok(conn) => Some(conn),
             Err(error) => {
                 return (
@@ -455,7 +455,7 @@ pub async fn patch_config_entries(
     let mut updated = 0;
     let mut rejected = Vec::new();
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         for (key, value) in entries {
             if !allowed.contains(key.as_str()) || is_read_only_config_key(key) {
                 rejected.push(key.clone());
@@ -495,7 +495,7 @@ pub async fn patch_config_entries(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

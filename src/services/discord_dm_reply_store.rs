@@ -72,7 +72,7 @@ pub(crate) fn delete_pending_dm_reply(sqlite: &Db, reply_id: i64) -> Result<(), 
 }
 
 pub(crate) async fn register_pending_dm_reply_db(
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     source_agent: &str,
     user_id: &str,
@@ -87,6 +87,7 @@ pub(crate) async fn register_pending_dm_reply_db(
     // intake/consume paths query PG when a pool exists, so mirroring writes to
     // SQLite would only create unread legacy rows.
     let Some(pool) = pg_pool else {
+        let sqlite = sqlite.ok_or("sqlite db unavailable for pending_dm_replies insert")?;
         return register_pending_dm_reply(
             sqlite,
             &source_agent,
@@ -134,11 +135,12 @@ pub(crate) async fn register_pending_dm_reply_db(
 }
 
 pub(crate) async fn delete_pending_dm_reply_db(
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     reply_id: i64,
 ) -> Result<(), String> {
     let Some(pool) = pg_pool else {
+        let sqlite = sqlite.ok_or("sqlite db unavailable for pending_dm_replies delete")?;
         return delete_pending_dm_reply(sqlite, reply_id);
     };
 
@@ -205,7 +207,7 @@ pub(crate) async fn load_oldest_pending_dm_reply_db(
 }
 
 pub(crate) async fn load_most_recent_consumed_dm_reply_db(
-    sqlite: &Db,
+    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<Option<PendingDmReplyRecord>, String> {
@@ -231,6 +233,7 @@ pub(crate) async fn load_most_recent_consumed_dm_reply_db(
     }
 
     let conn = sqlite
+        .ok_or("sqlite db unavailable for pending_dm_replies lookup")?
         .separate_conn()
         .map_err(|error| format!("db connection: {error}"))?;
     match conn.query_row(

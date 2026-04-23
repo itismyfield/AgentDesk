@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use libsql_rusqlite::Connection;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::db::agents::load_agent_channel_bindings;
 use crate::{db::Db, dispatch, engine::PolicyEngine};
@@ -103,7 +103,11 @@ pub(crate) async fn reconcile_boot_runtime(
         reconcile_boot_db(&conn)?
     };
 
-    stats.missing_review_dispatches_refired = refire_missing_review_dispatches(db, engine)?;
+    stats.missing_review_dispatches_refired = if let Some(pool) = engine.pg_pool().or(pg_pool) {
+        refire_missing_review_dispatches_pg(pool, engine)?
+    } else {
+        refire_missing_review_dispatches(db, engine)?
+    };
 
     if stats.touched() {
         tracing::info!(
@@ -465,6 +469,109 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
                 )
                 .unwrap_or(false)
         };
+        if has_review_dispatch {
+            refired += 1;
+        } else {
+            tracing::warn!(
+                "[boot-reconcile] OnReviewEnter re-fired for card {} but no active review dispatch was created",
+                card_id
+            );
+        }
+    }
+
+    Ok(refired)
+}
+
+fn refire_missing_review_dispatches_pg(pool: &PgPool, engine: &PolicyEngine) -> Result<usize> {
+    crate::pipeline::ensure_loaded();
+
+    let candidates: Vec<String> = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let rows = sqlx::query(
+                "SELECT id, status, repo_id, assigned_agent_id
+                 FROM kanban_cards
+                 WHERE status NOT IN ('done', 'backlog', 'ready')",
+            )
+            .fetch_all(&bridge_pool)
+            .await
+            .map_err(anyhow::Error::from)?;
+
+            let mut candidates = Vec::new();
+            for row in rows {
+                let card_id: String = row.try_get("id").map_err(anyhow::Error::from)?;
+                let status: String = row.try_get("status").map_err(anyhow::Error::from)?;
+                let repo_id: Option<String> =
+                    row.try_get("repo_id").map_err(anyhow::Error::from)?;
+                let agent_id: Option<String> = row
+                    .try_get("assigned_agent_id")
+                    .map_err(anyhow::Error::from)?;
+
+                let effective = crate::pipeline::resolve_for_card_pg(
+                    &bridge_pool,
+                    repo_id.as_deref(),
+                    agent_id.as_deref(),
+                )
+                .await;
+                let is_review_state = effective.hooks_for_state(&status).map_or(false, |hooks| {
+                    hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
+                });
+                if !is_review_state {
+                    continue;
+                }
+
+                let has_review_dispatch = sqlx::query_scalar::<_, bool>(
+                    "SELECT COUNT(*) > 0 FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type IN ('review', 'review-decision')
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&card_id)
+                .fetch_one(&bridge_pool)
+                .await
+                .unwrap_or(false);
+                if !has_review_dispatch {
+                    candidates.push(card_id);
+                }
+            }
+
+            Ok::<Vec<String>, anyhow::Error>(candidates)
+        },
+        |error| anyhow!(error),
+    )?;
+
+    let mut refired = 0usize;
+    for card_id in candidates {
+        if let Err(error) =
+            engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": card_id }))
+        {
+            tracing::warn!(
+                "[boot-reconcile] failed to re-fire OnReviewEnter for card {}: {error}",
+                card_id
+            );
+            continue;
+        }
+        crate::kanban::drain_hook_side_effects_with_backends(engine.legacy_db(), engine);
+
+        let card_id_pg = card_id.clone();
+        let has_review_dispatch = crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT COUNT(*) > 0 FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type IN ('review', 'review-decision')
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&card_id_pg)
+                .fetch_one(&bridge_pool)
+                .await
+                .map_err(anyhow::Error::from)
+            },
+            |error| anyhow!(error),
+        )
+        .unwrap_or(false);
+
         if has_review_dispatch {
             refired += 1;
         } else {

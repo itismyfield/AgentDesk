@@ -784,7 +784,7 @@ async fn hook_session_pg(
             let dispatch_id = body.dispatch_id.clone();
 
             crate::kanban::fire_event_hooks(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 "on_session_status_change",
                 "OnSessionStatusChange",
@@ -939,7 +939,7 @@ pub async fn list_dispatched_sessions(
     Query(params): Query<ListDispatchedSessionsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let include_all = params.include_merged.as_deref() == Some("1");
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match list_dispatched_sessions_pg(pool, include_all).await {
             Ok(sessions) => (StatusCode::OK, Json(json!({"sessions": sessions}))),
             Err(error) => (
@@ -949,7 +949,7 @@ pub async fn list_dispatched_sessions(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1099,11 +1099,11 @@ pub async fn hook_session(
     State(state): State<AppState>,
     Json(body): Json<HookSessionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return hook_session_pg(&state, pool, body).await;
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1201,7 +1201,7 @@ pub async fn hook_session(
 
             // Fire event hooks for session status change (#134)
             crate::kanban::fire_event_hooks(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 "on_session_status_change",
                 "OnSessionStatusChange",
@@ -1231,7 +1231,7 @@ pub async fn hook_session(
             // Emit session event for real-time dashboard update (#156)
             // Read the full session row (joined with agent data) from sessions table
             // to ensure fresh status/session_info rather than stale agents table data.
-            if let Ok(conn) = state.db.lock() {
+            if let Ok(conn) = state.sqlite_db().lock() {
                 let session_event: Option<(i64, serde_json::Value, bool)> = conn.query_row(
                     "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, \
                      s.active_dispatch_id, s.model, s.tokens, s.cwd, s.last_heartbeat, \
@@ -1295,7 +1295,7 @@ pub async fn hook_session(
 
             // Also emit agent_status for agent-level dashboard (batched)
             if let Some(ref aid) = agent_id {
-                if let Ok(conn) = state.db.lock() {
+                if let Ok(conn) = state.sqlite_db().lock() {
                     if let Ok(agent) = conn.query_row(
                         "SELECT a.id, a.name, a.name_ko, s.status, s.session_info, \
                          a.cli_provider, a.avatar_emoji, a.department, \
@@ -1345,7 +1345,7 @@ pub async fn hook_session(
 pub async fn cleanup_sessions(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query("DELETE FROM sessions WHERE status = 'disconnected'")
             .execute(pool)
             .await
@@ -1361,7 +1361,7 @@ pub async fn cleanup_sessions(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1384,7 +1384,7 @@ pub async fn cleanup_sessions(
 pub async fn gc_thread_sessions(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let deleted = gc_stale_thread_sessions_pg(pool).await;
         return (
             StatusCode::OK,
@@ -1392,7 +1392,7 @@ pub async fn gc_thread_sessions(
         );
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1414,7 +1414,7 @@ pub async fn delete_session(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let session_id =
             match sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
                 .bind(&params.session_key)
@@ -1455,7 +1455,7 @@ pub async fn delete_session(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1502,7 +1502,7 @@ pub async fn get_claude_session_id(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let _ = disconnect_stale_fixed_session_by_key_pg(pool, &params.session_key).await;
 
         let provider = params.provider.as_deref().filter(|s| !s.is_empty());
@@ -1572,7 +1572,7 @@ pub async fn get_claude_session_id(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1656,7 +1656,7 @@ pub async fn clear_stale_session_id(
             Json(json!({"error": "session_id required"})),
         );
     };
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query(
             "UPDATE sessions
              SET claude_session_id = NULL,
@@ -1679,7 +1679,7 @@ pub async fn clear_stale_session_id(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1714,7 +1714,7 @@ pub async fn clear_session_id_by_key(
             Json(json!({"error": "session_key required"})),
         );
     };
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match sqlx::query(
             "UPDATE sessions
              SET claude_session_id = NULL,
@@ -1736,7 +1736,7 @@ pub async fn clear_session_id_by_key(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -2182,7 +2182,7 @@ pub async fn update_dispatched_session(
     Path(id): Path<i64>,
     Json(body): Json<UpdateDispatchedSessionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if body.status.is_none()
             && body.active_dispatch_id.is_none()
             && body.model.is_none()
@@ -2246,7 +2246,7 @@ pub async fn update_dispatched_session(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -2407,7 +2407,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
         .as_ref()
         .map(|(provider, _)| provider.as_str());
     let (active_dispatch_id, agent_id, runtime_channel_id, session_provider) = if let Some(pool) =
-        state.pg_pool.as_ref()
+        state.pg_pool_ref()
     {
         match load_force_kill_session_pg(pool, session_key, provider_name).await {
             Ok(Some(tuple)) => tuple,
@@ -2425,7 +2425,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -2522,7 +2522,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
         Option<String>,
         i64,
     )> = None;
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match disconnect_session_and_prepare_retry_pg(
             pool,
             session_key,
@@ -2551,7 +2551,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             }
         }
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -2621,7 +2621,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_else(|| json!({}));
 
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             let meta = RetryDispatchMeta {
                 card_id,
                 to_agent_id,
@@ -2643,7 +2643,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             }
         } else {
             match crate::dispatch::create_dispatch(
-                &state.db,
+                state.sqlite_db(),
                 &state.engine,
                 &card_id,
                 agent,
@@ -2653,7 +2653,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             ) {
                 Ok(dispatch_row) => {
                     let new_id = dispatch_row["id"].as_str().unwrap_or("").to_string();
-                    if let Ok(conn) = state.db.lock() {
+                    if let Ok(conn) = state.sqlite_db().lock() {
                         conn.execute(
                             "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
                             libsql_rusqlite::params![retry_count + 1, new_id],
@@ -2695,8 +2695,8 @@ pub(crate) async fn force_kill_session_impl_with_reason(
 
     if tmux_killed && !lifecycle.termination_recorded {
         crate::services::termination_audit::record_termination_with_handles(
-            Some(&state.db),
-            state.pg_pool.as_ref(),
+            Some(state.sqlite_db()),
+            state.pg_pool_ref(),
             session_key,
             active_dispatch_id.as_deref(),
             "force_kill_api",
@@ -2728,7 +2728,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
                 }
             })
             .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             let _ = enqueue_lifecycle_notification_pg(
                 pool,
                 &format!("channel:{channel_id_str}"),
@@ -2739,7 +2739,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             .await;
         } else {
             enqueue_lifecycle_notification(
-                &state.db,
+                state.sqlite_db(),
                 &format!("channel:{channel_id_str}"),
                 Some(session_key),
                 lifecycle_reason_code,

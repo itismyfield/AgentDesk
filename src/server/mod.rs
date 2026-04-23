@@ -15,7 +15,6 @@ use std::time::Duration;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
-use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
 
@@ -142,14 +141,14 @@ fn is_five_min_policy_tick(count: u64) -> bool {
 
 pub async fn run(
     config: Config,
-    db: Db,
+    legacy_db: crate::db::Db,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)?;
-    crate::services::observability::init_observability(db.clone(), pg_pool.clone());
+    crate::services::observability::init_observability(Some(legacy_db.clone()), pg_pool.clone());
     let startup_pg_pool = if pg_pool.is_some() {
         match crate::db::postgres::connect_for_startup(&config).await {
             Ok(pool) => pool,
@@ -168,11 +167,10 @@ pub async fn run(
         crate::db::postgres::startup_reseed(pool, &config)
             .await
             .map_err(anyhow::Error::msg)?;
-        seed_sqlite_startup_runtime_state(&db, &config, false);
     } else {
-        seed_startup_runtime_state(&db, &config);
+        seed_startup_runtime_state(&legacy_db, &config);
     }
-    crate::pipeline::refresh_override_health_report(&db, pg_pool.as_ref()).await;
+    crate::pipeline::refresh_override_health_report(&legacy_db, pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
             &config,
@@ -181,7 +179,7 @@ pub async fn run(
         None => None,
     };
     crate::reconcile::reconcile_boot_runtime(
-        &db,
+        &legacy_db,
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
     )
@@ -244,7 +242,7 @@ pub async fn run(
         .nest(
             "/api",
             routes::api_router_with_pg(
-                db.clone(),
+                legacy_db.clone(),
                 engine.clone(),
                 config.clone(),
                 broadcast_tx.clone(),
@@ -266,13 +264,17 @@ pub async fn run(
     Ok(())
 }
 
-fn seed_startup_runtime_state(db: &Db, config: &Config) {
-    seed_sqlite_startup_runtime_state(db, config, true);
+fn seed_startup_runtime_state(legacy_db: &crate::db::Db, config: &Config) {
+    seed_sqlite_startup_runtime_state(legacy_db, config, true);
 }
 
-fn seed_sqlite_startup_runtime_state(db: &Db, config: &Config, seed_runtime_kv: bool) {
+fn seed_sqlite_startup_runtime_state(
+    legacy_db: &crate::db::Db,
+    config: &Config,
+    seed_runtime_kv: bool,
+) {
     if seed_runtime_kv {
-        if let Ok(conn) = db.lock() {
+        if let Ok(conn) = legacy_db.lock() {
             routes::settings::seed_config_defaults(&conn, config);
             // server_port is always overwritten (not INSERT OR IGNORE) to match current config
             conn.execute(
@@ -285,15 +287,18 @@ fn seed_sqlite_startup_runtime_state(db: &Db, config: &Config, seed_runtime_kv: 
         }
     }
 
-    if let Err(error) = seed_github_repos_from_config(db, config) {
+    if let Err(error) = seed_github_repos_from_config(legacy_db, config) {
         tracing::warn!("[startup] failed to seed github repos from config: {error}");
     }
-    if let Err(error) = crate::db::agents::sync_agents_from_config(db, &config.agents) {
+    if let Err(error) = crate::db::agents::sync_agents_from_config(legacy_db, &config.agents) {
         tracing::warn!("[startup] failed to sync agents from config: {error}");
     }
 }
 
-fn seed_github_repos_from_config(db: &Db, config: &Config) -> std::result::Result<(), String> {
+fn seed_github_repos_from_config(
+    legacy_db: &crate::db::Db,
+    config: &Config,
+) -> std::result::Result<(), String> {
     use std::collections::BTreeSet;
 
     let mut repo_ids = BTreeSet::new();
@@ -313,7 +318,7 @@ fn seed_github_repos_from_config(db: &Db, config: &Config) -> std::result::Resul
     }
 
     for repo_id in repo_ids {
-        crate::github::register_repo(db, &repo_id)?;
+        crate::github::register_repo(legacy_db, &repo_id)?;
     }
 
     Ok(())
@@ -389,11 +394,17 @@ async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
 
 /// Fire a single tick hook by name, log timing, record telemetry, and notify any dispatches created by JS.
 /// Uses try_fire_hook_by_name for dynamic hook binding (#134).
-async fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label: &str) {
+#[cfg(test)]
+async fn fire_tick_hook_by_name(
+    engine: &PolicyEngine,
+    legacy_db: &crate::db::Db,
+    hook_name: &str,
+    label: &str,
+) {
     let execution =
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
             .await;
-    record_tick_hook_execution(db, label, &execution);
+    record_tick_hook_execution(legacy_db, label, &execution);
 }
 
 async fn fire_tick_hook_by_name_with_pg(
@@ -405,10 +416,8 @@ async fn fire_tick_hook_by_name_with_pg(
     let execution =
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
             .await;
-    if let Some(pool) = pg_pool {
+    if let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) {
         record_tick_hook_execution_pg(pool, label, &execution).await;
-    } else if let Some(db) = engine.legacy_db() {
-        record_tick_hook_execution(db, label, &execution);
     }
     crate::kanban::drain_hook_side_effects_with_backends(None, engine);
 }
@@ -493,7 +502,12 @@ async fn fire_tick_hook_by_name_with_timeout(
     }
 }
 
-fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookExecution) {
+#[cfg(test)]
+fn record_tick_hook_execution(
+    legacy_db: &crate::db::Db,
+    label: &str,
+    execution: &PolicyTickHookExecution,
+) {
     let now_ms = chrono::Utc::now().timestamp_millis().to_string();
     let key_ms = format!("last_tick_{}_ms", label);
     let key_status = format!("last_tick_{}_status", label);
@@ -543,7 +557,7 @@ fn record_tick_hook_execution(db: &Db, label: &str, execution: &PolicyTickHookEx
 
     let skipped_inflight = matches!(execution.outcome, PolicyTickHookOutcome::SkippedInFlight);
 
-    if let Ok(conn) = db.lock() {
+    if let Ok(conn) = legacy_db.lock() {
         // Always record the status + skip timestamp so dashboards can see
         // a skipped invocation happened. Duration for SkippedInFlight is
         // always ZERO, which is fine.
@@ -706,14 +720,14 @@ async fn record_tick_hook_execution_pg(
 #[cfg(test)]
 pub(crate) async fn fire_tick_hook_by_name_for_test(
     engine: &PolicyEngine,
-    db: &Db,
+    legacy_db: &crate::db::Db,
     hook_name: &str,
     label: &str,
     hook_timeout: Duration,
 ) -> PolicyTickHookOutcome {
     let execution =
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, hook_timeout).await;
-    record_tick_hook_execution(db, label, &execution);
+    record_tick_hook_execution(legacy_db, label, &execution);
     execution.outcome
 }
 
@@ -750,40 +764,26 @@ async fn record_periodic_job_execution_pg(
 /// Background task that periodically fetches rate-limit data from external providers
 /// and caches it in the `rate_limit_cache` table for the dashboard API.
 async fn upsert_rate_limit_cache_entry(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
+    pg_pool: &PgPool,
     provider: &str,
     data: &str,
     fetched_at: i64,
 ) {
-    if let Some(pool) = pg_pool {
-        if let Err(error) = sqlx::query(
-            "INSERT INTO rate_limit_cache (provider, data, fetched_at)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (provider)
-             DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
-        )
-        .bind(provider)
-        .bind(data)
-        .bind(fetched_at)
-        .execute(pool)
-        .await
-        {
-            tracing::warn!(
-                "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
-            );
-        }
-        return;
-    }
-
-    if let Some(db) = db {
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
-                libsql_rusqlite::params![provider, data, fetched_at],
-            )
-            .ok();
-        }
+    if let Err(error) = sqlx::query(
+        "INSERT INTO rate_limit_cache (provider, data, fetched_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (provider)
+         DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
+    )
+    .bind(provider)
+    .bind(data)
+    .bind(fetched_at)
+    .execute(pg_pool)
+    .await
+    {
+        tracing::warn!(
+            "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
+        );
     }
 }
 
@@ -813,8 +813,7 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "claude", &data, now)
-                    .await;
+                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "claude", &data, now).await;
                 tracing::info!("[rate-limit-sync] Claude: {} buckets cached", buckets.len());
             }
             Err(e) => {
@@ -835,8 +834,7 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "codex", &data, now)
-                    .await;
+                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "codex", &data, now).await;
                 tracing::info!("[rate-limit-sync] Codex: {} buckets cached", buckets.len());
             }
             Err(e) => {
@@ -852,8 +850,7 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 let n = buckets.len();
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(None, Some(pg_pool.as_ref()), "gemini", &data, now)
-                    .await;
+                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "gemini", &data, now).await;
                 tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
             }
             Err(e) => {
@@ -869,7 +866,7 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
-    fn test_db() -> Db {
+    fn test_db() -> crate::db::Db {
         crate::db::test_db()
     }
 
@@ -883,14 +880,14 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies")
     }
 
-    fn test_engine_with_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
+    fn test_engine_with_dir(db: &crate::db::Db, dir: &std::path::Path) -> PolicyEngine {
         let mut config = crate::config::Config::default();
         config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
-    fn kv_value(db: &Db, key: &str) -> Option<String> {
+    fn kv_value(db: &crate::db::Db, key: &str) -> Option<String> {
         let conn = db.lock().unwrap();
         conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
             row.get(0)
@@ -898,7 +895,7 @@ mod tests {
         .ok()
     }
 
-    fn repo_ids(db: &Db) -> Vec<String> {
+    fn repo_ids(db: &crate::db::Db) -> Vec<String> {
         crate::github::list_repos(db)
             .unwrap()
             .into_iter()
@@ -906,7 +903,7 @@ mod tests {
             .collect()
     }
 
-    fn agent_ids(db: &Db) -> Vec<String> {
+    fn agent_ids(db: &crate::db::Db) -> Vec<String> {
         let conn = db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT id FROM agents ORDER BY id ASC")
@@ -917,7 +914,7 @@ mod tests {
             .collect()
     }
 
-    fn insert_pending_message(db: &Db, target: &str, content: &str) -> i64 {
+    fn insert_pending_message(db: &crate::db::Db, target: &str, content: &str) -> i64 {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
@@ -927,7 +924,7 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    fn message_row_status(db: &Db, id: i64) -> (String, Option<String>, Option<String>) {
+    fn message_row_status(db: &crate::db::Db, id: i64) -> (String, Option<String>, Option<String>) {
         db.lock()
             .unwrap()
             .query_row(
@@ -1846,7 +1843,7 @@ mod tests {
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "hello");
         let delivered = Arc::new(Mutex::new(Vec::new()));
 
-        let processed = drain_message_outbox_batch_once(Some(&db), None, None, {
+        let processed = drain_message_outbox_batch_once_sqlite(&db, {
             let delivered = delivered.clone();
             move |target, content, source, bot| {
                 let delivered = delivered.clone();
@@ -1882,18 +1879,14 @@ mod tests {
         let db = test_db();
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
 
-        let processed = drain_message_outbox_batch_once(
-            Some(&db),
-            None,
-            None,
-            |_target, _content, _source, _bot| async {
+        let processed =
+            drain_message_outbox_batch_once_sqlite(&db, |_target, _content, _source, _bot| async {
                 (
                     "500 Internal Server Error".to_string(),
                     json!({"error": "mock failure"}).to_string(),
                 )
-            },
-        )
-        .await;
+            })
+            .await;
 
         let (status, error, sent_at) = message_row_status(&db, message_id);
 
@@ -1966,23 +1959,22 @@ mod tests {
         .await
         .unwrap();
 
-        let processed =
-            drain_message_outbox_batch_once(Some(&db), Some(&pg_pool), Some("test-owner"), {
+        let processed = drain_message_outbox_batch_once(&pg_pool, Some("test-owner"), {
+            let delivered = delivered.clone();
+            move |target, content, source, bot| {
                 let delivered = delivered.clone();
-                move |target, content, source, bot| {
-                    let delivered = delivered.clone();
-                    async move {
-                        delivered.lock().unwrap().push(json!({
-                            "target": target,
-                            "content": content,
-                            "source": source,
-                            "bot": bot,
-                        }));
-                        ("200 OK".to_string(), json!({"ok": true}).to_string())
-                    }
+                async move {
+                    delivered.lock().unwrap().push(json!({
+                        "target": target,
+                        "content": content,
+                        "source": source,
+                        "bot": bot,
+                    }));
+                    ("200 OK".to_string(), json!({"ok": true}).to_string())
                 }
-            })
-            .await;
+            }
+        })
+        .await;
 
         assert_eq!(processed, 1);
         let captured = delivered.lock().unwrap().clone();
@@ -2744,8 +2736,11 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 
 /// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
 /// Runs every 2 seconds, processes up to 10 messages per tick.
-fn load_pending_message_outbox_batch_sqlite(db: &Db) -> Vec<(i64, String, String, String, String)> {
-    let conn = match db.lock() {
+#[cfg(test)]
+fn load_pending_message_outbox_batch_sqlite(
+    legacy_db: &crate::db::Db,
+) -> Vec<(i64, String, String, String, String)> {
+    let conn = match legacy_db.lock() {
         Ok(conn) => conn,
         Err(_) => return Vec::new(),
     };
@@ -2828,8 +2823,7 @@ async fn claim_pending_message_outbox_batch_pg(
 }
 
 async fn drain_message_outbox_batch_once<F, Fut>(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
+    pg_pool: &PgPool,
     claim_owner: Option<&str>,
     mut deliver: F,
 ) -> usize
@@ -2837,15 +2831,9 @@ where
     F: FnMut(String, String, String, String) -> Fut,
     Fut: std::future::Future<Output = (String, String)>,
 {
-    let pending = if let Some(pool) = pg_pool {
-        claim_pending_message_outbox_batch_pg(pool, claim_owner.unwrap_or("message-outbox")).await
-    } else {
-        let Some(db) = db else {
-            tracing::warn!("[outbox] sqlite backend unavailable while pg_pool is absent");
-            return 0;
-        };
-        load_pending_message_outbox_batch_sqlite(db)
-    };
+    let pending =
+        claim_pending_message_outbox_batch_pg(pg_pool, claim_owner.unwrap_or("message-outbox"))
+            .await;
     if pending.is_empty() {
         return 0;
     }
@@ -2854,66 +2842,89 @@ where
         let (status, err_text) =
             deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
         if status == "200 OK" {
-            if let Some(pool) = pg_pool {
-                sqlx::query(
+            sqlx::query(
+                "UPDATE message_outbox
+                    SET status = 'sent',
+                        sent_at = NOW(),
+                        error = NULL,
+                        claimed_at = NULL,
+                        claim_owner = NULL
+                  WHERE id = $1",
+            )
+            .bind(*id)
+            .execute(pg_pool)
+            .await
+            .ok();
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+        } else {
+            let error_text = format!("{status}: {err_text}");
+            sqlx::query(
+                "UPDATE message_outbox
+                    SET status = 'failed',
+                        error = $1,
+                        claimed_at = NULL,
+                        claim_owner = NULL
+                  WHERE id = $2",
+            )
+            .bind(error_text)
+            .bind(*id)
+            .execute(pg_pool)
+            .await
+            .ok();
+            tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+        }
+    }
+
+    pending.len()
+}
+
+#[cfg(test)]
+async fn drain_message_outbox_batch_once_sqlite<F, Fut>(
+    sqlite_db: &crate::db::Db,
+    mut deliver: F,
+) -> usize
+where
+    F: FnMut(String, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = (String, String)>,
+{
+    let pending = load_pending_message_outbox_batch_sqlite(sqlite_db);
+    if pending.is_empty() {
+        return 0;
+    }
+
+    for (id, target, content, bot, source) in &pending {
+        let (status, err_text) =
+            deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
+        if status == "200 OK" {
+            if let Ok(conn) = sqlite_db.lock() {
+                conn.execute(
                     "UPDATE message_outbox
                         SET status = 'sent',
-                            sent_at = NOW(),
+                            sent_at = datetime('now'),
                             error = NULL,
                             claimed_at = NULL,
                             claim_owner = NULL
-                      WHERE id = $1",
+                      WHERE id = ?1",
+                    [id],
                 )
-                .bind(*id)
-                .execute(pool)
-                .await
                 .ok();
-            } else if let Some(db) = db {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE message_outbox
-                            SET status = 'sent',
-                                sent_at = datetime('now'),
-                                error = NULL,
-                                claimed_at = NULL,
-                                claim_owner = NULL
-                          WHERE id = ?1",
-                        [id],
-                    )
-                    .ok();
-                }
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
         } else {
             let error_text = format!("{status}: {err_text}");
-            if let Some(pool) = pg_pool {
-                sqlx::query(
+            if let Ok(conn) = sqlite_db.lock() {
+                conn.execute(
                     "UPDATE message_outbox
                         SET status = 'failed',
-                            error = $1,
+                            error = ?1,
                             claimed_at = NULL,
                             claim_owner = NULL
-                      WHERE id = $2",
+                      WHERE id = ?2",
+                    libsql_rusqlite::params![error_text, id],
                 )
-                .bind(error_text)
-                .bind(*id)
-                .execute(pool)
-                .await
                 .ok();
-            } else if let Some(db) = db {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE message_outbox
-                            SET status = 'failed',
-                                error = ?1,
-                                claimed_at = NULL,
-                                claim_owner = NULL
-                          WHERE id = ?2",
-                        libsql_rusqlite::params![error_text, id],
-                    )
-                    .ok();
-                }
             }
             tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
         }
@@ -2944,7 +2955,7 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
 
     loop {
         tokio::time::sleep(poll_interval).await;
-        if drain_message_outbox_batch_once(None, Some(pg_pool.as_ref()), Some(&claim_owner), {
+        if drain_message_outbox_batch_once(pg_pool.as_ref(), Some(&claim_owner), {
             let health_registry = health_registry.clone();
             let pg_pool = pg_pool.clone();
             move |target, content, source, bot| {

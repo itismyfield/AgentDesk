@@ -200,10 +200,10 @@ fn runtime() -> Arc<ObservabilityRuntime> {
         .clone()
 }
 
-pub fn init_observability(db: Db, pg_pool: Option<PgPool>) {
+pub fn init_observability(db: Option<Db>, pg_pool: Option<PgPool>) {
     let runtime = runtime();
     if let Ok(mut storage) = runtime.storage.lock() {
-        storage.db = Some(db);
+        storage.db = db;
         storage.pg_pool = pg_pool;
     }
     ensure_worker(&runtime);
@@ -1204,7 +1204,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         emit_turn_started(
             "codex",
@@ -1268,7 +1268,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         let iterations = 500usize;
         let mut tasks = Vec::new();
@@ -1304,7 +1304,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db, None);
+        init_observability(Some(db), None);
 
         let iterations = 20_000usize;
         let baseline_start = std::time::Instant::now();

@@ -720,7 +720,7 @@ pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
         loaded.config,
         loaded.path,
         loaded.existed,
-        &db,
+        Some(&db),
         &legacy_scan,
         dry_run,
     )?;

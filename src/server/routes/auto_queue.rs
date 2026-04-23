@@ -783,6 +783,57 @@ async fn create_activate_dispatch_pg(
     Ok(dispatch_id)
 }
 
+fn create_activate_dispatch_prefer_pg(
+    deps: &AutoQueueActivateDeps,
+    card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<String, String> {
+    if let Some(pool) = deps.pg_pool.as_ref() {
+        let card_id = card_id.to_string();
+        let to_agent_id = to_agent_id.to_string();
+        let dispatch_type = dispatch_type.to_string();
+        let title = title.to_string();
+        let context = context.clone();
+        return crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                create_activate_dispatch_pg(
+                    &bridge_pool,
+                    &card_id,
+                    &to_agent_id,
+                    &dispatch_type,
+                    &title,
+                    &context,
+                )
+                .await
+            },
+            |error| error,
+        );
+    }
+
+    let dispatch = run_activate_blocking(|| {
+        crate::dispatch::create_dispatch(
+            &deps.db,
+            &deps.engine,
+            card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context,
+        )
+    })
+    .map_err(|error| error.to_string())?;
+
+    dispatch
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("dispatch id missing after creating {dispatch_type} for {card_id}"))
+}
+
 fn load_live_dispatch_ids_for_runs(
     conn: &libsql_rusqlite::Connection,
     run_ids: &[String],
@@ -2500,31 +2551,25 @@ fn attempt_restore_dispatch(
         }
     }
 
-    let dispatch_result = run_activate_blocking(|| {
-        let dispatch_context = build_auto_queue_dispatch_context(
-            &entry.entry_id,
-            entry.thread_group,
-            slot_index,
-            reset_slot_thread_before_reuse,
-            [("restored_run", json!(true)), ("run_id", json!(run_id))],
-        );
-        crate::dispatch::create_dispatch(
-            &deps.db,
-            &deps.engine,
-            &entry.card_id,
-            &entry.agent_id,
-            "implementation",
-            &candidate.title,
-            &dispatch_context,
-        )
-    });
+    let dispatch_context = build_auto_queue_dispatch_context(
+        &entry.entry_id,
+        entry.thread_group,
+        slot_index,
+        reset_slot_thread_before_reuse,
+        [("restored_run", json!(true)), ("run_id", json!(run_id))],
+    );
+    let dispatch_result = create_activate_dispatch_prefer_pg(
+        deps,
+        &entry.card_id,
+        &entry.agent_id,
+        "implementation",
+        &candidate.title,
+        &dispatch_context,
+    );
     let created_dispatch = dispatch_result.is_ok();
 
     let dispatch_id = match dispatch_result {
-        Ok(dispatch) => dispatch
-            .get("id")
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
+        Ok(dispatch_id) => Some(dispatch_id),
         Err(error) => {
             let error_text = error.to_string();
             crate::auto_queue_log!(
@@ -2883,9 +2928,16 @@ pub(crate) struct AutoQueueActivateDeps {
 
 impl AutoQueueActivateDeps {
     fn from_state(state: &AppState) -> Self {
+        let pg_pool = state.pg_pool.clone();
         Self {
-            db: state.db.clone(),
-            pg_pool: state.pg_pool.clone(),
+            db: if pg_pool.is_some() {
+                crate::db::unavailable(
+                    "auto-queue activate in PostgreSQL mode does not require the legacy SQLite backend",
+                )
+            } else {
+                state.sqlite_db().clone()
+            },
+            pg_pool,
             engine: state.engine.clone(),
             config: state.config.clone(),
             health_registry: state.health_registry.clone(),
@@ -2905,10 +2957,12 @@ impl AutoQueueActivateDeps {
     }
 
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(
-            Some(self.db.clone()),
-            self.engine.clone(),
-        )
+        let db = if self.pg_pool.is_some() {
+            None
+        } else {
+            Some(self.db.clone())
+        };
+        crate::services::auto_queue::AutoQueueService::new(db, self.engine.clone())
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -3266,12 +3320,13 @@ pub(crate) async fn activate_with_bridge_pg(
     engine: crate::engine::PolicyEngine,
     body: ActivateBody,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(db) = db.or_else(|| engine.legacy_db().cloned()) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "sqlite backend is unavailable"})),
-        );
-    };
+    let db = db
+        .or_else(|| engine.legacy_db().cloned())
+        .unwrap_or_else(|| {
+            crate::db::unavailable(
+                "PostgreSQL auto-queue bridge does not require the legacy SQLite runtime backend",
+            )
+        });
     let mut deps = AutoQueueActivateDeps::for_bridge(db, engine.clone());
     deps.pg_pool = engine.pg_pool().cloned();
     activate_with_deps_pg(&deps, body).await
@@ -3708,29 +3763,26 @@ fn handle_activate_preflight_metadata(
                 }
             };
 
-            let dispatch_result = run_activate_blocking(|| {
-                let dispatch_context = build_auto_queue_dispatch_context(
-                    entry_id,
-                    group,
-                    None,
-                    false,
-                    [
-                        ("run_id", json!(run_id)),
-                        ("batch_phase", json!(batch_phase)),
-                    ],
-                );
-                crate::dispatch::create_dispatch(
-                    &deps.db,
-                    &deps.engine,
-                    card_id,
-                    &consult_agent_id,
-                    "consultation",
-                    &format!("[Consultation] {title}"),
-                    &dispatch_context,
-                )
-            });
+            let dispatch_context = build_auto_queue_dispatch_context(
+                entry_id,
+                group,
+                None,
+                false,
+                [
+                    ("run_id", json!(run_id)),
+                    ("batch_phase", json!(batch_phase)),
+                ],
+            );
+            let dispatch_result = create_activate_dispatch_prefer_pg(
+                deps,
+                card_id,
+                &consult_agent_id,
+                "consultation",
+                &format!("[Consultation] {title}"),
+                &dispatch_context,
+            );
             let dispatch = match dispatch_result {
-                Ok(dispatch) => dispatch,
+                Ok(dispatch_id) => json!({ "id": dispatch_id }),
                 Err(error) => {
                     let failure = record_entry_dispatch_failure(
                         deps,
@@ -5435,7 +5487,7 @@ pub async fn generate(
                 .collect()
         })
         .unwrap_or_default();
-    let mut cards: Vec<GenerateCandidate> = if let Some(pool) = state.pg_pool.as_ref() {
+    let mut cards: Vec<GenerateCandidate> = if let Some(pool) = state.pg_pool_ref() {
         let conflicting_live_runs = match find_matching_active_run_id_pg(
             pool,
             body.repo.as_deref(),
@@ -5500,7 +5552,7 @@ pub async fn generate(
             Err(error) => return error.into_json_response(),
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(conn) => conn,
             Err(error) => {
                 return (
@@ -5574,7 +5626,7 @@ pub async fn generate(
         if let Some(pipeline) = crate::pipeline::try_get() {
             for pipeline_state in &pipeline.states {
                 if !pipeline_state.terminal {
-                    let c = if let Some(pool) = state.pg_pool.as_ref() {
+                    let c = if let Some(pool) = state.pg_pool_ref() {
                         state
                             .auto_queue_service()
                             .count_cards_by_status_with_pg(
@@ -5621,7 +5673,7 @@ pub async fn generate(
         .collect();
     let mut filtered_cards = Vec::with_capacity(cards.len());
     let mut excluded_count = 0usize;
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let mut dependency_status_cache: HashMap<i64, Option<String>> = HashMap::new();
         for card in &cards {
             let dep_parse = extract_dependency_parse_result(card);
@@ -5691,7 +5743,7 @@ pub async fn generate(
             }
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -5866,7 +5918,7 @@ pub async fn generate(
     // Create run + entries atomically so partial inserts cannot masquerade as success.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ai_model_str = "smart-planner".to_string();
-    let entry_ids = if let Some(pool) = state.pg_pool.as_ref() {
+    let entry_ids = if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -5943,7 +5995,7 @@ pub async fn generate(
         }
         entry_ids
     } else {
-        let mut conn = match state.db.separate_conn() {
+        let mut conn = match state.sqlite_db().separate_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -6021,7 +6073,7 @@ pub async fn generate(
         entry_ids
     };
 
-    let entries = if let Some(pool) = state.pg_pool.as_ref() {
+    let entries = if let Some(pool) = state.pg_pool_ref() {
         let mut values = Vec::with_capacity(entry_ids.len());
         for entry_id in &entry_ids {
             values.push(
@@ -6045,7 +6097,7 @@ pub async fn generate(
             .collect::<Vec<_>>()
     };
 
-    let run = if let Some(pool) = state.pg_pool.as_ref() {
+    let run = if let Some(pool) = state.pg_pool_ref() {
         state
             .auto_queue_service()
             .run_json_with_pg(pool, &run_id)
@@ -6071,7 +6123,7 @@ pub async fn activate(
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let deps = AutoQueueActivateDeps::from_state(&state);
-    let body = if let Some(pool) = state.pg_pool.as_ref() {
+    let body = if let Some(pool) = state.pg_pool_ref() {
         match activate_preflight_with_pg(pool, body).await {
             ActivatePgPreflight::Return(response) => return response,
             ActivatePgPreflight::Continue(body) => body,
@@ -8291,7 +8343,7 @@ pub async fn dispatch(
     let auto_assign_agent = body.auto_assign_agent.unwrap_or(body.agent_id.is_some());
 
     let cards_by_issue =
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             let mut cards =
                 match resolve_dispatch_cards_with_pg(pool, body.repo.as_deref(), &issue_numbers)
                     .await
@@ -8357,7 +8409,7 @@ pub async fn dispatch(
 
             cards
         } else {
-            let conn = match state.db.separate_conn() {
+            let conn = match state.sqlite_db().separate_conn() {
                 Ok(c) => c,
                 Err(e) => {
                     return (
@@ -8464,7 +8516,7 @@ pub async fn dispatch(
         }
     };
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Some(ref deploy_phases) = body.deploy_phases {
             if !deploy_phases.is_empty()
                 && let Ok(json_str) = serde_json::to_string(deploy_phases)
@@ -8506,7 +8558,7 @@ pub async fn dispatch(
             *priority_rank += 1;
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -8574,7 +8626,7 @@ pub async fn dispatch(
         None
     };
 
-    let mut snapshot = if let Some(pool) = state.pg_pool.as_ref() {
+    let mut snapshot = if let Some(pool) = state.pg_pool_ref() {
         state
             .auto_queue_service()
             .status_json_for_run_with_pg(
@@ -8644,7 +8696,7 @@ pub async fn status(
         guild_id: state.config.discord.guild_id.clone(),
     };
 
-    let result = if let Some(pool) = state.pg_pool.as_ref() {
+    let result = if let Some(pool) = state.pg_pool_ref() {
         state.auto_queue_service().status_with_pg(pool, input).await
     } else {
         state.auto_queue_service().status(input)
@@ -8666,7 +8718,7 @@ pub async fn history(
         repo: query.repo,
         agent_id: query.agent_id,
     };
-    let records = if let Some(pool) = state.pg_pool.as_ref() {
+    let records = if let Some(pool) = state.pg_pool_ref() {
         match crate::db::auto_queue::list_run_history_pg(pool, &filter, limit).await {
             Ok(records) => records,
             Err(error) => {
@@ -8677,7 +8729,7 @@ pub async fn history(
             }
         }
     } else {
-        let conn = match state.db.separate_conn() {
+        let conn = match state.sqlite_db().separate_conn() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -8995,7 +9047,7 @@ pub async fn update_entry(
         return update_entry_with_pg(&state, &id, &body, requested_status, &pg_pool).await;
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -9324,7 +9376,7 @@ pub async fn add_run_entry(
         return add_run_entry_with_pg(&state, &run_id, &body, batch_phase, &pg_pool).await;
     }
 
-    let mut conn = match state.db.separate_conn() {
+    let mut conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -9607,7 +9659,7 @@ pub async fn restore_run(
         return restore_run_with_pg(&state, &run_id, &pg_pool).await;
     }
 
-    let mut conn = match state.db.separate_conn() {
+    let mut conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -9942,7 +9994,7 @@ pub async fn rebind_slot(
         return rebind_slot_with_pg(&agent_id, slot_index, &body, &pg_pool).await;
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10107,7 +10159,7 @@ pub async fn skip_entry(
         return skip_entry_with_pg(&id, &pg_pool).await;
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10173,7 +10225,7 @@ pub async fn update_run(
         );
     }
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         if let Some(max_concurrent_threads) = body.max_concurrent_threads {
             if max_concurrent_threads <= 0 {
                 return (
@@ -10210,7 +10262,7 @@ pub async fn update_run(
         };
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10292,7 +10344,7 @@ pub async fn reset_slot_thread(
     State(state): State<AppState>,
     Path((agent_id, slot_index)): Path<(String, i64)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match crate::services::auto_queue::runtime::reset_slot_thread_bindings_pg(
             pool, &agent_id, slot_index,
         )
@@ -10320,7 +10372,9 @@ pub async fn reset_slot_thread(
     }
 
     match crate::services::auto_queue::runtime::reset_slot_thread_bindings(
-        &state.db, &agent_id, slot_index,
+        state.sqlite_db(),
+        &agent_id,
+        slot_index,
     )
     .await
     {
@@ -10373,7 +10427,7 @@ pub async fn reset(
         }
     };
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match reset_scoped_with_pg(agent_id, pool).await {
             Ok(response) => (StatusCode::OK, Json(response)),
             Err(error) => (
@@ -10383,7 +10437,7 @@ pub async fn reset(
         };
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10442,7 +10496,7 @@ pub async fn reset_global(
         );
     }
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match reset_global_with_pg(pool).await {
             Ok(response) => (StatusCode::OK, Json(response)),
             Err(error) => (
@@ -10452,7 +10506,7 @@ pub async fn reset_global(
         };
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10484,7 +10538,7 @@ pub async fn pause(
     };
     let force = body.force.unwrap_or(false);
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match if force {
             force_pause_with_pg(state.health_registry.clone(), pool).await
         } else {
@@ -10498,7 +10552,7 @@ pub async fn pause(
         };
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10545,7 +10599,7 @@ fn cancel_route_error_response(
 
 /// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
 pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let blocked_runs = match sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)
              FROM auto_queue_runs r
@@ -10624,7 +10678,7 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
         );
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10700,7 +10754,7 @@ pub async fn cancel(
     State(state): State<AppState>,
     Query(query): Query<CancelQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let service = state.auto_queue_service();
         let result = if let Some(run_id) = query
             .run_id
@@ -10722,7 +10776,7 @@ pub async fn cancel(
         };
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -10753,7 +10807,7 @@ pub async fn reorder(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match reorder_with_pg(&body, pool).await {
             Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
             Err(error) if error.starts_with("not_found:") => (
@@ -10776,7 +10830,7 @@ pub async fn reorder(
         };
     }
 
-    let mut conn = match state.db.separate_conn() {
+    let mut conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -11137,7 +11191,7 @@ pub async fn submit_order(
         return submit_order_with_pg(&state, &run_id, &headers, &body, &pg_pool).await;
     }
 
-    let conn = match state.db.separate_conn() {
+    let conn = match state.sqlite_db().separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (

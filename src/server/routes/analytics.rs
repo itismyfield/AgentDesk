@@ -6,14 +6,16 @@ use axum::{
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder, Row};
 use std::{
     collections::{BTreeMap, HashSet},
     process::Command,
 };
 
 use super::{
-    AppState, skill_usage_analytics::collect_skill_usage, skills_api::sync_skills_from_disk,
+    AppState,
+    skill_usage_analytics::{collect_skill_usage, collect_skill_usage_pg},
+    skills_api::{sync_skills_from_disk, sync_skills_from_disk_pg},
 };
 
 const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[(
@@ -55,8 +57,8 @@ pub async fn analytics(
     };
 
     match crate::services::observability::query_analytics(
-        &state.db,
-        state.pg_pool.as_ref(),
+        state.sqlite_db(),
+        state.pg_pool_ref(),
         &filters,
     )
     .await
@@ -77,7 +79,64 @@ pub async fn analytics(
 
 /// GET /api/streaks
 pub async fn streaks(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let rows = match sqlx::query(
+            "SELECT a.id,
+                    a.name,
+                    a.avatar_emoji,
+                    STRING_AGG(
+                        DISTINCT TO_CHAR(td.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
+                        ','
+                    ) AS active_dates,
+                    MAX(td.updated_at)::text AS last_active
+             FROM agents a
+             INNER JOIN task_dispatches td ON td.to_agent_id = a.id
+             WHERE td.status = 'completed'
+             GROUP BY a.id, a.name, a.avatar_emoji
+             ORDER BY MAX(td.updated_at) DESC",
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query failed: {error}")})),
+                );
+            }
+        };
+
+        let streaks = rows
+            .into_iter()
+            .map(|row| {
+                let active_dates_str = row
+                    .try_get::<Option<String>, _>("active_dates")
+                    .ok()
+                    .flatten();
+                let streak = if let Some(ref dates_str) = active_dates_str {
+                    let mut dates: Vec<&str> = dates_str.split(',').collect();
+                    dates.sort();
+                    dates.reverse();
+                    compute_streak(&dates)
+                } else {
+                    0
+                };
+
+                json!({
+                    "agent_id": row.try_get::<String, _>("id").unwrap_or_default(),
+                    "name": row.try_get::<Option<String>, _>("name").ok().flatten(),
+                    "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").ok().flatten(),
+                    "streak": streak,
+                    "last_active": row.try_get::<Option<String>, _>("last_active").ok().flatten(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        return (StatusCode::OK, Json(json!({ "streaks": streaks })));
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -214,7 +273,104 @@ pub async fn achievements(
     State(state): State<AppState>,
     Query(params): Query<AchievementsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let milestones: &[(i64, &str, &str)] = &[
+            (10, "first_task", "첫 번째 작업 완료"),
+            (50, "getting_started", "본격적인 시작"),
+            (100, "centurion", "100 XP 달성"),
+            (250, "veteran", "베테랑"),
+            (500, "expert", "전문가"),
+            (1000, "master", "마스터"),
+        ];
+
+        let mut query = QueryBuilder::<Postgres>::new(
+            "SELECT id,
+                    COALESCE(name, id) AS display_name,
+                    COALESCE(name_ko, name, id) AS display_name_ko,
+                    xp,
+                    COALESCE(avatar_emoji, '🤖') AS avatar_emoji
+             FROM agents
+             WHERE xp > 0",
+        );
+        if let Some(agent_id) = params.agent_id.as_deref() {
+            query.push(" AND id = ");
+            query.push_bind(agent_id);
+        }
+
+        let agents = match query.build().fetch_all(pool).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query failed: {error}")})),
+                );
+            }
+        };
+
+        let mut achievements = Vec::new();
+        for row in agents {
+            let agent_id = row.try_get::<String, _>("id").unwrap_or_default();
+            let name = row
+                .try_get::<String, _>("display_name")
+                .unwrap_or_else(|_| agent_id.clone());
+            let name_ko = row
+                .try_get::<String, _>("display_name_ko")
+                .unwrap_or_else(|_| name.clone());
+            let xp = row.try_get::<i64, _>("xp").unwrap_or_default();
+            let avatar_emoji = row
+                .try_get::<String, _>("avatar_emoji")
+                .unwrap_or_else(|_| "🤖".to_string());
+
+            let completion_times = match sqlx::query_scalar::<_, i64>(
+                "SELECT CAST(EXTRACT(EPOCH FROM updated_at) * 1000 AS BIGINT) AS ts
+                 FROM task_dispatches
+                 WHERE to_agent_id = $1
+                   AND status = 'completed'
+                 ORDER BY updated_at ASC",
+            )
+            .bind(&agent_id)
+            .fetch_all(pool)
+            .await
+            {
+                Ok(times) => times,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("completion query failed: {error}")})),
+                    );
+                }
+            };
+
+            for (threshold, achievement_type, description) in milestones {
+                if xp >= *threshold {
+                    let approx_index = (*threshold as usize / 10).saturating_sub(1);
+                    let earned_at = completion_times
+                        .get(approx_index.min(completion_times.len().saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0);
+
+                    achievements.push(json!({
+                        "id": format!("{agent_id}:{achievement_type}"),
+                        "agent_id": agent_id,
+                        "type": achievement_type,
+                        "name": format!("{description} ({threshold} XP)"),
+                        "description": description,
+                        "earned_at": earned_at,
+                        "agent_name": name,
+                        "agent_name_ko": name_ko,
+                        "avatar_emoji": avatar_emoji,
+                    }));
+                }
+            }
+        }
+
+        return (
+            StatusCode::OK,
+            Json(json!({ "achievements": achievements })),
+        );
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -337,7 +493,64 @@ pub async fn activity_heatmap(
     State(state): State<AppState>,
     Query(params): Query<HeatmapQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let date = params
+            .date
+            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+        let rows = match sqlx::query(
+            "SELECT CAST(EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') AS INTEGER) AS hour,
+                    to_agent_id,
+                    COUNT(*)::BIGINT AS cnt
+             FROM task_dispatches
+             WHERE DATE(created_at AT TIME ZONE 'UTC') = $1::date
+               AND to_agent_id IS NOT NULL
+             GROUP BY hour, to_agent_id
+             ORDER BY hour ASC",
+        )
+        .bind(&date)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query failed: {error}")})),
+                );
+            }
+        };
+
+        let mut by_hour: BTreeMap<i64, serde_json::Map<String, serde_json::Value>> =
+            BTreeMap::new();
+        for row in rows {
+            let hour = row.try_get::<i32, _>("hour").unwrap_or_default() as i64;
+            let agent_id = row.try_get::<String, _>("to_agent_id").unwrap_or_default();
+            let count = row.try_get::<i64, _>("cnt").unwrap_or_default();
+            by_hour
+                .entry(hour)
+                .or_default()
+                .insert(agent_id, json!(count));
+        }
+
+        let hours = (0..24)
+            .map(|hour| {
+                json!({
+                    "hour": hour,
+                    "agents": serde_json::Value::Object(by_hour.remove(&(hour as i64)).unwrap_or_default()),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "hours": hours,
+                "date": date,
+            })),
+        );
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -414,7 +627,156 @@ pub async fn audit_logs(
     State(state): State<AppState>,
     Query(params): Query<AuditLogsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let limit = params.limit.unwrap_or(20);
+        let audit_count =
+            match sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM audit_logs")
+                .fetch_one(pool)
+                .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("count query failed: {error}")})),
+                    );
+                }
+            };
+
+        let logs = if audit_count > 0 {
+            let mut query = QueryBuilder::<Postgres>::new(
+                "SELECT id::text AS id,
+                        COALESCE(entity_type, 'system') AS entity_type,
+                        COALESCE(entity_id, '') AS entity_id,
+                        COALESCE(action, 'updated') AS action,
+                        CAST(EXTRACT(EPOCH FROM timestamp) * 1000 AS BIGINT) AS created_at,
+                        COALESCE(actor, '') AS actor
+                 FROM audit_logs",
+            );
+            let mut has_where = false;
+            if let Some(entity_type) = params.entity_type.as_deref() {
+                if !has_where {
+                    query.push(" WHERE ");
+                    has_where = true;
+                } else {
+                    query.push(" AND ");
+                }
+                query.push("entity_type = ");
+                query.push_bind(entity_type);
+            }
+            if let Some(entity_id) = params.entity_id.as_deref() {
+                if !has_where {
+                    query.push(" WHERE ");
+                    has_where = true;
+                } else {
+                    query.push(" AND ");
+                }
+                query.push("entity_id = ");
+                query.push_bind(entity_id);
+            }
+            query.push(" ORDER BY timestamp DESC LIMIT ");
+            query.push_bind(limit);
+
+            match query.build().fetch_all(pool).await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| {
+                        let entity_type = row
+                            .try_get::<String, _>("entity_type")
+                            .unwrap_or_else(|_| "system".to_string());
+                        let entity_id = row.try_get::<String, _>("entity_id").unwrap_or_default();
+                        let action = row
+                            .try_get::<String, _>("action")
+                            .unwrap_or_else(|_| "updated".to_string());
+                        let summary = if entity_id.is_empty() {
+                            format!("{entity_type} {action}")
+                        } else {
+                            format!("{entity_type}:{entity_id} {action}")
+                        };
+                        json!({
+                            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                            "actor": row.try_get::<String, _>("actor").unwrap_or_default(),
+                            "action": action,
+                            "entity_type": entity_type,
+                            "entity_id": entity_id,
+                            "summary": summary,
+                            "created_at": row.try_get::<i64, _>("created_at").unwrap_or_default(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("query failed: {error}")})),
+                    );
+                }
+            }
+        } else {
+            if let Some(ref entity_type) = params.entity_type
+                && entity_type != "kanban_card"
+            {
+                return (StatusCode::OK, Json(json!({ "logs": [] })));
+            }
+
+            let mut query = QueryBuilder::<Postgres>::new(
+                "SELECT id::text AS id,
+                        COALESCE(card_id, '') AS card_id,
+                        COALESCE(from_status, 'unknown') AS from_status,
+                        COALESCE(to_status, 'unknown') AS to_status,
+                        COALESCE(source, 'hook') AS source,
+                        CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at
+                 FROM kanban_audit_logs",
+            );
+            if let Some(card_id) = params.entity_id.as_deref() {
+                query.push(" WHERE card_id = ");
+                query.push_bind(card_id);
+            }
+            query.push(" ORDER BY created_at DESC LIMIT ");
+            query.push_bind(limit);
+
+            match query.build().fetch_all(pool).await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|row| {
+                        let card_id = row.try_get::<String, _>("card_id").unwrap_or_default();
+                        let from_status = row
+                            .try_get::<String, _>("from_status")
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let to_status = row
+                            .try_get::<String, _>("to_status")
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let actor = row
+                            .try_get::<String, _>("source")
+                            .unwrap_or_else(|_| "hook".to_string());
+                        json!({
+                            "id": format!("kanban-{}", row.try_get::<String, _>("id").unwrap_or_default()),
+                            "actor": actor.clone(),
+                            "action": format!("{from_status}->{to_status}"),
+                            "entity_type": "kanban_card",
+                            "entity_id": card_id,
+                            "summary": format!("{from_status} -> {to_status}"),
+                            "metadata": {
+                                "from_status": from_status,
+                                "to_status": to_status,
+                                "source": actor,
+                            },
+                            "created_at": row.try_get::<i64, _>("created_at").unwrap_or_default(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("query failed: {error}")})),
+                    );
+                }
+            }
+        };
+
+        return (StatusCode::OK, Json(json!({ "logs": logs })));
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -639,10 +1001,10 @@ pub async fn machine_status(
 /// Returns cached rate limit data from rate_limit_cache table.
 pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let now = chrono::Utc::now().timestamp();
-    let providers = if let Some(pool) = state.pg_pool.as_ref() {
+    let providers = if let Some(pool) = state.pg_pool_ref() {
         build_rate_limit_provider_payloads_pg(pool, now).await
     } else {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -961,7 +1323,38 @@ pub async fn skills_trend(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let days = params.days.unwrap_or(30).min(90).max(1);
 
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        if let Err(error) = sync_skills_from_disk_pg(pool).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("skill sync failed: {error}")})),
+            );
+        }
+
+        let usage = match collect_skill_usage_pg(pool, Some(days)).await {
+            Ok(data) => data,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("usage query failed: {error}")})),
+                );
+            }
+        };
+
+        let mut by_day = BTreeMap::<String, i64>::new();
+        for record in usage {
+            *by_day.entry(record.day).or_default() += 1;
+        }
+
+        let trend = by_day
+            .into_iter()
+            .map(|(day, count)| json!({ "day": day, "count": count }))
+            .collect::<Vec<_>>();
+
+        return (StatusCode::OK, Json(json!({"trend": trend})));
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1156,7 +1549,7 @@ mod tests {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
         let db = crate::db::test_db();
-        crate::services::observability::init_observability(db.clone(), None);
+        crate::services::observability::init_observability(Some(db.clone()), None);
         crate::services::observability::emit_turn_started(
             "codex",
             4242,

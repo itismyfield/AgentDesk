@@ -5,6 +5,16 @@ use serde_json::json;
 use super::super::AppState;
 use crate::services::provider::ProviderKind;
 
+fn legacy_db(state: &AppState) -> &crate::db::Db {
+    match state {
+        AppState { db, .. } => db,
+    }
+}
+
+fn legacy_db_if_needed(state: &AppState) -> Option<&crate::db::Db> {
+    state.pg_pool_ref().is_none().then_some(legacy_db(state))
+}
+
 /// Write a review-passed marker file for the reviewed commit.
 /// `promote-release.sh` checks this before allowing release promotion.
 ///
@@ -50,6 +60,14 @@ fn normalize_review_notes(text: &str) -> String {
         .to_lowercase()
 }
 
+fn review_state_sync_pg_first(state: &AppState, payload: &serde_json::Value) -> String {
+    crate::engine::ops::review_state_sync_with_backends(
+        state.pg_pool_ref().is_none().then_some(legacy_db(state)),
+        state.pg_pool_ref(),
+        &payload.to_string(),
+    )
+}
+
 async fn enforce_session_reset_dilemma_fallback(
     state: &AppState,
     card_id: &str,
@@ -70,7 +88,7 @@ async fn enforce_session_reset_dilemma_fallback(
     let snapshot: Option<(String, Option<String>, Option<String>, i64, Option<i64>)> = if let Some(
         pool,
     ) =
-        state.pg_pool.as_ref()
+        state.pg_pool_ref()
     {
         sqlx::query_as::<_, (String, Option<String>, Option<String>, i64, Option<i64>)>(
             "SELECT c.status,
@@ -88,7 +106,7 @@ async fn enforce_session_reset_dilemma_fallback(
         .ok()
         .flatten()
     } else {
-        let Ok(conn) = state.db.lock() else {
+        let Ok(conn) = legacy_db(state).lock() else {
             return;
         };
         conn.query_row(
@@ -142,7 +160,7 @@ async fn enforce_session_reset_dilemma_fallback(
         reset_round, current_round
     );
 
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         let _ = sqlx::query(
             "UPDATE kanban_cards
              SET review_status = 'dilemma_pending',
@@ -156,7 +174,7 @@ async fn enforce_session_reset_dilemma_fallback(
         .bind(card_id)
         .execute(pool)
         .await;
-    } else if let Ok(conn) = state.db.lock() {
+    } else if let Ok(conn) = legacy_db(state).lock() {
         let _ = conn.execute(
             "UPDATE kanban_cards
              SET review_status = 'dilemma_pending',
@@ -177,15 +195,11 @@ async fn enforce_session_reset_dilemma_fallback(
         "last_verdict": verdict,
         "session_reset_round": reset_round,
     });
-    let _ = crate::engine::ops::review_state_sync_with_backends(
-        Some(&state.db),
-        state.pg_pool.as_ref(),
-        &payload.to_string(),
-    );
+    let _ = review_state_sync_pg_first(state, &payload);
 }
 
 async fn emit_card_updated(state: &AppState, card_id: &str) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         match super::super::kanban::load_card_json_pg(pool, card_id).await {
             Ok(Some(card)) => {
                 crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
@@ -202,7 +216,7 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
         }
     }
 
-    if let Ok(conn) = state.db.lock() {
+    if let Ok(conn) = legacy_db(state).lock() {
         if let Ok(card) = conn.query_row(
             &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
             [card_id],
@@ -254,8 +268,8 @@ pub async fn submit_verdict(
     }
 
     let dispatch = match crate::dispatch::load_dispatch_row_pg_first(
-        &state.db,
-        state.pg_pool.as_ref(),
+        legacy_db(&state),
+        state.pg_pool_ref(),
         &body.dispatch_id,
     ) {
         Ok(Some(dispatch)) => dispatch,
@@ -420,8 +434,8 @@ pub async fn submit_verdict(
     // Review verdict fires OnReviewVerdict — specialized hook, not the generic completion hook.
     // Cancelled dispatches must NOT be promoted to completed (review loop guard #80).
     let updated = match crate::dispatch::mark_dispatch_completed_pg_first(
-        &state.db,
-        state.pg_pool.as_ref(),
+        legacy_db(&state),
+        state.pg_pool_ref(),
         &body.dispatch_id,
         &result_json,
     ) {
@@ -436,8 +450,8 @@ pub async fn submit_verdict(
 
     if updated == 0 {
         let current_status = crate::dispatch::load_dispatch_row_pg_first(
-            &state.db,
-            state.pg_pool.as_ref(),
+            legacy_db(&state),
+            state.pg_pool_ref(),
             &body.dispatch_id,
         )
         .ok()
@@ -458,8 +472,8 @@ pub async fn submit_verdict(
 
     // Find associated card
     let card_id = crate::dispatch::load_dispatch_row_pg_first(
-        &state.db,
-        state.pg_pool.as_ref(),
+        legacy_db(&state),
+        state.pg_pool_ref(),
         &body.dispatch_id,
     )
     .ok()
@@ -478,8 +492,8 @@ pub async fn submit_verdict(
         if let Err(e) = stamp_review_passed_marker(effective_commit.as_deref()) {
             // Roll back the dispatch status since we can't complete the pass flow
             let _ = crate::dispatch::set_dispatch_status_pg_first(
-                &state.db,
-                state.pg_pool.as_ref(),
+                legacy_db(&state),
+                state.pg_pool_ref(),
                 &body.dispatch_id,
                 "dispatched",
                 None,
@@ -499,8 +513,8 @@ pub async fn submit_verdict(
 
     // Fire event hooks for review verdict (#134 — pipeline-defined events)
     if let Some(ref cid) = card_id {
-        crate::kanban::fire_event_hooks(
-            &state.db,
+        crate::kanban::fire_event_hooks_with_backends(
+            legacy_db_if_needed(&state),
             &state.engine,
             "on_review_verdict",
             "OnReviewVerdict",
@@ -522,8 +536,9 @@ pub async fn submit_verdict(
                 break;
             }
             for (t_card_id, old_s, new_s) in &transitions {
-                crate::kanban::fire_transition_hooks(
-                    &state.db,
+                crate::kanban::fire_transition_hooks_with_backends(
+                    legacy_db_if_needed(&state),
+                    state.pg_pool_ref(),
                     &state.engine,
                     t_card_id,
                     old_s,
@@ -540,7 +555,7 @@ pub async fn submit_verdict(
         )
         .await;
 
-        if let Some(pool) = state.pg_pool.as_ref() {
+        if let Some(pool) = state.pg_pool_ref() {
             if let Err(error) =
                 super::super::dispatches::queue_dispatch_followup_pg(pool, &body.dispatch_id).await
             {
@@ -550,7 +565,7 @@ pub async fn submit_verdict(
                 );
             }
         } else {
-            super::super::dispatches::queue_dispatch_followup(&state.db, &body.dispatch_id);
+            super::super::dispatches::queue_dispatch_followup(legacy_db(&state), &body.dispatch_id);
         }
     }
 

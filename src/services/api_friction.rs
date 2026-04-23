@@ -207,13 +207,6 @@ pub(crate) async fn record_api_friction_reports(
         let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
         persist_event_rows_pg(pg_pool, &context, &prepared_rows).await?;
 
-        // Temporary dual-write: policy-tick aggregation still reads SQLite-only state.
-        // Keep SQLite mirrored while PG remains the runtime authority for capture.
-        if let Some(db) = db {
-            let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
-            persist_event_rows(&mut conn, &context, &prepared_rows)?;
-        }
-
         prepared_rows
             .into_iter()
             .map(|row| EventMemoryDraft {
@@ -1014,6 +1007,7 @@ async fn mark_event_memory_status(
         .bind(event_id)
         .execute(pg_pool)
         .await;
+        return;
     }
 
     let Some(db) = db else {

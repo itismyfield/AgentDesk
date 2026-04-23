@@ -512,6 +512,7 @@ fn disconnect_sessions_for_worktree_path(
                 err
             ),
         }
+        return;
     }
 
     let Some(db) = db else {

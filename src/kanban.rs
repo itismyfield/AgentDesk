@@ -1198,6 +1198,28 @@ async fn transition_status_with_opts_pg_inner(
     ))
 }
 
+pub async fn transition_status_with_opts_pg_only(
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+) -> Result<TransitionResult> {
+    transition_status_with_opts_pg_inner(
+        None,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        None,
+    )
+    .await
+    .map(|(result, _)| result)
+}
+
 pub async fn transition_status_with_opts_pg(
     db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
@@ -1219,6 +1241,28 @@ pub async fn transition_status_with_opts_pg(
     )
     .await
     .map(|(result, _)| result)
+}
+
+pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+    on_pg_policy: AllowedOnConnMutation,
+) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
+    transition_status_with_opts_pg_inner(
+        None,
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        Some(on_pg_policy),
+    )
+    .await
 }
 
 pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
@@ -1560,6 +1604,14 @@ fn resolve_effective_pipeline_for_hooks(
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
 ) -> Option<crate::pipeline::PipelineConfig> {
+    resolve_effective_pipeline_for_hooks_with_backends(Some(db), pg_pool, card_id)
+}
+
+fn resolve_effective_pipeline_for_hooks_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    card_id: &str,
+) -> Option<crate::pipeline::PipelineConfig> {
     crate::pipeline::ensure_loaded();
 
     if let Some(pg_pool) = pg_pool {
@@ -1615,6 +1667,10 @@ fn resolve_effective_pipeline_for_hooks(
         };
     }
 
+    let Some(db) = db else {
+        return None;
+    };
+
     db.lock().ok().map(|conn| {
         let repo_id: Option<String> = conn
             .query_row(
@@ -1652,7 +1708,17 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
 /// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
 /// where `fire_state_hooks` would no-op because from == to.
 pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
-    let effective = resolve_effective_pipeline_for_hooks(db, engine.pg_pool(), card_id);
+    fire_enter_hooks_with_backends(Some(db), engine.pg_pool(), engine, card_id, state);
+}
+
+pub fn fire_enter_hooks_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&sqlx::PgPool>,
+    engine: &PolicyEngine,
+    card_id: &str,
+    state: &str,
+) {
+    let effective = resolve_effective_pipeline_for_hooks_with_backends(db, pg_pool, card_id);
     if let Some(ref pipeline) = effective {
         if let Some(bindings) = pipeline.hooks_for_state(state) {
             let payload = json!({
@@ -1666,7 +1732,7 @@ pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &s
             }
         }
     }
-    drain_hook_side_effects(db, engine);
+    drain_hook_side_effects_with_backends(db, engine);
 }
 
 /// Fire hooks for a status transition that already happened in the DB.
@@ -2246,7 +2312,7 @@ fn record_true_negative_if_pass_with_backends(
 /// which is the pass/approved dispatch with empty items. On reopen we look for the
 /// most recent review dispatch that actually reported findings (non-empty items array)
 /// to carry those categories forward into the FN record.
-pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
+pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
     if let Some(pool) = pg_pool {
         let card_id = card_id.to_string();
         let log_card_id = card_id.clone();
@@ -2367,6 +2433,9 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_
         return;
     }
 
+    let Some(db) = db else {
+        return;
+    };
     if let Ok(conn) = db.lock() {
         // Only correct the most recent TN (latest review_round) to avoid
         // corrupting historical TN records from earlier rounds

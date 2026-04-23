@@ -23,7 +23,7 @@ pub struct SkillUsageBody {
 
 /// POST /api/hook/reset-status
 pub async fn reset_status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match reset_status_pg(pool).await {
             Ok(updated) => (
                 StatusCode::OK,
@@ -36,7 +36,7 @@ pub async fn reset_status(State(state): State<AppState>) -> (StatusCode, Json<se
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -63,7 +63,7 @@ pub async fn skill_usage(
     State(state): State<AppState>,
     Json(body): Json<SkillUsageBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match skill_usage_pg(pool, &body).await {
             Ok(id) => (StatusCode::OK, Json(json!({"ok": true, "id": id}))),
             Err(error) => (
@@ -73,7 +73,7 @@ pub async fn skill_usage(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -113,7 +113,7 @@ pub async fn disconnect_session(
     State(state): State<AppState>,
     Path(session_key): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool.as_ref() {
+    if let Some(pool) = state.pg_pool_ref() {
         return match disconnect_session_pg(pool, &session_key).await {
             Ok(false) => (
                 StatusCode::NOT_FOUND,
@@ -130,7 +130,7 @@ pub async fn disconnect_session(
         };
     }
 
-    let conn = match state.db.lock() {
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 
 use super::AppState;
 use crate::github;
@@ -137,7 +138,46 @@ pub async fn close_issue(
 
 /// Returns kanban cards marked "done" today that have a github_issue_url.
 pub async fn closed_today(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let rows = match sqlx::query(
+            "SELECT id, title, github_issue_url, github_issue_number, updated_at::text AS updated_at
+             FROM kanban_cards
+             WHERE status = 'done'
+               AND github_issue_url IS NOT NULL
+               AND DATE(updated_at) = CURRENT_DATE
+             ORDER BY updated_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                        "title": row.try_get::<String, _>("title").unwrap_or_default(),
+                        "github_issue_url": row.try_get::<Option<String>, _>("github_issue_url").ok().flatten(),
+                        "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").ok().flatten(),
+                        "updated_at": row.try_get::<Option<String>, _>("updated_at").ok().flatten(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                return Json(json!({
+                    "count": 0,
+                    "issues": [],
+                    "error": format!("query: {error}")
+                }));
+            }
+        };
+
+        return Json(json!({
+            "count": rows.len(),
+            "issues": rows,
+        }));
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return Json(json!({

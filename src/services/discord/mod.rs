@@ -1933,6 +1933,8 @@ async fn mark_session_disconnected_for_idle_cleanup(
         .bind(session_key)
         .execute(pool)
         .await;
+
+        return prior_status.as_deref() != Some("disconnected");
     }
 
     if let Some(db) = db {

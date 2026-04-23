@@ -175,7 +175,7 @@ pub fn execute_intents_with_backends(
                 }
             }
             Intent::ExecuteSQL { sql, params } => {
-                if let Err(e) = execute_sql(db, &sql, &params) {
+                if let Err(e) = execute_sql(db, pg_pool, &sql, &params) {
                     tracing::warn!(error = %e, sql, "execute-sql intent failed");
                     result.errors += 1;
                 }
@@ -553,28 +553,9 @@ fn execute_activate_auto_queue(
     Ok(())
 }
 
-fn json_to_sqlite(val: &serde_json::Value) -> libsql_rusqlite::types::Value {
-    match val {
-        serde_json::Value::Null => libsql_rusqlite::types::Value::Null,
-        serde_json::Value::Bool(b) => {
-            libsql_rusqlite::types::Value::Integer(if *b { 1 } else { 0 })
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                libsql_rusqlite::types::Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                libsql_rusqlite::types::Value::Real(f)
-            } else {
-                libsql_rusqlite::types::Value::Null
-            }
-        }
-        serde_json::Value::String(s) => libsql_rusqlite::types::Value::Text(s.clone()),
-        _ => libsql_rusqlite::types::Value::Text(val.to_string()),
-    }
-}
-
 fn execute_sql(
     db: Option<&crate::db::Db>,
+    pg_pool: Option<&sqlx::PgPool>,
     sql: &str,
     params: &[serde_json::Value],
 ) -> anyhow::Result<()> {
@@ -583,16 +564,8 @@ fn execute_sql(
         return Err(anyhow::anyhow!(violation.error_message()));
     }
 
-    let Some(db) = db else {
-        anyhow::bail!("sqlite backend is unavailable");
-    };
-    let conn = db.separate_conn()?;
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind
-        .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
-        .collect();
-    conn.execute(sql, params_ref.as_slice())?;
+    crate::engine::ops::execute_policy_sql_with_backends(db, pg_pool, sql, params)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 

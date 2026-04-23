@@ -6,11 +6,34 @@ use axum::{
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::{PgPool, Postgres, Row as SqlxRow};
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
 use crate::services::discord::{health, meeting, settings};
 use crate::services::provider::ProviderKind;
+
+const MEETING_SELECT_PG: &str = r#"
+    SELECT
+        id,
+        channel_id,
+        thread_id,
+        title,
+        status,
+        effective_rounds::BIGINT AS effective_rounds,
+        CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_ms,
+        CASE
+            WHEN completed_at IS NULL THEN NULL
+            ELSE CAST(EXTRACT(EPOCH FROM completed_at) * 1000 AS BIGINT)
+        END AS completed_at_ms,
+        summary,
+        primary_provider,
+        reviewer_provider,
+        participant_names,
+        selection_reason,
+        created_at
+    FROM meetings
+"#;
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -522,11 +545,343 @@ fn apply_selection_reason_fallback(
     }
 }
 
+fn clamp_pg_i32(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+async fn load_kv_meta_value_pg(pool: &PgPool, key: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres kv_meta {key}: {error}"))
+}
+
+async fn upsert_kv_meta_value_pg(pool: &PgPool, key: &str, value: &str) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value, expires_at)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value,
+             expires_at = EXCLUDED.expires_at",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("upsert postgres kv_meta {key}: {error}"))?;
+    Ok(())
+}
+
+async fn upsert_kv_meta_value_pg_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value, expires_at)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value,
+             expires_at = EXCLUDED.expires_at",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("upsert postgres kv_meta {key}: {error}"))?;
+    Ok(())
+}
+
+async fn persist_meeting_query_hashes_pg(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    meeting_id: &str,
+    thread_id: Option<&str>,
+) -> Result<(), String> {
+    let meeting_hash = meeting_query_hash(meeting_id);
+    let normalized_thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
+    let thread_hash = normalized_thread_id.map(thread_query_hash);
+
+    upsert_kv_meta_value_pg_tx(
+        tx,
+        &format!("meeting_query_hash:{meeting_id}"),
+        &meeting_hash,
+    )
+    .await?;
+    upsert_kv_meta_value_pg_tx(
+        tx,
+        &format!("meeting_query_hash_lookup:{meeting_hash}"),
+        meeting_id,
+    )
+    .await?;
+
+    if let (Some(thread_id), Some(thread_hash)) = (normalized_thread_id, thread_hash.as_deref()) {
+        upsert_kv_meta_value_pg_tx(
+            tx,
+            &format!("meeting_thread_hash:{meeting_id}"),
+            thread_hash,
+        )
+        .await?;
+        upsert_kv_meta_value_pg_tx(
+            tx,
+            &format!("meeting_thread_hash_lookup:{thread_hash}"),
+            &json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string(),
+        )
+        .await?;
+    }
+
+    tracing::info!(
+        meeting_id = %meeting_id,
+        meeting_hash = %meeting_hash,
+        thread_hash = thread_hash.as_deref().unwrap_or("-"),
+        "[meetings] persisted meeting query hashes"
+    );
+
+    Ok(())
+}
+
+fn meeting_row_to_json_pg(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value, String> {
+    let meeting_id: String = row
+        .try_get("id")
+        .map_err(|error| format!("read meeting id: {error}"))?;
+    let channel_id: Option<String> = row
+        .try_get("channel_id")
+        .map_err(|error| format!("read meeting channel_id: {error}"))?;
+    let thread_id: Option<String> = row
+        .try_get("thread_id")
+        .map_err(|error| format!("read meeting thread_id: {error}"))?;
+    let title: Option<String> = row
+        .try_get("title")
+        .map_err(|error| format!("read meeting title: {error}"))?;
+    let status: Option<String> = row
+        .try_get("status")
+        .map_err(|error| format!("read meeting status: {error}"))?;
+    let effective_rounds = row
+        .try_get::<Option<i64>, _>("effective_rounds")
+        .map_err(|error| format!("read meeting effective_rounds: {error}"))?
+        .unwrap_or(0);
+    let started_at = row
+        .try_get::<Option<i64>, _>("started_at_ms")
+        .map_err(|error| format!("read meeting started_at: {error}"))?
+        .unwrap_or(0);
+    let completed_at: Option<i64> = row
+        .try_get("completed_at_ms")
+        .map_err(|error| format!("read meeting completed_at: {error}"))?;
+    let summary: Option<String> = row
+        .try_get("summary")
+        .map_err(|error| format!("read meeting summary: {error}"))?;
+    let primary_provider: Option<String> = row
+        .try_get("primary_provider")
+        .map_err(|error| format!("read meeting primary_provider: {error}"))?;
+    let reviewer_provider: Option<String> = row
+        .try_get("reviewer_provider")
+        .map_err(|error| format!("read meeting reviewer_provider: {error}"))?;
+    let participant_names = row
+        .try_get::<Option<String>, _>("participant_names")
+        .map_err(|error| format!("read meeting participant_names: {error}"))?
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    let selection_reason = row
+        .try_get::<Option<String>, _>("selection_reason")
+        .map_err(|error| format!("read meeting selection_reason: {error}"))?
+        .as_deref()
+        .and_then(normalize_selection_reason);
+    let created_at = row
+        .try_get::<Option<i64>, _>("created_at")
+        .map_err(|error| format!("read meeting created_at: {error}"))?
+        .unwrap_or(started_at);
+    let thread_hash = thread_id.as_deref().map(thread_query_hash);
+
+    Ok(json!({
+        "id": meeting_id.clone(),
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "meeting_hash": meeting_query_hash(&meeting_id),
+        "thread_hash": thread_hash,
+        "title": title,
+        "status": status,
+        "effective_rounds": effective_rounds,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "summary": summary,
+        "selection_reason": selection_reason,
+        "agenda": title,
+        "total_rounds": effective_rounds,
+        "primary_provider": primary_provider,
+        "reviewer_provider": reviewer_provider,
+        "participant_names": participant_names,
+        "issues_created": 0,
+        "proposed_issues": null,
+        "issue_creation_results": null,
+        "issue_repo": null,
+        "created_at": created_at,
+    }))
+}
+
+async fn load_transcripts_pg(
+    pool: &PgPool,
+    meeting_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = sqlx::query(
+        "SELECT id,
+                meeting_id,
+                seq::BIGINT AS seq,
+                round::BIGINT AS round,
+                speaker_agent_id,
+                speaker_name,
+                content,
+                COALESCE(is_summary, FALSE) AS is_summary
+         FROM meeting_transcripts
+         WHERE meeting_id = $1
+         ORDER BY seq ASC, id ASC",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres meeting transcripts {meeting_id}: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(json!({
+                "id": row.try_get::<i64, _>("id").map_err(|error| format!("read transcript id: {error}"))?,
+                "meeting_id": row.try_get::<String, _>("meeting_id").map_err(|error| format!("read transcript meeting_id: {error}"))?,
+                "seq": row.try_get::<Option<i64>, _>("seq").map_err(|error| format!("read transcript seq: {error}"))?,
+                "round": row.try_get::<Option<i64>, _>("round").map_err(|error| format!("read transcript round: {error}"))?,
+                "speaker_agent_id": row.try_get::<Option<String>, _>("speaker_agent_id").map_err(|error| format!("read transcript speaker_agent_id: {error}"))?,
+                "speaker_name": row.try_get::<Option<String>, _>("speaker_name").map_err(|error| format!("read transcript speaker_name: {error}"))?,
+                "content": row.try_get::<Option<String>, _>("content").map_err(|error| format!("read transcript content: {error}"))?,
+                "is_summary": row.try_get::<bool, _>("is_summary").map_err(|error| format!("read transcript is_summary: {error}"))?,
+            }))
+        })
+        .collect()
+}
+
+async fn enrich_meeting_with_issue_data_pg(
+    pool: &PgPool,
+    meeting_id: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(issue_repo) =
+        load_kv_meta_value_pg(pool, &format!("meeting_issue_repo:{meeting_id}")).await?
+    {
+        obj.insert("issue_repo".to_string(), json!(issue_repo));
+    }
+
+    let mut results = Vec::new();
+    let mut i = 0;
+    loop {
+        let key = format!("meeting:{meeting_id}:issue:item-{i}");
+        let url = load_kv_meta_value_pg(pool, &format!("{key}:url")).await?;
+        let discarded = load_kv_meta_value_pg(pool, &format!("{key}:discarded"))
+            .await?
+            .map(|value| value == "true")
+            .unwrap_or(false);
+
+        if url.is_none() && !discarded && i > 0 {
+            break;
+        }
+        if url.is_some() || discarded {
+            results.push(json!({
+                "key": format!("item-{i}"),
+                "ok": url.is_some(),
+                "discarded": discarded,
+                "issue_url": url,
+            }));
+        }
+        i += 1;
+        if i > 100 {
+            break;
+        }
+    }
+
+    if !results.is_empty() {
+        let created_count = results
+            .iter()
+            .filter(|entry| entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+            .count();
+        obj.insert("issue_creation_results".to_string(), json!(results));
+        obj.insert("issues_created".to_string(), json!(created_count));
+    }
+
+    Ok(())
+}
+
+async fn load_meeting_pg_base(
+    pool: &PgPool,
+    id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let query = format!("{MEETING_SELECT_PG} WHERE id = $1 LIMIT 1");
+    let row = sqlx::query(&query)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres meeting {id}: {error}"))?;
+    row.as_ref().map(meeting_row_to_json_pg).transpose()
+}
+
+async fn load_meeting_pg_full(
+    pool: &PgPool,
+    id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(mut meeting) = load_meeting_pg_base(pool, id).await? else {
+        return Ok(None);
+    };
+    let transcripts = load_transcripts_pg(pool, id).await?;
+    if let Some(obj) = meeting.as_object_mut() {
+        obj.insert("transcripts".to_string(), json!(&transcripts));
+        obj.insert("entries".to_string(), json!(&transcripts));
+        enrich_meeting_with_issue_data_pg(pool, id, obj).await?;
+        apply_selection_reason_fallback(obj, &transcripts);
+    }
+    Ok(Some(meeting))
+}
+
+async fn list_meetings_pg(pool: &PgPool) -> Result<Vec<serde_json::Value>, String> {
+    let query = format!("{MEETING_SELECT_PG} ORDER BY started_at DESC NULLS LAST");
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("load postgres meetings: {error}"))?;
+
+    let mut meetings = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut meeting = meeting_row_to_json_pg(&row)?;
+        let Some(meeting_id) = meeting
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
+            meetings.push(meeting);
+            continue;
+        };
+        let transcripts = load_transcripts_pg(pool, &meeting_id).await?;
+        if let Some(obj) = meeting.as_object_mut() {
+            obj.insert("transcripts".to_string(), json!(&transcripts));
+            obj.insert("entries".to_string(), json!(&transcripts));
+            enrich_meeting_with_issue_data_pg(pool, &meeting_id, obj).await?;
+            apply_selection_reason_fallback(obj, &transcripts);
+        }
+        meetings.push(meeting);
+    }
+
+    Ok(meetings)
+}
+
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/round-table-meetings
 pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        return match list_meetings_pg(pool).await {
+            Ok(meetings) => (StatusCode::OK, Json(json!({"meetings": meetings}))),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -639,7 +994,21 @@ pub async fn get_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        return match load_meeting_pg_full(pool, &id).await {
+            Ok(Some(meeting)) => (StatusCode::OK, Json(json!({"meeting": meeting}))),
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -681,7 +1050,62 @@ pub async fn delete_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("begin postgres delete meeting {id}: {error}")})),
+                );
+            }
+        };
+
+        if let Err(error) = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("delete postgres meeting transcripts {id}: {error}")}),
+                ),
+            );
+        }
+
+        let deleted = match sqlx::query("DELETE FROM meetings WHERE id = $1")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(result) => result.rows_affected(),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("delete postgres meeting {id}: {error}")})),
+                );
+            }
+        };
+
+        if let Err(error) = tx.commit().await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("commit postgres delete meeting {id}: {error}")})),
+            );
+        }
+
+        return if deleted == 0 {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            )
+        } else {
+            (StatusCode::OK, Json(json!({"ok": true})))
+        };
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -716,7 +1140,62 @@ pub async fn update_issue_repo(
     Path(id): Path<String>,
     Json(body): Json<IssueRepoBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let exists = match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = $1)",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(exists) => exists,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("load postgres meeting {id}: {error}")})),
+                );
+            }
+        };
+
+        if !exists {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            );
+        }
+
+        let key = format!("meeting_issue_repo:{id}");
+        let value = body.repo.as_deref().unwrap_or("");
+        if let Err(error) = upsert_kv_meta_value_pg(pool, &key, value).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+
+        return match load_meeting_pg_base(pool, &id).await {
+            Ok(Some(mut meeting)) => {
+                meeting
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("issue_repo".to_string(), json!(body.repo));
+                (
+                    StatusCode::OK,
+                    Json(json!({"ok": true, "meeting": meeting})),
+                )
+            }
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -795,8 +1274,188 @@ pub async fn create_issues(
     Path(id): Path<String>,
     Json(body): Json<CreateIssuesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool_ref() {
+        let meeting_exists = match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = $1)",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(exists) => exists,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("load postgres meeting {id}: {error}")})),
+                );
+            }
+        };
+        if !meeting_exists {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            );
+        }
+
+        let repo = match body.repo.clone() {
+            Some(repo) => Some(repo),
+            None => match load_kv_meta_value_pg(pool, &format!("meeting_issue_repo:{id}")).await {
+                Ok(repo) => repo,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    );
+                }
+            },
+        };
+
+        let Some(repo) = repo else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"error": "no repo configured for this meeting — set issue_repo first"}),
+                ),
+            );
+        };
+
+        let summaries = match sqlx::query_scalar::<_, String>(
+            "SELECT content
+             FROM meeting_transcripts
+             WHERE meeting_id = $1 AND is_summary = TRUE
+             ORDER BY seq ASC, id ASC",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres meeting summaries {id}: {error}")}),
+                    ),
+                );
+            }
+        };
+
+        if summaries.is_empty() {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "skipped": true,
+                    "results": [],
+                    "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 0, "pending": 0, "all_created": true, "all_resolved": true}
+                })),
+            );
+        }
+
+        let mut results = Vec::new();
+        let mut created = 0i64;
+        let mut failed = 0i64;
+
+        for (i, summary) in summaries.iter().enumerate() {
+            let key = format!("item-{i}");
+            let discarded =
+                match load_kv_meta_value_pg(pool, &format!("meeting:{id}:issue:{key}:discarded"))
+                    .await
+                {
+                    Ok(value) => value.map(|value| value == "true").unwrap_or(false),
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                };
+
+            if discarded {
+                results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "discarded": true, "attempted_at": 0}));
+                continue;
+            }
+
+            let already_url =
+                match load_kv_meta_value_pg(pool, &format!("meeting:{id}:issue:{key}:url")).await {
+                    Ok(url) => url,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                };
+
+            if let Some(url) = already_url {
+                results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "issue_url": url, "attempted_at": 0}));
+                created += 1;
+                continue;
+            }
+
+            let title = summary
+                .lines()
+                .next()
+                .unwrap_or("Meeting action item")
+                .trim();
+            let body_text = if summary.lines().count() > 1 {
+                summary.lines().skip(1).collect::<Vec<_>>().join("\n")
+            } else {
+                String::new()
+            };
+
+            match crate::github::create_issue(&repo, title, &body_text).await {
+                Ok(issue) => {
+                    let url = issue.url;
+                    if let Err(error) = upsert_kv_meta_value_pg(
+                        pool,
+                        &format!("meeting:{id}:issue:{key}:url"),
+                        &url,
+                    )
+                    .await
+                    {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                    results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
+                    created += 1;
+                }
+                Err(error) => {
+                    results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": error, "attempted_at": chrono::Utc::now().timestamp()}));
+                    failed += 1;
+                }
+            }
+        }
+
+        let total = results.len() as i64;
+        let discarded = results
+            .iter()
+            .filter(|r| r["discarded"].as_bool().unwrap_or(false))
+            .count() as i64;
+        let pending = total - created - failed - discarded;
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "results": results,
+                "summary": {
+                    "total": total,
+                    "created": created,
+                    "failed": failed,
+                    "discarded": discarded,
+                    "pending": pending,
+                    "all_created": pending == 0 && failed == 0,
+                    "all_resolved": pending == 0 && failed == 0,
+                }
+            })),
+        );
+    }
+
     let (repo, summaries) = {
-        let conn = match state.db.lock() {
+        let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -878,7 +1537,7 @@ pub async fn create_issues(
         let key = format!("item-{i}");
         // Check if already discarded
         let discarded = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.sqlite_db().lock().unwrap();
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1",
                 [&format!("meeting:{id}:issue:{key}:discarded")],
@@ -895,7 +1554,7 @@ pub async fn create_issues(
 
         // Check if already created
         let already_url: Option<String> = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.sqlite_db().lock().unwrap();
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1",
                 [&format!("meeting:{id}:issue:{key}:url")],
@@ -927,7 +1586,7 @@ pub async fn create_issues(
             Ok(issue) => {
                 let url = issue.url;
                 // Store result
-                let conn = state.db.lock().unwrap();
+                let conn = state.sqlite_db().lock().unwrap();
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                     libsql_rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
@@ -988,7 +1647,37 @@ pub async fn discard_issue(
         );
     }
 
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        if let Err(error) =
+            upsert_kv_meta_value_pg(pool, &format!("meeting:{id}:issue:{key}:discarded"), "true")
+                .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+
+        let meeting = match load_meeting_pg_base(pool, &id).await {
+            Ok(Some(meeting)) => meeting,
+            Ok(None) => json!(null),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+        return (
+            StatusCode::OK,
+            Json(
+                json!({"ok": true, "meeting": meeting, "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 1, "pending": 0, "all_created": false, "all_resolved": false}}),
+            ),
+        );
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1028,7 +1717,65 @@ pub async fn discard_all_issues(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let count = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM meeting_transcripts
+             WHERE meeting_id = $1 AND is_summary = TRUE",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("count postgres meeting summaries {id}: {error}")}),
+                    ),
+                );
+            }
+        };
+
+        for i in 0..count {
+            if let Err(error) = upsert_kv_meta_value_pg(
+                pool,
+                &format!("meeting:{id}:issue:item-{i}:discarded"),
+                "true",
+            )
+            .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        }
+
+        let meeting = match load_meeting_pg_base(pool, &id).await {
+            Ok(Some(meeting)) => meeting,
+            Ok(None) => json!(null),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "meeting": meeting,
+                "results": [],
+                "summary": {"total": count, "created": 0, "failed": 0, "discarded": count, "pending": 0, "all_created": false, "all_resolved": true}
+            })),
+        );
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1222,7 +1969,283 @@ pub async fn upsert_meeting(
         .as_deref()
         .and_then(normalize_selection_reason);
 
-    let conn = match state.db.lock() {
+    if let Some(pool) = state.pg_pool_ref() {
+        let total_rounds_i32 = clamp_pg_i32(total_rounds);
+        let total_rounds_update_i32 = total_rounds_update.map(clamp_pg_i32);
+        let started_at_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
+            .unwrap_or_else(chrono::Utc::now);
+        let completed_at_dt = body
+            .completed_at
+            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("begin postgres upsert meeting {}: {error}", body.id)}),
+                    ),
+                );
+            }
+        };
+
+        if let Err(error) = sqlx::query(
+            "INSERT INTO meetings (
+                id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10, $11, $12, $13, $14
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                channel_id = COALESCE(EXCLUDED.channel_id, meetings.channel_id),
+                thread_id = COALESCE(EXCLUDED.thread_id, meetings.thread_id),
+                title = COALESCE($15, meetings.title),
+                status = COALESCE($16, meetings.status),
+                effective_rounds = COALESCE($17, meetings.effective_rounds),
+                started_at = COALESCE(meetings.started_at, EXCLUDED.started_at),
+                completed_at = COALESCE($18, meetings.completed_at),
+                summary = COALESCE($19, meetings.summary),
+                primary_provider = COALESCE($20, meetings.primary_provider),
+                reviewer_provider = COALESCE($21, meetings.reviewer_provider),
+                participant_names = COALESCE($22, meetings.participant_names),
+                selection_reason = COALESCE($23, meetings.selection_reason),
+                created_at = COALESCE(meetings.created_at, EXCLUDED.created_at)",
+        )
+        .bind(&body.id)
+        .bind(body.channel_id.as_deref())
+        .bind(body.thread_id.as_deref())
+        .bind(agenda)
+        .bind(status)
+        .bind(total_rounds_i32)
+        .bind(started_at_dt)
+        .bind(completed_at_dt)
+        .bind(summary)
+        .bind(primary_provider.as_ref().map(ProviderKind::as_str))
+        .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
+        .bind(&participant_names_json)
+        .bind(selection_reason.clone())
+        .bind(started_at)
+        .bind(agenda_update)
+        .bind(status_update)
+        .bind(total_rounds_update_i32)
+        .bind(completed_at_dt)
+        .bind(summary)
+        .bind(primary_provider.as_ref().map(ProviderKind::as_str))
+        .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
+        .bind(participant_names_update_json.as_deref())
+        .bind(selection_reason.clone())
+        .execute(&mut *tx)
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+
+        let saved_thread_id = match sqlx::query_scalar::<_, String>(
+            "SELECT thread_id FROM meetings WHERE id = $1 LIMIT 1",
+        )
+        .bind(&body.id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres saved thread id {}: {error}", body.id)}),
+                    ),
+                );
+            }
+        };
+        if let Err(error) =
+            persist_meeting_query_hashes_pg(&mut tx, &body.id, saved_thread_id.as_deref()).await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+
+        let mut next_seq = match sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(seq), 0)::BIGINT + 1
+             FROM meeting_transcripts
+             WHERE meeting_id = $1",
+        )
+        .bind(&body.id)
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(next_seq) => next_seq,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("load postgres next transcript seq {}: {error}", body.id)}),
+                    ),
+                );
+            }
+        };
+        let replacing_entries = body.entries.is_some();
+
+        if let Some(entries) = body.entries.as_ref() {
+            if let Err(error) = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
+                .bind(&body.id)
+                .execute(&mut *tx)
+                .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("delete postgres meeting transcripts {}: {error}", body.id)}),
+                    ),
+                );
+            }
+
+            next_seq = 1;
+            for (idx, entry) in entries.iter().enumerate() {
+                let seq = entry.seq.unwrap_or((idx as i64) + 1);
+                next_seq = next_seq.max(seq + 1);
+                if let Err(error) = sqlx::query(
+                    "INSERT INTO meeting_transcripts (
+                        meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(&body.id)
+                .bind(clamp_pg_i32(seq))
+                .bind(entry.round.map(clamp_pg_i32))
+                .bind(entry.speaker_role_id.as_deref())
+                .bind(entry.speaker_name.as_deref())
+                .bind(entry.content.as_deref())
+                .bind(entry.is_summary.unwrap_or(false))
+                .execute(&mut *tx)
+                .await
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            }
+        }
+
+        if let Some(summary_text) = summary {
+            let summary_round = match sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(effective_rounds, 0)::BIGINT
+                 FROM meetings
+                 WHERE id = $1
+                 LIMIT 1",
+            )
+            .bind(&body.id)
+            .fetch_optional(&mut *tx)
+            .await
+            {
+                Ok(summary_round) => summary_round.unwrap_or(total_rounds),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("load postgres summary round {}: {error}", body.id)}),
+                        ),
+                    );
+                }
+            };
+
+            let existing_summary_id = if replacing_entries {
+                None
+            } else {
+                match sqlx::query_scalar::<_, i64>(
+                    "SELECT id
+                     FROM meeting_transcripts
+                     WHERE meeting_id = $1 AND is_summary = TRUE
+                     ORDER BY seq DESC, id DESC
+                     LIMIT 1",
+                )
+                .bind(&body.id)
+                .fetch_optional(&mut *tx)
+                .await
+                {
+                    Ok(summary_id) => summary_id,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(
+                                json!({"error": format!("load postgres summary transcript {}: {error}", body.id)}),
+                            ),
+                        );
+                    }
+                }
+            };
+
+            let summary_result = if let Some(summary_id) = existing_summary_id {
+                sqlx::query(
+                    "UPDATE meeting_transcripts
+                     SET round = $2,
+                         speaker_agent_id = NULL,
+                         speaker_name = $3,
+                         content = $4,
+                         is_summary = TRUE
+                     WHERE id = $1",
+                )
+                .bind(summary_id)
+                .bind(clamp_pg_i32(summary_round))
+                .bind(Some("Summary"))
+                .bind(summary_text)
+                .execute(&mut *tx)
+                .await
+            } else {
+                sqlx::query(
+                    "INSERT INTO meeting_transcripts (
+                        meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
+                    ) VALUES ($1, $2, $3, $4, $5, $6, TRUE)",
+                )
+                .bind(&body.id)
+                .bind(clamp_pg_i32(next_seq))
+                .bind(clamp_pg_i32(summary_round))
+                .bind(Option::<&str>::None)
+                .bind(Some("Summary"))
+                .bind(summary_text)
+                .execute(&mut *tx)
+                .await
+            };
+
+            if let Err(error) = summary_result {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+
+        if let Err(error) = tx.commit().await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("commit postgres upsert meeting {}: {error}", body.id)}),
+                ),
+            );
+        }
+
+        return match load_meeting_pg_full(pool, &body.id).await {
+            Ok(Some(meeting)) => (
+                StatusCode::OK,
+                Json(json!({"ok": true, "meeting": meeting})),
+            ),
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "meeting not found"})),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
+
+    let conn = match state.sqlite_db().lock() {
         Ok(c) => c,
         Err(e) => {
             return (

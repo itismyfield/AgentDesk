@@ -127,17 +127,13 @@ fn dm_reply_register_raw(
 ) -> String {
     let ch = (!channel_id.is_empty()).then_some(channel_id);
     let result = if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
         let source_agent = source_agent.trim().to_string();
         let user_id = user_id.trim().to_string();
         let channel_id = ch.map(str::to_string);
         let context = context.to_string();
         run_async_bridge_pg(&pg_pool, move |pool| async move {
             register_pending_dm_reply_db(
-                &db,
+                None,
                 Some(&pool),
                 &source_agent,
                 &user_id,
@@ -170,14 +166,10 @@ fn dm_reply_register_raw(
 
 fn dm_reply_consume_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
     if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
         let user_id = user_id.to_string();
         let log_user_id = user_id.clone();
         return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            consume_pending_dm_reply_db(&db, Some(&pool), &user_id).await
+            consume_pending_dm_reply_db(None, Some(&pool), &user_id).await
         }) {
             Ok(ConsumePendingDmReplyResult::Consumed(record)) => {
                 tracing::info!(
@@ -262,13 +254,9 @@ fn dm_reply_consume_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str)
 
 fn dm_reply_pending_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
     if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
         let user_id = user_id.to_string();
         return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            load_oldest_pending_dm_reply_db(Some(&db), Some(&pool), &user_id).await
+            load_oldest_pending_dm_reply_db(None, Some(&pool), &user_id).await
         }) {
             Ok(Some(record)) => dm_reply_record_json(record, true),
             Ok(None) => r#"{"ok":false}"#.to_string(),
@@ -313,13 +301,9 @@ fn dm_reply_pending_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str)
 
 fn dm_reply_read_consumed_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
     if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
         let user_id = user_id.to_string();
         return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            load_most_recent_consumed_dm_reply_db(&db, Some(&pool), &user_id).await
+            load_most_recent_consumed_dm_reply_db(None, Some(&pool), &user_id).await
         }) {
             Ok(Some(record)) => dm_reply_record_json(record, true),
             Ok(None) => r#"{"ok":false}"#.to_string(),
@@ -368,17 +352,16 @@ enum ConsumePendingDmReplyResult {
 }
 
 async fn consume_pending_dm_reply_db(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     user_id: &str,
 ) -> Result<ConsumePendingDmReplyResult, String> {
-    let Some(record) = load_oldest_pending_dm_reply_db(Some(db), pg_pool, user_id).await? else {
+    let Some(record) = load_oldest_pending_dm_reply_db(db, pg_pool, user_id).await? else {
         return Ok(ConsumePendingDmReplyResult::NoPending);
     };
 
     let updated =
-        mark_pending_dm_reply_consumed_db(Some(db), pg_pool, record.id, &record.context_json)
-            .await?;
+        mark_pending_dm_reply_consumed_db(db, pg_pool, record.id, &record.context_json).await?;
     if !updated {
         return Ok(ConsumePendingDmReplyResult::AlreadyConsumed);
     }

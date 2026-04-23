@@ -14,15 +14,23 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
-    let db = crate::db::init(&config).context("Failed to init DB")?;
-
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)
         .context("Failed to init PostgreSQL")?;
 
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool)
-        .context("Failed to init policy engine")?;
+    let legacy_db = if pg_pool.is_none() {
+        crate::db::init(&config).context("Failed to init legacy SQLite DB")?
+    } else {
+        crate::db::unavailable("PostgreSQL mode disables the legacy SQLite runtime backend")
+    };
+
+    let engine = if let Some(pool) = pg_pool.clone() {
+        crate::engine::PolicyEngine::new_with_pg(&config, Some(pool))
+    } else {
+        crate::engine::PolicyEngine::new_with_legacy_db(&config, legacy_db.clone())
+    }
+    .context("Failed to init policy engine")?;
 
     tracing::info!(
         "AgentDesk v{} starting on {}:{}",
@@ -31,7 +39,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         config.server.port
     );
 
-    crate::server::run(config.clone(), db, engine, None)
+    crate::server::run(config.clone(), legacy_db, engine, None)
         .await
         .context("Server error")?;
 

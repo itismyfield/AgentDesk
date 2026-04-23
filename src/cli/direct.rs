@@ -173,7 +173,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
+            Some(&db),
             &legacy_scan,
             false,
         )
