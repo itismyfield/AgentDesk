@@ -8,8 +8,18 @@ use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
 #[cfg(unix)]
+use crate::services::platform::binary_resolver;
+#[cfg(unix)]
+use crate::services::tmux_common::tmux_exact_target;
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 use crate::utils::format::tail_with_ellipsis;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
 
 #[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
@@ -90,6 +100,125 @@ fn save_missing_session_handoff(
         state.user_msg_id,
         partial_summary
     );
+}
+
+fn can_replace_stale_rebind_inflight(state: &inflight::InflightTurnState) -> bool {
+    state.rebind_origin
+        && state.full_response.trim().is_empty()
+        && state.last_watcher_relayed_offset.is_none()
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedRebindOutputPath {
+    path: String,
+    initial_offset: u64,
+}
+
+#[cfg(unix)]
+fn candidate_identity(path: &str) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(unix)]
+fn normalize_lsof_path(raw: &str) -> &str {
+    raw.trim_end_matches(" (deleted)")
+}
+
+#[cfg(unix)]
+fn candidate_matches_fallback(fallback_path: &str, candidate_path: &str) -> bool {
+    let Some(fallback_name) = Path::new(fallback_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let Some(candidate_name) = Path::new(candidate_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let fallback_stem = fallback_name
+        .strip_suffix(".jsonl")
+        .unwrap_or(fallback_name);
+    candidate_name == fallback_name
+        || (candidate_name.starts_with(fallback_stem) && candidate_name.contains(".jsonl"))
+}
+
+#[cfg(unix)]
+fn detect_rebind_output_path_from_candidates(
+    fallback_path: &str,
+    candidates: impl IntoIterator<Item = String>,
+) -> Option<DetectedRebindOutputPath> {
+    let fallback_identity = candidate_identity(fallback_path);
+    for raw_path in candidates {
+        let candidate_path = normalize_lsof_path(&raw_path);
+        if !candidate_matches_fallback(fallback_path, candidate_path) {
+            continue;
+        }
+        let meta = match std::fs::metadata(candidate_path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let identity = (meta.dev(), meta.ino());
+        if fallback_identity.is_some() && fallback_identity == Some(identity) {
+            continue;
+        }
+        return Some(DetectedRebindOutputPath {
+            path: candidate_path.to_string(),
+            initial_offset: meta.len(),
+        });
+    }
+    None
+}
+
+#[cfg(unix)]
+fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
+    let mut cmd = Command::new("tmux");
+    binary_resolver::apply_runtime_path(&mut cmd);
+    let output = cmd
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &tmux_exact_target(tmux_session_name),
+            "#{pane_pid}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+#[cfg(unix)]
+fn detect_live_tmux_output_path(
+    tmux_session_name: &str,
+    fallback_path: &str,
+) -> Option<DetectedRebindOutputPath> {
+    let pane_pid = tmux_pane_pid(tmux_session_name)?;
+    let mut cmd = Command::new("lsof");
+    binary_resolver::apply_runtime_path(&mut cmd);
+    let output = cmd
+        .args(["-Fn", "-p", &pane_pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let candidates = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(str::to_string);
+    detect_rebind_output_path_from_candidates(fallback_path, candidates)
 }
 
 /// Check whether a **successful** result record exists after the given offset.
@@ -1739,8 +1868,12 @@ pub(crate) async fn rebind_inflight_for_channel(
     // `save_inflight_state_create_new` below which uses `O_CREAT | O_EXCL`
     // so a live turn that wins the race between here and the write cannot
     // be clobbered by the synthetic rebind state.
-    if super::inflight::load_inflight_state(provider, channel_id).is_some() {
-        return Err(RebindError::InflightAlreadyExists);
+    if let Some(existing) = super::inflight::load_inflight_state(provider, channel_id) {
+        if can_replace_stale_rebind_inflight(&existing) {
+            super::inflight::clear_inflight_state(provider, channel_id);
+        } else {
+            return Err(RebindError::InflightAlreadyExists);
+        }
     }
 
     // Resolve tmux session name + channel name from the request, falling back
@@ -1800,10 +1933,25 @@ pub(crate) async fn rebind_inflight_for_channel(
         return Err(RebindError::ChannelNotBound);
     }
 
-    let (output_path, input_fifo) = tmux_runtime_paths(&tmux_session_name);
-    let initial_offset = std::fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let (default_output_path, input_fifo) = tmux_runtime_paths(&tmux_session_name);
+    #[cfg(unix)]
+    let detected_output = detect_live_tmux_output_path(&tmux_session_name, &default_output_path);
+    let (output_path, initial_offset) = if let Some(detected) = detected_output {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ rebind adopted live tmux output path for {}: {} -> {} (offset {})",
+            tmux_session_name,
+            default_output_path,
+            detected.path,
+            detected.initial_offset
+        );
+        (detected.path, detected.initial_offset)
+    } else {
+        let initial_offset = std::fs::metadata(&default_output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        (default_output_path, initial_offset)
+    };
 
     // Build and persist the new inflight state. No request_owner / msg_ids
     // apply because this recovery has no originating Discord message.
@@ -2160,6 +2308,56 @@ mod tests {
             file.path().to_str().unwrap(),
             0
         ));
+    }
+
+    #[test]
+    fn stale_synthetic_rebind_inflight_is_replaceable() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            0,
+            0,
+            0,
+            "/api/inflight/rebind".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.input".to_string()),
+            0,
+        );
+        state.rebind_origin = true;
+
+        assert!(can_replace_stale_rebind_inflight(&state));
+
+        state.full_response = "partial".to_string();
+        assert!(!can_replace_stale_rebind_inflight(&state));
+
+        state.full_response.clear();
+        state.last_watcher_relayed_offset = Some(10);
+        assert!(!can_replace_stale_rebind_inflight(&state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebind_adopts_detected_output_path_when_inode_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let fallback = dir.path().join("agentdesk-session.jsonl");
+        let rotated = dir.path().join("agentdesk-session.jsonl.stale");
+        std::fs::write(&fallback, b"fresh\n").unwrap();
+        std::fs::write(&rotated, b"stale-file-content\n").unwrap();
+
+        let detected = detect_rebind_output_path_from_candidates(
+            fallback.to_str().unwrap(),
+            vec![rotated.to_string_lossy().to_string()],
+        )
+        .expect("mismatched inode candidate must be adopted");
+
+        assert_eq!(detected.path, rotated.to_string_lossy());
+        assert_eq!(
+            detected.initial_offset,
+            std::fs::metadata(&rotated).unwrap().len()
+        );
     }
 
     #[tokio::test]
