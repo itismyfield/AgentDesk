@@ -21,8 +21,8 @@ pub(crate) use dispatch_context::{
     DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
     REVIEW_VERDICT_IMPROVE_GUIDANCE, commit_belongs_to_card_issue, commit_belongs_to_card_issue_pg,
     dispatch_session_strategy_from_context, dispatch_type_force_new_session_default,
-    dispatch_type_requires_fresh_worktree, dispatch_type_session_strategy_default,
-    dispatch_type_uses_thread_routing, inject_review_dispatch_identifiers, resolve_card_worktree,
+    dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
+    inject_review_dispatch_identifiers, resolve_card_worktree,
     validate_dispatch_completion_evidence,
 };
 #[cfg(test)]

@@ -1204,18 +1204,11 @@ fn session_runtime_state_after_redirect(
 /// Returns `true` when the effective path should overwrite the session path.
 fn dispatch_session_path_should_update(
     has_dispatch: bool,
-    dispatch_type: Option<&str>,
     has_worktree_path: bool,
-    bootstrapped_fresh_thread_session: bool,
     current_path: &str,
     dispatch_effective_path: &str,
 ) -> bool {
     if !has_dispatch {
-        return false;
-    }
-    if crate::dispatch::dispatch_type_requires_fresh_worktree(dispatch_type)
-        && bootstrapped_fresh_thread_session
-    {
         return false;
     }
     if has_worktree_path {
@@ -1621,7 +1614,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
     let dispatch_uses_thread_routing =
         crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
-    let mut bootstrapped_fresh_thread_session = false;
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         if !dispatch_uses_thread_routing {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1690,7 +1682,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             tid,
                             did
                         );
-                        bootstrapped_fresh_thread_session = super::super::bootstrap_thread_session(
+                        super::super::bootstrap_thread_session(
                             shared,
                             tid,
                             &dispatch_effective_path,
@@ -1754,14 +1746,13 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 thread.id,
                                 did
                             );
-                            bootstrapped_fresh_thread_session =
-                                super::super::bootstrap_thread_session(
-                                    shared,
-                                    thread.id,
-                                    &dispatch_effective_path,
-                                    ctx,
-                                )
-                                .await;
+                            super::super::bootstrap_thread_session(
+                                shared,
+                                thread.id,
+                                &dispatch_effective_path,
+                                ctx,
+                            )
+                            .await;
                             shared.dispatch_thread_parents.insert(channel_id, thread.id);
                             super::link_dispatch_thread(
                                 shared.api_port,
@@ -1829,7 +1820,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     let current_path = if dispatch_session_path_should_update(
         dispatch_id_for_thread.is_some(),
         dispatch_worktree_path.is_some(),
-        bootstrapped_fresh_thread_session,
         &current_path,
         &dispatch_effective_path,
     ) {
@@ -4742,7 +4732,6 @@ mod tests {
             dispatch_session_path_should_update(
                 true,  // has_dispatch
                 false, // has_worktree_path
-                false, // reused thread, no fresh bootstrap this turn
                 "/tmp/stale-impl-repo",
                 "/tmp/external-target-repo",
             ),
@@ -4751,31 +4740,16 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_session_path_should_update_for_reused_implementation_thread_worktree() {
-        // Reused implementation thread: no fresh bootstrap happened this
-        // turn, so the new dispatch's managed worktree must replace the stale
-        // session path.
+    fn dispatch_session_path_should_update_still_triggers_for_worktree_path_dispatch() {
+        // Classic #259 path: dispatch has worktree_path. Always update,
+        // even when stale current_path already happens to match.
         assert!(
-            dispatch_session_path_should_update(
-                true,
-                Some("implementation"),
-                true,
-                false,
-                "/tmp/impl-wt",
-                "/tmp/impl-wt",
-            ),
-            "reused implementation dispatch with worktree_path must refresh session CWD"
+            dispatch_session_path_should_update(true, true, "/tmp/impl-wt", "/tmp/impl-wt",),
+            "worktree_path dispatches must always update session CWD"
         );
         assert!(
-            dispatch_session_path_should_update(
-                true,
-                Some("implementation"),
-                true,
-                false,
-                "/tmp/stale",
-                "/tmp/fresh-wt",
-            ),
-            "reused implementation dispatch with a new worktree must update"
+            dispatch_session_path_should_update(true, true, "/tmp/stale", "/tmp/fresh-wt",),
+            "worktree_path dispatches with divergent path must update"
         );
     }
 
@@ -4783,147 +4757,16 @@ mod tests {
     fn dispatch_session_path_should_update_skips_when_paths_match() {
         // No dispatch → leave alone.
         assert!(!dispatch_session_path_should_update(
-            false, None, false, false, "/tmp/a", "/tmp/b",
+            false, false, "/tmp/a", "/tmp/b",
         ));
         // Dispatch present but worktree_path absent AND effective path
         // matches current path → nothing to update.
         assert!(!dispatch_session_path_should_update(
             true,
-            Some("review"),
-            false,
             false,
             "/tmp/same",
             "/tmp/same",
         ));
-    }
-
-    #[test]
-    fn dispatch_session_path_should_not_override_fresh_bootstrap_for_implementation() {
-        assert!(!dispatch_session_path_should_update(
-            true,
-            Some("implementation"),
-            true,
-            true,
-            "/tmp/worktrees/dispatch-934",
-            "/tmp/workspaces/agentdesk",
-        ));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn enforce_dispatch_cwd_policy_marks_implementation_dispatch_failed() {
-        let db = crate::db::test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
-                 VALUES ('agent-1', 'Test Agent', '111', '222')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
-                 VALUES ('card-934-policy', '#934 policy fail', 'in_progress', 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-
-        let (dispatch_id, _, _) = crate::dispatch::create_dispatch_record_sqlite_test(
-            &db,
-            "card-934-policy",
-            "agent-1",
-            "implementation",
-            "[Impl]",
-            &json!({}),
-            crate::dispatch::DispatchCreateOptions::default(),
-        )
-        .unwrap();
-        let shared = make_shared_data_for_tests_with_storage(Some(db.clone()), None);
-
-        let error = enforce_dispatch_cwd_policy(
-            &shared,
-            Some(&dispatch_id),
-            Some("implementation"),
-            Some("card-934-policy"),
-            "/tmp/campaign-r3-934-main-workspace",
-        )
-        .await
-        .expect_err("implementation dispatch must fail closed outside managed worktrees");
-        assert!(
-            error
-                .to_string()
-                .contains("requires a fresh origin/main worktree")
-        );
-
-        let conn = db.lock().unwrap();
-        let (status, result_json): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, result FROM task_dispatches WHERE id = ?1",
-                [&dispatch_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(status, "failed");
-        let result: serde_json::Value =
-            serde_json::from_str(result_json.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(
-            result["error"].as_str(),
-            Some("implementation_requires_fresh_worktree")
-        );
-
-        let blocked_reason: Option<String> = conn
-            .query_row(
-                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-934-policy'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            blocked_reason.as_deref(),
-            Some(
-                "dispatch:implementation_requires_fresh_worktree:cowardly refusing cwd /tmp/campaign-r3-934-main-workspace"
-            )
-        );
-    }
-
-    #[test]
-    fn evaluate_dispatch_cwd_policy_rejects_main_workspace_for_implementation() {
-        let root = tempfile::tempdir().unwrap();
-        let main_workspace = root.path().join("workspaces").join("agentdesk");
-        let worktrees_root = root.path().join("worktrees");
-        std::fs::create_dir_all(&main_workspace).unwrap();
-        std::fs::create_dir_all(worktrees_root.join("impl-934")).unwrap();
-
-        let decision = evaluate_dispatch_cwd_policy(
-            Some("implementation"),
-            main_workspace.to_str().unwrap(),
-            Some(main_workspace.as_path()),
-            Some(worktrees_root.as_path()),
-        );
-
-        assert!(decision.log_main_workspace_error);
-        assert!(decision.reject_for_missing_fresh_worktree);
-    }
-
-    #[test]
-    fn evaluate_dispatch_cwd_policy_allows_review_repo_root_fallback() {
-        let root = tempfile::tempdir().unwrap();
-        let main_workspace = root.path().join("workspaces").join("agentdesk");
-        let external_repo = root.path().join("external-review");
-        let worktrees_root = root.path().join("worktrees");
-        std::fs::create_dir_all(&main_workspace).unwrap();
-        std::fs::create_dir_all(&external_repo).unwrap();
-        std::fs::create_dir_all(&worktrees_root).unwrap();
-
-        let decision = evaluate_dispatch_cwd_policy(
-            Some("review"),
-            external_repo.to_str().unwrap(),
-            Some(main_workspace.as_path()),
-            Some(worktrees_root.as_path()),
-        );
-
-        assert!(!decision.log_main_workspace_error);
-        assert!(!decision.reject_for_missing_fresh_worktree);
     }
 
     #[test]
