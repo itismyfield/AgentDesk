@@ -105,6 +105,25 @@ async fn stop_turn_with_policy(
         }
     }
 
+    // Some force-kill callers only know the tmux session name. When the canonical
+    // provider/channel path cannot resolve, fall back to mailbox hard-stop cleanup
+    // so active-turn state does not survive after tmux teardown.
+    if lifecycle_path == "direct-fallback"
+        && let Some(registry) = health_registry
+    {
+        let hard_stop = crate::services::discord::health::hard_stop_runtime_turn(
+            Some(registry),
+            target.provider.as_ref().map(|provider| provider.as_str()),
+            target.channel_id.map(|channel_id| channel_id.get()),
+            Some(&target.tmux_name),
+            "turn_lifecycle_direct_fallback",
+        )
+        .await;
+        if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
+            lifecycle_path = hard_stop.cleanup_path;
+        }
+    }
+
     let tmux_killed = if cleanup_tmux {
         #[cfg(unix)]
         if crate::services::platform::tmux::has_session(&target.tmux_name) {
@@ -183,6 +202,9 @@ pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
 
 #[cfg(test)]
 mod tests {
+    use crate::services::discord::health::TestHealthHarness;
+    use crate::services::provider::ProviderKind;
+
     #[test]
     fn preserve_session_handoff_policy_keeps_inflight_metadata() {
         assert!(
@@ -200,5 +222,44 @@ mod tests {
             }
             .should_clear_inflight()
         );
+    }
+
+    #[tokio::test]
+    async fn direct_fallback_force_kill_clears_mailbox_by_tmux_lookup() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 223_456_789_012_345_678;
+        let channel_name = "fallback-mailbox-cleanup";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(channel_name);
+
+        harness
+            .seed_channel_session(channel_id, channel_name, Some("session-fallback"))
+            .await;
+        harness.seed_active_turn(channel_id, 55, 66).await;
+        harness
+            .seed_queue(channel_id, &[(9_001, "preserve queued follow-up")])
+            .await;
+
+        let registry = harness.registry();
+        let result = super::force_kill_turn(
+            Some(registry.as_ref()),
+            &super::TurnLifecycleTarget {
+                provider: Some(ProviderKind::Codex),
+                channel_id: None,
+                tmux_name,
+            },
+            "test direct fallback",
+            "force_kill",
+        )
+        .await;
+
+        assert_eq!(result.lifecycle_path, "mailbox_canonical");
+        assert!(!result.tmux_killed);
+        assert!(!result.inflight_cleared);
+        assert!(result.queue_preserved);
+
+        let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_id).await;
+        assert!(!has_active_turn);
+        assert_eq!(queue_depth, 1);
+        assert_eq!(session_id, None);
     }
 }
