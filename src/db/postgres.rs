@@ -11,6 +11,14 @@ use crate::config::{AgentChannel, AgentDef, Config};
 use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
+const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 3;
+const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 60;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PoolConnectSettings {
+    max_connections: u32,
+    acquire_timeout: Duration,
+}
 
 /// Session-scoped PostgreSQL advisory lock lease.
 ///
@@ -125,20 +133,57 @@ pub fn connect_options(config: &Config) -> Result<Option<PgConnectOptions>, Stri
     Ok(Some(options))
 }
 
-pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
+fn runtime_pool_settings(config: &Config) -> PoolConnectSettings {
+    PoolConnectSettings {
+        max_connections: config.database.pool_max.max(1),
+        acquire_timeout: Duration::from_secs(DEFAULT_PG_ACQUIRE_TIMEOUT_SECS),
+    }
+}
+
+fn startup_pool_settings(config: &Config) -> PoolConnectSettings {
+    let steady_max = config.database.pool_max.max(1);
+    PoolConnectSettings {
+        max_connections: steady_max.saturating_mul(3).div_ceil(2).max(2),
+        acquire_timeout: Duration::from_secs(STARTUP_PG_ACQUIRE_TIMEOUT_SECS),
+    }
+}
+
+async fn connect_with_settings(
+    config: &Config,
+    settings: PoolConnectSettings,
+    context: &str,
+) -> Result<Option<PgPool>, String> {
     let Some(options) = connect_options(config)? else {
         return Ok(None);
     };
 
     let pool = PgPoolOptions::new()
-        .max_connections(config.database.pool_max.max(1))
-        .acquire_timeout(Duration::from_secs(3))
+        .max_connections(settings.max_connections)
+        .acquire_timeout(settings.acquire_timeout)
         .connect_with(options)
         .await
-        .map_err(|error| format!("connect postgres: {error}"))?;
+        .map_err(|error| format!("{context}: {error}"))?;
 
     health_check(&pool).await?;
     Ok(Some(pool))
+}
+
+pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
+    connect_with_settings(config, runtime_pool_settings(config), "connect postgres").await
+}
+
+pub async fn connect_for_startup(config: &Config) -> Result<Option<PgPool>, String> {
+    let settings = startup_pool_settings(config);
+    let pool =
+        connect_with_settings(config, settings, "connect postgres startup warmup pool").await?;
+    if pool.is_some() {
+        tracing::info!(
+            "[startup] postgres warmup pool ready (max_connections={}, acquire_timeout={}s)",
+            settings.max_connections,
+            settings.acquire_timeout.as_secs()
+        );
+    }
+    Ok(pool)
 }
 
 pub async fn connect_and_migrate(config: &Config) -> Result<Option<PgPool>, String> {
@@ -514,9 +559,10 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvisoryLockLease, close_test_pool, config_database_summary, connect_and_migrate,
-        connect_options, create_test_database, database_enabled, database_summary,
-        run_test_postgres_sqlx_op_with_timeout, startup_reseed,
+        AdvisoryLockLease, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, close_test_pool,
+        config_database_summary, connect_and_migrate, connect_options, create_test_database,
+        database_enabled, database_summary, run_test_postgres_sqlx_op_with_timeout,
+        startup_pool_settings, startup_reseed,
     };
     use sqlx::Row;
     use std::time::Duration;
@@ -655,6 +701,21 @@ mod tests {
             "db.internal:5433/agentdesk_dev user=agentdesk_app pool_max=16"
         );
         assert!(connect_options(&config).unwrap().is_some());
+    }
+
+    #[test]
+    fn startup_pool_settings_raise_pool_size_and_acquire_timeout() {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.pool_max = 5;
+
+        let settings = startup_pool_settings(&config);
+
+        assert_eq!(settings.max_connections, 8);
+        assert_eq!(
+            settings.acquire_timeout,
+            Duration::from_secs(STARTUP_PG_ACQUIRE_TIMEOUT_SECS)
+        );
     }
 
     #[tokio::test]

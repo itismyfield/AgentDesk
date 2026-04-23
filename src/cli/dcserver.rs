@@ -1271,8 +1271,19 @@ pub fn handle_dcserver(token: Option<String>) {
                 match crate::db::postgres::connect_and_migrate(&ad_config).await {
                     Ok(pg_pool) => {
                         if let Some(pool) = pg_pool.as_ref() {
+                            let startup_pg_pool =
+                                match crate::db::postgres::connect_for_startup(&ad_config).await {
+                                    Ok(pool) => pool,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "  ⚠ PostgreSQL warmup pool unavailable: {error} — falling back to runtime pool"
+                                        );
+                                        None
+                                    }
+                                };
+                            let startup_pool = startup_pg_pool.as_ref().unwrap_or(pool);
                             if let Err(error) =
-                                crate::db::postgres::startup_reseed(pool, &ad_config).await
+                                crate::db::postgres::startup_reseed(startup_pool, &ad_config).await
                             {
                                 eprintln!(
                                     "  ⚠ PostgreSQL startup reseed failed: {error} — Discord runtime PG path disabled"
@@ -1280,6 +1291,7 @@ pub fn handle_dcserver(token: Option<String>) {
                             } else {
                                 discord_pg_pool = pg_pool.clone();
                             }
+                            drop(startup_pg_pool);
                         }
                     }
                     Err(error) => {

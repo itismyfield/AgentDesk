@@ -7,6 +7,114 @@ use super::*;
 mod failure_recovery {
     use super::*;
 
+    struct PgRecoveryTestDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+    }
+
+    impl PgRecoveryTestDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_pg_recovery_{}", uuid::Uuid::new_v4().simple());
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "integration high_risk_recovery",
+            )
+            .await
+            .expect("create postgres recovery test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+            }
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "integration high_risk_recovery",
+            )
+            .await
+            .expect("drop postgres recovery test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
+    fn pg_recovery_test_config(test_db: &PgRecoveryTestDatabase) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.database.enabled = true;
+        config.database.pool_max = 1;
+        config.database.host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        config.database.port = std::env::var("PGPORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(5432);
+        config.database.dbname = test_db.database_name.clone();
+        config.database.user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        config.database.password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        config
+    }
+
     #[test]
     fn scenario_3_restart_recovery_reconciles_broken_state() {
         let db = test_db();
@@ -336,6 +444,90 @@ mod failure_recovery {
         assert_eq!(cancelled_status, "pending");
         assert_eq!(completed_status, "pending");
         assert_eq!(valid_status, "dispatched");
+    }
+
+    #[test]
+    fn scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs() {
+        let (result, logs) = capture_policy_logs(|| {
+            tokio::runtime::Runtime::new()
+                .expect("integration test runtime")
+                .block_on(async {
+                    let test_pg = PgRecoveryTestDatabase::create().await;
+                    let config = pg_recovery_test_config(&test_pg);
+                    let runtime_pool = crate::db::postgres::connect_and_migrate(&config)
+                        .await
+                        .expect("connect runtime postgres pool")
+                        .expect("runtime postgres pool");
+                    let startup_pool = crate::db::postgres::connect_for_startup(&config)
+                        .await
+                        .expect("connect startup postgres pool")
+                        .expect("startup postgres pool");
+
+                    sqlx::query(
+                        "INSERT INTO dispatch_outbox (dispatch_id, action, status)
+                         VALUES ('dispatch-969', 'notify', 'processing')",
+                    )
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed stale outbox row");
+                    sqlx::query(
+                        "INSERT INTO kv_meta (key, value)
+                         VALUES ('dispatch_reserving:dispatch-969', 'agent-1')",
+                    )
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed stale reservation");
+
+                    let _runtime_conn = runtime_pool
+                        .acquire()
+                        .await
+                        .expect("exhaust single runtime pool connection");
+
+                    let sqlite = test_db();
+                    let engine = test_engine(&sqlite);
+                    let stats = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::reconcile::reconcile_boot_runtime(
+                            &sqlite,
+                            &engine,
+                            Some(&startup_pool),
+                        ),
+                    )
+                    .await
+                    .expect("boot reconcile must not hang")
+                    .expect("boot reconcile succeeds with startup pool");
+
+                    drop(_runtime_conn);
+                    crate::db::postgres::close_test_pool(
+                        startup_pool,
+                        "integration high_risk_recovery startup pool",
+                    )
+                    .await
+                    .expect("close startup pool");
+                    crate::db::postgres::close_test_pool(
+                        runtime_pool,
+                        "integration high_risk_recovery runtime pool",
+                    )
+                    .await
+                    .expect("close runtime pool");
+                    test_pg.drop().await;
+                    stats
+                })
+        });
+
+        let stats = result;
+        assert_eq!(
+            stats.stale_processing_outbox_reset, 1,
+            "boot reconcile must reset stale outbox rows through the startup pool"
+        );
+        assert_eq!(
+            stats.stale_dispatch_reservations_cleared, 1,
+            "boot reconcile must clear stale reservations through the startup pool"
+        );
+        assert!(
+            !logs.contains("pool timed out while waiting for an open connection"),
+            "startup reconcile must avoid steady-state pool timeout logs; captured logs:\n{logs}"
+        );
     }
 
     // TODO(#850 follow-up): rewrite as PG fixture test.
