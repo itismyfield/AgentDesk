@@ -909,13 +909,14 @@ async fn execute_allowed_cleanup_on_pg_tx(
             let reason = format!("force-transition to {new_status}");
             // Model 2: generic cancel keeps the dispatch pointer for
             // provenance. Force-transition cleanup is the explicit terminal
-            // cleanup path, so it snapshots live entries before cancel and
-            // then clears any skipped links that cancel's side-effect left.
-            counts.skipped_auto_queue_entries =
-                count_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
-            counts.cancelled_dispatches =
+            // cleanup path, so it preserves the detailed cancel bookkeeping
+            // and then clears any skipped links that cancel's side-effect left.
+            let cancelled_counts =
                 cancel_active_dispatches_for_card_on_pg_tx(tx, card_id, Some(&reason)).await?;
-            skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
+            counts.cancelled_dispatches = cancelled_counts.cancelled_dispatches;
+            counts.skipped_auto_queue_entries = cancelled_counts.skipped_auto_queue_entries;
+            counts.skipped_auto_queue_entries +=
+                skip_live_auto_queue_entries_for_card_on_pg_tx(tx, card_id).await?;
             clear_force_transition_terminalized_links_on_pg_tx(tx, card_id).await?;
             cleanup_force_transition_revert_fields_on_pg_tx(tx, card_id).await?;
         }
