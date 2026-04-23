@@ -1645,13 +1645,13 @@ mod tests {
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("review_round")
+                .try_get::<i64, _>("review_round")
                 .expect("decode review_round"),
             7
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("retry_count")
+                .try_get::<i64, _>("retry_count")
                 .expect("decode retry_count"),
             0
         );
@@ -1832,13 +1832,13 @@ mod tests {
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("review_round")
+                .try_get::<i64, _>("review_round")
                 .expect("decode review_round"),
             4
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("retry_count")
+                .try_get::<i64, _>("retry_count")
                 .expect("decode retry_count"),
             2
         );
@@ -1973,13 +1973,13 @@ mod tests {
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("review_round")
+                .try_get::<i64, _>("review_round")
                 .expect("decode tracking review round"),
             2
         );
         assert_eq!(
             tracking
-                .try_get::<i32, _>("retry_count")
+                .try_get::<i64, _>("retry_count")
                 .expect("decode tracking retry count"),
             0
         );
@@ -2188,13 +2188,13 @@ mod tests {
         );
         assert_eq!(
             tracking_after_reseed
-                .try_get::<i32, _>("review_round")
+                .try_get::<i64, _>("review_round")
                 .expect("decode reseeded review round"),
             2
         );
         assert_eq!(
             tracking_after_reseed
-                .try_get::<i32, _>("retry_count")
+                .try_get::<i64, _>("retry_count")
                 .expect("decode reseeded retry count"),
             0
         );

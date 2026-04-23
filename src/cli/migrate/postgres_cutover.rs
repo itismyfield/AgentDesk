@@ -6909,7 +6909,7 @@ mod tests {
         .await
         .expect("load imported outbox");
         assert_eq!(outbox_row.get::<String, _>("status"), "pending");
-        assert_eq!(outbox_row.get::<i32, _>("retry_count"), 2);
+        assert_eq!(outbox_row.get::<i64, _>("retry_count"), 2);
 
         let next_outbox_id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO dispatch_outbox (dispatch_id, action, status)
