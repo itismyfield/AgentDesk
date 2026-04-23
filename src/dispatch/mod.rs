@@ -53,6 +53,8 @@ pub use dispatch_status::{
 pub(crate) use dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, ensure_dispatch_status_reaction_outbox_on_conn,
     record_dispatch_status_event_on_conn, set_dispatch_status_on_conn,
+    set_dispatch_status_without_queue_sync_on_conn,
+    set_dispatch_status_without_queue_sync_with_backends,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -100,6 +102,15 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
     dispatch_id: &str,
     reason: Option<&str>,
 ) -> libsql_rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM auto_queue_entries
+         WHERE dispatch_id = ?1 AND status IN ('pending', 'dispatched')",
+    )?;
+    let entry_ids: Vec<String> = stmt
+        .query_map([dispatch_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
     let cancel_payload = reason.map(|reason| json!({ "reason": reason }));
     let cancelled = if let Some(payload) = cancel_payload.as_ref() {
         set_dispatch_status_on_conn(
@@ -144,15 +155,6 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
         dispatch_status.as_deref(),
         Some("cancelled") | Some("failed")
     ) {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM auto_queue_entries
-             WHERE dispatch_id = ?1 AND status IN ('pending', 'dispatched')",
-        )?;
-        let entry_ids: Vec<String> = stmt
-            .query_map([dispatch_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
-
         // #815: user / external explicit stops must move the entry to a
         // non-dispatchable terminal status so the next auto-queue tick does
         // not immediately re-dispatch the same entry. System cancels (retry
@@ -418,20 +420,36 @@ pub fn cancel_active_dispatches_for_card_on_conn(
         reason.map(|reason| json!({ "reason": reason, "completion_source": "force_transition" }));
     let mut cancelled = 0usize;
     for dispatch_id in live_dispatch_ids {
-        cancelled += set_dispatch_status_on_conn(
-            conn,
-            &dispatch_id,
-            "cancelled",
-            cancel_payload.as_ref(),
-            "force_transition",
-            Some(&["pending", "dispatched"]),
-            false,
-        )
-        .map_err(|e| {
-            libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
-                e.to_string(),
-            )))
-        })?;
+        cancelled += match cancel_payload.as_ref() {
+            Some(payload) => set_dispatch_status_without_queue_sync_on_conn(
+                conn,
+                &dispatch_id,
+                "cancelled",
+                Some(payload),
+                "cancel_dispatch",
+                Some(&["pending", "dispatched"]),
+                false,
+            )
+            .map_err(|error| {
+                libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                    error.to_string(),
+                )))
+            })?,
+            None => set_dispatch_status_without_queue_sync_on_conn(
+                conn,
+                &dispatch_id,
+                "cancelled",
+                None,
+                "cancel_dispatch",
+                Some(&["pending", "dispatched"]),
+                false,
+            )
+            .map_err(|error| {
+                libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                    error.to_string(),
+                )))
+            })?,
+        };
     }
     Ok(cancelled)
 }

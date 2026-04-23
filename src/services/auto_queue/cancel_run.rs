@@ -386,13 +386,18 @@ pub(crate) fn cancel_live_dispatches_for_runs(
     reason: &str,
 ) -> usize {
     let dispatch_ids = load_live_dispatch_ids_for_runs(conn, run_ids).unwrap_or_default();
+    let cancel_payload = json!({ "reason": reason });
     dispatch_ids
         .into_iter()
         .map(|dispatch_id| {
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+            crate::dispatch::set_dispatch_status_without_queue_sync_on_conn(
                 conn,
                 &dispatch_id,
-                Some(reason),
+                "cancelled",
+                Some(&cancel_payload),
+                "cancel_dispatch",
+                Some(&["pending", "dispatched"]),
+                false,
             )
             .unwrap_or(0)
         })
@@ -566,6 +571,61 @@ pub(crate) fn clear_sessions_for_dispatches(
         )?;
     }
     Ok(cleared_sessions)
+}
+
+pub(crate) fn skip_dispatched_entries_for_runs(
+    conn: &libsql_rusqlite::Connection,
+    run_ids: &[String],
+    trigger_source: &str,
+) -> usize {
+    if run_ids.is_empty() {
+        return 0;
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE run_id IN ({placeholders})
+           AND status = 'dispatched'
+         ORDER BY id ASC"
+    );
+    let entry_ids: Vec<String> = conn
+        .prepare(&sql)
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(libsql_rusqlite::params_from_iter(run_ids.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+        })
+        .unwrap_or_default();
+
+    let mut skipped = 0usize;
+    for entry_id in entry_ids {
+        match crate::db::auto_queue::update_entry_status_on_conn(
+            conn,
+            &entry_id,
+            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
+            trigger_source,
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+        ) {
+            Ok(result) if result.changed => skipped += 1,
+            Ok(_) => {}
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "pause_skip_entry_failed",
+                AutoQueueLogContext::new().entry(&entry_id),
+                "[auto-queue] failed to skip dispatched entry {entry_id}: {error}"
+            ),
+        }
+    }
+
+    skipped
 }
 
 pub(crate) fn cancel_and_release_runs_with_conn(
@@ -783,14 +843,20 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
     reason: &str,
 ) -> Result<usize, String> {
     let dispatch_ids = load_live_dispatch_ids_for_runs_pg(pool, run_ids).await?;
+    let cancel_payload = json!({ "reason": reason });
     let mut cancelled = 0usize;
     for dispatch_id in dispatch_ids {
-        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-            pool,
+        cancelled += crate::dispatch::set_dispatch_status_without_queue_sync_with_backends(
+            None,
+            Some(pool),
             &dispatch_id,
-            Some(reason),
+            "cancelled",
+            Some(&cancel_payload),
+            "cancel_dispatch",
+            Some(&["pending", "dispatched"]),
+            false,
         )
-        .await?;
+        .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?;
     }
     Ok(cancelled)
 }
@@ -1442,6 +1508,46 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         response["warning"] = json!(warning);
     }
     Ok(response)
+}
+
+pub(crate) async fn skip_dispatched_entries_for_runs_pg(
+    pool: &PgPool,
+    run_ids: &[String],
+    trigger_source: &str,
+) -> Result<usize, String> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let entry_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE run_id = ANY($1)
+           AND status = 'dispatched'
+         ORDER BY id ASC",
+    )
+    .bind(run_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres dispatched entries for pause: {error}"))?;
+
+    let mut skipped = 0usize;
+    for entry_id in entry_ids {
+        match transition_entry_to_skipped_pg(pool, &entry_id, trigger_source).await {
+            Ok(true) => skipped += 1,
+            Ok(false) => {}
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "pause_skip_entry_pg_failed",
+                AutoQueueLogContext::new().entry(&entry_id),
+                "[auto-queue] failed to skip postgres dispatched entry {}: {}",
+                entry_id,
+                error
+            ),
+        }
+    }
+
+    Ok(skipped)
 }
 
 pub(crate) async fn cancel_with_pg(

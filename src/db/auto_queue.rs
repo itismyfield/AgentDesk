@@ -1516,7 +1516,9 @@ pub fn rebind_slot_for_group_agent(
     agent_id: &str,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    // SQLite-only compatibility path: PG auto-queue slot ownership is
+    // authoritative when a pool exists, but legacy no-PG routes/tests still
+    // need deterministic slot rebinding behavior.
     ensure_agent_slot_rows(conn, run_id, agent_id)?;
 
     let slot_updated = conn.execute(
@@ -1527,7 +1529,7 @@ pub fn rebind_slot_for_group_agent(
          WHERE agent_id = ?3
            AND slot_index = ?4
            AND (assigned_run_id IS NULL OR assigned_run_id = ?1)",
-        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
     )?;
     if slot_updated == 0 {
         return Ok(0);
@@ -1593,7 +1595,7 @@ fn bind_slot_index_for_group_entries(
     thread_group: i64,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    // SQLite-only compatibility path for the legacy no-PG runtime.
     conn.execute(
         "UPDATE auto_queue_entries
          SET slot_index = ?1
@@ -1602,7 +1604,7 @@ fn bind_slot_index_for_group_entries(
            AND COALESCE(thread_group, 0) = ?4
            AND status IN ('pending', 'dispatched')
            AND (slot_index IS NULL OR slot_index != ?1)",
-        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group],
     )
 }
 
@@ -1613,7 +1615,7 @@ pub fn release_slot_for_group_agent(
     agent_id: &str,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    // SQLite-only compatibility path for the legacy no-PG runtime.
     conn.execute(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -1623,7 +1625,7 @@ pub fn release_slot_for_group_agent(
            AND slot_index = ?2
            AND assigned_run_id = ?3
            AND COALESCE(assigned_thread_group, 0) = ?4",
-        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group],
     )
 }
 
