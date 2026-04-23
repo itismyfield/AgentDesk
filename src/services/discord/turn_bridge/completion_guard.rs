@@ -820,11 +820,22 @@ struct DispatchCompletionHints {
 }
 
 fn resolve_completion_target_repo(
+    dispatch_id: &str,
     context_raw: Option<&str>,
     fallback_repo: Option<String>,
 ) -> Option<String> {
     context_raw
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|raw| match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(
+                    dispatch_id = %dispatch_id,
+                    error = %error,
+                    "failed to parse postgres completion hint context JSON"
+                );
+                None
+            }
+        })
         .as_ref()
         .and_then(|value| value.get("target_repo"))
         .and_then(|value| value.as_str())
@@ -883,7 +894,11 @@ fn lookup_dispatch_completion_hints(
                     (
                         issue_number,
                         dispatch_created_at,
-                        resolve_completion_target_repo(context_raw.as_deref(), fallback_repo),
+                        resolve_completion_target_repo(
+                            &dispatch_id_owned,
+                            context_raw.as_deref(),
+                            fallback_repo,
+                        ),
                     )
                 }))
             },
@@ -921,6 +936,7 @@ fn lookup_dispatch_completion_hints(
                 |row| {
                     let context_raw: Option<String> = row.get(2)?;
                     let target_repo = resolve_completion_target_repo(
+                        dispatch_id,
                         context_raw.as_deref(),
                         row.get::<_, Option<String>>(3).ok().flatten(),
                     );
@@ -1578,6 +1594,18 @@ mod tests {
         assert!(logs.contains("failed to decode postgres completion hint field"));
         assert!(logs.contains("dispatch_id=dispatch-1"));
         assert!(logs.contains("context"));
+    }
+
+    #[test]
+    fn resolve_completion_target_repo_logs_context_parse_failures() {
+        let fallback_repo = Some("agentdesk".to_string());
+        let (value, logs) = capture_logs(|| {
+            resolve_completion_target_repo("dispatch-1", Some("{not-json"), fallback_repo.clone())
+        });
+
+        assert_eq!(value, fallback_repo);
+        assert!(logs.contains("failed to parse postgres completion hint context JSON"));
+        assert!(logs.contains("dispatch_id=dispatch-1"));
     }
 
     #[test]

@@ -49,7 +49,7 @@ Initial pass did not surface a clear production PG site still decoding raw `TIME
 | --- | --- | --- |
 | `src/server/routes/offices.rs:479-480,657-658` | `hardened` | Office-agent PG routes now log lookup failures and return `500` instead of silently degrading `office_exists_pg(...)` errors into office-not-found behavior. |
 | `src/dispatch/dispatch_context.rs:1516-1519,1539-1544` | `hardened` | Card issue / PR lookup helpers still fall back to `None`, but PG fetch/decode failures now emit `tracing::warn!` instead of disappearing behind `.await.ok().flatten()`. |
-| `src/services/discord/turn_bridge/completion_guard.rs:850-857` | `hardened` | PG completion-hint loading now logs both query failures and per-column decode failures before falling back to the SQLite/no-hints path. |
+| `src/services/discord/turn_bridge/completion_guard.rs:822-894` | `hardened` | PG completion-hint loading now logs query failures, per-column decode failures, and malformed `td.context` JSON before falling back to the SQLite/no-hints path. |
 | `src/engine/ops/cards_ops.rs:652-655` | `hardened` | Invalid card JSON still becomes `Value::Null` for compatibility, but malformed payloads now emit `tracing::warn!`; the fallback is no longer silent. |
 | `src/services/retrospectives.rs:242-243,465-466,617-618` | `hardened` | Retrospective result decoding still preserves a string fallback for malformed JSON, but the malformed payload is now observable via `tracing::warn!`. |
 | `src/services/message_outbox.rs:128-150,226-236` | `hardened` | Best-effort PG enqueue failures still return `false`, but warning logs now carry backend / reason-code / session-key context so the fallback path is observable. |
