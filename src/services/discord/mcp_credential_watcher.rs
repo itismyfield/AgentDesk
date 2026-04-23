@@ -18,15 +18,225 @@
 //! do not persist this across restarts because the cooldown is short (5min default)
 //! and re-notification after a restart is harmless.
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use dashmap::DashMap;
+use notify::EventKind;
 use poise::serenity_prelude::ChannelId;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::SharedData;
+
+#[derive(Debug, Clone)]
+struct CredentialChange {
+    path: PathBuf,
+    kind: EventKind,
+    timestamp: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileSnapshot {
+    Config(String),
+    CredentialsPresent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpConfigDiff {
+    added: Vec<String>,
+    removed: Vec<String>,
+    changed: Vec<String>,
+}
+
+impl McpConfigDiff {
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileChangeSummary {
+    Config { file: String, diff: McpConfigDiff },
+    Credentials { file: String, detail: &'static str },
+}
+
+impl FileChangeSummary {
+    fn render(&self) -> String {
+        match self {
+            Self::Config { file, diff } => {
+                let mut parts = Vec::new();
+                if !diff.added.is_empty() {
+                    parts.push(prefix_names("+", &diff.added));
+                }
+                if !diff.removed.is_empty() {
+                    parts.push(prefix_names("-", &diff.removed));
+                }
+                if !diff.changed.is_empty() {
+                    parts.push(prefix_names("변경 ", &diff.changed));
+                }
+                format!("{file}: {}", parts.join(", "))
+            }
+            Self::Credentials { file, detail } => format!("{file}: {detail}"),
+        }
+    }
+}
+
+fn prefix_names(prefix: &str, names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("{prefix}{name}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn snapshot_existing_files(paths: &[PathBuf]) -> HashMap<PathBuf, Option<FileSnapshot>> {
+    paths
+        .iter()
+        .map(|path| (path.clone(), snapshot_file(path).unwrap_or(None)))
+        .collect()
+}
+
+fn snapshot_file(path: &Path) -> std::io::Result<Option<FileSnapshot>> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            if is_credentials_file(path) {
+                Ok(Some(FileSnapshot::CredentialsPresent))
+            } else {
+                Ok(Some(FileSnapshot::Config(canonical_mcp_config(&contents))))
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_credentials_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".credentials.json")
+}
+
+fn canonical_mcp_config(contents: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(contents) else {
+        return "{}".to_string();
+    };
+    let entries = extract_mcp_server_entries(&value);
+    serde_json::to_string(&entries).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn extract_mcp_server_entries(value: &Value) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    for key in ["mcpServers", "mcp_servers"] {
+        let Some(servers) = value.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, server_config) in servers {
+            let rendered =
+                serde_json::to_string(server_config).unwrap_or_else(|_| "null".to_string());
+            entries.insert(name.clone(), rendered);
+        }
+    }
+    entries
+}
+
+fn parse_config_snapshot(snapshot: Option<&FileSnapshot>) -> BTreeMap<String, String> {
+    let Some(FileSnapshot::Config(config)) = snapshot else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str::<BTreeMap<String, String>>(config).unwrap_or_default()
+}
+
+fn diff_mcp_config(
+    previous: Option<&FileSnapshot>,
+    current: Option<&FileSnapshot>,
+) -> McpConfigDiff {
+    let previous = parse_config_snapshot(previous);
+    let current = parse_config_snapshot(current);
+    let previous_names = previous.keys().cloned().collect::<BTreeSet<_>>();
+    let current_names = current.keys().cloned().collect::<BTreeSet<_>>();
+
+    let added = current_names
+        .difference(&previous_names)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = previous_names
+        .difference(&current_names)
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed = current_names
+        .intersection(&previous_names)
+        .filter(|name| previous.get(*name) != current.get(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    McpConfigDiff {
+        added,
+        removed,
+        changed,
+    }
+}
+
+fn summarize_change(
+    path: &Path,
+    previous: Option<&FileSnapshot>,
+    current: Option<&FileSnapshot>,
+) -> Option<FileChangeSummary> {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("credential file")
+        .to_string();
+    if is_credentials_file(path) {
+        let detail = match (previous, current) {
+            (None, Some(FileSnapshot::CredentialsPresent)) => "created",
+            (Some(FileSnapshot::CredentialsPresent), None) => "removed",
+            (Some(FileSnapshot::CredentialsPresent), Some(FileSnapshot::CredentialsPresent)) => {
+                "updated"
+            }
+            _ => return None,
+        };
+        return Some(FileChangeSummary::Credentials { file, detail });
+    }
+
+    let diff = diff_mcp_config(previous, current);
+    if diff.is_empty() {
+        return None;
+    }
+    Some(FileChangeSummary::Config { file, diff })
+}
+
+fn build_notification_from_changes(
+    changes: &[CredentialChange],
+    snapshots: &mut HashMap<PathBuf, Option<FileSnapshot>>,
+    notify_message: &str,
+) -> Option<String> {
+    let mut changed_paths = BTreeSet::new();
+    for change in changes {
+        let _ = &change.kind;
+        let _ = change.timestamp;
+        changed_paths.insert(change.path.clone());
+    }
+
+    let mut summaries = Vec::new();
+    for path in changed_paths {
+        let previous = snapshots.get(&path).cloned().flatten();
+        let current = snapshot_file(&path).unwrap_or(None);
+        snapshots.insert(path.clone(), current.clone());
+        if let Some(summary) = summarize_change(&path, previous.as_ref(), current.as_ref()) {
+            summaries.push(summary.render());
+        }
+    }
+
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(format!("{notify_message} ({})", summaries.join("; ")))
+    }
+}
 
 /// In-memory per-channel cooldown tracker — skip notifying a channel if it was
 /// notified within the dedupe window.
@@ -131,9 +341,10 @@ pub(super) fn spawn_watcher(
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<CredentialChange>();
     let watch_dirs_for_thread = watch_dirs.clone();
     let paths_for_filter = paths.clone();
+    let paths_for_snapshots = paths.clone();
 
     // Notify watcher runs on its own OS thread (the notify crate uses sync callbacks).
     std::thread::Builder::new()
@@ -153,14 +364,23 @@ pub(super) fn spawn_watcher(
                     ) {
                         return;
                     }
-                    let touched_credential = event.paths.iter().any(|path| {
-                        paths_for_filter.iter().any(|target| {
-                            path.file_name() == target.file_name()
-                                && path.parent() == target.parent()
+                    let changed_paths = event
+                        .paths
+                        .iter()
+                        .filter_map(|path| {
+                            paths_for_filter.iter().find(|target| {
+                                path.file_name() == target.file_name()
+                                    && path.parent() == target.parent()
+                            })
                         })
-                    });
-                    if touched_credential {
-                        let _ = watcher_tx.send(());
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for path in changed_paths {
+                        let _ = watcher_tx.send(CredentialChange {
+                            path,
+                            kind: event.kind.clone(),
+                            timestamp: SystemTime::now(),
+                        });
                     }
                 }) {
                     Ok(w) => w,
@@ -210,20 +430,27 @@ pub(super) fn spawn_watcher(
     // Async consumer: debounce + dispatch notifications.
     let dedupe = Arc::new(CredentialNotifyDedupe::new());
     tokio::spawn(async move {
+        let mut snapshots = snapshot_existing_files(&paths_for_snapshots);
         let debounce = Duration::from_millis(750);
         loop {
             // Wait for an event.
-            if rx.recv().await.is_none() {
+            let Some(first_change) = rx.recv().await else {
                 return;
-            }
+            };
             // Drain any backlog inside the debounce window so we send at most one
             // notification per burst of file events (e.g. credential rotation that
             // touches both files in quick succession).
             tokio::time::sleep(debounce).await;
-            while rx.try_recv().is_ok() {}
+            let mut changes = vec![first_change];
+            while let Ok(change) = rx.try_recv() {
+                changes.push(change);
+            }
 
             tracing::info!("MCP credential change detected — notifying active Claude sessions");
-            broadcast_credential_change(&shared, &dedupe, dedupe_window, notify_message).await;
+            let notification =
+                build_notification_from_changes(&changes, &mut snapshots, notify_message)
+                    .unwrap_or_else(|| notify_message.to_string());
+            broadcast_credential_change(&shared, &dedupe, dedupe_window, &notification).await;
         }
     });
 }
@@ -275,10 +502,12 @@ async fn broadcast_credential_change(
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialNotifyDedupe, credential_paths_with_overrides};
+    use super::*;
+    use notify::event::{CreateKind, ModifyKind};
     use poise::serenity_prelude::ChannelId;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
+    use tempfile::tempdir;
 
     #[test]
     fn credential_paths_covers_top_level_config_and_dot_claude_files() {

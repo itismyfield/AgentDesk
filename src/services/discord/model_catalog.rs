@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::Deserialize;
@@ -84,6 +84,12 @@ const CLAUDE_MODEL_CATALOG: &[ModelCatalogEntry] = &[
 ];
 
 const CODEX_MODEL_CATALOG: &[ModelCatalogEntry] = &[
+    ModelCatalogEntry {
+        value: "gpt-5.5",
+        label: "GPT-5.5",
+        primary_summary: "Frontier complex work",
+        secondary_summary: "Local CLI catalog",
+    },
     ModelCatalogEntry {
         value: "gpt-5.4",
         label: "gpt-5.4",
@@ -191,10 +197,24 @@ const GEMINI_MODEL_CATALOG: &[ModelCatalogEntry] = &[
     },
 ];
 
-static CODEX_MODEL_CATALOG_DYNAMIC: OnceLock<Vec<ModelCatalogEntry>> = OnceLock::new();
-static GEMINI_MODEL_CATALOG_DYNAMIC: OnceLock<Vec<ModelCatalogEntry>> = OnceLock::new();
+static CODEX_MODEL_CATALOG_DYNAMIC: OnceLock<Mutex<FileBackedCatalogCache>> = OnceLock::new();
+static GEMINI_MODEL_CATALOG_DYNAMIC: OnceLock<Mutex<FileBackedCatalogCache>> = OnceLock::new();
 static QWEN_MODEL_CATALOG_CACHE: OnceLock<Mutex<HashMap<String, QwenResolvedCatalog>>> =
     OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileBackedCatalogCacheKey {
+    path: PathBuf,
+    modified_secs: u64,
+    modified_nanos: u32,
+    len: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FileBackedCatalogCache {
+    key: Option<FileBackedCatalogCacheKey>,
+    entries: Vec<ModelCatalogEntry>,
+}
 
 #[derive(Debug, Deserialize)]
 struct CodexModelsCache {
@@ -268,6 +288,10 @@ fn codex_catalog_summary(model: &str) -> CatalogSummary {
         "gpt-5.4" => CatalogSummary {
             primary: "Frontier coding baseline",
             secondary: "API $2.5/$15",
+        },
+        "gpt-5.5" => CatalogSummary {
+            primary: "Frontier complex work",
+            secondary: "Local CLI catalog",
         },
         "gpt-5.4-mini" => CatalogSummary {
             primary: "Fast strong mini",
@@ -360,14 +384,61 @@ fn gemini_catalog_summary(model: &str) -> CatalogSummary {
     }
 }
 
+fn file_backed_catalog_cache_key(path: PathBuf) -> Option<FileBackedCatalogCacheKey> {
+    let metadata = fs::metadata(&path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or(Duration::ZERO);
+    Some(FileBackedCatalogCacheKey {
+        path,
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+        len: metadata.len(),
+    })
+}
+
+fn build_file_backed_catalog(
+    cache: &'static OnceLock<Mutex<FileBackedCatalogCache>>,
+    path: Option<PathBuf>,
+    fallback: &[ModelCatalogEntry],
+    parse: fn(&str) -> Option<Vec<ModelCatalogEntry>>,
+) -> Vec<ModelCatalogEntry> {
+    let Some(path) = path else {
+        return fallback.to_vec();
+    };
+    let Some(cache_key) = file_backed_catalog_cache_key(path) else {
+        return fallback.to_vec();
+    };
+
+    let cache_cell = cache.get_or_init(|| Mutex::new(FileBackedCatalogCache::default()));
+    if let Ok(cached) = cache_cell.lock() {
+        if cached.key.as_ref() == Some(&cache_key) {
+            return cached.entries.clone();
+        }
+    }
+
+    let entries = fs::read_to_string(&cache_key.path)
+        .ok()
+        .and_then(|raw| parse(&raw))
+        .unwrap_or_else(|| fallback.to_vec());
+
+    if let Ok(mut cached) = cache_cell.lock() {
+        cached.key = Some(cache_key);
+        cached.entries = entries.clone();
+    }
+
+    entries
+}
+
 fn build_codex_model_catalog() -> Vec<ModelCatalogEntry> {
-    let Some(path) = codex_model_cache_path() else {
-        return CODEX_MODEL_CATALOG.to_vec();
-    };
-    let Ok(raw) = fs::read_to_string(path) else {
-        return CODEX_MODEL_CATALOG.to_vec();
-    };
-    build_codex_model_catalog_from_cache(&raw).unwrap_or_else(|| CODEX_MODEL_CATALOG.to_vec())
+    build_file_backed_catalog(
+        &CODEX_MODEL_CATALOG_DYNAMIC,
+        codex_model_cache_path(),
+        CODEX_MODEL_CATALOG,
+        build_codex_model_catalog_from_cache,
+    )
 }
 
 fn build_codex_model_catalog_from_cache(raw: &str) -> Option<Vec<ModelCatalogEntry>> {
@@ -449,13 +520,12 @@ fn gemini_display_label(model: &str) -> String {
 }
 
 fn build_gemini_model_catalog() -> Vec<ModelCatalogEntry> {
-    let Some(path) = gemini_models_js_path() else {
-        return GEMINI_MODEL_CATALOG.to_vec();
-    };
-    let Ok(raw) = fs::read_to_string(path) else {
-        return GEMINI_MODEL_CATALOG.to_vec();
-    };
-    build_gemini_model_catalog_from_models_js(&raw).unwrap_or_else(|| GEMINI_MODEL_CATALOG.to_vec())
+    build_file_backed_catalog(
+        &GEMINI_MODEL_CATALOG_DYNAMIC,
+        gemini_models_js_path(),
+        GEMINI_MODEL_CATALOG,
+        build_gemini_model_catalog_from_models_js,
+    )
 }
 
 fn build_gemini_model_catalog_from_models_js(raw: &str) -> Option<Vec<ModelCatalogEntry>> {
@@ -732,7 +802,7 @@ pub(crate) fn resolved_models(
 ) -> Vec<ModelCatalogEntry> {
     match provider {
         ProviderKind::Qwen => resolve_qwen_model_catalog(working_dir).entries,
-        _ => known_models(provider).to_vec(),
+        _ => known_models(provider),
     }
 }
 
@@ -751,8 +821,12 @@ pub(in crate::services::discord) fn model_hint(
 ) -> String {
     match provider {
         ProviderKind::Claude => "default + curated Claude models + custom model id".to_string(),
-        ProviderKind::Codex => "default + curated Codex models + custom model id".to_string(),
-        ProviderKind::Gemini => "default + curated Gemini models + custom model id".to_string(),
+        ProviderKind::Codex => {
+            "default + models resolved from local Codex catalog + custom model id".to_string()
+        }
+        ProviderKind::Gemini => {
+            "default + models resolved from local Gemini catalog + custom model id".to_string()
+        }
         ProviderKind::Qwen => {
             let catalog = resolve_qwen_model_catalog(working_dir);
             if catalog.entries.is_empty() {
@@ -765,17 +839,13 @@ pub(in crate::services::discord) fn model_hint(
     }
 }
 
-pub(crate) fn known_models(provider: &ProviderKind) -> &'static [ModelCatalogEntry] {
+pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
     match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_CATALOG,
-        ProviderKind::Codex => CODEX_MODEL_CATALOG_DYNAMIC
-            .get_or_init(build_codex_model_catalog)
-            .as_slice(),
-        ProviderKind::Gemini => GEMINI_MODEL_CATALOG_DYNAMIC
-            .get_or_init(build_gemini_model_catalog)
-            .as_slice(),
-        ProviderKind::Qwen => &[],
-        ProviderKind::Unsupported(_) => &[],
+        ProviderKind::Claude => CLAUDE_MODEL_CATALOG.to_vec(),
+        ProviderKind::Codex => build_codex_model_catalog(),
+        ProviderKind::Gemini => build_gemini_model_catalog(),
+        ProviderKind::Qwen => Vec::new(),
+        ProviderKind::Unsupported(_) => Vec::new(),
     }
 }
 
@@ -791,11 +861,10 @@ fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static s
 
 fn canonical_known_model(provider: &ProviderKind, raw: &str) -> Option<&'static str> {
     let trimmed = raw.trim();
-    if let Some(entry) = known_models(provider)
-        .iter()
-        .find(|entry| entry.value.eq_ignore_ascii_case(trimmed))
-    {
-        return Some(entry.value);
+    for entry in known_models(provider) {
+        if entry.value.eq_ignore_ascii_case(trimmed) {
+            return Some(entry.value);
+        }
     }
 
     model_aliases(provider)
@@ -865,6 +934,45 @@ mod tests {
 
     use super::{build_codex_model_catalog_from_cache, build_gemini_model_catalog_from_models_js};
 
+    fn with_temp_model_catalog_home<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let _guard = super::super::runtime_store::lock_test_env();
+        let temp_home = TempDir::new().unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_test_home = std::env::var_os("AGENTDESK_TEST_HOME");
+
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
+            std::env::set_var("AGENTDESK_TEST_HOME", temp_home.path());
+        }
+
+        f(&temp_home);
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        match prev_test_home {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_TEST_HOME") },
+        }
+    }
+
+    fn write_codex_models_cache(home: &TempDir, raw: &str) {
+        let codex_dir = home.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(codex_dir.join("models_cache.json"), raw).unwrap();
+    }
+
     fn with_temp_qwen_env<F>(f: F)
     where
         F: FnOnce(&TempDir, &TempDir),
@@ -916,6 +1024,7 @@ mod tests {
         let raw = r#"{
           "models": [
             { "slug": "gpt-5.4", "display_name": "gpt-5.4", "visibility": "list" },
+            { "slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list" },
             { "slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini", "visibility": "list" },
             { "slug": "gpt-5.1", "display_name": "gpt-5.1", "visibility": "hide" },
             { "slug": "gpt-5.3-codex-spark", "display_name": "GPT-5.3-Codex-Spark", "visibility": "list" }
@@ -925,12 +1034,46 @@ mod tests {
         let catalog = build_codex_model_catalog_from_cache(raw).expect("catalog");
         assert_eq!(catalog[0].value, "gpt-5.4");
         assert_eq!(catalog[0].label, "gpt-5.4");
-        assert_eq!(catalog[1].label, "GPT-5.4-Mini");
+        assert_eq!(catalog[1].value, "gpt-5.5");
+        assert_eq!(catalog[1].label, "GPT-5.5");
+        assert_eq!(catalog[2].label, "GPT-5.4-Mini");
         assert_eq!(
-            catalog[2].picker_description(),
+            catalog[3].picker_description(),
             "Text-only preview | No API"
         );
         assert!(!catalog.iter().any(|entry| entry.value == "gpt-5.1"));
+    }
+
+    #[test]
+    fn codex_known_models_reloads_when_local_cache_changes() {
+        with_temp_model_catalog_home(|home| {
+            write_codex_models_cache(
+                home,
+                r#"{
+                  "models": [
+                    { "slug": "gpt-5.4", "display_name": "gpt-5.4", "visibility": "list" }
+                  ]
+                }"#,
+            );
+            assert!(
+                super::known_models(&ProviderKind::Codex)
+                    .iter()
+                    .any(|entry| entry.value == "gpt-5.4")
+            );
+
+            write_codex_models_cache(
+                home,
+                r#"{
+                  "models": [
+                    { "slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list" },
+                    { "slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini", "visibility": "list" }
+                  ]
+                }"#,
+            );
+            let catalog = super::known_models(&ProviderKind::Codex);
+            assert!(catalog.iter().any(|entry| entry.value == "gpt-5.5"));
+            assert!(!catalog.iter().any(|entry| entry.value == "gpt-5.4"));
+        });
     }
 
     #[test]

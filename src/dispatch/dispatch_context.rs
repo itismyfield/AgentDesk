@@ -99,6 +99,10 @@ pub(crate) fn dispatch_type_force_new_session_default(dispatch_type: Option<&str
         .map(|strategy| strategy.reset_provider_state)
 }
 
+pub(crate) fn dispatch_type_requires_fresh_worktree(dispatch_type: Option<&str>) -> bool {
+    matches!(dispatch_type, Some("implementation" | "rework"))
+}
+
 pub(crate) fn dispatch_type_uses_thread_routing(dispatch_type: Option<&str>) -> bool {
     !matches!(dispatch_type, Some("phase-gate"))
 }
