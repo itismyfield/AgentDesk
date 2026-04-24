@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Agent, CliProvider, Department } from "../../types";
 import type { Translator } from "./types";
 import { localeName } from "../../i18n";
 import * as api from "../../api";
+import {
+  dryRunSetupAgent,
+  dryRunDuplicateAgent,
+  summarizeRollback,
+} from "../../api/agentsSetup";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -12,6 +17,15 @@ import {
 } from "../common/SurfacePrimitives";
 import AgentPromptEditor from "./AgentPromptEditor";
 import { CLI_PROVIDERS } from "./constants";
+import {
+  WIZARD_STEPS,
+  buildSetupBody,
+  buildDuplicateBody,
+  detectProviderSuffix,
+  parseSkills,
+  validateAllSteps,
+  type WizardDraft,
+} from "./setupWizardHelpers";
 
 type WizardMode = "create" | "duplicate";
 
@@ -26,28 +40,7 @@ interface AgentSetupWizardProps {
   onDone: () => void;
 }
 
-interface WizardDraft {
-  agentId: string;
-  name: string;
-  nameKo: string;
-  departmentId: string;
-  provider: CliProvider;
-  channelId: string;
-  promptTemplatePath: string;
-  promptContent: string;
-  skillsText: string;
-  cronEnabled: boolean;
-  cronSpec: string;
-}
-
-const steps = [
-  "role",
-  "discord",
-  "prompt",
-  "workspace",
-  "cron",
-  "preview",
-] as const;
+const steps = WIZARD_STEPS;
 
 const inputClass =
   "w-full rounded-2xl border px-3 py-2 text-sm outline-none transition-shadow focus:ring-2 focus:ring-blue-500/30";
@@ -74,13 +67,6 @@ function buildDefaultDraft(sourceAgent?: Agent | null): WizardDraft {
     cronEnabled: false,
     cronSpec: "0 9 * * 1-5",
   };
-}
-
-function parseSkills(skillsText: string): string[] {
-  return skillsText
-    .split(/[\n,]/)
-    .map((skill) => skill.trim())
-    .filter(Boolean);
 }
 
 function labelForStep(step: (typeof steps)[number], tr: Translator): string {
@@ -113,81 +99,168 @@ export default function AgentSetupWizard({
   const [stepIndex, setStepIndex] = useState(0);
   const [draft, setDraft] = useState<WizardDraft>(() => buildDefaultDraft(sourceAgent));
   const [preview, setPreview] = useState<api.AgentSetupResponse | null>(null);
+  const [liveValidation, setLiveValidation] = useState<api.AgentSetupResponse | null>(null);
+  const [liveValidationError, setLiveValidationError] = useState<string | null>(null);
+  const [validating, setValidating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rollback, setRollback] = useState<unknown>(null);
+  const [providerAuto, setProviderAuto] = useState<string | null>(null);
+  const [channelName, setChannelName] = useState<string | null>(null);
+  const providerTouchedRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
     setStepIndex(0);
     setDraft(buildDefaultDraft(sourceAgent));
     setPreview(null);
+    setLiveValidation(null);
+    setLiveValidationError(null);
     setError(null);
+    setRollback(null);
+    setProviderAuto(null);
+    setChannelName(null);
+    providerTouchedRef.current = false;
   }, [open, sourceAgent]);
 
-  const validationByStep = useMemo(() => {
-    const agentIdValid = /^[a-zA-Z0-9_-]{2,64}$/.test(draft.agentId.trim());
-    const channelValid = /^\d{10,32}$/.test(draft.channelId.trim());
-    const promptPathValid =
-      mode === "duplicate" || draft.promptTemplatePath.trim().length > 0;
-    const cronValid =
-      !draft.cronEnabled || draft.cronSpec.trim().split(/\s+/).length >= 5;
+  // Debounced Discord channel lookup — triggers provider suffix auto-detection
+  // using the channel *name* if we can resolve it; falls back to agent_id.
+  useEffect(() => {
+    if (!open) return;
+    const channelId = draft.channelId.trim();
+    if (!/^\d{10,32}$/.test(channelId)) {
+      setChannelName(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api
+        .getDiscordChannelInfo(channelId)
+        .then((info) => {
+          if (!cancelled) setChannelName(info.name ?? null);
+        })
+        .catch(() => {
+          if (!cancelled) setChannelName(null);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [draft.channelId, open]);
 
-    return [
-      agentIdValid && draft.name.trim().length > 0,
-      channelValid,
-      promptPathValid,
-      draft.provider.trim().length > 0,
-      cronValid,
-      agentIdValid && channelValid && promptPathValid && cronValid,
-    ];
-  }, [draft, mode]);
+  // Provider suffix auto-recommendation (`-cc` → claude, `-cdx` → codex, ...)
+  useEffect(() => {
+    if (!open) return;
+    const detection = detectProviderSuffix(channelName, draft.agentId);
+    if (detection.provider && detection.suffix) {
+      setProviderAuto(
+        `${detection.suffix} → ${detection.provider} (${detection.source})`,
+      );
+      if (!providerTouchedRef.current && draft.provider !== detection.provider) {
+        setDraft((prev) => ({ ...prev, provider: detection.provider as CliProvider }));
+      }
+    } else {
+      setProviderAuto(null);
+    }
+  }, [channelName, draft.agentId, draft.provider, open]);
+
+  const validationResults = useMemo(
+    () => validateAllSteps(draft, mode),
+    [draft, mode],
+  );
+  const validationByStep = validationResults.map((r) => r.valid);
 
   const currentValid = validationByStep[stepIndex];
   const currentStep = steps[stepIndex];
 
-  const buildSetupBody = useCallback((dryRun: boolean): api.AgentSetupRequest => ({
-    agent_id: draft.agentId.trim(),
-    channel_id: draft.channelId.trim(),
-    provider: draft.provider,
-    prompt_template_path: draft.promptTemplatePath.trim(),
-    skills: parseSkills(draft.skillsText),
-    dry_run: dryRun,
-  }), [draft]);
-
-  const buildDuplicateBody = useCallback((dryRun: boolean): api.DuplicateAgentRequest => ({
-    new_agent_id: draft.agentId.trim(),
-    channel_id: draft.channelId.trim(),
-    provider: draft.provider,
-    name: draft.name.trim(),
-    name_ko: draft.nameKo.trim() || draft.name.trim(),
-    department_id: draft.departmentId || null,
-    skills: parseSkills(draft.skillsText),
-    dry_run: dryRun,
-  }), [draft]);
+  // Debounced dry-run validation (500ms) — fires whenever the draft changes and
+  // the core fields are structurally valid. Surfaces conflicts (duplicate
+  // agent_id, provider not installed, etc.) before the user hits Preview.
+  useEffect(() => {
+    if (!open) return;
+    const structurallyValid =
+      validationByStep[0] && validationByStep[1] && validationByStep[2];
+    if (!structurallyValid) {
+      setLiveValidation(null);
+      setLiveValidationError(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setValidating(true);
+      const request =
+        mode === "duplicate" && sourceAgent
+          ? dryRunDuplicateAgent(sourceAgent.id, buildDuplicateBody(draft, true))
+          : dryRunSetupAgent(buildSetupBody(draft, true));
+      request
+        .then((result) => {
+          if (cancelled) return;
+          setLiveValidation(result);
+          setLiveValidationError(null);
+        })
+        .catch((caught) => {
+          if (cancelled) return;
+          setLiveValidation(null);
+          setLiveValidationError(
+            caught instanceof Error ? caught.message : String(caught),
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setValidating(false);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // We intentionally depend on individual draft fields (via JSON below) so
+    // updates to any field re-run the dry-run check.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    open,
+    mode,
+    sourceAgent,
+    draft.agentId,
+    draft.channelId,
+    draft.provider,
+    draft.promptTemplatePath,
+    draft.skillsText,
+    validationByStep[0],
+    validationByStep[1],
+    validationByStep[2],
+  ]);
 
   const runPreview = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setRollback(null);
     try {
       const result =
         mode === "duplicate" && sourceAgent
-          ? await api.duplicateAgent(sourceAgent.id, buildDuplicateBody(true))
-          : await api.setupAgent(buildSetupBody(true));
+          ? await api.duplicateAgent(sourceAgent.id, buildDuplicateBody(draft, true))
+          : await api.setupAgent(buildSetupBody(draft, true));
       setPreview(result);
+      if (result.rollback) setRollback(result.rollback);
     } catch (caught) {
       setPreview(null);
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy(false);
     }
-  }, [buildDuplicateBody, buildSetupBody, mode, sourceAgent]);
+  }, [draft, mode, sourceAgent]);
 
   const runConfirm = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setRollback(null);
     try {
       if (mode === "duplicate" && sourceAgent) {
-        await api.duplicateAgent(sourceAgent.id, buildDuplicateBody(false));
+        const result = await api.duplicateAgent(
+          sourceAgent.id,
+          buildDuplicateBody(draft, false),
+        );
+        if (result.rollback) setRollback(result.rollback);
         if (draft.promptContent.trim()) {
           await api.updateAgent(draft.agentId.trim(), {
             prompt_content: draft.promptContent,
@@ -195,7 +268,8 @@ export default function AgentSetupWizard({
           });
         }
       } else {
-        await api.setupAgent(buildSetupBody(false));
+        const result = await api.setupAgent(buildSetupBody(draft, false));
+        if (result.rollback) setRollback(result.rollback);
         await api.updateAgent(draft.agentId.trim(), {
           name: draft.name.trim(),
           name_ko: draft.nameKo.trim() || draft.name.trim(),
@@ -208,10 +282,17 @@ export default function AgentSetupWizard({
       onDone();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      // If the thrown error carried rollback info (api request errors may
+      // stash the full body under .details), surface it.
+      const maybeDetails = (caught as { details?: unknown } | null)?.details;
+      if (maybeDetails && typeof maybeDetails === "object") {
+        const rb = (maybeDetails as { rollback?: unknown }).rollback;
+        if (rb) setRollback(rb);
+      }
     } finally {
       setBusy(false);
     }
-  }, [buildDuplicateBody, buildSetupBody, draft, mode, onDone, sourceAgent]);
+  }, [draft, mode, onDone, sourceAgent]);
 
   if (!open) return null;
 
@@ -356,7 +437,10 @@ export default function AgentSetupWizard({
                       </span>
                       <select
                         value={draft.provider}
-                        onChange={(event) => setDraft({ ...draft, provider: event.target.value as CliProvider })}
+                        onChange={(event) => {
+                          providerTouchedRef.current = true;
+                          setDraft({ ...draft, provider: event.target.value as CliProvider });
+                        }}
                         className={inputClass}
                         style={inputStyle}
                       >
@@ -364,8 +448,18 @@ export default function AgentSetupWizard({
                           <option key={provider} value={provider}>{provider}</option>
                         ))}
                       </select>
+                      {providerAuto && !providerTouchedRef.current && (
+                        <span className="mt-1 block text-[11px]" style={{ color: "var(--th-accent-primary)" }}>
+                          {tr("자동 추천", "Auto-detected")}: {providerAuto}
+                        </span>
+                      )}
                     </label>
                   </div>
+                  {channelName && (
+                    <p className="mt-3 text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                      {tr("채널 이름", "Channel name")}: <span style={{ color: "var(--th-text-primary)" }}>#{channelName}</span>
+                    </p>
+                  )}
                   {!validationByStep[1] && (
                     <p className="mt-3 text-xs" style={{ color: "var(--th-accent-danger)" }}>
                       {tr("Discord channel_id는 숫자 ID여야 합니다.", "Discord channel_id must be a numeric ID.")}
@@ -386,12 +480,46 @@ export default function AgentSetupWizard({
                       (promptTemplatePath) => setDraft({ ...draft, promptTemplatePath }),
                       "~/.adk/release/config/agents/_shared.prompt.md",
                     )}
-                    <AgentPromptEditor
-                      label={tr("프롬프트 본문", "Prompt content")}
-                      value={draft.promptContent}
-                      onChange={(promptContent) => setDraft({ ...draft, promptContent })}
-                      minHeight={320}
-                    />
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <AgentPromptEditor
+                        label={tr("프롬프트 본문", "Prompt content")}
+                        value={draft.promptContent}
+                        onChange={(promptContent) => setDraft({ ...draft, promptContent })}
+                        minHeight={320}
+                      />
+                      <SurfaceCard className="rounded-[24px] p-4">
+                        <div className="text-xs font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+                          {tr("_shared 병합 미리보기", "_shared merge preview")}
+                        </div>
+                        <p className="mt-2 text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                          {tr(
+                            "런타임은 아래 순서로 파일을 합쳐 최종 역할 프롬프트를 만듭니다.",
+                            "The runtime combines the files below in order to build the final role prompt.",
+                          )}
+                        </p>
+                        <ol className="mt-3 space-y-2 text-xs" style={{ color: "var(--th-text-primary)" }}>
+                          <li>
+                            <span className="font-mono" style={{ color: "var(--th-accent-primary)" }}>1.</span>{" "}
+                            <span className="font-mono">{draft.promptTemplatePath || "_shared.prompt.md"}</span>
+                            <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                              {tr("조직 공용 헤더 (설치 시 복사)", "org-wide shared header (copied on setup)")}
+                            </div>
+                          </li>
+                          <li>
+                            <span className="font-mono" style={{ color: "var(--th-accent-primary)" }}>2.</span>{" "}
+                            <span className="font-mono">agents/{draft.agentId || "{role_id}"}.prompt.md</span>
+                            <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                              {draft.promptContent.trim()
+                                ? tr(
+                                    `사용자 프롬프트 (${draft.promptContent.trim().length} 자)`,
+                                    `user prompt (${draft.promptContent.trim().length} chars)`,
+                                  )
+                                : tr("빈 상태 — 템플릿만 사용", "empty — template only")}
+                            </div>
+                          </li>
+                        </ol>
+                      </SurfaceCard>
+                    </div>
                   </div>
                 </SurfaceSubsection>
               )}
@@ -472,20 +600,102 @@ export default function AgentSetupWizard({
                         <div>provider: <span style={{ color: "var(--th-text-primary)" }}>{draft.provider}</span></div>
                         <div>prompt: <span style={{ color: "var(--th-text-primary)" }}>{mode === "duplicate" ? tr("원본 복사", "copy source") : draft.promptTemplatePath}</span></div>
                         <div>skills: <span style={{ color: "var(--th-text-primary)" }}>{parseSkills(draft.skillsText).join(", ") || "--"}</span></div>
+                        <div>
+                          {tr("실시간 검증", "Live validation")}:{" "}
+                          <span style={{ color: liveValidationError ? "var(--th-accent-danger)" : "var(--th-text-primary)" }}>
+                            {validating
+                              ? tr("확인 중...", "checking...")
+                              : liveValidationError
+                                ? tr("충돌 있음", "conflict")
+                                : liveValidation
+                                  ? tr("충돌 없음", "no conflict")
+                                  : "--"}
+                          </span>
+                        </div>
                       </div>
                     </SurfaceCard>
                     <SurfaceCard className="max-h-80 overflow-auto rounded-[24px] p-4">
-                      <pre className="whitespace-pre-wrap text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
-                        {preview ? JSON.stringify(preview, null, 2) : tr("아직 preview가 없습니다.", "No preview yet.")}
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
+                        {tr("Dry-run 결과", "Dry-run result")}
+                      </div>
+                      <pre className="mt-2 whitespace-pre-wrap text-xs leading-5" style={{ color: "var(--th-text-secondary)" }}>
+                        {preview
+                          ? JSON.stringify(preview, null, 2)
+                          : liveValidation
+                            ? JSON.stringify(liveValidation, null, 2)
+                            : tr("아직 preview가 없습니다.", "No preview yet.")}
                       </pre>
                     </SurfaceCard>
                   </div>
+                  {(preview?.errors?.length || liveValidation?.errors?.length) ? (
+                    <SurfaceNotice tone="warn" className="mt-3">
+                      <div className="text-xs">
+                        <div className="font-semibold">{tr("Dry-run 경고", "Dry-run warnings")}</div>
+                        <ul className="mt-1 list-disc pl-5">
+                          {(preview?.errors ?? liveValidation?.errors ?? []).map((e, i) => (
+                            <li key={i}>{e}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </SurfaceNotice>
+                  ) : null}
+                  {rollback ? (
+                    <SurfaceNotice tone="danger" className="mt-3">
+                      <div className="text-xs">
+                        <div className="font-semibold">{tr("Rollback 결과", "Rollback summary")}</div>
+                        {(() => {
+                          const summary = summarizeRollback(rollback);
+                          return (
+                            <div className="mt-1 space-y-1">
+                              {summary.attempted.length > 0 && (
+                                <div>
+                                  <span className="font-medium">{tr("시도", "Attempted")}:</span>{" "}
+                                  {summary.attempted.join(", ")}
+                                </div>
+                              )}
+                              {summary.reverted.length > 0 && (
+                                <div>
+                                  <span className="font-medium">{tr("복구 완료", "Reverted")}:</span>{" "}
+                                  {summary.reverted.join(", ")}
+                                </div>
+                              )}
+                              {summary.failed.length > 0 && (
+                                <div style={{ color: "var(--th-accent-danger)" }}>
+                                  <span className="font-medium">{tr("복구 실패", "Failed to revert")}:</span>{" "}
+                                  {summary.failed.join(", ")}
+                                </div>
+                              )}
+                              {summary.attempted.length === 0 &&
+                                summary.reverted.length === 0 &&
+                                summary.failed.length === 0 && (
+                                  <pre className="whitespace-pre-wrap text-[11px]">
+                                    {JSON.stringify(rollback, null, 2)}
+                                  </pre>
+                                )}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </SurfaceNotice>
+                  ) : null}
                 </SurfaceSubsection>
               )}
 
               {error && (
                 <SurfaceNotice tone="danger">
-                  <span className="text-sm">{error}</span>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <span className="text-sm">{error}</span>
+                    {currentStep === "preview" && (
+                      <SurfaceActionButton
+                        tone="accent"
+                        compact
+                        onClick={runConfirm}
+                        disabled={busy || !currentValid}
+                      >
+                        {tr("재시도", "Retry")}
+                      </SurfaceActionButton>
+                    )}
+                  </div>
                 </SurfaceNotice>
               )}
             </div>

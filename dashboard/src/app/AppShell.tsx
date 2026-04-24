@@ -1121,6 +1121,42 @@ export default function AppShell({
                 }
               />
               <Route
+                path="/agents/new"
+                element={
+                  <AgentManagerView
+                    agents={agents}
+                    departments={departments}
+                    kanbanCards={kanbanCards}
+                    language={settings.language}
+                    officeId={selectedOfficeId}
+                    onAgentsChange={() => {
+                      refreshAgents();
+                      refreshAllAgents();
+                      refreshOffices();
+                    }}
+                    onDepartmentsChange={() => {
+                      refreshDepartments();
+                      refreshAllDepartments();
+                      refreshOffices();
+                    }}
+                    sessions={visibleDispatchedSessions}
+                    onAssign={async (id, patch) => {
+                      const updated = await api.assignDispatchedSession(id, patch);
+                      setSessions((prev) =>
+                        prev.map((session) =>
+                          session.id === updated.id ? updated : session,
+                        ),
+                      );
+                    }}
+                    onSelectAgent={openDefaultAgentInfo}
+                    activeTab={agentsPageTab}
+                    onTabChange={setAgentsPageTab}
+                    autoOpenCreate
+                    onAutoOpenConsumed={() => navigateToRoute("/agents")}
+                  />
+                }
+              />
+              <Route
                 path="/kanban"
                 element={
                   <div className="h-full overflow-auto p-4 pb-36 sm:p-6">
