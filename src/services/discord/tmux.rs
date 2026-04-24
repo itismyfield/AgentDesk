@@ -3913,6 +3913,10 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     tool_state.transcript_events.len(),
                 );
             }
+            let placeholder_preserves_content = matches!(
+                task_notification_kind,
+                Some(TaskNotificationKind::Background | TaskNotificationKind::Subagent)
+            );
             match suppressed_placeholder_action(
                 placeholder_msg_id.is_some(),
                 response_sent_offset,
@@ -3925,7 +3929,17 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     }
                 }
                 SuppressedPlaceholderAction::Edit(content) => {
-                    if let Some(msg_id) = placeholder_msg_id {
+                    if placeholder_preserves_content {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 Task-notification suppress: preserved placeholder body for {} (kind={}, offset {})",
+                            tmux_session_name,
+                            task_notification_kind
+                                .map(TaskNotificationKind::as_str)
+                                .unwrap_or("none"),
+                            data_start_offset
+                        );
+                    } else if let Some(msg_id) = placeholder_msg_id {
                         rate_limit_wait(&shared, channel_id).await;
                         if let Err(error) = channel_id
                             .edit_message(
