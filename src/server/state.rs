@@ -57,6 +57,22 @@ impl MonitoringStore {
         }
     }
 
+    /// Return channel ids that currently hold an entry with the given key.
+    /// Used by the idle detector (#1031) to garbage-collect `system-detected:idle`
+    /// entries when a turn ends without a dedicated removal callback.
+    pub fn channels_with_entry(&self, key: &str) -> Vec<u64> {
+        self.entries
+            .iter()
+            .filter_map(|(channel_id, entries)| {
+                if entries.iter().any(|entry| entry.key == key) {
+                    Some(*channel_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn sweep_expired(&mut self, ttl: Duration) -> Vec<u64> {
         self.sweep_expired_inner(ttl).emptied_channels
