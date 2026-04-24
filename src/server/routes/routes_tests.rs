@@ -6828,6 +6828,188 @@ async fn agent_duplicate_reuses_setup_and_copies_prompt() {
 }
 
 #[tokio::test]
+async fn agent_archive_rejects_when_active_turn_present() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+
+    // Seed an active turn for the managed-agent (status='working').
+    db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat)
+             VALUES ('sess-active', 'managed-agent', 'codex', 'working', 'dispatch-1', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+    let archived = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/archive")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"reason": "blocked", "discord_action": "none"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(archived.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active turn"),
+        "expected 'active turn' error, got: {json:?}"
+    );
+
+    // agent_archive row should NOT be written when rejected.
+    let archive_count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_archive WHERE agent_id = 'managed-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 0);
+}
+
+#[tokio::test]
+async fn agent_duplicate_ignores_sensitive_fields_from_body() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+    fs::write(
+        runtime_root
+            .path()
+            .join("config/agents/managed-agent/IDENTITY.md"),
+        "source identity prompt\n",
+    )
+    .unwrap();
+
+    let source_channel = "1473922824350601297";
+    let new_channel = "1473922824350601299";
+
+    // Send sensitive fields that must be ignored (not in the allowlist struct):
+    // - `id` / `agent_id`: must not override new_agent_id
+    // - `discord_channel_id` (raw DB col): must not leak source channel
+    // - `token`, `api_key`, `system_prompt`: must not be carried over
+    let duplicated = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/duplicate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "new_agent_id": "managed-copy-2",
+                        "channel_id": new_channel,
+                        "name": "Managed Copy 2",
+                        "id": "attacker-override",
+                        "agent_id": "attacker-override",
+                        "discord_channel_id": source_channel,
+                        "token": "secret-token",
+                        "api_key": "secret-key",
+                        "system_prompt": "leaked personality"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicated.status(), StatusCode::CREATED);
+
+    // Resulting agent row must use new_agent_id + new channel (via setup's provider→column mapping),
+    // NOT the source channel, and NOT any body-supplied sensitive fields.
+    let (copied_id, channel_primary, channel_alt, channel_cc, channel_cdx, system_prompt): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
+                    discord_channel_cdx, system_prompt
+             FROM agents WHERE id = 'managed-copy-2'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(copied_id, "managed-copy-2");
+    let all_channels = [&channel_primary, &channel_alt, &channel_cc, &channel_cdx];
+    assert!(
+        all_channels
+            .iter()
+            .any(|c| c.as_deref() == Some(new_channel)),
+        "at least one channel column must be the new_channel (got {all_channels:?})"
+    );
+    assert!(
+        all_channels
+            .iter()
+            .all(|c| c.as_deref() != Some(source_channel)),
+        "source channel must not be reused in any column (got {all_channels:?})"
+    );
+    assert!(
+        system_prompt.as_deref() != Some("leaked personality"),
+        "system_prompt from body must NOT be written during duplicate (got {system_prompt:?})"
+    );
+
+    // Attacker-override id must not exist as an agent row.
+    let attacker_rows: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attacker_rows, 0);
+}
+
+#[tokio::test]
 async fn create_issue_route_builds_pmd_body_and_agent_label() {
     let _env_lock = env_lock();
     let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 819);
