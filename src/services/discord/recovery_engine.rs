@@ -284,6 +284,31 @@ async fn finish_recovered_turn_mailbox(
         );
     }
 }
+
+pub(super) async fn reregister_active_turn_from_inflight(
+    shared: &Arc<SharedData>,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    if state.current_msg_id == 0 || state.user_msg_id == 0 || state.request_owner_user_id == 0 {
+        return false;
+    }
+
+    let channel_id = ChannelId::new(state.channel_id);
+    let user_msg_id = MessageId::new(state.user_msg_id);
+    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    if snapshot.cancel_token.is_some() {
+        return snapshot.active_user_message_id == Some(user_msg_id);
+    }
+
+    super::mailbox_try_start_turn(
+        shared,
+        channel_id,
+        Arc::new(CancelToken::new()),
+        UserId::new(state.request_owner_user_id),
+        user_msg_id,
+    )
+    .await
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExistingInflightRebindAction {
     ReplaceSynthetic,
@@ -1156,6 +1181,9 @@ pub(super) async fn restore_inflight_turns(
                     restore_recovered_session_worktree(session, &state);
                 }
 
+                let finish_mailbox_on_completion =
+                    reregister_active_turn_from_inflight(shared, &state).await;
+
                 // Immediately spawn a tmux watcher instead of deferring to
                 // restore_tmux_watchers().  The previous "watcher will adopt"
                 // approach had a race condition: the tmux session could die
@@ -1213,7 +1241,13 @@ pub(super) async fn restore_inflight_turns(
                             );
                             #[cfg(unix)]
                             {
-                                tokio::spawn(super::tmux::tmux_output_watcher(
+                                let restored_turn =
+                                    super::tmux::restored_watcher_turn_from_inflight(
+                                        &state,
+                                        tmux_session_name,
+                                        finish_mailbox_on_completion,
+                                    );
+                                tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                                     channel_id,
                                     http.clone(),
                                     shared.clone(),
@@ -1225,25 +1259,12 @@ pub(super) async fn restore_inflight_turns(
                                     resume_offset,
                                     pause_epoch,
                                     turn_delivered,
+                                    restored_turn,
                                 ));
                             }
                         }
                     }
                 }
-
-                // Mark the channel mailbox as having an active turn so new
-                // incoming messages are queued instead of racing the restored
-                // tmux turn. Without this, the hourglass reaction appears
-                // immediately on the next user message but no response is
-                // produced because the tmux session is still busy.
-                mailbox_restore_active_turn(
-                    shared,
-                    channel_id,
-                    Arc::new(CancelToken::new()),
-                    UserId::new(state.request_owner_user_id),
-                    MessageId::new(state.user_msg_id),
-                )
-                .await;
 
                 // Keep the inflight state until the watcher either relays the
                 // final response or triggers watcher-death handoff. Clearing it
@@ -2010,6 +2031,9 @@ pub(super) async fn restore_inflight_turns(
                 restore_recovered_session_worktree(session, &state);
             }
 
+            let finish_mailbox_on_completion =
+                reregister_active_turn_from_inflight(shared, &state).await;
+
             // Immediately spawn watcher to avoid race condition.
             if std::fs::metadata(&output_path).is_ok() {
                 let (initial_offset, current_len, truncated) =
@@ -2055,7 +2079,12 @@ pub(super) async fn restore_inflight_turns(
                     );
                     #[cfg(unix)]
                     {
-                        tokio::spawn(super::tmux::tmux_output_watcher(
+                        let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
+                            &state,
+                            &tmux_session_name,
+                            finish_mailbox_on_completion,
+                        );
+                        tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                             channel_id,
                             http.clone(),
                             shared.clone(),
@@ -2067,24 +2096,11 @@ pub(super) async fn restore_inflight_turns(
                             resume_offset,
                             pause_epoch,
                             turn_delivered,
+                            restored_turn,
                         ));
                     }
                 }
             }
-
-            // Mark the channel mailbox as having an active turn so new
-            // incoming messages are queued instead of racing the restored
-            // tmux turn. Without this, the hourglass reaction appears
-            // immediately on the next user message but no response is
-            // produced because the tmux session is still busy.
-            mailbox_restore_active_turn(
-                shared,
-                channel_id,
-                Arc::new(CancelToken::new()),
-                UserId::new(state.request_owner_user_id),
-                MessageId::new(state.user_msg_id),
-            )
-            .await;
 
             // Keep the inflight state until the watcher either relays the
             // final response or triggers watcher-death handoff. Clearing it
@@ -3285,6 +3301,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reregister_active_turn_from_inflight_is_idempotent() {
+        let shared = super::super::make_shared_data_for_tests();
+        let state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            4242,
+            Some("adk-cdx-t4242".to_string()),
+            7,
+            9001,
+            9002,
+            "continue streaming".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx-t4242".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.input".to_string()),
+            64,
+        );
+        let channel_id = ChannelId::new(state.channel_id);
+
+        assert!(reregister_active_turn_from_inflight(&shared, &state).await);
+        assert!(super::super::mailbox_has_active_turn(&shared, channel_id).await);
+
+        assert!(reregister_active_turn_from_inflight(&shared, &state).await);
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(MessageId::new(state.user_msg_id))
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn rebind_adopts_detected_output_path_when_inode_differs() {
@@ -3451,6 +3497,7 @@ mod tests {
             response_sent_offset: 0,
             current_tool_line: None,
             prev_tool_status: None,
+            task_notification_kind: None,
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,
@@ -3565,6 +3612,7 @@ mod tests {
             response_sent_offset: 0,
             current_tool_line: None,
             prev_tool_status: None,
+            task_notification_kind: None,
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,
