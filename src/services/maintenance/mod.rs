@@ -331,7 +331,7 @@ fn duration_to_i64_ms(duration: Duration) -> i64 {
 }
 
 #[cfg(test)]
-fn reset_registry_for_tests() {
+pub(crate) fn reset_registry_for_tests() {
     if let Ok(mut guard) = registry().write() {
         guard.clear();
     }

@@ -21,6 +21,9 @@
 //!     postgres tables (7/30/90d horizons). Requires a live `PgPool`; if
 //!     postgres is disabled, this job is skipped (remaining jobs still
 //!     register).
+//!   * `memory.memento_consolidation` — weekly (#1089 / 908-7). Calls the
+//!     memento MCP `memory_consolidate` tool to merge low-importance /
+//!     duplicate fragments. No-ops when memento is not configured.
 //!
 //! Log rotation for `dcserver.stdout.log` / `dcserver.stderr.log` is intentionally
 //! deferred to a follow-up — it requires wiring `tracing-appender::rolling` into
@@ -34,6 +37,7 @@ use crate::services::maintenance::register_maintenance_job;
 
 pub mod db_retention;
 pub mod hang_dump_cleanup;
+pub mod memento_consolidation;
 pub mod target_sweep;
 pub mod worktree_orphan_sweep;
 
@@ -91,6 +95,18 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
             );
         }
     }
+
+    // Weekly memento consolidation (#1089 / 908-7). Self-skips if memento is
+    // not configured, so registration is unconditional.
+    register_maintenance_job(
+        "memory.memento_consolidation",
+        memento_consolidation::DEFAULT_INTERVAL,
+        || {
+            Box::pin(async {
+                memento_consolidation::run(memento_consolidation::Config::default_runtime()).await
+            })
+        },
+    );
 }
 
 fn register_db_retention(pool: PgPool) {
@@ -109,4 +125,31 @@ fn register_db_retention(pool: PgPool) {
             })
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::maintenance::{
+        list_maintenance_jobs, reset_registry_for_tests, test_serialization_lock,
+    };
+
+    #[test]
+    fn spawn_storage_jobs_registers_memento_consolidation() {
+        let _guard = test_serialization_lock();
+        reset_registry_for_tests();
+
+        spawn_storage_maintenance_jobs(None);
+
+        let jobs = list_maintenance_jobs();
+        let memento = jobs
+            .iter()
+            .find(|info| info.name == "memory.memento_consolidation")
+            .expect("memory.memento_consolidation should be registered");
+
+        // Weekly cadence: 7 * 24 * 60 * 60 * 1000 ms.
+        assert_eq!(memento.schedule.every_ms, 604_800_000);
+        assert!(memento.enabled);
+        assert_eq!(memento.state.last_status, "never");
+    }
 }
