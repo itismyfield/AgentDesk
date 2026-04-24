@@ -26,8 +26,7 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryPhase {
     Pending,
     WatcherReattach,
@@ -35,7 +34,6 @@ pub enum RecoveryPhase {
     Done,
 }
 
-#[allow(dead_code)]
 impl RecoveryPhase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -59,6 +57,10 @@ impl RecoveryPhase {
     pub fn from_optional_str(value: Option<&str>) -> Option<Self> {
         value.and_then(Self::from_str)
     }
+}
+
+fn canonical_recovery_phase(phase: RecoveryPhase) -> RecoveryPhase {
+    RecoveryPhase::from_optional_str(Some(phase.as_str())).unwrap_or(phase)
 }
 
 /// Retry-aware tmux session check for recovery after dcserver restart.
@@ -152,6 +154,20 @@ fn can_resume_existing_rebind_inflight(state: &inflight::InflightTurnState) -> b
         && state.last_watcher_relayed_offset.is_none()
 }
 
+fn recovery_phase_for_existing_inflight_rebind(
+    state: &inflight::InflightTurnState,
+) -> RecoveryPhase {
+    let phase = match (
+        can_replace_stale_rebind_inflight(state),
+        can_resume_existing_rebind_inflight(state),
+    ) {
+        (true, _) => RecoveryPhase::WatcherReattach,
+        (false, true) => RecoveryPhase::InflightRestore,
+        (false, false) => RecoveryPhase::Pending,
+    };
+    canonical_recovery_phase(phase)
+}
+
 fn can_fast_path_captured_full_response(
     state: &inflight::InflightTurnState,
     output_already_completed: bool,
@@ -164,6 +180,27 @@ fn can_fast_path_captured_full_response(
         && !state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
         && state.last_watcher_relayed_offset.is_none()
+}
+
+fn recovery_phase_after_output_scan(
+    output_already_completed: bool,
+    tmux_ready_without_new_output: bool,
+) -> RecoveryPhase {
+    let phase = match (output_already_completed, tmux_ready_without_new_output) {
+        (true, _) | (_, true) => RecoveryPhase::Done,
+        (false, false) => RecoveryPhase::Pending,
+    };
+    canonical_recovery_phase(phase)
+}
+
+fn recovery_phase_after_tmux_probe(can_recover: bool, pane_alive: Option<bool>) -> RecoveryPhase {
+    let phase = match (can_recover, pane_alive) {
+        (false, _) => RecoveryPhase::Done,
+        (true, Some(true)) => RecoveryPhase::WatcherReattach,
+        (true, Some(false)) => RecoveryPhase::InflightRestore,
+        (true, None) => RecoveryPhase::Pending,
+    };
+    canonical_recovery_phase(phase)
 }
 
 fn recovery_worktree_path(state: &inflight::InflightTurnState) -> Option<&str> {
@@ -344,25 +381,6 @@ pub(super) async fn reregister_active_turn_from_inflight(
     )
     .await
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExistingInflightRebindAction {
-    ReplaceSynthetic,
-    ResumeExisting,
-    RejectConflict,
-}
-
-fn existing_inflight_rebind_action(
-    state: &inflight::InflightTurnState,
-) -> ExistingInflightRebindAction {
-    if can_replace_stale_rebind_inflight(state) {
-        ExistingInflightRebindAction::ReplaceSynthetic
-    } else if can_resume_existing_rebind_inflight(state) {
-        ExistingInflightRebindAction::ResumeExisting
-    } else {
-        ExistingInflightRebindAction::RejectConflict
-    }
-}
-
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetectedRebindOutputPath {
@@ -1613,7 +1631,10 @@ pub(super) async fn restore_inflight_turns(
             }
             continue;
         }
-        if output_already_completed {
+        if matches!(
+            recovery_phase_after_output_scan(output_already_completed, false),
+            RecoveryPhase::Done
+        ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ✓ recovering completed turn for channel {}: output contains result after offset {}",
@@ -1847,7 +1868,10 @@ pub(super) async fn restore_inflight_turns(
             !output_has_new_bytes && crate::services::provider::tmux_session_ready_for_input(name)
         });
 
-        if tmux_ready_without_new_output {
+        if matches!(
+            recovery_phase_after_output_scan(false, tmux_ready_without_new_output),
+            RecoveryPhase::Done
+        ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and output is idle after offset {}",
@@ -1875,7 +1899,10 @@ pub(super) async fn restore_inflight_turns(
             .as_deref()
             .map_or(false, |name| tmux_has_session_with_retry(name));
 
-        if !can_recover {
+        if matches!(
+            recovery_phase_after_tmux_probe(can_recover, None),
+            RecoveryPhase::Done
+        ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             // Even without a live tmux session, the output file may contain
             // response data. Try extracting from the full file first, then
@@ -1967,7 +1994,10 @@ pub(super) async fn restore_inflight_turns(
         // condition where the session could die in the gap between recovery and
         // restore_tmux_watchers (~50s), losing the response.
         let pane_alive = tmux_session_alive_with_retry(&tmux_session_name);
-        if pane_alive {
+        if matches!(
+            recovery_phase_after_tmux_probe(true, Some(pane_alive)),
+            RecoveryPhase::WatcherReattach
+        ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, spawning watcher immediately",
@@ -2516,13 +2546,13 @@ pub(crate) async fn rebind_inflight_for_channel(
     // so a live turn that wins the race between here and the write cannot
     // be clobbered by the synthetic rebind state.
     let existing_inflight = match super::inflight::load_inflight_state(provider, channel_id) {
-        Some(existing) => match existing_inflight_rebind_action(&existing) {
-            ExistingInflightRebindAction::ReplaceSynthetic => {
+        Some(existing) => match recovery_phase_for_existing_inflight_rebind(&existing) {
+            RecoveryPhase::WatcherReattach => {
                 super::inflight::clear_inflight_state(provider, channel_id);
                 None
             }
-            ExistingInflightRebindAction::ResumeExisting => Some(existing),
-            ExistingInflightRebindAction::RejectConflict => {
+            RecoveryPhase::InflightRestore => Some(existing),
+            RecoveryPhase::Pending | RecoveryPhase::Done => {
                 return Err(RebindError::InflightAlreadyExists);
             }
         },
@@ -2853,6 +2883,79 @@ mod tests {
     fn recovery_phase_from_str_rejects_unknown_value() {
         assert_eq!(RecoveryPhase::from_str("unknown"), None);
         assert_eq!(RecoveryPhase::from_str(""), None);
+    }
+
+    #[test]
+    fn recovery_phase_sqlite_boundary_round_trips_rebind_call_site() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx".to_string()),
+            123,
+            456,
+            789,
+            "real user input".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.input".to_string()),
+            64,
+        );
+
+        let conn = libsql_rusqlite::Connection::open_in_memory()
+            .expect("in-memory sqlite should open for recovery phase test");
+        conn.execute_batch(
+            "CREATE TABLE recovery_phase_roundtrip (
+                id TEXT PRIMARY KEY,
+                state TEXT
+            );",
+        )
+        .expect("test table should be created");
+
+        let initial_phase = recovery_phase_for_existing_inflight_rebind(&state);
+        assert_eq!(initial_phase, RecoveryPhase::InflightRestore);
+        conn.execute(
+            "INSERT INTO recovery_phase_roundtrip (id, state) VALUES (?1, ?2)",
+            libsql_rusqlite::params!["phase-1", initial_phase.as_str()],
+        )
+        .expect("initial recovery phase should be inserted");
+
+        let persisted: Option<String> = conn
+            .query_row(
+                "SELECT state FROM recovery_phase_roundtrip WHERE id = ?1",
+                ["phase-1"],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("test phase row should be readable");
+        let phase = RecoveryPhase::from_optional_str(persisted.as_deref())
+            .unwrap_or(RecoveryPhase::Pending);
+        assert_eq!(phase, RecoveryPhase::InflightRestore);
+
+        match phase {
+            RecoveryPhase::InflightRestore => state.last_watcher_relayed_offset = Some(128),
+            RecoveryPhase::Pending | RecoveryPhase::WatcherReattach | RecoveryPhase::Done => {}
+        };
+        let next_phase = recovery_phase_for_existing_inflight_rebind(&state);
+        assert_eq!(next_phase, RecoveryPhase::Pending);
+        conn.execute(
+            "UPDATE recovery_phase_roundtrip SET state = ?1 WHERE id = ?2",
+            libsql_rusqlite::params![next_phase.as_str(), "phase-1"],
+        )
+        .expect("updated recovery phase should be written");
+
+        let updated: Option<String> = conn
+            .query_row(
+                "SELECT state FROM recovery_phase_roundtrip WHERE id = ?1",
+                ["phase-1"],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("updated phase row should be readable");
+        assert_eq!(
+            RecoveryPhase::from_optional_str(updated.as_deref()),
+            Some(RecoveryPhase::Pending)
+        );
     }
 
     #[derive(Default)]
@@ -3326,8 +3429,8 @@ mod tests {
 
         assert!(can_resume_existing_rebind_inflight(&state));
         assert_eq!(
-            existing_inflight_rebind_action(&state),
-            ExistingInflightRebindAction::ResumeExisting
+            recovery_phase_for_existing_inflight_rebind(&state),
+            RecoveryPhase::InflightRestore
         );
     }
 
@@ -3351,8 +3454,8 @@ mod tests {
 
         assert!(!can_resume_existing_rebind_inflight(&state));
         assert_eq!(
-            existing_inflight_rebind_action(&state),
-            ExistingInflightRebindAction::RejectConflict
+            recovery_phase_for_existing_inflight_rebind(&state),
+            RecoveryPhase::Pending
         );
 
         state.full_response.clear();
@@ -3360,8 +3463,8 @@ mod tests {
 
         assert!(!can_resume_existing_rebind_inflight(&state));
         assert_eq!(
-            existing_inflight_rebind_action(&state),
-            ExistingInflightRebindAction::RejectConflict
+            recovery_phase_for_existing_inflight_rebind(&state),
+            RecoveryPhase::Pending
         );
     }
 
