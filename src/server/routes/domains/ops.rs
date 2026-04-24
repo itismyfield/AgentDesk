@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, hooks,
-    log_deprecated_alias, messages, pipeline, protected_api_domain, queue_api, skills_api,
-    termination_events,
+    log_deprecated_alias, maintenance, messages, pipeline, protected_api_domain, queue_api,
+    skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
@@ -124,6 +124,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/skills/ranking", get(skills_api::ranking))
             .route("/skills/prune", post(skills_api::prune))
             .route("/cron-jobs", get(cron_api::list_cron_jobs))
+            .route("/maintenance/jobs", get(maintenance::list_jobs))
             .route("/auto-queue/generate", post(auto_queue::generate))
             .route("/auto-queue/dispatch", post(auto_queue::dispatch))
             .route("/auto-queue/dispatch-next", post(auto_queue::activate))

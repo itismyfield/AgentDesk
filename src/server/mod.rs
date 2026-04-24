@@ -1,4 +1,5 @@
 pub(crate) mod cron_catalog;
+pub(crate) mod maintenance;
 pub mod routes;
 mod worker_registry;
 pub mod ws;

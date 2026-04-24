@@ -19,6 +19,7 @@ pub mod health_api;
 pub mod hooks;
 pub mod kanban;
 pub mod kanban_repos;
+mod maintenance;
 pub mod meetings;
 pub mod messages;
 pub mod monitoring;

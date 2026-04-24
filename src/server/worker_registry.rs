@@ -44,6 +44,7 @@ enum ServerWorkerId {
     GithubSync,
     PolicyTick,
     RateLimitSync,
+    MaintenanceScheduler,
     MessageOutbox,
     DispatchOutbox,
     DmReplyRetry,
@@ -130,7 +131,7 @@ pub(crate) struct WorkerSpec {
     pub(crate) notes: &'static str,
 }
 
-pub(crate) const WORKER_SPECS: [WorkerSpec; 7] = [
+pub(crate) const WORKER_SPECS: [WorkerSpec; 8] = [
     WorkerSpec {
         id: ServerWorkerId::GithubSync,
         name: "github_sync_loop",
@@ -172,6 +173,20 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 7] = [
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         health_owner: "rate_limit_cache freshness and tracing logs",
         notes: "Runs immediately on startup and then every 120 seconds",
+    },
+    WorkerSpec {
+        id: ServerWorkerId::MaintenanceScheduler,
+        name: "maintenance_scheduler_loop",
+        kind: WorkerKind::TokioTask,
+        target: "maintenance::scheduler_loop",
+        responsibility: "Run registered maintenance jobs on interval schedules",
+        owner: "server::worker_registry",
+        start_stage: WorkerStartStage::AfterBootReconcile,
+        start_order: 35,
+        restart_policy: WorkerRestartPolicy::LoopOwned,
+        shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        health_owner: "kv_meta maintenance_job:* keys and tracing logs",
+        notes: "Static registry seeded with a noop heartbeat; first runs are staggered after startup",
     },
     WorkerSpec {
         id: ServerWorkerId::MessageOutbox,
@@ -391,6 +406,16 @@ impl SupervisedWorkerRegistry {
                 });
                 Ok(None)
             }
+            ServerWorkerId::MaintenanceScheduler => {
+                let Some(maintenance_pg_pool) = self.pg_pool.clone() else {
+                    self.log_skip(spec, "postgres pool unavailable");
+                    return Ok(None);
+                };
+                self.register_tokio(spec, async move {
+                    super::maintenance::scheduler_loop(maintenance_pg_pool).await;
+                });
+                Ok(None)
+            }
             ServerWorkerId::MessageOutbox => {
                 let Some(outbox_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(spec, "postgres pool unavailable");
@@ -514,7 +539,7 @@ mod tests {
 
     #[test]
     fn long_lived_workers_have_explicit_supervision_metadata() {
-        assert_eq!(WORKER_SPECS.len(), 7);
+        assert_eq!(WORKER_SPECS.len(), 8);
         assert!(
             WORKER_SPECS
                 .windows(2)
@@ -525,7 +550,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.start_stage == WorkerStartStage::AfterBootReconcile)
                 .count(),
-            6
+            7
         );
         assert_eq!(
             WORKER_SPECS
