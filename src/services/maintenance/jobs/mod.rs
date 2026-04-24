@@ -24,6 +24,9 @@
 //!   * `memory.memento_consolidation` — weekly (#1089 / 908-7). Calls the
 //!     memento MCP `memory_consolidate` tool to merge low-importance /
 //!     duplicate fragments. No-ops when memento is not configured.
+//!   * `reconcile.zombie_resources` — hourly (#1076 / 905-7). Sweeps stale
+//!     inflight state files, unrelocated `discord_uploads/*`, and any other
+//!     zombie resources (see `crate::reconcile::reconcile_zombie_resources`).
 //!
 //! Log rotation for `dcserver.stdout.log` / `dcserver.stderr.log` is intentionally
 //! deferred to a follow-up — it requires wiring `tracing-appender::rolling` into
@@ -107,6 +110,22 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
             })
         },
     );
+
+    // Hourly zombie resource reconcile (#1076 / 905-7). No PG pool needed —
+    // the file-system sweeps degrade gracefully when AGENTDESK_ROOT_DIR is
+    // unset. Discord-runtime-facing zombie checks (tmux orphans, DashMap
+    // trimming) are driven separately by the Discord bot's own tick loop
+    // and merely *report* their counts here via tracing.
+    register_maintenance_job(
+        "reconcile.zombie_resources",
+        Duration::from_secs(60 * 60),
+        || {
+            Box::pin(async {
+                let _stats = crate::reconcile::reconcile_zombie_resources().await;
+                Ok(())
+            })
+        },
+    );
 }
 
 fn register_db_retention(pool: PgPool) {
@@ -151,5 +170,27 @@ mod tests {
         assert_eq!(memento.schedule.every_ms, 604_800_000);
         assert!(memento.enabled);
         assert_eq!(memento.state.last_status, "never");
+    }
+
+    /// #1076 (905-7): the zombie reconcile job must be registered on hourly
+    /// cadence so orphan tmux / stale inflight / unrelocated uploads get
+    /// swept between boots.
+    #[test]
+    fn spawn_storage_jobs_registers_zombie_reconcile_hourly() {
+        let _guard = test_serialization_lock();
+        reset_registry_for_tests();
+
+        spawn_storage_maintenance_jobs(None);
+
+        let jobs = list_maintenance_jobs();
+        let zombie = jobs
+            .iter()
+            .find(|info| info.name == "reconcile.zombie_resources")
+            .expect("reconcile.zombie_resources should be registered");
+
+        // Hourly cadence: 60 * 60 * 1000 ms.
+        assert_eq!(zombie.schedule.every_ms, 3_600_000);
+        assert!(zombie.enabled);
+        assert_eq!(zombie.state.last_status, "never");
     }
 }

@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 mod bootstrap;
 mod cli;
+pub(crate) mod compat;
 mod config;
 pub(crate) mod credential;
 mod db;

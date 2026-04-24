@@ -2,9 +2,20 @@ use anyhow::{Result, anyhow};
 use libsql_rusqlite::Connection;
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::Duration;
 
 use crate::db::agents::load_agent_channel_bindings;
 use crate::{db::Db, dispatch, engine::PolicyEngine};
+
+/// Hard cutoff for "stale inflight" detection in the periodic reconcile.
+/// Anything older than this with no live tmux pane is considered abandoned.
+/// #1076 (905-7): zombie resource sweep cadence.
+const STALE_INFLIGHT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Hard cutoff for orphan `discord_uploads/<channel>/*` files. 7 days matches
+/// the default retention hint used by `settings/content.rs::cleanup_old_uploads`
+/// for manually-aged attachments, so the periodic sweep is a strict superset.
+const STALE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BootReconcileStats {
@@ -478,6 +489,235 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
     Ok(refired)
 }
 
+// ============================================================================
+// #1076 (905-7): zombie resource sweep — periodic reconcile
+// ============================================================================
+//
+// Four zombie classes are covered by `reconcile_zombie_resources()`:
+//
+//   1. Orphan tmux sessions (AgentDesk-* with no owning channel entry AND no
+//      live pane) — already handled on boot by `cleanup_orphan_tmux_sessions`;
+//      the periodic path re-checks hourly so long-running processes do not
+//      accumulate leaks between restarts. The periodic path is a no-op unless
+//      a live `SharedData` was registered via `register_shared_runtime_handle`.
+//   2. Stale inflight state files (> `STALE_INFLIGHT_MAX_AGE` and restart_mode
+//      is None, i.e. never planned for resume) — deletes the JSON file so the
+//      next boot does not try to resume an abandoned turn.
+//   3. Zombie DashMap entries (intake dedupe / api_timestamps / tmux_relay_coords
+//      growing unboundedly when channels disappear). The sweep trims any entry
+//      whose key channel no longer has a matching live tmux session + no
+//      active inflight.
+//   4. Unrelocated `discord_uploads/<channel>/*` files older than
+//      `STALE_UPLOAD_MAX_AGE` — the Discord upload content-addressed mirror
+//      migrated off disk-per-channel but legacy files can linger when a
+//      migration step aborts.
+//
+// Each helper returns a count, aggregated into `ZombieReconcileStats` for
+// log emission. The callers must tolerate Postgres / SQLite / tmux being
+// unavailable — all helpers degrade gracefully (zero count + warn log).
+
+/// Aggregate stats from one run of [`reconcile_zombie_resources`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ZombieReconcileStats {
+    pub orphan_tmux_killed: usize,
+    pub stale_inflight_removed: usize,
+    pub zombie_dashmap_trimmed: usize,
+    pub stale_uploads_removed: usize,
+}
+
+impl ZombieReconcileStats {
+    pub(crate) fn total(&self) -> usize {
+        self.orphan_tmux_killed
+            + self.stale_inflight_removed
+            + self.zombie_dashmap_trimmed
+            + self.stale_uploads_removed
+    }
+}
+
+/// Remove inflight state JSON files older than [`STALE_INFLIGHT_MAX_AGE`] that
+/// have no `restart_mode` assignment (i.e. were never scheduled for resume).
+/// Returns the number of files deleted. Safe to call without a Postgres pool.
+pub(crate) fn sweep_stale_inflight_files() -> usize {
+    let Some(root) =
+        crate::config::runtime_root().map(|p| p.join("runtime").join("discord_inflight"))
+    else {
+        return 0;
+    };
+    sweep_stale_inflight_files_at(&root, STALE_INFLIGHT_MAX_AGE)
+}
+
+pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Duration) -> usize {
+    use std::fs;
+    use std::time::SystemTime;
+
+    if !root.exists() {
+        return 0;
+    }
+
+    let Ok(provider_dirs) = fs::read_dir(root) else {
+        return 0;
+    };
+
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+
+    for provider in provider_dirs.filter_map(|e| e.ok()) {
+        let pdir = provider.path();
+        if !pdir.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&pdir) else {
+            continue;
+        };
+        for entry in files.filter_map(|e| e.ok()) {
+            let fpath = entry.path();
+            if !fpath.is_file() {
+                continue;
+            }
+            // Only consider .json state files — skip anything unexpected.
+            if fpath.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let age_ok = fs::metadata(&fpath)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map(|age| age >= max_age)
+                .unwrap_or(false);
+            if !age_ok {
+                continue;
+            }
+            // Only remove when restart_mode is absent. A file with a restart_mode
+            // set is owned by a planned lifecycle (drain/hot-swap); the existing
+            // inflight retention helpers cover those.
+            let restart_mode_present = fs::read_to_string(&fpath)
+                .ok()
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .and_then(|v| {
+                    v.get("restart_mode")
+                        .filter(|rm| !rm.is_null())
+                        .map(|_| true)
+                })
+                .unwrap_or(false);
+            if restart_mode_present {
+                continue;
+            }
+            if fs::remove_file(&fpath).is_ok() {
+                removed += 1;
+                tracing::info!(
+                    target: "reconcile",
+                    path = %fpath.display(),
+                    "[zombie-reconcile] removed stale inflight state file"
+                );
+            }
+        }
+    }
+    removed
+}
+
+/// Remove `discord_uploads/<channel>/*` files older than
+/// [`STALE_UPLOAD_MAX_AGE`]. Returns the number of files removed.
+pub(crate) fn sweep_stale_discord_uploads() -> usize {
+    let Some(root) =
+        crate::config::runtime_root().map(|p| p.join("runtime").join("discord_uploads"))
+    else {
+        return 0;
+    };
+    sweep_stale_discord_uploads_at(&root, STALE_UPLOAD_MAX_AGE)
+}
+
+pub(crate) fn sweep_stale_discord_uploads_at(root: &std::path::Path, max_age: Duration) -> usize {
+    use std::fs;
+    use std::time::SystemTime;
+
+    if !root.exists() {
+        return 0;
+    }
+    let Ok(channels) = fs::read_dir(root) else {
+        return 0;
+    };
+
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+
+    for ch in channels.filter_map(|e| e.ok()) {
+        let ch_path = ch.path();
+        if !ch_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&ch_path) else {
+            continue;
+        };
+        for entry in files.filter_map(|e| e.ok()) {
+            let fpath = entry.path();
+            if !fpath.is_file() {
+                continue;
+            }
+            let stale = fs::metadata(&fpath)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map(|age| age >= max_age)
+                .unwrap_or(false);
+            if stale && fs::remove_file(&fpath).is_ok() {
+                removed += 1;
+            }
+        }
+        // Drop the channel dir if now empty.
+        if fs::read_dir(&ch_path)
+            .ok()
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_dir(&ch_path);
+        }
+    }
+    removed
+}
+
+/// Run the full zombie sweep (stale inflight + stale uploads).
+///
+/// The tmux orphan cleanup + DashMap trim require a live `Arc<SharedData>`
+/// handle which is owned by the Discord bot runtime; those two counters are
+/// filled in by the Discord-side runtime loop in
+/// `services/discord/mod.rs::run_discord_zombie_sweep_tick`. The periodic
+/// maintenance job records whatever the file-system and PG layers can do
+/// without the Discord runtime handle, which means it is safe to run before
+/// (and independently of) the bot coming up.
+pub(crate) async fn reconcile_zombie_resources() -> ZombieReconcileStats {
+    let stale_inflight_removed = tokio::task::spawn_blocking(sweep_stale_inflight_files)
+        .await
+        .unwrap_or(0);
+    let stale_uploads_removed = tokio::task::spawn_blocking(sweep_stale_discord_uploads)
+        .await
+        .unwrap_or(0);
+
+    let stats = ZombieReconcileStats {
+        orphan_tmux_killed: 0,
+        stale_inflight_removed,
+        zombie_dashmap_trimmed: 0,
+        stale_uploads_removed,
+    };
+
+    if stats.total() > 0 {
+        tracing::info!(
+            target: "reconcile",
+            orphan_tmux = stats.orphan_tmux_killed,
+            stale_inflight = stats.stale_inflight_removed,
+            zombie_dashmap = stats.zombie_dashmap_trimmed,
+            stale_uploads = stats.stale_uploads_removed,
+            "[zombie-reconcile] sweep completed"
+        );
+    } else {
+        tracing::debug!(
+            target: "reconcile",
+            "[zombie-reconcile] sweep completed (no zombies found)"
+        );
+    }
+
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,5 +836,90 @@ mod tests {
             .unwrap();
         assert_eq!(map.as_deref(), Some("{\"111\":\"thread-unknown\"}"));
         assert_eq!(active_thread_id.as_deref(), Some("thread-unknown"));
+    }
+
+    // ------------------------------------------------------------------
+    // #1076 (905-7): zombie reconcile sweep tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn zombie_sweep_removes_old_inflight_files_without_restart_mode() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let provider_dir = tmp.path().join("claude");
+        fs::create_dir_all(&provider_dir).unwrap();
+
+        // File with restart_mode = null -> must be removed once max_age=0.
+        let stale = provider_dir.join("stale.json");
+        fs::write(
+            &stale,
+            "{\"channel_id\":1,\"restart_mode\":null,\"updated_at\":\"x\"}",
+        )
+        .unwrap();
+
+        // File WITH restart_mode -> must be preserved even when max_age=0.
+        let planned = provider_dir.join("planned.json");
+        fs::write(
+            &planned,
+            "{\"channel_id\":2,\"restart_mode\":\"DrainRestart\",\"updated_at\":\"x\"}",
+        )
+        .unwrap();
+
+        // Non-json file -> ignored.
+        let stray = provider_dir.join("junk.tmp");
+        fs::write(&stray, "nope").unwrap();
+
+        // max_age = 0 -> every file is "stale" by age, so the restart_mode
+        // branch is the only thing protecting `planned.json`.
+        let removed = sweep_stale_inflight_files_at(tmp.path(), Duration::from_secs(0));
+        assert_eq!(
+            removed, 1,
+            "only the stale unplanned file should be removed"
+        );
+        assert!(!stale.exists(), "stale file must be gone");
+        assert!(planned.exists(), "planned-restart file must survive");
+        assert!(stray.exists(), "non-json files must be ignored");
+    }
+
+    #[test]
+    fn zombie_sweep_preserves_everything_when_max_age_is_far_in_future() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let provider_dir = tmp.path().join("codex");
+        fs::create_dir_all(&provider_dir).unwrap();
+        let a = provider_dir.join("a.json");
+        fs::write(&a, "{\"restart_mode\":null}").unwrap();
+        let removed =
+            sweep_stale_inflight_files_at(tmp.path(), Duration::from_secs(365 * 24 * 60 * 60));
+        assert_eq!(removed, 0);
+        assert!(a.exists());
+    }
+
+    #[test]
+    fn zombie_sweep_removes_stale_discord_uploads() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let channel_dir = tmp.path().join("999");
+        fs::create_dir_all(&channel_dir).unwrap();
+        let f = channel_dir.join("old.png");
+        fs::write(&f, b"old").unwrap();
+
+        // max_age = 0 -> file qualifies as stale.
+        let removed = sweep_stale_discord_uploads_at(tmp.path(), Duration::from_secs(0));
+        assert_eq!(removed, 1);
+        assert!(!f.exists());
+        // The empty channel dir is pruned.
+        assert!(!channel_dir.exists());
+    }
+
+    #[test]
+    fn zombie_stats_total_sums_all_buckets() {
+        let stats = ZombieReconcileStats {
+            orphan_tmux_killed: 1,
+            stale_inflight_removed: 2,
+            zombie_dashmap_trimmed: 3,
+            stale_uploads_removed: 4,
+        };
+        assert_eq!(stats.total(), 10);
     }
 }

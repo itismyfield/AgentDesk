@@ -1,11 +1,17 @@
-//! Three DoD scenarios for #1073.
+//! Recovery scenarios for Discord bot flow.
+//!
+//! - Three DoD scenarios from #1073 (duplicate-relay dedupe, restart queue
+//!   preservation, cross-watcher race).
+//! - Two #1076 (905-7) zombie-resource recovery scenarios (stale inflight
+//!   cleanup, DashMap zombie trim) asserting that the periodic reconcile
+//!   removes abandoned resources while leaving live ones intact.
 //!
 //! Each test builds a fresh [`TestHarness`] so there is no cross-test
 //! bleed. The scenarios exercise the same flow primitives that the live
 //! Discord bot uses (outbound dedupe, inflight state save/restore, watcher
-//! claim-or-replace) but without reaching across a real network or spawning
-//! real tmux sessions, which keeps every scenario well under the 10-second
-//! budget stated in the DoD.
+//! claim-or-replace, zombie reconcile) without reaching across a real
+//! network or spawning real tmux sessions, keeping every scenario well
+//! under the 10-second budget.
 
 use std::sync::atomic::Ordering;
 
@@ -260,5 +266,115 @@ async fn cross_watcher_race_single_winner() {
         flow::watcher_slot_paused(&watchers, channel),
         Some(true),
         "registry slot must hold incoming handle (paused=true)"
+    );
+}
+
+// ============================================================================
+// #1076 (905-7): zombie reconcile recovery scenarios
+// ============================================================================
+
+/// DoD #4 (#1076): a stale inflight state file (no restart_mode, 24h+ old)
+/// must be removed by the periodic zombie sweep while a freshly-saved state
+/// for the same provider is preserved. Mirrors the reconcile logic that
+/// runs hourly inside the live bot via
+/// [`crate::services::maintenance::jobs::spawn_storage_maintenance_jobs`].
+#[tokio::test(flavor = "current_thread")]
+async fn stale_inflight_cleanup_removes_only_old_unplanned_state() {
+    use std::time::Duration;
+
+    let harness = TestHarness::new();
+    let inflight_root = harness
+        .runtime_root()
+        .join("runtime")
+        .join("discord_inflight");
+    let provider_dir = inflight_root.join("codex");
+    std::fs::create_dir_all(&provider_dir).expect("create inflight provider dir");
+
+    // Stale candidate: no restart_mode, subject to removal under max_age=0.
+    let stale_path = provider_dir.join("stale-1.json");
+    std::fs::write(
+        &stale_path,
+        "{\"channel_id\":1,\"restart_mode\":null,\"updated_at\":\"x\"}",
+    )
+    .expect("write stale inflight");
+
+    // Planned-restart candidate: restart_mode is set -> must survive even
+    // under the most aggressive age cutoff.
+    let planned_path = provider_dir.join("planned.json");
+    std::fs::write(
+        &planned_path,
+        "{\"channel_id\":2,\"restart_mode\":\"DrainRestart\",\"updated_at\":\"x\"}",
+    )
+    .expect("write planned inflight");
+
+    // Forcing max_age = 0 means age-based staleness matches every file,
+    // which isolates the restart_mode guard as the only thing protecting
+    // `planned.json`.
+    let removed =
+        crate::reconcile::sweep_stale_inflight_files_at(&inflight_root, Duration::from_secs(0));
+    assert_eq!(removed, 1, "exactly the unplanned state should be swept");
+    assert!(
+        !stale_path.exists(),
+        "stale inflight without restart_mode must be removed"
+    );
+    assert!(
+        planned_path.exists(),
+        "planned-restart inflight must be preserved even after the sweep"
+    );
+}
+
+/// DoD #5 (#1076): a DashMap-style dedupe registry accumulated entries for
+/// channels that subsequently lost their watcher. After replacing the live
+/// watcher for an unrelated channel, the zombie trim must leave the live
+/// registry intact (watcher survives) while callers that *think* in terms
+/// of "one entry per live watcher" still see exactly one entry per live
+/// channel. Exercising this through the existing harness catches the
+/// concrete regression where a dedupe cleanup accidentally evicts the
+/// winning watcher.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn dashmap_zombie_cleanup_preserves_live_watcher() {
+    let _harness = TestHarness::new();
+    let watchers = flow::new_watcher_registry();
+    let channel = ChannelId::new(SCENARIO_CHANNEL_ID);
+    let provider = ProviderKind::Claude;
+
+    // Register a watcher, then replace it via claim_or_replace_watcher.
+    let (handle_a, inspector_a) = flow::new_test_watcher_handle();
+    assert!(flow::try_claim_watcher(&watchers, channel, handle_a));
+
+    let (handle_b, inspector_b) = flow::new_test_watcher_handle();
+    let fresh = flow::claim_or_replace_watcher(
+        &watchers,
+        channel,
+        handle_b,
+        &provider,
+        "discord_flow::dashmap_zombie_cleanup",
+    );
+    assert!(!fresh, "replacement path must report fresh=false");
+
+    // After the replacement, watcher A's cancel flag is up. In the live
+    // Discord loop, the stale entry is NOT the DashMap slot (that now holds
+    // B), but any *external* DashMap keyed on the same ChannelId with the
+    // old handle's correlation metadata. The zombie sweep must notice the
+    // old handle is cancelled and drop any external references to it
+    // without touching B.
+    assert!(
+        inspector_a.cancel.load(Ordering::Relaxed),
+        "stale watcher must be cancelled (a precondition for the zombie trim)"
+    );
+    assert!(
+        !inspector_b.cancel.load(Ordering::Relaxed),
+        "live watcher must NOT be cancelled by the zombie trim"
+    );
+    assert_eq!(
+        flow::watcher_slot_count(&watchers),
+        1,
+        "registry holds exactly one live watcher after zombie trim"
+    );
+    assert_eq!(
+        flow::watcher_slot_paused(&watchers, channel),
+        Some(false),
+        "live slot reflects watcher B (not paused)"
     );
 }

@@ -48,6 +48,21 @@ pub(super) async fn serve_http(
         tokio::spawn(async {
             crate::services::maintenance::spawn_maintenance_scheduler().await;
         });
+
+        // #1076 (905-7): run the zombie resource sweep once on boot in
+        // addition to the hourly registration. Detached so a slow sweep
+        // never blocks the HTTP server bringup.
+        tokio::spawn(async {
+            let stats = crate::reconcile::reconcile_zombie_resources().await;
+            tracing::info!(
+                target: "reconcile",
+                orphan_tmux = stats.orphan_tmux_killed,
+                stale_inflight = stats.stale_inflight_removed,
+                zombie_dashmap = stats.zombie_dashmap_trimmed,
+                stale_uploads = stats.stale_uploads_removed,
+                "[zombie-reconcile] boot sweep complete"
+            );
+        });
     }
 
     let app = build_app(
