@@ -37,14 +37,16 @@ pub(super) async fn serve_http(
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
     crate::services::observability::init_observability(db.clone(), pg_pool.clone());
 
-    // #1091 (909-2): dynamic maintenance job scheduler. The registry itself is
-    // currently empty — 909-3 wires the first real job in. We still spawn the
-    // loop here so the surface is live from boot and `/api/cron-jobs` reflects
-    // whatever gets registered at runtime.
+    // #1091 (909-2): dynamic maintenance job scheduler. #1093 (909-4) wires
+    // `storage.db_retention` in here with the live postgres pool; further
+    // storage jobs will join via `jobs::spawn_storage_maintenance_jobs`.
     #[cfg(not(test))]
-    tokio::spawn(async {
-        crate::services::maintenance::spawn_maintenance_scheduler().await;
-    });
+    {
+        crate::services::maintenance::jobs::spawn_storage_maintenance_jobs(pg_pool.clone());
+        tokio::spawn(async {
+            crate::services::maintenance::spawn_maintenance_scheduler().await;
+        });
+    }
 
     let app = build_app(
         &dashboard_dir,

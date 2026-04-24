@@ -21,6 +21,8 @@
 //!
 //! 909-3 will register the first real job against this surface.
 
+pub mod jobs;
+
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
