@@ -145,6 +145,7 @@ src/
 │   │   ├── hooks.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs
+│   │   ├── maintenance.rs
 │   │   ├── meetings.rs
 │   │   ├── messages.rs
 │   │   ├── mod.rs
@@ -167,6 +168,7 @@ src/
 │   ├── background.rs
 │   ├── boot.rs
 │   ├── cron_catalog.rs
+│   ├── maintenance.rs
 │   ├── mod.rs
 │   ├── state.rs
 │   ├── tick.rs
