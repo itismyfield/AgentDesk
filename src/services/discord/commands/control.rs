@@ -8,7 +8,7 @@ use crate::services::provider::ProviderKind;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::cancel_active_token;
+use super::super::turn_bridge::{cancel_active_token, interrupt_provider_cli_turn};
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
 };
@@ -356,6 +356,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     clear_all_fast_mode_reset_markers(shared, channel_id).await;
 
     if let Some(token) = cleared.removed_token {
+        interrupt_provider_cli_turn(provider, &token, clear_source).await;
         cancel_active_token(
             &token,
             super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
@@ -445,6 +446,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
 
             ctx.say("Stopping...").await?;
 
+            interrupt_provider_cli_turn(&ctx.data().provider, &token, "/stop").await;
             cancel_active_token(
                 &token,
                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
