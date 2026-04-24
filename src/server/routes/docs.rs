@@ -2407,6 +2407,30 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ]),
         ep(
             "GET",
+            "/api/analytics/invariants",
+            "analytics",
+            "Runtime invariant violation counts and recent events",
+        )
+        .with_params([
+            (
+                "provider",
+                query_param("string", false, "Filter by provider id (claude/codex/gemini/qwen)"),
+            ),
+            (
+                "channelId",
+                query_param("string", false, "Filter by Discord channel id"),
+            ),
+            (
+                "invariant",
+                query_param("string", false, "Filter by invariant key"),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Maximum recent violations to return").with_default(50),
+            ),
+        ]),
+        ep(
+            "GET",
             "/api/quality/events",
             "analytics",
             "Agent quality raw event stream",

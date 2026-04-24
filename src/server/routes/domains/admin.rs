@@ -66,6 +66,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(escalation::emit_escalation),
             )
             .route("/analytics", get(analytics::analytics))
+            .route("/analytics/invariants", get(analytics::invariants))
             .route("/quality/events", get(analytics::quality_events))
             .route("/streaks", get(analytics::streaks))
             .route("/achievements", get(analytics::achievements))
