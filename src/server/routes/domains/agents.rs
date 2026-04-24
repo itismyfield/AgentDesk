@@ -3,7 +3,9 @@ use axum::{
     routing::{get, post},
 };
 
-use super::super::{ApiRouter, AppState, agents, agents_crud, cron_api, protected_api_domain};
+use super::super::{
+    ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, protected_api_domain,
+};
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
@@ -12,6 +14,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/agents",
                 get(agents_crud::list_agents).post(agents_crud::create_agent),
             )
+            .route("/agents/setup", post(agents_setup::setup_agent))
             .route(
                 "/agents/{id}",
                 get(agents_crud::get_agent)

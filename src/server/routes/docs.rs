@@ -294,6 +294,60 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Generate onboarding prompt",
         ),
         ep(
+            "POST",
+            "/api/agents/setup",
+            "agents",
+            "Atomically create an agent config binding, prompt file, workspace seed, DB row, and optional skill workspace mapping. Supports dry_run planning and rollback on partial failure.",
+        )
+        .with_params([
+            ("agent_id", body_param("string", true, "New agent id")),
+            (
+                "channel_id",
+                body_param("string", true, "Existing Discord channel snowflake"),
+            ),
+            (
+                "provider",
+                body_param("string", true, "Provider for the agent channel")
+                    .with_enum(&["claude", "codex", "gemini", "qwen"]),
+            ),
+            (
+                "prompt_template_path",
+                body_param(
+                    "string",
+                    true,
+                    "Prompt template path, usually config/agents/_shared.prompt.md",
+                ),
+            ),
+            (
+                "skills",
+                body_param("array", false, "Managed skill ids to map to the new workspace"),
+            ),
+            (
+                "dry_run",
+                body_param("boolean", false, "Validate and return planned mutations only")
+                    .with_default(false),
+            ),
+        ])
+        .with_example(
+            json!({
+                "body": {
+                    "agent_id": "project-agentdesk",
+                    "channel_id": "1473922824350601297",
+                    "provider": "codex",
+                    "prompt_template_path": "config/agents/_shared.prompt.md",
+                    "skills": ["memory-read"],
+                    "dry_run": true
+                }
+            }),
+            json!({
+                "ok": true,
+                "dry_run": true,
+                "created": [],
+                "rolled_back": [],
+                "errors": [],
+            }),
+        ),
+        ep(
             "GET",
             "/api/agents/{id}/offices",
             "agents",

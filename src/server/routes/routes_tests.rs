@@ -6235,6 +6235,304 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
         turn_start["example"]["response"]["status"],
         serde_json::json!("started")
     );
+
+    let setup = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/agents/setup")
+        .expect("agents setup endpoint must be present");
+    assert_eq!(setup["params"]["agent_id"]["required"], true);
+    assert_eq!(setup["params"]["dry_run"]["type"], "boolean");
+    assert_eq!(setup["params"]["provider"]["enum"][0], "claude");
+    assert_eq!(setup["example"]["response"]["dry_run"], true);
+}
+
+#[tokio::test]
+async fn agent_setup_dry_run_reports_plan_without_mutation() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let config_path = crate::runtime_layout::config_file_path(runtime_root.path());
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+    let prompt_template = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    fs::create_dir_all(prompt_template.parent().unwrap()).unwrap();
+    fs::write(&prompt_template, "shared prompt\n").unwrap();
+    write_test_skill(runtime_root.path(), "memory-read", "Memory read");
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "agent_id": "setup-agent",
+                        "channel_id": "1473922824350601297",
+                        "provider": "codex",
+                        "prompt_template_path": "config/agents/_shared.prompt.md",
+                        "skills": ["memory-read"],
+                        "dry_run": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["dry_run"], true);
+    assert!(json["created"].as_array().unwrap().is_empty());
+    assert!(json["errors"].as_array().unwrap().is_empty());
+    assert!(
+        json["planned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "agentdesk_yaml" && entry["status"] == "planned")
+    );
+    assert!(
+        json["planned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "skill_mapping" && entry["status"] == "planned")
+    );
+
+    let config = crate::config::load_from_path(&config_path).unwrap();
+    assert!(config.agents.iter().all(|agent| agent.id != "setup-agent"));
+    assert!(
+        !runtime_root
+            .path()
+            .join("config/agents/setup-agent/IDENTITY.md")
+            .exists()
+    );
+    let count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        !crate::runtime_layout::managed_skills_manifest_path(runtime_root.path()).exists(),
+        "dry_run must not create skills manifest"
+    );
+}
+
+#[tokio::test]
+async fn agent_setup_creates_resources_and_retry_is_idempotent() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let config_path = crate::runtime_layout::config_file_path(runtime_root.path());
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+    let prompt_template = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    fs::create_dir_all(prompt_template.parent().unwrap()).unwrap();
+    fs::write(&prompt_template, "shared prompt\n").unwrap();
+    write_test_skill(runtime_root.path(), "memory-read", "Memory read");
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    let request_body = json!({
+        "agent_id": "setup-agent",
+        "channel_id": "1473922824350601297",
+        "provider": "codex",
+        "prompt_template_path": "config/agents/_shared.prompt.md",
+        "skills": ["memory-read"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert!(
+        json["created"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "agentdesk_yaml")
+    );
+    assert!(json["transaction"]["audit_log"].as_str().is_some());
+
+    let config = crate::config::load_from_path(&config_path).unwrap();
+    let agent = config
+        .agents
+        .iter()
+        .find(|agent| agent.id == "setup-agent")
+        .expect("setup agent in config");
+    assert_eq!(agent.provider, "codex");
+    let codex_channel = agent.channels.codex.as_ref().expect("codex channel");
+    assert_eq!(
+        codex_channel.channel_id().as_deref(),
+        Some("1473922824350601297")
+    );
+    assert_eq!(
+        fs::read_to_string(
+            runtime_root
+                .path()
+                .join("config/agents/setup-agent/IDENTITY.md")
+        )
+        .unwrap(),
+        "shared prompt\n"
+    );
+    assert!(runtime_root.path().join("workspaces/setup-agent").is_dir());
+    let db_channel: Option<String> = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT discord_channel_cdx FROM agents WHERE id = 'setup-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(db_channel.as_deref(), Some("1473922824350601297"));
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(crate::runtime_layout::managed_skills_manifest_path(
+            runtime_root.path(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["skills"]["memory-read"]["providers"][0], "codex");
+    assert_eq!(
+        manifest["skills"]["memory-read"]["workspaces"][0],
+        "setup-agent"
+    );
+
+    let retry = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(retry.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["created"].as_array().unwrap().is_empty());
+    assert!(
+        json["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "db_seed")
+    );
+}
+
+#[tokio::test]
+async fn agent_setup_rolls_back_when_mid_step_fails() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let _fail = EnvVarGuard::set("AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER", "prompt_file");
+    let config_path = crate::runtime_layout::config_file_path(runtime_root.path());
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+    let prompt_template = crate::runtime_layout::shared_prompt_path(runtime_root.path());
+    fs::create_dir_all(prompt_template.parent().unwrap()).unwrap();
+    fs::write(&prompt_template, "shared prompt\n").unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "agent_id": "setup-agent",
+                        "channel_id": "1473922824350601297",
+                        "provider": "codex",
+                        "prompt_template_path": "config/agents/_shared.prompt.md"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert!(
+        json["rolled_back"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "prompt_file")
+    );
+    assert!(
+        json["rolled_back"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["step"] == "agentdesk_yaml")
+    );
+
+    let config = crate::config::load_from_path(&config_path).unwrap();
+    assert!(config.agents.iter().all(|agent| agent.id != "setup-agent"));
+    assert!(
+        !runtime_root
+            .path()
+            .join("config/agents/setup-agent/IDENTITY.md")
+            .exists()
+    );
+    let count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(runtime_root.path().join("config/.audit").is_dir());
 }
 
 #[tokio::test]

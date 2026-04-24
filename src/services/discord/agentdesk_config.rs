@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use poise::serenity_prelude::ChannelId;
 
@@ -6,7 +7,10 @@ use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, Summ
 use super::settings::{
     PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
 };
-use crate::config::{AgentChannel, Config, MeetingAgentEntry, MeetingSummaryAgentDef};
+use crate::config::{
+    AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config, MeetingAgentEntry,
+    MeetingSummaryAgentDef,
+};
 use crate::services::provider::ProviderKind;
 
 fn expand_tilde(path: &str) -> String {
@@ -34,6 +38,130 @@ fn load_agentdesk_config_with_path() -> Option<(Config, std::path::PathBuf)> {
         }
     }
     None
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSetupConfigInput {
+    pub agent_id: String,
+    pub provider: String,
+    pub channel_id: String,
+    pub prompt_file: String,
+    pub workspace: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgentSetupConfigMutation {
+    Created,
+    Unchanged,
+    Conflict(String),
+}
+
+pub(crate) fn agent_setup_config_path(root: &Path) -> PathBuf {
+    crate::runtime_layout::config_file_path(root)
+}
+
+pub(crate) fn load_agent_setup_config(root: &Path) -> Result<(Config, PathBuf, bool), String> {
+    for path in [
+        crate::runtime_layout::config_file_path(root),
+        crate::runtime_layout::legacy_config_file_path(root),
+    ] {
+        if path.is_file() {
+            let config = crate::config::load_from_path(&path)
+                .map_err(|error| format!("load '{}': {error}", path.display()))?;
+            return Ok((config, path, true));
+        }
+    }
+
+    Ok((Config::default(), agent_setup_config_path(root), false))
+}
+
+pub(crate) fn ensure_agent_setup_config(
+    config: &mut Config,
+    input: &AgentSetupConfigInput,
+) -> AgentSetupConfigMutation {
+    if let Some(existing) = config
+        .agents
+        .iter()
+        .find(|agent| agent.id == input.agent_id)
+    {
+        if agent_setup_config_matches(existing, input) {
+            return AgentSetupConfigMutation::Unchanged;
+        }
+        return AgentSetupConfigMutation::Conflict(format!(
+            "agent '{}' already exists in agentdesk.yaml with different setup data",
+            input.agent_id
+        ));
+    }
+
+    let Some(channel) = agent_channel_for_setup(input) else {
+        return AgentSetupConfigMutation::Conflict(format!(
+            "unsupported provider '{}'",
+            input.provider
+        ));
+    };
+
+    let mut channels = AgentChannels::default();
+    match input.provider.as_str() {
+        "claude" => channels.claude = Some(channel),
+        "codex" => channels.codex = Some(channel),
+        "gemini" => channels.gemini = Some(channel),
+        "qwen" => channels.qwen = Some(channel),
+        _ => {
+            return AgentSetupConfigMutation::Conflict(format!(
+                "unsupported provider '{}'",
+                input.provider
+            ));
+        }
+    }
+
+    config.agents.push(AgentDef {
+        id: input.agent_id.clone(),
+        name: input.agent_id.clone(),
+        name_ko: None,
+        provider: input.provider.clone(),
+        channels,
+        keywords: Vec::new(),
+        department: None,
+        avatar_emoji: None,
+    });
+
+    AgentSetupConfigMutation::Created
+}
+
+fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel> {
+    ProviderKind::from_str(&input.provider)?;
+    Some(AgentChannel::Detailed(AgentChannelConfig {
+        id: Some(input.channel_id.clone()),
+        name: None,
+        aliases: Vec::new(),
+        prompt_file: Some(input.prompt_file.clone()),
+        workspace: Some(input.workspace.clone()),
+        provider: Some(input.provider.clone()),
+        model: None,
+        reasoning_effort: None,
+        peer_agents: None,
+    }))
+}
+
+fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -> bool {
+    if agent.provider != input.provider {
+        return false;
+    }
+    let channel = match input.provider.as_str() {
+        "claude" => agent.channels.claude.as_ref(),
+        "codex" => agent.channels.codex.as_ref(),
+        "gemini" => agent.channels.gemini.as_ref(),
+        "qwen" => agent.channels.qwen.as_ref(),
+        _ => None,
+    };
+    let Some(channel) = channel else {
+        return false;
+    };
+
+    channel.channel_id().as_deref() == Some(input.channel_id.as_str())
+        && channel.prompt_file().as_deref() == Some(input.prompt_file.as_str())
+        && channel.workspace().as_deref() == Some(input.workspace.as_str())
+        && channel.provider().as_deref() == Some(input.provider.as_str())
 }
 
 fn load_agentdesk_config() -> Option<Config> {

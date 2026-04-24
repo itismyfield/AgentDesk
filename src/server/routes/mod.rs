@@ -1,5 +1,6 @@
 pub mod agents;
 mod agents_crud;
+mod agents_setup;
 pub mod analytics;
 pub mod auth;
 pub mod auto_queue;
