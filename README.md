@@ -48,7 +48,7 @@ cargo build --release
 AgentDesk intentionally keeps a separate `target/` directory per worktree. Sharing `CARGO_TARGET_DIR` across always-parallel worktrees causes Cargo lock contention, so the supported acceleration path is a shared `sccache` rustc cache instead.
 
 - `.cargo/config.toml` enables `build.rustc-wrapper = "sccache"`
-- release scripts export `SCCACHE_DIR="$HOME/.cache/sccache"` and `SCCACHE_CACHE_SIZE=10G`
+- worktree builds use the documented env default `SCCACHE_CACHE_SIZE=10G`; export another value before building to override it
 - plain `cargo build` / `cargo test` reuse the same cache automatically once `sccache` is on `PATH`
 
 Install `sccache` before building:

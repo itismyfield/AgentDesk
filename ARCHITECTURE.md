@@ -11,6 +11,8 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
+Worktree builds expect `sccache` on `PATH` via `.cargo/config.toml`; install it with `brew install sccache`, and override the documented `SCCACHE_CACHE_SIZE=10G` default only when a host needs a different local cache cap.
+
 ## Generated `src/` Tree
 
 This block is generated from the filesystem and is checked in CI for drift.
