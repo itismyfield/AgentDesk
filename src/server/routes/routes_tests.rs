@@ -8144,6 +8144,83 @@ async fn cron_jobs_include_github_issue_card_sync_job() {
 }
 
 #[tokio::test]
+async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    {
+        let conn = db.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            libsql_rusqlite::params![
+                "maintenance_job:maintenance.noop_heartbeat:next_run_ms",
+                "1700000000000"
+            ],
+        )?;
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/maintenance/jobs")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let jobs = json["jobs"].as_array().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "maintenance response must include jobs array",
+        )
+    })?;
+    let noop_job = jobs
+        .iter()
+        .find(|job| job["id"] == "maintenance.noop_heartbeat")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "maintenance response must include noop heartbeat job",
+            )
+        })?;
+
+    assert_eq!(noop_job["schedule"]["kind"], "every");
+    assert_eq!(noop_job["schedule"]["everyMs"], 900000);
+    assert_eq!(
+        noop_job["state"]["nextRunAtMs"],
+        json!(1_700_000_000_000i64)
+    );
+
+    let cron_response = app
+        .oneshot(Request::builder().uri("/cron-jobs").body(Body::empty())?)
+        .await?;
+    assert_eq!(cron_response.status(), StatusCode::OK);
+    let cron_body = axum::body::to_bytes(cron_response.into_body(), usize::MAX).await?;
+    let cron_json: serde_json::Value = serde_json::from_slice(&cron_body)?;
+    let cron_jobs = cron_json["jobs"].as_array().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cron response must include jobs array",
+        )
+    })?;
+    let cron_maintenance_job = cron_jobs
+        .iter()
+        .find(|job| job["id"] == "maintenance.noop_heartbeat")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cron response must include noop maintenance job",
+            )
+        })?;
+    assert_eq!(cron_maintenance_job["state"]["status"], "active");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn github_repos_pg_sync_closes_card_and_cleans_live_state() {
     crate::pipeline::ensure_loaded();
     let terminal = crate::pipeline::try_get()

@@ -134,6 +134,19 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         }));
     }
 
+    let maintenance_jobs = match state.pg_pool_ref() {
+        Some(pool) => crate::server::maintenance::list_job_statuses_pg(pool.clone()).await,
+        None => crate::server::maintenance::list_job_statuses_sqlite(state.db.clone()).await,
+    };
+    for job in maintenance_jobs {
+        match serde_json::to_value(job) {
+            Ok(value) => jobs.push(value),
+            Err(error) => {
+                tracing::warn!("[cron_api] failed to encode maintenance job status: {error}");
+            }
+        }
+    }
+
     jobs
 }
 
