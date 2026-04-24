@@ -10,9 +10,14 @@ use super::{SharedData, health, rate_limit_wait};
 use crate::server::routes::state::{MonitoringEntry, MonitoringStore, global_monitoring_store};
 
 const RENDER_DEBOUNCE: StdDuration = StdDuration::from_millis(300);
+
+#[cfg_attr(test, allow(dead_code))]
 const MONITORING_TTL: chrono::Duration = chrono::Duration::minutes(10);
+
+#[cfg_attr(test, allow(dead_code))]
 const SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
+#[cfg_attr(test, allow(dead_code))]
 static SWEEPER_STARTED: OnceLock<()> = OnceLock::new();
 
 pub(crate) fn schedule_render_channel(
@@ -53,6 +58,7 @@ pub(crate) fn schedule_render_channel(
     });
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn spawn_expiry_sweeper(
     monitoring: Arc<Mutex<MonitoringStore>>,
     health_registry: Option<Arc<health::HealthRegistry>>,
