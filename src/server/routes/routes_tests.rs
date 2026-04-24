@@ -8500,6 +8500,79 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
+async fn cron_api_response_includes_maintenance_section() -> Result<(), Box<dyn std::error::Error>>
+{
+    // #1091: /api/cron-jobs must include dynamically-registered maintenance
+    // jobs, tagged `source: "maintenance"` alongside the existing cron tiers
+    // which are tagged `source: "cron"`.
+    use crate::services::maintenance::{register_maintenance_job, test_serialization_lock};
+    use std::time::Duration;
+
+    // Serialize with any parallel services::maintenance::tests::* test that
+    // clears the process-global registry mid-run.
+    let _maintenance_lock = test_serialization_lock();
+
+    register_maintenance_job("test.cron_api_section", Duration::from_secs(300), || {
+        Box::pin(async { Ok(()) })
+    });
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(Request::builder().uri("/cron-jobs").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let jobs = json["jobs"].as_array().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cron response must include jobs array",
+        )
+    })?;
+
+    // Every job must have a `source` tag, and the set must contain both
+    // cron tiers and our registered maintenance job.
+    let mut saw_cron = false;
+    let mut saw_maintenance = false;
+    let mut saw_target = false;
+    for job in jobs {
+        let source = job["source"].as_str().unwrap_or("");
+        assert!(
+            !source.is_empty(),
+            "every cron-jobs entry must carry a non-empty `source` tag; got {job:?}"
+        );
+        match source {
+            "cron" => saw_cron = true,
+            "maintenance" => saw_maintenance = true,
+            other => panic!("unexpected source {other:?}"),
+        }
+        if job["id"] == "maintenance:test.cron_api_section" {
+            saw_target = true;
+            assert_eq!(job["source"], "maintenance");
+            assert_eq!(job["schedule"]["everyMs"], 300_000);
+            assert_eq!(job["enabled"], true);
+        }
+    }
+    assert!(
+        saw_cron,
+        "response must include at least one `cron` source job"
+    );
+    assert!(
+        saw_maintenance,
+        "response must include at least one `maintenance` source job"
+    );
+    assert!(
+        saw_target,
+        "response must include the registered test.cron_api_section maintenance job"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
     let db = test_db();
     seed_test_agents(&db);

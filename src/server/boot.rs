@@ -37,6 +37,15 @@ pub(super) async fn serve_http(
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
     crate::services::observability::init_observability(db.clone(), pg_pool.clone());
 
+    // #1091 (909-2): dynamic maintenance job scheduler. The registry itself is
+    // currently empty — 909-3 wires the first real job in. We still spawn the
+    // loop here so the surface is live from boot and `/api/cron-jobs` reflects
+    // whatever gets registered at runtime.
+    #[cfg(not(test))]
+    tokio::spawn(async {
+        crate::services::maintenance::spawn_maintenance_scheduler().await;
+    });
+
     let app = build_app(
         &dashboard_dir,
         db.clone(),

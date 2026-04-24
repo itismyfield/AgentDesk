@@ -62,6 +62,7 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         jobs.push(json!({
             "id": descriptor.job_id,
             "name": descriptor.name,
+            "source": "cron",
             "enabled": true,
             "schedule": {
                 "kind": "every",
@@ -93,6 +94,7 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
             jobs.push(json!({
                 "id": descriptor.job_id,
                 "name": descriptor.name,
+                "source": "cron",
                 "enabled": true,
                 "schedule": {
                     "kind": "every",
@@ -120,6 +122,7 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         jobs.push(json!({
             "id": descriptor.job_id,
             "name": descriptor.name,
+            "source": "cron",
             "enabled": true,
             "schedule": {
                 "kind": "every",
@@ -134,13 +137,31 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         }));
     }
 
+    // #1091: surface dynamically-registered maintenance jobs alongside cron.
+    for info in crate::services::maintenance::list_maintenance_jobs() {
+        match serde_json::to_value(info) {
+            Ok(value) => jobs.push(value),
+            Err(error) => {
+                tracing::warn!("[cron_api] failed to encode services::maintenance job: {error}");
+            }
+        }
+    }
+
     let maintenance_jobs = match state.pg_pool_ref() {
         Some(pool) => crate::server::maintenance::list_job_statuses_pg(pool.clone()).await,
         None => crate::server::maintenance::list_job_statuses_sqlite(state.db.clone()).await,
     };
     for job in maintenance_jobs {
         match serde_json::to_value(job) {
-            Ok(value) => jobs.push(value),
+            Ok(mut value) => {
+                // #1091: mark legacy server::maintenance entries with
+                // source = "maintenance" so /api/cron-jobs carries a
+                // consistent tag for every non-cron job.
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("source".to_string(), json!("maintenance"));
+                }
+                jobs.push(value);
+            }
             Err(error) => {
                 tracing::warn!("[cron_api] failed to encode maintenance job status: {error}");
             }

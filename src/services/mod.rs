@@ -12,6 +12,7 @@ pub mod dispatches;
 pub mod dispatches_followup;
 pub mod gemini;
 pub mod kanban;
+pub mod maintenance;
 pub mod mcp_config;
 pub mod memory;
 pub mod message_outbox;
