@@ -8,6 +8,9 @@ dashboard/dist/
 .DS_Store
 agentdesk.yaml
 /config/.backups/
+# Per-agent prompts are operator-private; canonical source lives in Obsidian
+# (~/ObsidianVault/RemoteVault/adk-config/agents/). See docs/source-of-truth.md.
+/config/agents/
 
 # Generated/temp files
 agentdesk.db

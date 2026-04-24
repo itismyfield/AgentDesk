@@ -307,13 +307,19 @@ DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
-# Stage agent prompt files atomically (source-of-truth: workspace config/agents/)
-if [ -d "$REPO/config/agents" ]; then
-    echo "▸ Staging agent prompts..."
+# Stage agent prompt files atomically (source-of-truth: Obsidian vault, private).
+# Agent prompts contain operator-specific content and are NOT tracked in this repo.
+# See docs/source-of-truth.md.
+OBSIDIAN_AGENTS_SRC="$HOME/ObsidianVault/RemoteVault/adk-config/agents"
+if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
+    echo "▸ Staging agent prompts from Obsidian vault..."
     PROMPTS_STAGED="$ADK_REL/config/agents.new"
     rm -rf "$PROMPTS_STAGED"
     mkdir -p "$PROMPTS_STAGED"
-    rsync -a "$REPO/config/agents/" "$PROMPTS_STAGED/"
+    rsync -a "$OBSIDIAN_AGENTS_SRC/" "$PROMPTS_STAGED/"
+else
+    echo "⚠ Obsidian agent prompt source missing: $OBSIDIAN_AGENTS_SRC"
+    echo "  Skipping prompt staging — existing $ADK_REL/config/agents/ will be retained."
 fi
 
 # Stage managed skills before stopping release so skill sync never sees partial content.
@@ -427,20 +433,12 @@ rm -rf "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
 
-if [ -d "$PROMPTS_STAGED" ]; then
+if [ -n "${PROMPTS_STAGED:-}" ] && [ -d "$PROMPTS_STAGED" ]; then
     rm -rf "$ADK_REL/config/agents.old"
     [ -d "$ADK_REL/config/agents" ] && mv "$ADK_REL/config/agents" "$ADK_REL/config/agents.old"
     mv "$PROMPTS_STAGED" "$ADK_REL/config/agents"
     rm -rf "$ADK_REL/config/agents.old"
     [ ! -e "$ADK_REL/config/agents/_shared.md" ] && ln -s _shared.prompt.md "$ADK_REL/config/agents/_shared.md" 2>/dev/null || true
-
-    # Audit copy: one-way sync to ObsidianVault (non-blocking, failure is not fatal)
-    OBSIDIAN_AGENTS="$HOME/ObsidianVault/RemoteVault/adk-config/agents"
-    if [ -d "$OBSIDIAN_AGENTS" ]; then
-        rsync -a --delete "$ADK_REL/config/agents/" "$OBSIDIAN_AGENTS/" 2>/dev/null \
-            && echo "▸ Audit copy → ObsidianVault" \
-            || echo "▸ Audit copy to ObsidianVault failed (non-fatal)"
-    fi
 fi
 
 # Keep the user-facing CLI wrapper discoverable via PATH.
