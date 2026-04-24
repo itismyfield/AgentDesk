@@ -12,8 +12,9 @@ fn session_retry_context_key(channel_id: u64) -> String {
     format!("session_retry_context:{channel_id}")
 }
 
-fn direct_api_context_unavailable(error: &str) -> bool {
+fn direct_runtime_context_unavailable(error: &str) -> bool {
     error.contains("direct runtime API context is unavailable")
+        || error.contains("direct runtime pg context is unavailable")
 }
 
 fn store_session_retry_context_sqlite(
@@ -171,7 +172,7 @@ pub(in crate::services::discord) fn store_session_retry_context(
     let key = session_retry_context_key(channel_id);
     match super::super::internal_api::set_kv_value(&key, history) {
         Ok(()) => Ok(()),
-        Err(err) if direct_api_context_unavailable(&err) => {
+        Err(err) if direct_runtime_context_unavailable(&err) => {
             if let Some(pg_pool) = pg_pool {
                 store_session_retry_context_pg(pg_pool, &key, history)
             } else if let Some(db) = db {
@@ -220,11 +221,27 @@ pub(in crate::services::discord) fn take_session_retry_context(
             }
         }
         Ok(None) => None,
-        Err(err) if direct_api_context_unavailable(&err) => {
+        Err(err) if direct_runtime_context_unavailable(&err) => {
             take_session_retry_context_runtime_pg(&key)
                 .or_else(|| db.and_then(|db| take_session_retry_context_sqlite(db, &key)))
         }
         Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::direct_runtime_context_unavailable;
+
+    #[test]
+    fn direct_runtime_context_unavailable_matches_api_and_pg_errors() {
+        assert!(direct_runtime_context_unavailable(
+            "direct runtime API context is unavailable"
+        ));
+        assert!(direct_runtime_context_unavailable(
+            "direct runtime pg context is unavailable"
+        ));
+        assert!(!direct_runtime_context_unavailable("other runtime error"));
     }
 }
 
