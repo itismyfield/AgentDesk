@@ -2186,6 +2186,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
         .seed_queue(channel_num, &[(2_001, "preserve cancel queue")])
         .await;
     harness.insert_dispatch_role_override(channel_num, 1485506232256168998);
+    let watcher_cancel = harness.seed_watcher(channel_num);
 
     let app = test_api_router(db.clone(), engine, Some(harness.registry()));
     let response = app
@@ -2207,6 +2208,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
+    assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["queue_preserved"], true);
     assert!(json["dispatch_cancelled"].is_null());
 
@@ -2215,6 +2217,14 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
     assert!(harness.has_dispatch_role_override(channel_num));
+    assert!(
+        harness.has_watcher(channel_num),
+        "cancel with tmux_killed=false must keep watcher attached"
+    );
+    assert!(
+        !watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "cancel with tmux_killed=false must not signal watcher cancellation"
+    );
 
     let conn = db.lock().unwrap();
     let session_status: String = conn

@@ -1767,6 +1767,169 @@ async fn resolve_watcher_dispatch_id(
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MissingInflightFallbackPlan {
+    warn: bool,
+    trigger_reattach: bool,
+}
+
+fn missing_inflight_fallback_plan(
+    inflight_missing: bool,
+    dispatch_resolved: bool,
+    terminal_output_committed: bool,
+) -> MissingInflightFallbackPlan {
+    MissingInflightFallbackPlan {
+        warn: inflight_missing,
+        trigger_reattach: inflight_missing && !dispatch_resolved && terminal_output_committed,
+    }
+}
+
+fn trigger_missing_inflight_reattach(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ watcher: DB dispatch fallback unresolved for channel {} — triggering explicit reattach to {}",
+        channel_id.get(),
+        tmux_session_name
+    );
+
+    if !tmux_session_has_live_pane(tmux_session_name) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: explicit reattach skipped for channel {} — tmux session is not live ({})",
+            channel_id.get(),
+            tmux_session_name
+        );
+        return;
+    }
+
+    let (output_path, input_fifo_path) = super::turn_bridge::tmux_runtime_paths(tmux_session_name);
+    let initial_offset = std::fs::metadata(&output_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let channel_name =
+        parse_provider_and_channel_from_tmux_name(tmux_session_name).map(|(_, name)| name);
+
+    let mut state = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        channel_name.clone(),
+        0,
+        0,
+        0,
+        "watcher missing-inflight reattach".to_string(),
+        None,
+        Some(tmux_session_name.to_string()),
+        Some(output_path.clone()),
+        Some(input_fifo_path),
+        initial_offset,
+    );
+    state.rebind_origin = true;
+
+    match super::inflight::save_inflight_state_create_new(&state) {
+        Ok(()) => {}
+        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: explicit reattach skipped for channel {} — inflight state already exists",
+                channel_id.get()
+            );
+            return;
+        }
+        Err(super::inflight::CreateNewInflightError::Internal(error)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::error!(
+                "  [{ts}] ❌ watcher: explicit reattach failed for channel {} / {} after DB fallback miss: {}",
+                channel_id.get(),
+                tmux_session_name,
+                error
+            );
+            return;
+        }
+    }
+
+    if let Ok(mut data) = shared.core.try_lock() {
+        let session = data
+            .sessions
+            .entry(channel_id)
+            .or_insert_with(|| super::DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: channel_name.clone(),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: super::runtime_store::load_generation(),
+                assistant_turns: 0,
+            });
+        session.channel_id = Some(channel_id.get());
+        session.last_active = tokio::time::Instant::now();
+        if session.channel_name.is_none() {
+            session.channel_name = channel_name.clone();
+        }
+    } else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: explicit reattach could not refresh in-memory session for channel {} because core state was busy",
+            channel_id.get()
+        );
+    }
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+    let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = TmuxWatcherHandle {
+        paused: paused.clone(),
+        resume_offset: resume_offset.clone(),
+        cancel: cancel.clone(),
+        pause_epoch: pause_epoch.clone(),
+        turn_delivered: turn_delivered.clone(),
+    };
+    let fresh = claim_or_replace_watcher(
+        &shared.tmux_watchers,
+        channel_id,
+        handle,
+        provider,
+        "watcher_missing_inflight_fallback",
+    );
+    tokio::spawn(tmux_output_watcher(
+        channel_id,
+        http.clone(),
+        shared.clone(),
+        output_path,
+        tmux_session_name.to_string(),
+        initial_offset,
+        cancel,
+        paused,
+        resume_offset,
+        pause_epoch,
+        turn_delivered,
+    ));
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ↻ watcher: reattach triggered for channel {} (tmux={}, offset={}, replaced={})",
+        channel_id.get(),
+        tmux_session_name,
+        initial_offset,
+        !fresh
+    );
+}
+
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
 /// Returns true if the claim succeeded (caller should spawn the watcher).
 /// Returns false if a watcher already exists (caller should skip).
@@ -3894,6 +4057,21 @@ pub(super) async fn tmux_output_watcher_with_restore(
             tracing::warn!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
         }
 
+        let missing_inflight_plan = missing_inflight_fallback_plan(
+            inflight_state.is_none(),
+            resolved_did.is_some(),
+            relay_ok || relay_suppressed,
+        );
+        if missing_inflight_plan.trigger_reattach {
+            trigger_missing_inflight_reattach(
+                &http,
+                &shared,
+                &provider_kind,
+                channel_id,
+                &tmux_session_name,
+            );
+        }
+
         // Update session tokens from result event and auto-compact if threshold exceeded
         if let Some(tokens) = result_usage.map(|usage| usage.total_input_tokens()) {
             let provider = shared.settings.read().await.provider.clone();
@@ -5238,14 +5416,14 @@ mod tests {
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
-        load_restored_provider_session_id, notify_path_offset_advance_decision,
-        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
-        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
-        restored_watcher_turn_from_inflight, rollback_enqueued_offset_for_reconciled_failures,
-        start_monitor_auto_turn_when_available, strip_inprogress_indicators,
-        suppressed_placeholder_action, terminal_relay_decision, tmux_death_is_normal_completion,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
-        watcher_stream_seed,
+        load_restored_provider_session_id, missing_inflight_fallback_plan,
+        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
+        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
+        refresh_session_heartbeat_from_tmux_output, restored_watcher_turn_from_inflight,
+        rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
+        strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
+        tmux_death_is_normal_completion, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state, watcher_stream_seed,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -5403,6 +5581,21 @@ mod tests {
 
         let watcher = watchers.get(&channel_id).expect("watcher should exist");
         assert!(watcher.paused.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn missing_inflight_fallback_warns_and_triggers_reattach_on_db_miss() {
+        let plan = missing_inflight_fallback_plan(true, false, true);
+        assert!(plan.warn);
+        assert!(plan.trigger_reattach);
+
+        let resolved = missing_inflight_fallback_plan(true, true, true);
+        assert!(resolved.warn);
+        assert!(!resolved.trigger_reattach);
+
+        let uncommitted = missing_inflight_fallback_plan(true, false, false);
+        assert!(uncommitted.warn);
+        assert!(!uncommitted.trigger_reattach);
     }
 
     #[test]

@@ -312,6 +312,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         channel_id,
         &finish,
         "runtime_stop_fallback",
+        cleanup_requested,
     )
     .await;
     let queue_depth = shared
@@ -488,6 +489,7 @@ async fn apply_runtime_hard_stop_cleanup(
     channel_id: ChannelId,
     finish: &super::FinishTurnResult,
     stop_source: &'static str,
+    stop_watcher: bool,
 ) -> bool {
     if let Some(token) = finish.removed_token.as_ref() {
         token.cancelled.store(true, Ordering::Relaxed);
@@ -505,7 +507,7 @@ async fn apply_runtime_hard_stop_cleanup(
         shared.dispatch_role_overrides.remove(&channel_id);
     }
 
-    if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
+    if stop_watcher && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
         watcher.cancel.store(true, Ordering::Relaxed);
     }
 
@@ -568,6 +570,7 @@ pub async fn hard_stop_runtime_turn(
             runtime.channel_id,
             &finish,
             stop_source,
+            true,
         )
         .await;
         return HardStopRuntimeResult {
@@ -1127,6 +1130,27 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             ChannelId::new(override_channel_id),
         );
+    }
+
+    pub(crate) fn seed_watcher(&self, channel_id: u64) -> Arc<std::sync::atomic::AtomicBool> {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.shared.tmux_watchers.insert(
+            ChannelId::new(channel_id),
+            super::TmuxWatcherHandle {
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: cancel.clone(),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        cancel
+    }
+
+    pub(crate) fn has_watcher(&self, channel_id: u64) -> bool {
+        self.shared
+            .tmux_watchers
+            .contains_key(&ChannelId::new(channel_id))
     }
 }
 

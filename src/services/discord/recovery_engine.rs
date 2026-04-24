@@ -226,6 +226,26 @@ fn recovery_dispatch_id(state: &inflight::InflightTurnState) -> Option<&str> {
         .filter(|dispatch_id| !dispatch_id.is_empty())
 }
 
+fn recovery_tmux_session_name(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Option<String> {
+    state
+        .tmux_session_name
+        .as_deref()
+        .or_else(|| state.channel_name.as_deref())
+        .map(|name| {
+            if name.starts_with(&format!(
+                "{}-",
+                crate::services::provider::TMUX_SESSION_PREFIX
+            )) {
+                name.to_string()
+            } else {
+                provider.build_tmux_session_name(name)
+            }
+        })
+}
+
 fn recovery_requires_worktree_context(state: &inflight::InflightTurnState) -> bool {
     recovery_worktree_branch(state).is_some()
         || state
@@ -600,32 +620,42 @@ fn detect_live_tmux_output_path(
 /// Check whether a **successful** result record exists after the given offset.
 /// Error results are not considered completion — they should not trigger the
 /// recovery completed-turn path (✅ reaction, idle dispatch, etc.).
-fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool {
+fn success_result_end_offset_after_offset(output_path: &str, start_offset: u64) -> Option<u64> {
     let Ok(bytes) = std::fs::read(output_path) else {
-        return false;
+        return None;
     };
     let start = usize::try_from(start_offset)
         .ok()
         .map(|offset| offset.min(bytes.len()))
         .unwrap_or(bytes.len());
 
-    String::from_utf8_lossy(&bytes[start..])
-        .lines()
-        .any(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                return false;
-            };
-            let is_result = value.get("type").and_then(|v| v.as_str()) == Some("result");
-            let is_error = value
-                .get("is_error")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            is_result && !is_error
-        })
+    let mut absolute_end = start as u64;
+    for segment in bytes[start..].split_inclusive(|byte| *byte == b'\n') {
+        absolute_end = absolute_end.saturating_add(segment.len() as u64);
+        let line = String::from_utf8_lossy(segment);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let is_result = value.get("type").and_then(|v| v.as_str()) == Some("result");
+        let is_error = value
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_result && !is_error {
+            return Some(absolute_end);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool {
+    success_result_end_offset_after_offset(output_path, start_offset).is_some()
 }
 
 /// Extract accumulated assistant text from output JSONL after the given offset.
@@ -784,6 +814,57 @@ fn output_has_bytes_after_offset(output_path: &str, start_offset: u64) -> bool {
         .unwrap_or(false)
 }
 
+const TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn terminal_success_watcher_stop_allowed(
+    confirmed_end: u64,
+    tmux_tail_offset: u64,
+    quiet_for: std::time::Duration,
+) -> bool {
+    confirmed_end >= tmux_tail_offset && quiet_for >= TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD
+}
+
+async fn terminal_success_output_drained_for_recovery(
+    output_path: &str,
+    confirmed_end: u64,
+    tmux_session_name: Option<&str>,
+) -> bool {
+    let Ok(before_meta) = std::fs::metadata(output_path) else {
+        return false;
+    };
+    let tmux_alive = tmux_session_name
+        .map(crate::services::platform::tmux::has_session)
+        .unwrap_or(false);
+
+    if !tmux_alive {
+        return terminal_success_watcher_stop_allowed(
+            confirmed_end,
+            before_meta.len(),
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD,
+        );
+    }
+
+    if !terminal_success_watcher_stop_allowed(
+        confirmed_end,
+        before_meta.len(),
+        TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD,
+    ) {
+        return false;
+    }
+
+    tokio::time::sleep(TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD).await;
+
+    let tail_after = std::fs::metadata(output_path)
+        .map(|meta| meta.len())
+        .unwrap_or(confirmed_end.saturating_add(1));
+    tail_after == confirmed_end
+        && terminal_success_watcher_stop_allowed(
+            confirmed_end,
+            tail_after,
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD,
+        )
+}
+
 fn recovery_watcher_start_offset(output_path: &str, saved_last_offset: u64) -> (u64, u64, bool) {
     let current_len = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
     if current_len >= saved_last_offset {
@@ -866,12 +947,36 @@ pub(super) async fn restore_inflight_turns(
                         .as_ref()
                         .map(|name| tmux_runtime_paths(&provider.build_tmux_session_name(name)).0)
                 });
-            let completed_during_downtime = output_path_for_check
+            let restart_tmux_name = recovery_tmux_session_name(provider, &state);
+            let completed_during_downtime_end = output_path_for_check
                 .as_deref()
-                .map(|path| output_has_result_after_offset(path, state.last_offset))
-                .unwrap_or(false);
+                .and_then(|path| success_result_end_offset_after_offset(path, state.last_offset));
+            let completed_during_downtime = completed_during_downtime_end.is_some();
+            let completed_during_downtime_drained = match (
+                output_path_for_check.as_deref(),
+                completed_during_downtime_end,
+            ) {
+                (Some(path), Some(confirmed_end)) => {
+                    terminal_success_output_drained_for_recovery(
+                        path,
+                        confirmed_end,
+                        restart_tmux_name.as_deref(),
+                    )
+                    .await
+                }
+                (None, Some(_)) => true,
+                _ => false,
+            };
 
-            if completed_during_downtime {
+            if completed_during_downtime && !completed_during_downtime_drained {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: terminal success observed for channel {} but tmux output has not stayed drained; reattaching watcher",
+                    state.channel_id
+                );
+            }
+
+            if completed_during_downtime_drained {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ✓ recovering completed turn for channel {} (restart report exists but output has result)",
@@ -1115,20 +1220,7 @@ pub(super) async fn restore_inflight_turns(
             // the restart report and fall through to normal recovery (which
             // re-attaches a watcher to pick up the remaining output).
             // If the session is dead, delegate to the flush loop for fallback.
-            let tmux_name = state
-                .tmux_session_name
-                .as_deref()
-                .or_else(|| state.channel_name.as_deref())
-                .map(|name| {
-                    if name.starts_with(&format!(
-                        "{}-",
-                        crate::services::provider::TMUX_SESSION_PREFIX
-                    )) {
-                        name.to_string()
-                    } else {
-                        provider.build_tmux_session_name(name)
-                    }
-                });
+            let tmux_name = restart_tmux_name;
             let session_alive = tmux_name
                 .as_deref()
                 .map_or(false, tmux_session_alive_with_retry);
@@ -1421,16 +1513,35 @@ pub(super) async fn restore_inflight_turns(
             }
         }
 
-        let output_already_completed = output_path
+        let terminal_success_end = output_path
             .as_deref()
-            .map(|path| output_has_result_after_offset(path, state.last_offset))
-            .unwrap_or(false);
+            .and_then(|path| success_result_end_offset_after_offset(path, state.last_offset));
+        let output_already_completed = terminal_success_end.is_some();
+        let terminal_success_drained = match (output_path.as_deref(), terminal_success_end) {
+            (Some(path), Some(confirmed_end)) => {
+                terminal_success_output_drained_for_recovery(
+                    path,
+                    confirmed_end,
+                    tmux_session_name.as_deref(),
+                )
+                .await
+            }
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if output_already_completed && !terminal_success_drained {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ recovery: terminal success observed for channel {} but tmux output has not stayed drained; reattaching watcher",
+                state.channel_id
+            );
+        }
         let output_has_new_bytes = output_path
             .as_deref()
             .map(|path| output_has_bytes_after_offset(path, state.last_offset))
             .unwrap_or(false);
 
-        if can_fast_path_captured_full_response(&state, output_already_completed) {
+        if can_fast_path_captured_full_response(&state, terminal_success_drained) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ recovery fast-path: delivering captured full_response for channel {}",
@@ -1632,7 +1743,7 @@ pub(super) async fn restore_inflight_turns(
             continue;
         }
         if matches!(
-            recovery_phase_after_output_scan(output_already_completed, false),
+            recovery_phase_after_output_scan(terminal_success_drained, false),
             RecoveryPhase::Done
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3188,6 +3299,27 @@ mod tests {
     }
 
     #[test]
+    fn success_result_end_offset_stops_at_result_line_before_followup_output() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"next"}]}}"#,
+        ]);
+        let full_len = file.as_file().metadata().unwrap().len();
+        let result_end =
+            success_result_end_offset_after_offset(file.path().to_str().unwrap(), 0).unwrap();
+
+        assert!(
+            result_end < full_len,
+            "confirmed end must not jump past follow-up output"
+        );
+        assert!(!terminal_success_watcher_stop_allowed(
+            result_end,
+            full_len,
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD
+        ));
+    }
+
+    #[test]
     fn ignores_result_before_offset() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         writeln!(
@@ -3230,6 +3362,25 @@ mod tests {
         assert!(!output_has_bytes_after_offset(
             file.path().to_str().unwrap(),
             offset
+        ));
+    }
+
+    #[test]
+    fn terminal_success_stop_requires_drained_tail_and_quiet_period() {
+        assert!(terminal_success_watcher_stop_allowed(
+            256,
+            256,
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD
+        ));
+        assert!(!terminal_success_watcher_stop_allowed(
+            128,
+            256,
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD
+        ));
+        assert!(!terminal_success_watcher_stop_allowed(
+            256,
+            256,
+            TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD - std::time::Duration::from_millis(1)
         ));
     }
 
