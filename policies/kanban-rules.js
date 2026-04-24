@@ -15,6 +15,12 @@ function sendDiscordNotification(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
+function emitQualityEvent(event) {
+  if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
+    agentdesk.quality.emit(event);
+  }
+}
+
 function _loadCardAlertContext(cardId) {
   var rows = agentdesk.db.query(
     "SELECT assigned_agent_id, COALESCE(title, id) as title, github_issue_number " +
@@ -669,6 +675,25 @@ var rules = {
   // ── Card Transition — side effects ────────────────────────
   onCardTransition: function(payload) {
     agentdesk.log.info("[kanban] card " + payload.card_id + ": " + payload.from + " → " + payload.to);
+    if (agentdesk.quality && typeof agentdesk.quality.emit === "function") {
+      var qualityCardRows = agentdesk.db.query(
+        "SELECT assigned_agent_id, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+        [payload.card_id]
+      );
+      var qualityCard = qualityCardRows.length > 0 ? qualityCardRows[0] : {};
+      emitQualityEvent({
+        event_type: "card_transitioned",
+        source_event_id: payload.card_id + ":" + payload.to,
+        correlation_id: qualityCard.latest_dispatch_id || payload.card_id,
+        agent_id: qualityCard.assigned_agent_id || null,
+        card_id: payload.card_id,
+        dispatch_id: qualityCard.latest_dispatch_id || null,
+        payload: {
+          from: payload.from || null,
+          to: payload.to || null
+        }
+      });
+    }
     var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
     var initialState = agentdesk.pipeline.kickoffState(cfg);
 

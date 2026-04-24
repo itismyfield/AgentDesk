@@ -63,6 +63,35 @@ fn canonical_recovery_phase(phase: RecoveryPhase) -> RecoveryPhase {
     RecoveryPhase::from_optional_str(Some(phase.as_str())).unwrap_or(phase)
 }
 
+fn emit_recovery_quality_event(
+    provider: &ProviderKind,
+    channel_id: u64,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    reason: &str,
+) {
+    crate::services::observability::emit_agent_quality_event(
+        crate::services::observability::AgentQualityEvent {
+            source_event_id: session_key
+                .map(str::to_string)
+                .or_else(|| dispatch_id.map(str::to_string)),
+            correlation_id: dispatch_id
+                .map(str::to_string)
+                .or_else(|| session_key.map(str::to_string)),
+            agent_id: None,
+            provider: Some(provider.as_str().to_string()),
+            channel_id: Some(channel_id.to_string()),
+            card_id: None,
+            dispatch_id: dispatch_id.map(str::to_string),
+            event_type: "recovery_fired".to_string(),
+            payload: serde_json::json!({
+                "reason": reason,
+                "session_key": session_key,
+            }),
+        },
+    );
+}
+
 /// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 fn tmux_session_alive_with_retry(name: &str) -> bool {
@@ -839,6 +868,17 @@ pub(super) async fn restore_inflight_turns(
             super::restart_report::load_restart_report(provider, state.channel_id).is_some();
         crate::services::observability::emit_recovery_fired(
             provider.as_str(),
+            state.channel_id,
+            state.dispatch_id.as_deref(),
+            state.session_key.as_deref(),
+            if restart_report_exists {
+                "restart_report"
+            } else {
+                "restore_inflight"
+            },
+        );
+        emit_recovery_quality_event(
+            provider,
             state.channel_id,
             state.dispatch_id.as_deref(),
             state.session_key.as_deref(),
@@ -2039,6 +2079,13 @@ pub(super) async fn restore_inflight_turns(
                             state.session_key.as_deref(),
                             "worktree_missing_main_fallback_blocked",
                         );
+                        emit_recovery_quality_event(
+                            provider,
+                            state.channel_id,
+                            dispatch_id.as_deref(),
+                            state.session_key.as_deref(),
+                            "worktree_missing_main_fallback_blocked",
+                        );
                         let _ = super::formatting::replace_long_message_raw(
                             http,
                             channel_id,
@@ -2200,6 +2247,13 @@ pub(super) async fn restore_inflight_turns(
                 tracing::error!("  [{ts}] {error}; main-workspace fallback blocked");
                 crate::services::observability::emit_recovery_fired(
                     provider.as_str(),
+                    state.channel_id,
+                    dispatch_id.as_deref(),
+                    state.session_key.as_deref(),
+                    "worktree_missing_main_fallback_blocked",
+                );
+                emit_recovery_quality_event(
+                    provider,
                     state.channel_id,
                     dispatch_id.as_deref(),
                     state.session_key.as_deref(),

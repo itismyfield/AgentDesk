@@ -18,6 +18,7 @@ mod kv_ops;
 mod log_ops;
 pub(crate) mod message_ops;
 mod pipeline_ops;
+mod quality_ops;
 mod queue_ops;
 mod review_automation_ops;
 mod review_ops;
@@ -84,6 +85,9 @@ pub fn register_globals_with_supervisor_and_pg(
 
     // ── agentdesk.log ────────────────────────────────────────────
     log_ops::register_log_ops(ctx)?;
+
+    // ── agentdesk.quality ───────────────────────────────────────
+    quality_ops::register_quality_ops(ctx)?;
 
     // ── agentdesk.config ─────────────────────────────────────────
     config_ops::register_config_ops(ctx, db.clone(), pg_pool.clone())?;

@@ -64,6 +64,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(escalation::emit_escalation),
             )
             .route("/analytics", get(analytics::analytics))
+            .route("/quality/events", get(analytics::quality_events))
             .route("/streaks", get(analytics::streaks))
             .route("/achievements", get(analytics::achievements))
             .route("/activity-heatmap", get(analytics::activity_heatmap))

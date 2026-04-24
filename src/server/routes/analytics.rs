@@ -41,6 +41,13 @@ pub struct AnalyticsQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct QualityEventsQuery {
+    pub agent_id: Option<String>,
+    pub days: Option<i64>,
+    pub limit: Option<usize>,
+}
+
 /// GET /api/analytics
 pub async fn analytics(
     State(state): State<AppState>,
@@ -71,6 +78,37 @@ pub async fn analytics(
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("query analytics: {error}")})),
+        ),
+    }
+}
+
+/// GET /api/quality/events
+pub async fn quality_events(
+    State(state): State<AppState>,
+    Query(params): Query<QualityEventsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let filters = crate::services::observability::AgentQualityFilters {
+        agent_id: params.agent_id,
+        days: params.days.unwrap_or(7),
+        limit: params.limit.unwrap_or(200),
+    };
+
+    match crate::services::observability::query_agent_quality_events(
+        state.sqlite_db(),
+        state.pg_pool_ref(),
+        &filters,
+    )
+    .await
+    {
+        Ok(events) => (
+            StatusCode::OK,
+            Json(json!({
+                "events": events,
+            })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query agent quality events: {error}")})),
         ),
     }
 }

@@ -1924,6 +1924,36 @@ fn ensure_observability_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_observability_counter_snapshots_snapshot_at
             ON observability_counter_snapshots (snapshot_at DESC);",
     )?;
+    ensure_agent_quality_schema(conn)?;
+    Ok(())
+}
+
+fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_quality_event (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_event_id TEXT,
+            correlation_id  TEXT,
+            agent_id        TEXT,
+            provider        TEXT,
+            channel_id      TEXT,
+            card_id         TEXT,
+            dispatch_id     TEXT,
+            event_type      TEXT NOT NULL,
+            payload_json    TEXT NOT NULL DEFAULT '{}',
+            created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_event_agent_created
+            ON agent_quality_event (agent_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_event_created
+            ON agent_quality_event (created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_event_dispatch
+            ON agent_quality_event (dispatch_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_event_card
+            ON agent_quality_event (card_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_event_correlation
+            ON agent_quality_event (correlation_id, created_at DESC);",
+    )?;
     Ok(())
 }
 

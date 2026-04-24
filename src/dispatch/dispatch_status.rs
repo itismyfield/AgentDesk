@@ -29,6 +29,44 @@ fn should_enqueue_status_reaction(to_status: &str, transition_source: &str) -> b
     }
 }
 
+fn emit_dispatch_quality_event(
+    dispatch_id: &str,
+    agent_id: Option<&str>,
+    card_id: Option<&str>,
+    dispatch_type: Option<&str>,
+    from_status: Option<&str>,
+    to_status: &str,
+    transition_source: &str,
+    payload: Option<&serde_json::Value>,
+) {
+    let Some(event_type) = (match to_status {
+        "dispatched" => Some("dispatch_dispatched"),
+        "completed" => Some("dispatch_completed"),
+        _ => None,
+    }) else {
+        return;
+    };
+    crate::services::observability::emit_agent_quality_event(
+        crate::services::observability::AgentQualityEvent {
+            source_event_id: Some(dispatch_id.to_string()),
+            correlation_id: Some(dispatch_id.to_string()),
+            agent_id: agent_id.map(str::to_string),
+            provider: None,
+            channel_id: None,
+            card_id: card_id.map(str::to_string),
+            dispatch_id: Some(dispatch_id.to_string()),
+            event_type: event_type.to_string(),
+            payload: json!({
+                "dispatch_type": dispatch_type,
+                "from_status": from_status,
+                "to_status": to_status,
+                "transition_source": transition_source,
+                "payload": payload.cloned().unwrap_or_else(|| json!({})),
+            }),
+        },
+    );
+}
+
 fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
     result.is_some_and(|value| {
         value.get("work_outcome").and_then(|entry| entry.as_str()) == Some("noop")
@@ -350,7 +388,7 @@ async fn set_dispatch_status_on_pg_with_sync(
         .map_err(|error| anyhow::anyhow!("begin postgres dispatch status tx: {error}"))?;
 
     let current = sqlx::query(
-        "SELECT status, kanban_card_id, dispatch_type
+        "SELECT status, kanban_card_id, to_agent_id, dispatch_type
          FROM task_dispatches
          WHERE id = $1",
     )
@@ -462,6 +500,11 @@ async fn set_dispatch_status_on_pg_with_sync(
             .map_err(|error| {
                 anyhow::anyhow!("decode postgres kanban_card_id for {dispatch_id}: {error}")
             })?;
+        let agent_id = current
+            .try_get::<Option<String>, _>("to_agent_id")
+            .map_err(|error| {
+                anyhow::anyhow!("decode postgres to_agent_id for {dispatch_id}: {error}")
+            })?;
         let dispatch_type = current
             .try_get::<Option<String>, _>("dispatch_type")
             .map_err(|error| {
@@ -493,6 +536,19 @@ async fn set_dispatch_status_on_pg_with_sync(
         })?;
         crate::services::observability::emit_dispatch_result(
             dispatch_id,
+            kanban_card_id.as_deref(),
+            dispatch_type.as_deref(),
+            Some(&current_status),
+            to_status,
+            transition_source,
+            result_json
+                .as_ref()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .as_ref(),
+        );
+        emit_dispatch_quality_event(
+            dispatch_id,
+            agent_id.as_deref(),
             kanban_card_id.as_deref(),
             dispatch_type.as_deref(),
             Some(&current_status),
@@ -769,14 +825,18 @@ pub(crate) fn record_dispatch_status_event_on_conn(
     transition_source: &str,
     payload: Option<&serde_json::Value>,
 ) -> libsql_rusqlite::Result<()> {
-    let (kanban_card_id, dispatch_type): (Option<String>, Option<String>) = conn
+    let (kanban_card_id, agent_id, dispatch_type): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT kanban_card_id, dispatch_type FROM task_dispatches WHERE id = ?1",
+            "SELECT kanban_card_id, to_agent_id, dispatch_type FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
 
     conn.execute(
         "INSERT INTO dispatch_events (
@@ -800,6 +860,16 @@ pub(crate) fn record_dispatch_status_event_on_conn(
     )?;
     crate::services::observability::emit_dispatch_result(
         dispatch_id,
+        kanban_card_id.as_deref(),
+        dispatch_type.as_deref(),
+        from_status,
+        to_status,
+        transition_source,
+        payload,
+    );
+    emit_dispatch_quality_event(
+        dispatch_id,
+        agent_id.as_deref(),
         kanban_card_id.as_deref(),
         dispatch_type.as_deref(),
         from_status,
