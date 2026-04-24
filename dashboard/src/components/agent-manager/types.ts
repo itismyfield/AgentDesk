@@ -18,6 +18,8 @@ export interface FormData {
   avatar_emoji: string;
   sprite_number: number | null;
   personality: string;
+  prompt_content: string;
+  auto_commit: boolean;
 }
 
 export interface DeptForm {

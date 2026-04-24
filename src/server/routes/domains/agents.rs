@@ -28,6 +28,9 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                     .delete(agents_crud::delete_agent),
             )
             .route("/agents/{id}/quality", get(agents::agent_quality))
+            .route("/agents/{id}/archive", post(agents_crud::archive_agent))
+            .route("/agents/{id}/unarchive", post(agents_crud::unarchive_agent))
+            .route("/agents/{id}/duplicate", post(agents_crud::duplicate_agent))
             .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
             .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))

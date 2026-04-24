@@ -33,7 +33,7 @@ export interface Department {
   agent_count?: number;
 }
 
-export type AgentStatus = "idle" | "working" | "break" | "offline";
+export type AgentStatus = "idle" | "working" | "break" | "offline" | "archived";
 export type CliProvider =
   | "claude"
   | "codex"
@@ -71,7 +71,13 @@ export interface Agent {
   avatar_seed?: number | null;
   sprite_number?: number | null;
   personality: string | null;
+  system_prompt?: string | null;
   status: AgentStatus;
+  prompt_path?: string | null;
+  prompt_content?: string | null;
+  archive_state?: string | null;
+  archived_at?: number | null;
+  archive_reason?: string | null;
   current_task_id?: string | null;
   stats_tasks_done: number;
   stats_xp: number;

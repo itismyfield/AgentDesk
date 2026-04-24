@@ -3,6 +3,7 @@ import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
 import * as api from "../../api";
 import EmojiPicker from "./EmojiPicker";
+import AgentPromptEditor from "./AgentPromptEditor";
 import type { FormData } from "./types";
 import {
   SurfaceActionButton,
@@ -86,7 +87,7 @@ export default function AgentFormModal({
         role="dialog"
         aria-modal="true"
         aria-label={isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
-        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[28px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-3xl sm:p-6"
+        className="w-full self-start max-h-[calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem)] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[28px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-5xl sm:p-6"
         style={{
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
@@ -290,6 +291,29 @@ export default function AgentFormModal({
                 style={inputStyle}
               />
             </div>
+            {isEdit && (
+              <div>
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                    prompt.md
+                  </label>
+                  <label className="flex items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    <input
+                      type="checkbox"
+                      checked={form.auto_commit}
+                      onChange={(event) => setForm({ ...form, auto_commit: event.target.checked })}
+                    />
+                    {tr("자동 커밋", "Auto commit")}
+                  </label>
+                </div>
+                <AgentPromptEditor
+                  label="prompt.md"
+                  value={form.prompt_content}
+                  onChange={(prompt_content) => setForm({ ...form, prompt_content })}
+                  minHeight={300}
+                />
+              </div>
+            )}
             </div>
           </SurfaceSubsection>
         </div>

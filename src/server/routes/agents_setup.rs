@@ -15,14 +15,14 @@ use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AgentSetupBody {
-    agent_id: String,
-    channel_id: String,
-    provider: String,
-    prompt_template_path: String,
+    pub(super) agent_id: String,
+    pub(super) channel_id: String,
+    pub(super) provider: String,
+    pub(super) prompt_template_path: String,
     #[serde(default)]
-    skills: Vec<String>,
+    pub(super) skills: Vec<String>,
     #[serde(default)]
-    dry_run: bool,
+    pub(super) dry_run: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

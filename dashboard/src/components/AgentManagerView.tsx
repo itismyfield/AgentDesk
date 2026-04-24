@@ -5,6 +5,7 @@ import AgentsTab from "./agent-manager/AgentsTab";
 import BacklogTab from "./agent-manager/BacklogTab";
 import DepartmentsTab from "./agent-manager/DepartmentsTab";
 import AgentFormModal from "./agent-manager/AgentFormModal";
+import AgentSetupWizard from "./agent-manager/AgentSetupWizard";
 import DepartmentFormModal from "./agent-manager/DepartmentFormModal";
 import {
   type AgentManagerTab,
@@ -58,6 +59,7 @@ export default function AgentManagerView({
 }: AgentManagerViewProps) {
   const {
     canShowDispatch,
+    confirmArchiveId,
     confirmDeleteId,
     deptModal,
     deptOrder,
@@ -70,6 +72,7 @@ export default function AgentManagerView({
     form,
     agentModal,
     handleCancelOrder,
+    handleArchiveAgent,
     handleDeleteAgent,
     handleDragEnd,
     handleDragOver,
@@ -79,10 +82,12 @@ export default function AgentManagerView({
     handleSaveAgent,
     handleSaveOrder,
     handleTabChange,
+    handleUnarchiveAgent,
     isKo,
     locale,
     openCreateAgent,
     openCreateDept,
+    openDuplicateAgent,
     openEditAgent,
     openEditDept,
     reorderSaving,
@@ -90,13 +95,18 @@ export default function AgentManagerView({
     saving,
     search,
     setAgentModal,
+    setConfirmArchiveId,
     setConfirmDeleteId,
     setDeptModal,
     setDeptTab,
     setDispatchOpen,
     setForm,
     setSearch,
+    setSortMode,
     setStatusFilter,
+    setupWizard,
+    setSetupWizard,
+    sortMode,
     sortedAgents,
     spriteMap,
     statusFilter,
@@ -346,14 +356,21 @@ export default function AgentManagerView({
             setSearch={setSearch}
             statusFilter={statusFilter}
             setStatusFilter={setStatusFilter}
+            sortMode={sortMode}
+            setSortMode={setSortMode}
             sortedAgents={sortedAgents}
             spriteMap={spriteMap}
             confirmDeleteId={confirmDeleteId}
             setConfirmDeleteId={setConfirmDeleteId}
+            confirmArchiveId={confirmArchiveId}
+            setConfirmArchiveId={setConfirmArchiveId}
             onOpenAgent={(agent) =>
               onSelectAgent ? onSelectAgent(agent) : openEditAgent(agent)
             }
             onEditAgent={openEditAgent}
+            onDuplicateAgent={openDuplicateAgent}
+            onArchiveAgent={handleArchiveAgent}
+            onUnarchiveAgent={handleUnarchiveAgent}
             onEditDepartment={openEditDept}
             onDeleteAgent={handleDeleteAgent}
             saving={saving}
@@ -443,6 +460,20 @@ export default function AgentManagerView({
           onClose={() => setAgentModal({ open: false, editAgent: null })}
         />
       )}
+
+      <AgentSetupWizard
+        open={setupWizard.open}
+        mode={setupWizard.mode}
+        sourceAgent={setupWizard.sourceAgent}
+        departments={departments}
+        locale={locale}
+        tr={tr}
+        onClose={() => setSetupWizard({ open: false, mode: "create", sourceAgent: null })}
+        onDone={() => {
+          setSetupWizard({ open: false, mode: "create", sourceAgent: null });
+          onAgentsChange();
+        }}
+      />
 
       {/* Department modal */}
       {deptModal.open && (
