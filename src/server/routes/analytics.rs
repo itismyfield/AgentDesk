@@ -113,6 +113,7 @@ pub async fn quality_events(
             StatusCode::OK,
             Json(json!({
                 "events": events,
+                "generated_at_ms": chrono::Utc::now().timestamp_millis(),
             })),
         ),
         Err(error) => (
