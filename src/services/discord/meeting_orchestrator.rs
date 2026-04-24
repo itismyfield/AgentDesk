@@ -14,6 +14,8 @@ use crate::services::provider_exec;
 
 use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
+use super::meeting_artifact_store::{MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome};
+use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
 use super::org_schema;
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
@@ -49,6 +51,73 @@ pub(super) enum MeetingStatus {
     Concluding,
     Completed,
     Cancelled,
+}
+
+impl MeetingStatus {
+    /// Mapping from the legacy `MeetingStatus` to the new state-machine state
+    /// (#1008). Kept additive so the orchestrator's existing `.status` field
+    /// remains the source of truth while call sites migrate to the reducer.
+    pub(super) fn to_state(&self) -> MeetingState {
+        match self {
+            MeetingStatus::SelectingParticipants => MeetingState::Starting,
+            MeetingStatus::InProgress => MeetingState::Running,
+            MeetingStatus::Concluding => MeetingState::Summarizing,
+            MeetingStatus::Completed => MeetingState::Completed,
+            MeetingStatus::Cancelled => MeetingState::Cancelled,
+        }
+    }
+}
+
+/// Process-wide idempotent artifact repository for meetings (#1008).
+///
+/// Shared across `/meeting` Discord commands and `/api/meetings/*` HTTP
+/// routes so that retries from either surface collapse onto the same
+/// idempotency-key store.
+pub(super) fn meeting_artifact_repo() -> &'static MeetingArtifactRepo {
+    static REPO: std::sync::OnceLock<MeetingArtifactRepo> = std::sync::OnceLock::new();
+    REPO.get_or_init(MeetingArtifactRepo::new)
+}
+
+/// Record a state-machine transition for a meeting and (best-effort) log any
+/// rejected invalid transitions. This is the additive seam where the existing
+/// orchestrator hands off to the reducer without yet rewriting the
+/// `MeetingStatus` field.
+pub(super) fn record_meeting_transition(
+    meeting_id: &str,
+    from: MeetingState,
+    event: MeetingEvent,
+) -> Option<MeetingState> {
+    match msm::transition_idempotent_terminal(from, event) {
+        Ok(next) => {
+            tracing::debug!(
+                meeting_id = %meeting_id,
+                from = %from,
+                event = ?event,
+                to = %next,
+                "[meeting] state transition"
+            );
+            Some(next)
+        }
+        Err(err) => {
+            tracing::warn!(
+                meeting_id = %meeting_id,
+                error = %err,
+                "[meeting] invalid state transition rejected"
+            );
+            None
+        }
+    }
+}
+
+/// Record a cancellation artifact keyed idempotently by meeting id so two
+/// concurrent cancels produce only one artifact row.
+pub(super) fn record_cancel_artifact(meeting_id: &str, reason: &str) -> StoreOutcome {
+    meeting_artifact_repo().store_with_key(
+        meeting_id,
+        MeetingArtifactKind::Other("cancel_marker".to_string()),
+        "cancel",
+        reason,
+    )
 }
 
 pub(super) struct Meeting {
@@ -1273,6 +1342,10 @@ async fn start_meeting_with_reviewer(
 
     let meeting_id = generate_meeting_id();
 
+    // #1008: drive the opt-in state machine on the start path so invalid
+    // re-entries are logged uniformly.
+    let _ = record_meeting_transition(&meeting_id, MeetingState::Pending, MeetingEvent::Start);
+
     // Register meeting as SelectingParticipants
     {
         let mut core = shared.core.lock().await;
@@ -1591,6 +1664,12 @@ pub(super) async fn cancel_meeting(
     let meeting_info = {
         let mut core = shared.core.lock().await;
         if let Some(m) = core.active_meetings.get_mut(&channel_id) {
+            // #1008: drive the opt-in reducer; tolerant of already-cancelled
+            // meetings (cancel-race idempotency) so a second cancel is a no-op.
+            let _ = record_meeting_transition(&m.id, m.status.to_state(), MeetingEvent::Cancel);
+            // #1008: record a cancel artifact keyed by meeting id — concurrent
+            // cancels collapse onto one row.
+            let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
             m.status = MeetingStatus::Cancelled;
             let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
             Some(mc)
