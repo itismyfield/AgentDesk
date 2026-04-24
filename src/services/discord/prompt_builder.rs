@@ -1,6 +1,7 @@
 use super::settings::{
     MemoryBackendKind, ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance,
-    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
+    load_role_prompt, load_shared_prompt, load_shared_prompt_for_profile,
+    render_peer_agent_guidance,
 };
 use super::*;
 use crate::services::memory::{
@@ -741,8 +742,9 @@ pub(super) fn build_system_prompt(
                     system_prompt_owned.push_str(&guidance);
                 }
             }
-        } else if let Some(shared_prompt) = load_shared_prompt() {
-            // Full profile: inject complete shared agent prompt (AGENTS.md)
+        } else if let Some(shared_prompt) = load_shared_prompt_for_profile("full") {
+            // Full profile: inject the `full` + `all` sections of the shared agent prompt.
+            // Profile-gated blocks (`review-lite`, `headless`) are stripped at load time.
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
             system_prompt_owned.push_str(&shared_prompt);
             tracing::warn!(
