@@ -44,7 +44,9 @@ pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
-const SUPPRESSED_OUTPUT_LABEL: &str = "_(보류된 출력)_";
+const SUPPRESSED_INTERNAL_LABEL: &str = "(자동으로 처리된 내부 작업이라 여기서 멈췄어요)";
+const SUPPRESSED_RESTART_LABEL: &str =
+    "(서버가 재시작되면서 답변이 중간에 멈췄어요 — 필요하시면 다시 질문해 주세요)";
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 
@@ -59,6 +61,82 @@ pub(super) struct WatcherLineOutcome {
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RestoredWatcherTurn {
+    current_msg_id: MessageId,
+    response_sent_offset: usize,
+    full_response: String,
+    last_edit_text: String,
+    task_notification_kind: Option<TaskNotificationKind>,
+    finish_mailbox_on_completion: bool,
+}
+
+#[derive(Debug)]
+struct WatcherStreamSeed {
+    placeholder_msg_id: Option<MessageId>,
+    response_sent_offset: usize,
+    full_response: String,
+    last_edit_text: String,
+    task_notification_kind: Option<TaskNotificationKind>,
+    finish_mailbox_on_completion: bool,
+}
+
+fn normalize_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
+    let mut offset = response_sent_offset.min(full_response.len());
+    while offset > 0 && !full_response.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+pub(super) fn restored_watcher_turn_from_inflight(
+    state: &super::inflight::InflightTurnState,
+    tmux_session_name: &str,
+    finish_mailbox_on_completion: bool,
+) -> Option<RestoredWatcherTurn> {
+    if state.rebind_origin
+        || state.current_msg_id == 0
+        || state
+            .tmux_session_name
+            .as_deref()
+            .is_some_and(|name| name != tmux_session_name)
+    {
+        return None;
+    }
+
+    let response_sent_offset =
+        normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
+    Some(RestoredWatcherTurn {
+        current_msg_id: MessageId::new(state.current_msg_id),
+        response_sent_offset,
+        full_response: state.full_response.clone(),
+        last_edit_text: reconstructed_inflight_placeholder_body(state),
+        task_notification_kind: state.task_notification_kind,
+        finish_mailbox_on_completion,
+    })
+}
+
+fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStreamSeed {
+    match restored_turn {
+        Some(restored) => WatcherStreamSeed {
+            placeholder_msg_id: Some(restored.current_msg_id),
+            response_sent_offset: restored.response_sent_offset,
+            full_response: restored.full_response,
+            last_edit_text: restored.last_edit_text,
+            task_notification_kind: restored.task_notification_kind,
+            finish_mailbox_on_completion: restored.finish_mailbox_on_completion,
+        },
+        None => WatcherStreamSeed {
+            placeholder_msg_id: None,
+            response_sent_offset: 0,
+            full_response: String::new(),
+            last_edit_text: String::new(),
+            task_notification_kind: None,
+            finish_mailbox_on_completion: false,
+        },
+    }
 }
 
 fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
@@ -171,16 +249,42 @@ enum SuppressedPlaceholderAction {
     Edit(String),
 }
 
-fn append_suppressed_output_label(text: &str) -> String {
-    let trimmed = text.trim_end();
-    if trimmed.ends_with(SUPPRESSED_OUTPUT_LABEL) {
-        return text.to_string();
+fn is_spinner_prefix_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '⠏' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇'
+    )
+}
+
+fn is_inprogress_indicator_line(line: &str) -> bool {
+    line.trim_start()
+        .chars()
+        .next()
+        .is_some_and(is_spinner_prefix_char)
+}
+
+fn strip_inprogress_indicators(body: &str) -> String {
+    let mut lines: Vec<&str> = body
+        .lines()
+        .filter(|line| !is_inprogress_indicator_line(line))
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &'static str) -> String {
+    let cleaned = strip_inprogress_indicators(text);
+    let trimmed = cleaned.trim_end();
+    if trimmed.ends_with(label) {
+        return trimmed.to_string();
     }
     if trimmed.is_empty() {
-        return SUPPRESSED_OUTPUT_LABEL.to_string();
+        return label.to_string();
     }
 
-    let suffix = format!("\n\n{SUPPRESSED_OUTPUT_LABEL}");
+    let suffix = format!("\n\n{label}");
     let max_base_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
     let base = if trimmed.len() > max_base_len {
         truncate_str(trimmed, max_base_len)
@@ -188,6 +292,41 @@ fn append_suppressed_output_label(text: &str) -> String {
         trimmed.to_string()
     };
     format!("{base}{suffix}")
+}
+
+fn reconstructed_inflight_placeholder_body(state: &super::inflight::InflightTurnState) -> String {
+    let current_portion = state
+        .full_response
+        .get(state.response_sent_offset..)
+        .unwrap_or("");
+    let status_block = super::formatting::build_placeholder_status_block(
+        "⠼",
+        state.prev_tool_status.as_deref(),
+        state.current_tool_line.as_deref(),
+        &state.full_response,
+    );
+    build_streaming_placeholder_text(current_portion, &status_block)
+}
+
+fn orphan_suppressed_placeholder_action(
+    state: &super::inflight::InflightTurnState,
+    has_active_turn: bool,
+    tmux_session_name: &str,
+) -> SuppressedPlaceholderAction {
+    if has_active_turn
+        || state.rebind_origin
+        || state.response_sent_offset == 0
+        || state.current_msg_id == 0
+        || state.tmux_session_name.as_deref() != Some(tmux_session_name)
+    {
+        return SuppressedPlaceholderAction::None;
+    }
+
+    let body = reconstructed_inflight_placeholder_body(state);
+    SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
+        &body,
+        SUPPRESSED_RESTART_LABEL,
+    ))
 }
 
 fn suppressed_placeholder_action(
@@ -201,7 +340,10 @@ fn suppressed_placeholder_action(
 
     let placeholder_was_exposed = response_sent_offset > 0 || !last_edit_text.trim().is_empty();
     if placeholder_was_exposed {
-        SuppressedPlaceholderAction::Edit(append_suppressed_output_label(last_edit_text))
+        SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
+            last_edit_text,
+            SUPPRESSED_INTERNAL_LABEL,
+        ))
     } else {
         SuppressedPlaceholderAction::Delete
     }
@@ -1697,6 +1839,114 @@ pub(super) fn session_belongs_to_current_runtime(
         .unwrap_or(false)
 }
 
+async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    let has_active_turn = shared.mailbox(channel_id).has_active_turn().await;
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return;
+    };
+    let SuppressedPlaceholderAction::Edit(content) =
+        orphan_suppressed_placeholder_action(&state, has_active_turn, tmux_session_name)
+    else {
+        return;
+    };
+
+    let msg_id = MessageId::new(state.current_msg_id);
+    rate_limit_wait(shared, channel_id).await;
+    if let Err(error) = channel_id
+        .edit_message(http, msg_id, serenity::EditMessage::new().content(&content))
+        .await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ orphan suppressed placeholder reconcile failed for channel {} msg {}: {}",
+            channel_id.get(),
+            msg_id.get(),
+            error
+        );
+        return;
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ✓ reconciled orphan suppressed placeholder for channel {} msg {}",
+        channel_id.get(),
+        msg_id.get()
+    );
+}
+
+fn persist_watcher_stream_progress(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    current_msg_id: Option<MessageId>,
+    full_response: &str,
+    response_sent_offset: usize,
+    current_tool_line: Option<&str>,
+    prev_tool_status: Option<&str>,
+    task_notification_kind: Option<TaskNotificationKind>,
+) {
+    let Some(mut inflight) = super::inflight::load_inflight_state(provider, channel_id.get())
+    else {
+        return;
+    };
+    if inflight.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return;
+    }
+
+    if let Some(msg_id) = current_msg_id {
+        inflight.current_msg_id = msg_id.get();
+    }
+    inflight.full_response = full_response.to_string();
+    inflight.response_sent_offset =
+        normalize_response_sent_offset(full_response, response_sent_offset);
+    inflight.current_tool_line = current_tool_line.map(str::to_string);
+    inflight.prev_tool_status = prev_tool_status.map(str::to_string);
+    if task_notification_kind.is_some() {
+        inflight.task_notification_kind = task_notification_kind;
+    }
+    let _ = super::inflight::save_inflight_state(&inflight);
+}
+
+async fn finish_restored_watcher_active_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finish_mailbox_on_completion: bool,
+    stop_source: &'static str,
+) {
+    if !finish_mailbox_on_completion {
+        return;
+    }
+
+    let finish = super::mailbox_finish_turn(shared, provider, channel_id).await;
+    if let Some(token) = finish.removed_token {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    super::clear_watchdog_deadline_override(channel_id.get()).await;
+    shared
+        .dispatch_thread_parents
+        .retain(|_, thread| *thread != channel_id);
+    if !finish.has_pending {
+        shared.dispatch_role_overrides.remove(&channel_id);
+    }
+    if finish.mailbox_online && finish.has_pending {
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            stop_source,
+        );
+    }
+}
+
 /// Background watcher that continuously tails a tmux output file.
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 pub(super) async fn tmux_output_watcher(
@@ -1711,6 +1961,39 @@ pub(super) async fn tmux_output_watcher(
     resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+) {
+    tmux_output_watcher_with_restore(
+        channel_id,
+        http,
+        shared,
+        output_path,
+        tmux_session_name,
+        initial_offset,
+        cancel,
+        paused,
+        resume_offset,
+        pause_epoch,
+        turn_delivered,
+        None,
+    )
+    .await;
+}
+
+/// Background watcher variant used by restart recovery to continue editing an
+/// existing streaming placeholder instead of creating a new one.
+pub(super) async fn tmux_output_watcher_with_restore(
+    channel_id: ChannelId,
+    http: Arc<serenity::Http>,
+    shared: Arc<SharedData>,
+    output_path: String,
+    tmux_session_name: String,
+    initial_offset: u64,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    paused: Arc<std::sync::atomic::AtomicBool>,
+    resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
+    pause_epoch: Arc<std::sync::atomic::AtomicU64>,
+    turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    restored_turn: Option<RestoredWatcherTurn>,
 ) {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -1731,6 +2014,7 @@ pub(super) async fn tmux_output_watcher(
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
+    let mut restored_turn = restored_turn;
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
     // the relay is suppressed.
@@ -1981,15 +2265,17 @@ pub(super) async fn tmux_output_watcher(
         // Collect the full turn: keep reading until we see a "result" event
         let mut all_data = String::from_utf8_lossy(&data).to_string();
         let mut state = StreamLineState::new();
-        let mut full_response = String::new();
+        let stream_seed = watcher_stream_seed(restored_turn.take());
+        let mut full_response = stream_seed.full_response;
         let mut tool_state = WatcherToolState::new();
 
         // Create a placeholder message for real-time status display
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut spin_idx: usize = 0;
-        let mut placeholder_msg_id: Option<serenity::MessageId> = None;
-        let mut last_edit_text = String::new();
-        let mut response_sent_offset = 0usize;
+        let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
+        let mut last_edit_text = stream_seed.last_edit_text;
+        let mut response_sent_offset = stream_seed.response_sent_offset;
+        let finish_mailbox_on_completion = stream_seed.finish_mailbox_on_completion;
         let mut monitor_auto_turn_claimed = false;
         let mut monitor_auto_turn_deferred = false;
         let mut monitor_auto_turn_finished = false;
@@ -2008,7 +2294,10 @@ pub(super) async fn tmux_output_watcher(
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
-        let mut task_notification_kind = initial_outcome.task_notification_kind;
+        let mut task_notification_kind = stream_seed.task_notification_kind;
+        if let Some(kind) = initial_outcome.task_notification_kind {
+            task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
+        }
         if matches!(
             task_notification_kind,
             Some(TaskNotificationKind::MonitorAutoTurn)
@@ -2364,6 +2653,17 @@ pub(super) async fn tmux_output_watcher(
                                         placeholder_msg_id = Some(message.id);
                                         response_sent_offset += plan.split_at;
                                         last_edit_text = status_block;
+                                        persist_watcher_stream_progress(
+                                            &watcher_provider,
+                                            channel_id,
+                                            &tmux_session_name,
+                                            placeholder_msg_id,
+                                            &full_response,
+                                            response_sent_offset,
+                                            tool_state.current_tool_line.as_deref(),
+                                            tool_state.prev_tool_status.as_deref(),
+                                            task_notification_kind,
+                                        );
                                     }
                                     Err(error) => {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2430,6 +2730,17 @@ pub(super) async fn tmux_output_watcher(
                             }
                         }
                         last_edit_text = display_text;
+                        persist_watcher_stream_progress(
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            placeholder_msg_id,
+                            &full_response,
+                            response_sent_offset,
+                            tool_state.current_tool_line.as_deref(),
+                            tool_state.prev_tool_status.as_deref(),
+                            task_notification_kind,
+                        );
                     }
                 }
             }
@@ -3546,21 +3857,30 @@ pub(super) async fn tmux_output_watcher(
             turn_result_relayed = true;
             if dispatch_ok {
                 super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+                finish_restored_watcher_active_turn(
+                    &shared,
+                    &provider_kind,
+                    channel_id,
+                    finish_mailbox_on_completion,
+                    "restored watcher completed with queued backlog",
+                )
+                .await;
             }
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
-            let should_kickoff_queue = if monitor_auto_turn_finished || has_active_turn {
-                false
-            } else {
-                mailbox
-                    .has_pending_soft_queue(super::queue_persistence_context(
-                        &shared,
-                        &provider_kind,
-                        channel_id,
-                    ))
-                    .await
-                    .has_pending
-            };
+            let should_kickoff_queue =
+                if finish_mailbox_on_completion || monitor_auto_turn_finished || has_active_turn {
+                    false
+                } else {
+                    mailbox
+                        .has_pending_soft_queue(super::queue_persistence_context(
+                            &shared,
+                            &provider_kind,
+                            channel_id,
+                        ))
+                        .await
+                        .has_pending
+                };
             if dispatch_ok && should_kickoff_queue {
                 super::schedule_deferred_idle_queue_kickoff(
                     shared.clone(),
@@ -4317,6 +4637,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         output_path: String,
         session_name: String,
         initial_offset: u64,
+        restored_turn: Option<RestoredWatcherTurn>,
     }
 
     // Dead sessions that need DB cleanup (idle status report + tmux kill)
@@ -4475,15 +4796,44 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .entry(*channel_id)
             .or_insert_with(|| channel_name.clone());
 
-        let initial_offset = std::fs::metadata(&output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let mut restored_turn = None;
+        let initial_offset = if let Some(state) =
+            super::inflight::load_inflight_state(&provider, channel_id.get())
+        {
+            if let Some(restored_tmux) =
+                restored_watcher_turn_from_inflight(&state, session_name, false)
+            {
+                let finish_mailbox_on_completion =
+                    super::recovery::reregister_active_turn_from_inflight(&shared, &state).await;
+                restored_turn = Some(RestoredWatcherTurn {
+                    finish_mailbox_on_completion,
+                    ..restored_tmux
+                });
+                let file_len = std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if file_len >= state.last_offset {
+                    state.last_offset
+                } else {
+                    0
+                }
+            } else {
+                std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            }
+        } else {
+            std::fs::metadata(&output_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
 
         pending.push(PendingWatcher {
             channel_id: *channel_id,
             output_path,
             session_name: session_name.to_string(),
             initial_offset,
+            restored_turn,
         });
     }
 
@@ -4609,6 +4959,17 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             continue;
         }
 
+        if pw.restored_turn.is_none() {
+            reconcile_orphan_suppressed_placeholder_for_restored_watcher(
+                http,
+                shared,
+                &provider,
+                pw.channel_id,
+                &pw.session_name,
+            )
+            .await;
+        }
+
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
@@ -4638,7 +4999,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             pw.initial_offset
         );
 
-        tokio::spawn(tmux_output_watcher(
+        tokio::spawn(tmux_output_watcher_with_restore(
             pw.channel_id,
             http.clone(),
             shared.clone(),
@@ -4650,6 +5011,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             resume_offset,
             pause_epoch,
             turn_delivered,
+            pw.restored_turn,
         ));
     }
 
@@ -4870,17 +5232,20 @@ mod tests {
     use super::{
         DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
         MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
-        SUPPRESSED_OUTPUT_LABEL, SuppressedPlaceholderAction, TmuxWatcherHandle, WatcherToolState,
-        build_bg_trigger_session_key, claim_or_replace_watcher, dead_session_cleanup_plan,
+        SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
+        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
+        claim_or_replace_watcher, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
         load_restored_provider_session_id, notify_path_offset_advance_decision,
-        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
-        refresh_session_heartbeat_from_tmux_output,
-        rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
+        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
+        restored_watcher_turn_from_inflight, rollback_enqueued_offset_for_reconciled_failures,
+        start_monitor_auto_turn_when_available, strip_inprogress_indicators,
         suppressed_placeholder_action, terminal_relay_decision, tmux_death_is_normal_completion,
         watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        watcher_stream_seed,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -5858,16 +6223,42 @@ mod tests {
     }
 
     #[test]
+    fn strip_inprogress_indicators_removes_spinner_tool_preview_lines() {
+        let input = concat!(
+            "작업 요약\n",
+            "  ⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed\n",
+            "중요한 결과\n",
+            "⠋ ⚙ Bash: cargo check\n",
+            "\n"
+        );
+
+        assert_eq!(strip_inprogress_indicators(input), "작업 요약\n중요한 결과");
+    }
+
+    #[test]
+    fn strip_inprogress_indicators_leaves_plain_text_unchanged() {
+        let input = "작업 요약\n⚙ spinner 없이 시작한 일반 텍스트\n중요한 결과";
+
+        assert_eq!(strip_inprogress_indicators(input), input);
+    }
+
+    #[test]
     fn suppressed_placeholder_preserves_exposed_live_edit() {
         assert_eq!(
-            suppressed_placeholder_action(true, 32, "partial response"),
+            suppressed_placeholder_action(
+                true,
+                32,
+                "partial response\n\n⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed",
+            ),
             SuppressedPlaceholderAction::Edit(format!(
-                "partial response\n\n{SUPPRESSED_OUTPUT_LABEL}"
+                "partial response\n\n{SUPPRESSED_INTERNAL_LABEL}"
             ))
         );
         assert_eq!(
             suppressed_placeholder_action(true, 0, "status only"),
-            SuppressedPlaceholderAction::Edit(format!("status only\n\n{SUPPRESSED_OUTPUT_LABEL}"))
+            SuppressedPlaceholderAction::Edit(format!(
+                "status only\n\n{SUPPRESSED_INTERNAL_LABEL}"
+            ))
         );
     }
 
@@ -5880,6 +6271,155 @@ mod tests {
         assert_eq!(
             suppressed_placeholder_action(false, 99, "already visible"),
             SuppressedPlaceholderAction::None
+        );
+    }
+
+    #[test]
+    fn orphan_suppressed_placeholder_reconcile_rewrites_terminal_marker() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\npending tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+        state.current_tool_line =
+            Some("⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed".to_string());
+
+        let action = orphan_suppressed_placeholder_action(&state, false, &tmux_name);
+
+        assert_eq!(
+            action,
+            SuppressedPlaceholderAction::Edit(format!(
+                "pending tail\n\n{SUPPRESSED_RESTART_LABEL}"
+            ))
+        );
+    }
+
+    #[test]
+    fn internal_suppress_and_orphan_reconcile_use_distinct_labels() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\nshared tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+
+        assert_eq!(
+            suppressed_placeholder_action(true, state.response_sent_offset, "shared tail"),
+            SuppressedPlaceholderAction::Edit(format!(
+                "shared tail\n\n{SUPPRESSED_INTERNAL_LABEL}"
+            ))
+        );
+        assert_eq!(
+            orphan_suppressed_placeholder_action(&state, false, &tmux_name),
+            SuppressedPlaceholderAction::Edit(format!("shared tail\n\n{SUPPRESSED_RESTART_LABEL}"))
+        );
+    }
+
+    #[test]
+    fn orphan_suppressed_placeholder_reconcile_skips_active_turns() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\npending tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+
+        assert_eq!(
+            orphan_suppressed_placeholder_action(&state, true, &tmux_name),
+            SuppressedPlaceholderAction::None
+        );
+    }
+
+    #[test]
+    fn restored_watcher_seed_uses_existing_placeholder_and_offset() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "continue".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\npending".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+        state.task_notification_kind = Some(TaskNotificationKind::Background);
+
+        let restored = restored_watcher_turn_from_inflight(&state, &tmux_name, true)
+            .expect("valid inflight should seed watcher resume");
+        let seed = watcher_stream_seed(Some(restored));
+
+        assert_eq!(seed.placeholder_msg_id, Some(MessageId::new(11)));
+        assert_eq!(seed.response_sent_offset, "already delivered\n".len());
+        assert_eq!(seed.full_response, "already delivered\npending");
+        assert_eq!(
+            seed.task_notification_kind,
+            Some(TaskNotificationKind::Background)
+        );
+        assert!(seed.finish_mailbox_on_completion);
+    }
+
+    #[test]
+    fn restored_watcher_seed_rejects_mismatched_tmux_session() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "continue".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+
+        assert!(
+            restored_watcher_turn_from_inflight(&state, "AgentDesk-codex-other-channel", true)
+                .is_none()
         );
     }
 

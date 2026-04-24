@@ -181,7 +181,7 @@ jobs:
             ${{ runner.os }}-cargo-recovery-nightly-
 
       - name: High-risk recovery lane
-        run: "cargo test --bin agentdesk high_risk_recovery::"
+        run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
 
   scripts:
     name: Script checks nightly

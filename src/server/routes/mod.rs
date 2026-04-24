@@ -20,6 +20,7 @@ pub mod kanban;
 pub mod kanban_repos;
 pub mod meetings;
 pub mod messages;
+pub mod monitoring;
 pub mod offices;
 pub mod onboarding;
 pub mod pipeline;
@@ -32,6 +33,8 @@ mod session_activity;
 pub mod settings;
 mod skill_usage_analytics;
 pub mod skills_api;
+#[path = "../state.rs"]
+pub mod state;
 pub mod stats;
 pub mod termination_events;
 pub mod v1;
@@ -163,6 +166,12 @@ pub fn api_router_with_pg(
         health_registry,
     };
 
+    #[cfg(not(test))]
+    crate::services::discord::monitoring_status::spawn_expiry_sweeper(
+        state::global_monitoring_store(),
+        state.health_registry.clone(),
+    );
+
     compose_api_router(state.clone()).with_state(state)
 }
 
@@ -175,6 +184,7 @@ fn compose_api_router(state: AppState) -> ApiRouter {
         .merge(domains::reviews::router(state.clone()))
         .merge(domains::ops::router(state.clone()))
         .merge(domains::integrations::router(state.clone()))
+        .merge(monitoring::router(state.clone()))
         .merge(v1::router(state.clone()))
         .merge(domains::admin::router(state))
 }

@@ -34,6 +34,7 @@ src/
 │   ├── init.rs
 │   ├── migrate.rs
 │   ├── mod.rs
+│   ├── monitoring.rs
 │   ├── run.rs
 │   └── utils.rs
 ├── db/
@@ -143,6 +144,7 @@ src/
 │   │   ├── meetings.rs
 │   │   ├── messages.rs
 │   │   ├── mod.rs
+│   │   ├── monitoring.rs
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
@@ -162,6 +164,7 @@ src/
 │   ├── boot.rs
 │   ├── cron_catalog.rs
 │   ├── mod.rs
+│   ├── state.rs
 │   ├── tick.rs
 │   ├── worker_registry.rs
 │   └── ws.rs
@@ -225,6 +228,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
+│   │   ├── monitoring_status.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
 │   │   ├── prompt_builder.rs

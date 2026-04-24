@@ -6,6 +6,7 @@ pub(crate) mod discord;
 pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod migrate;
+pub(crate) mod monitoring;
 pub(crate) mod run;
 pub(crate) mod utils;
 
