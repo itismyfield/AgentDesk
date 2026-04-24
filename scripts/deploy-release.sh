@@ -18,12 +18,12 @@ fi
 REPO="$(cd "$REPO" && pwd)"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
-PROMOTE_DETACHED_CHILD="${AGENTDESK_PROMOTE_DETACHED_CHILD:-0}"
-PROMOTE_LOG_PATH="${AGENTDESK_PROMOTE_LOG_PATH:-}"
-PROMOTE_TEST_MODE="${AGENTDESK_PROMOTE_TEST_MODE:-0}"
-PROMOTE_DELAY_SECS="${AGENTDESK_PROMOTE_DELAY_SECS:-2}"
-PROMOTE_HEALTH_RETRIES="${AGENTDESK_PROMOTE_HEALTH_RETRIES:-20}"
-PROMOTE_HEALTH_DELAY_SECS="${AGENTDESK_PROMOTE_HEALTH_DELAY_SECS:-2}"
+DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DETACHED_CHILD:-0}"
+DEPLOY_LOG_PATH="${AGENTDESK_DEPLOY_LOG_PATH:-}"
+DEPLOY_TEST_MODE="${AGENTDESK_DEPLOY_TEST_MODE:-0}"
+DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DELAY_SECS:-2}"
+DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-20}"
+DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
@@ -35,7 +35,7 @@ for arg in "$@"; do
     esac
 done
 
-echo "═══ ADK Promote Dev → Release ═══"
+echo "═══ ADK Deploy → Release ═══"
 
 sign_binary_with_fallback() {
     local target="$1"
@@ -111,8 +111,8 @@ sign_binary_with_fallback() {
     fi
 }
 
-_staged_promote_binary_path() {
-    mktemp "$ADK_REL/bin/agentdesk.promote.XXXXXX"
+_staged_deploy_binary_path() {
+    mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
 
 _notify_channel() {
@@ -151,17 +151,17 @@ _resolve_dashboard_source() {
 
 _finalize_detached_helper() {
     local status="${1:-0}"
-    [ "$PROMOTE_DETACHED_CHILD" = "1" ] || return 0
+    [ "$DEPLOY_DETACHED_CHILD" = "1" ] || return 0
     [ -n "$REPORT_CHANNEL_ID" ] || return 0
 
     local content
     if [ "$status" -eq 0 ]; then
-        content="✅ release promote complete"
+        content="✅ release deploy complete"
     else
-        content="❌ release promote failed (exit ${status})
-log: ${PROMOTE_LOG_PATH:-n/a}"
+        content="❌ release deploy failed (exit ${status})
+log: ${DEPLOY_LOG_PATH:-n/a}"
         local summary
-        summary=$(_tail_for_summary "$PROMOTE_LOG_PATH")
+        summary=$(_tail_for_summary "$DEPLOY_LOG_PATH")
         if [ -n "$summary" ]; then
             content="${content}
 ${summary}"
@@ -179,7 +179,7 @@ _cleanup_on_exit() {
 trap _cleanup_on_exit EXIT
 
 _self_hosted_release_session() {
-    [ "$PROMOTE_DETACHED_CHILD" != "1" ] || return 1
+    [ "$DEPLOY_DETACHED_CHILD" != "1" ] || return 1
     [ -n "${TMUX:-}" ] || return 1
     [ -n "$REPORT_CHANNEL_ID" ] || return 1
     [ -n "$REPORT_PROVIDER" ] || return 1
@@ -187,14 +187,14 @@ _self_hosted_release_session() {
 }
 
 _spawn_detached_helper() {
-    local tasks_dir="$ADK_REL/runtime/self_hosted_promote"
+    local tasks_dir="$ADK_REL/runtime/self_hosted_deploy"
     mkdir -p "$tasks_dir"
 
     local stamp
     stamp=$(date '+%Y%m%d-%H%M%S')
-    local helper_session="ADK-promote-${REPORT_CHANNEL_ID}-${stamp}"
-    local log_path="$tasks_dir/promote-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.log"
-    local helper_script="$tasks_dir/promote-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.sh"
+    local helper_session="ADK-deploy-${REPORT_CHANNEL_ID}-${stamp}"
+    local log_path="$tasks_dir/deploy-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.log"
+    local helper_script="$tasks_dir/deploy-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.sh"
     local quoted_args=""
     if [ "$#" -gt 0 ]; then
         quoted_args=$(printf ' %q' "$@")
@@ -204,23 +204,23 @@ _spawn_detached_helper() {
 #!/usr/bin/env bash
 set -euo pipefail
 exec >>$(printf '%q' "$log_path") 2>&1
-sleep $(printf '%q' "$PROMOTE_DELAY_SECS")
+sleep $(printf '%q' "$DEPLOY_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
 export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
-export AGENTDESK_PROMOTE_DETACHED_CHILD=1
-export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
-export AGENTDESK_PROMOTE_TEST_MODE=$(printf '%q' "$PROMOTE_TEST_MODE")
+export AGENTDESK_DEPLOY_DETACHED_CHILD=1
+export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
+export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
-export AGENTDESK_PROMOTE_BINARY=$(printf '%q' "${AGENTDESK_PROMOTE_BINARY:-}")
+export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 cd $(printf '%q' "$REPO")
-exec $(printf '%q' "$SCRIPT_DIR/promote-release.sh")${quoted_args}
+exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
 EOF
     chmod +x "$helper_script"
     tmux new-session -d -s "$helper_session" "$helper_script"
 
-    echo "▸ Self-hosted release promotion detected — using detached helper"
+    echo "▸ Self-hosted release deploy detected — using detached helper"
     echo "  helper tmux: $helper_session"
     echo "  helper log: $log_path"
     echo "  current turn will finish before dcserver restart; final result will be reported automatically"
@@ -240,14 +240,14 @@ else
         | jq '[.dispatches[] | select(.dispatch_type=="create-pr")] | length' 2>/dev/null || echo 0)
     if [ "${gate_pending:-0}" -gt 0 ] || [ "${gate_dispatched:-0}" -gt 0 ]; then
         echo "✗ [gate] ${gate_pending} pending + ${gate_dispatched} dispatched create-pr dispatches inflight on release."
-        echo "  Wait for completion or cancel via API, then retry promotion."
+        echo "  Wait for completion or cancel via API, then retry deploy."
         exit 1
     fi
     echo "▸ [gate] Zero create-pr dispatches inflight on release — proceeding."
 fi
 
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
-    echo "✗ Dashboard dist not found in workspace — aborting promotion"
+    echo "✗ Dashboard dist not found in workspace — aborting deploy"
     echo "  looked for:"
     echo "    - $REPO/dashboard/dist/index.html"
     echo "  Run 'cd $REPO/dashboard && npm run build' to generate it"
@@ -255,7 +255,7 @@ if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
 fi
 echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 if [ ! -d "$REPO/skills" ]; then
-    echo "✗ Managed skills not found in workspace — aborting promotion"
+    echo "✗ Managed skills not found in workspace — aborting deploy"
     echo "  expected: $REPO/skills"
     exit 1
 fi
@@ -265,7 +265,7 @@ if _self_hosted_release_session; then
     exit 0
 fi
 
-if [ "$PROMOTE_TEST_MODE" = "1" ]; then
+if [ "$DEPLOY_TEST_MODE" = "1" ]; then
     echo "▸ TEST MODE: skipping release bootout/copy/bootstrap"
     echo "✓ Detached helper dry run complete"
     exit 0
@@ -284,16 +284,16 @@ else
     export RUSTC_WRAPPER=""
 fi
 
-# Build the release binary from the current workspace by default so promotion
+# Build the release binary from the current workspace by default so deploy
 # always ships code compiled from the current HEAD. When a validated external
 # artifact is provided explicitly, keep the existing override behavior.
-SOURCE_BINARY="${AGENTDESK_PROMOTE_BINARY:-$REPO/target/release/agentdesk}"
-if [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
+SOURCE_BINARY="${AGENTDESK_DEPLOY_BINARY:-$REPO/target/release/agentdesk}"
+if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     echo "▸ Building release binary..."
     (cd "$REPO" && cargo build --release --bin agentdesk)
 fi
 
-# Rebuild dashboard so promote never ships a stale dist.
+# Rebuild dashboard so deploy never ships a stale dist.
 echo "▸ Building dashboard..."
 (cd "$REPO/dashboard" && npm run build --silent)
 
@@ -355,12 +355,12 @@ if [ ! -x "$SOURCE_BINARY" ]; then
     exit 1
 fi
 
-# Binary freshness check — reject promoting a binary built before the current HEAD.
+# Binary freshness check — reject deploying a binary built before the current HEAD.
 # An older binary may miss embedded migrations (sqlx::migrate! is a compile-time
 # macro) or code changes, leading to runtime migration-mismatch errors. Opt out
-# with AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
-# when AGENTDESK_PROMOTE_BINARY points at a validated artifact from elsewhere).
-if [ "${AGENTDESK_PROMOTE_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_PROMOTE_BINARY:-}" ]; then
+# with AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional (e.g. bisecting, or
+# when AGENTDESK_DEPLOY_BINARY points at a validated artifact from elsewhere).
+if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     HEAD_EPOCH=$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || echo 0)
     BIN_EPOCH=$(stat -f %m "$SOURCE_BINARY" 2>/dev/null || stat -c %Y "$SOURCE_BINARY" 2>/dev/null || echo 0)
     if [ "$BIN_EPOCH" -lt "$HEAD_EPOCH" ]; then
@@ -370,8 +370,8 @@ if [ "${AGENTDESK_PROMOTE_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_PROM
         echo "✗ Binary is older than current HEAD (${HEAD_SHORT}):"
         echo "    binary mtime: ${BIN_MTIME_HUMAN}"
         echo "    HEAD commit:  ${HEAD_HUMAN}"
-        echo "  Rebuild with 'cargo build --release' before promoting, or override with"
-        echo "  AGENTDESK_PROMOTE_SKIP_FRESHNESS=1 when intentional."
+        echo "  Rebuild with 'cargo build --release' before deploying, or override with"
+        echo "  AGENTDESK_DEPLOY_SKIP_FRESHNESS=1 when intentional."
         exit 1
     fi
 fi
@@ -406,7 +406,7 @@ fi
 # if it fails mid-write, causing SIGKILL on subsequent launches even though
 # the binary is valid.
 echo "▸ Copying binary from $SOURCE_BINARY..."
-STAGED_BINARY="$(_staged_promote_binary_path)"
+STAGED_BINARY="$(_staged_deploy_binary_path)"
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
@@ -465,12 +465,12 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
 REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
 echo "▸ Waiting for release health on :${REL_PORT}..."
 REL_HEALTHY=false
-if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$PROMOTE_HEALTH_RETRIES" "$PROMOTE_HEALTH_DELAY_SECS" 1 1; then
+if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1; then
     REL_HEALTHY=true
 fi
 
 if [ "$REL_HEALTHY" != true ]; then
-    echo "✗ Release health check failed after $PROMOTE_HEALTH_RETRIES attempts — check logs: $ADK_REL/logs/"
+    echo "✗ Release health check failed after $DEPLOY_HEALTH_RETRIES attempts — check logs: $ADK_REL/logs/"
     exit 1
 fi
 
@@ -483,4 +483,4 @@ else
     echo "✓ Release is healthy on :${REL_PORT}"
 fi
 
-echo "═══ Promotion Complete ═══"
+echo "═══ Deploy Complete ═══"

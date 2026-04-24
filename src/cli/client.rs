@@ -862,15 +862,15 @@ pub fn cmd_deploy() -> Result<(), String> {
         return Err("build-release.sh failed".to_string());
     }
 
-    println!("\n=== Step 2: Promote to release ===");
-    let promote_status = std::process::Command::new("bash")
+    println!("\n=== Step 2: Deploy to release ===");
+    let deploy_status = std::process::Command::new("bash")
         .arg("-c")
-        .arg("AGENTDESK_REL_PORT=8791 ./scripts/promote-release.sh --skip-review")
+        .arg("AGENTDESK_REL_PORT=8791 ./scripts/deploy-release.sh --skip-review")
         .current_dir(&workspace)
         .status()
-        .map_err(|e| format!("promote-release failed: {e}"))?;
-    if !promote_status.success() {
-        return Err("promote-release.sh failed".to_string());
+        .map_err(|e| format!("deploy-release failed: {e}"))?;
+    if !deploy_status.success() {
+        return Err("deploy-release.sh failed".to_string());
     }
 
     println!("✅ Deploy complete — release runtime updated");

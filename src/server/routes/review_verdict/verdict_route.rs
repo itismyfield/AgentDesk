@@ -12,7 +12,7 @@ fn legacy_db(state: &AppState) -> &crate::db::Db {
 }
 
 /// Write a review-passed marker file for the reviewed commit.
-/// `promote-release.sh` checks this before allowing release promotion.
+/// `deploy-release.sh` checks this before allowing release deploy.
 ///
 /// When `reviewed_commit` is provided, stamp that exact commit (the one that
 /// was actually reviewed). Falls back to current HEAD for backwards compat.
