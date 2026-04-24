@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -221,6 +222,105 @@ fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {
+    (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
+}
+
+fn record_inflight_invariant(
+    condition: bool,
+    state: &InflightTurnState,
+    invariant: &'static str,
+    code_location: &'static str,
+    message: &'static str,
+    details: serde_json::Value,
+) -> bool {
+    let turn_id = turn_id_for_state(state);
+    crate::services::observability::record_invariant_check(
+        condition,
+        crate::services::observability::InvariantViolation {
+            provider: Some(state.provider.as_str()),
+            channel_id: Some(state.channel_id),
+            dispatch_id: state.dispatch_id.as_deref(),
+            session_key: state.session_key.as_deref(),
+            turn_id: turn_id.as_deref(),
+            invariant,
+            code_location,
+            message,
+            details,
+        },
+    )
+}
+
+fn validate_inflight_state_for_save(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    code_location: &'static str,
+) {
+    let offset_in_bounds = state.response_sent_offset <= state.full_response.len()
+        && state
+            .full_response
+            .is_char_boundary(state.response_sent_offset);
+    record_inflight_invariant(
+        offset_in_bounds,
+        state,
+        "response_sent_offset_in_bounds",
+        code_location,
+        "inflight response_sent_offset must stay within full_response",
+        serde_json::json!({
+            "response_sent_offset": state.response_sent_offset,
+            "full_response_len": state.full_response.len(),
+            "path": path.display().to_string(),
+        }),
+    );
+    debug_assert!(
+        offset_in_bounds,
+        "inflight response_sent_offset must stay within full_response"
+    );
+
+    let Ok(existing_content) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(existing) = serde_json::from_str::<InflightTurnState>(&existing_content) else {
+        return;
+    };
+
+    let monotonic_offset = state.response_sent_offset >= existing.response_sent_offset;
+    record_inflight_invariant(
+        monotonic_offset,
+        state,
+        "response_sent_offset_monotonic",
+        code_location,
+        "inflight response_sent_offset must not move backwards",
+        serde_json::json!({
+            "previous": existing.response_sent_offset,
+            "next": state.response_sent_offset,
+            "path": path.display().to_string(),
+        }),
+    );
+    debug_assert!(
+        monotonic_offset,
+        "inflight response_sent_offset must not move backwards"
+    );
+
+    let same_tmux_owner = existing.tmux_session_name.is_none()
+        || state.tmux_session_name.is_none()
+        || existing.tmux_session_name == state.tmux_session_name;
+    record_inflight_invariant(
+        same_tmux_owner,
+        state,
+        "inflight_tmux_one_to_one",
+        code_location,
+        "inflight state for a channel must not drift between tmux sessions",
+        serde_json::json!({
+            "previous_tmux_session_name": existing.tmux_session_name.as_deref(),
+            "next_tmux_session_name": state.tmux_session_name.as_deref(),
+            "root": root.display().to_string(),
+            "path": path.display().to_string(),
+        }),
+    );
+}
+
 pub(super) fn save_inflight_state(state: &InflightTurnState) -> Result<(), String> {
     let Some(root) = inflight_runtime_root() else {
         return Err("Home directory not found".to_string());
@@ -282,6 +382,12 @@ fn save_inflight_state_create_new_in_root(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
+    validate_inflight_state_for_save(
+        root,
+        &path,
+        state,
+        "src/services/discord/inflight.rs:save_inflight_state_create_new_in_root",
+    );
     let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated)
@@ -318,6 +424,12 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    validate_inflight_state_for_save(
+        root,
+        &path,
+        state,
+        "src/services/discord/inflight.rs:save_inflight_state_in_root",
+    );
     let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
@@ -466,6 +578,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
         return Vec::new();
     };
     let mut states = Vec::new();
+    let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let current_generation = super::runtime_store::load_generation();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -507,6 +620,29 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
             let _ = fs::remove_file(&path);
             continue;
+        }
+        if let Some(tmux_session_name) = state
+            .tmux_session_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Some(previous_channel_id) =
+                tmux_owners.insert(tmux_session_name.to_string(), state.channel_id)
+            {
+                record_inflight_invariant(
+                    false,
+                    &state,
+                    "inflight_tmux_one_to_one",
+                    "src/services/discord/inflight.rs:load_inflight_states_from_root",
+                    "one tmux session must not be owned by multiple inflight channel files",
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "previous_channel_id": previous_channel_id,
+                        "current_channel_id": state.channel_id,
+                        "path": path.display().to_string(),
+                    }),
+                );
+            }
         }
         states.push(state);
     }

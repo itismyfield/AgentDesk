@@ -20,6 +20,8 @@ const DEFAULT_EVENT_LIMIT: usize = 100;
 const DEFAULT_COUNTER_LIMIT: usize = 200;
 const MAX_EVENT_LIMIT: usize = 500;
 const MAX_COUNTER_LIMIT: usize = 500;
+const DEFAULT_INVARIANT_LIMIT: usize = 50;
+const MAX_INVARIANT_LIMIT: usize = 500;
 const DEFAULT_QUALITY_LIMIT: usize = 200;
 const MAX_QUALITY_LIMIT: usize = 500;
 const DEFAULT_QUALITY_DAYS: i64 = 7;
@@ -227,6 +229,55 @@ pub struct AnalyticsResponse {
     pub events: Vec<AnalyticsEventRecord>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InvariantAnalyticsFilters {
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub invariant: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InvariantViolationCount {
+    pub invariant: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InvariantViolationRecord {
+    pub id: i64,
+    pub invariant: String,
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub session_key: Option<String>,
+    pub turn_id: Option<String>,
+    pub message: Option<String>,
+    pub code_location: Option<String>,
+    pub details: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InvariantAnalyticsResponse {
+    pub generated_at: String,
+    pub total_violations: u64,
+    pub counts: Vec<InvariantViolationCount>,
+    pub recent: Vec<InvariantViolationRecord>,
+}
+
+pub struct InvariantViolation<'a> {
+    pub provider: Option<&'a str>,
+    pub channel_id: Option<u64>,
+    pub dispatch_id: Option<&'a str>,
+    pub session_key: Option<&'a str>,
+    pub turn_id: Option<&'a str>,
+    pub invariant: &'a str,
+    pub code_location: &'static str,
+    pub message: &'a str,
+    pub details: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentQualityEvent {
     pub source_event_id: Option<String>,
@@ -405,6 +456,46 @@ pub fn emit_recovery_fired(
             "reason": normalize_string(reason),
         }),
     );
+}
+
+pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>) -> bool {
+    if condition {
+        return true;
+    }
+
+    let invariant = normalize_string(violation.invariant).unwrap_or_else(|| "unknown".to_string());
+    tracing::error!(
+        invariant = %invariant,
+        provider = violation.provider.unwrap_or_default(),
+        channel_id = violation.channel_id.unwrap_or_default(),
+        dispatch_id = violation.dispatch_id.unwrap_or_default(),
+        session_key = violation.session_key.unwrap_or_default(),
+        turn_id = violation.turn_id.unwrap_or_default(),
+        code_location = violation.code_location,
+        "[invariant] {}",
+        violation.message
+    );
+
+    emit_event(
+        "invariant_violation",
+        violation.provider,
+        violation.channel_id,
+        violation.dispatch_id,
+        violation.session_key,
+        violation.turn_id,
+        Some(invariant.as_str()),
+        CounterDelta {
+            guard_fires: 1,
+            ..CounterDelta::default()
+        },
+        json!({
+            "invariant": invariant,
+            "code_location": violation.code_location,
+            "message": violation.message,
+            "details": violation.details,
+        }),
+    );
+    false
 }
 
 pub fn emit_dispatch_result(
@@ -790,6 +881,65 @@ pub async fn query_agent_quality_events(
     query_agent_quality_events_sqlite(&conn, filters.agent_id.as_deref(), days, limit)
 }
 
+pub async fn query_invariant_analytics(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    filters: &InvariantAnalyticsFilters,
+) -> Result<InvariantAnalyticsResponse> {
+    let limit = normalized_invariant_limit(filters.limit);
+    let counts = query_invariant_counts_db(db, pg_pool, filters).await?;
+    let total_violations = counts.iter().map(|count| count.count).sum();
+    let recent = query_invariant_events_db(db, pg_pool, filters, limit).await?;
+
+    Ok(InvariantAnalyticsResponse {
+        generated_at: now_kst(),
+        total_violations,
+        counts,
+        recent,
+    })
+}
+
+async fn query_invariant_counts_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    filters: &InvariantAnalyticsFilters,
+) -> Result<Vec<InvariantViolationCount>> {
+    if let Some(pool) = pg_pool {
+        match query_invariant_counts_pg(pool, filters).await {
+            Ok(records) => return Ok(records),
+            Err(error) => {
+                tracing::warn!("[observability] postgres invariant count query failed: {error}");
+            }
+        }
+    }
+
+    let conn = db
+        .read_conn()
+        .map_err(|error| anyhow!("db read connection for invariant counts: {error}"))?;
+    query_invariant_counts_sqlite(&conn, filters)
+}
+
+async fn query_invariant_events_db(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    filters: &InvariantAnalyticsFilters,
+    limit: usize,
+) -> Result<Vec<InvariantViolationRecord>> {
+    if let Some(pool) = pg_pool {
+        match query_invariant_events_pg(pool, filters, limit).await {
+            Ok(records) => return Ok(records),
+            Err(error) => {
+                tracing::warn!("[observability] postgres invariant event query failed: {error}");
+            }
+        }
+    }
+
+    let conn = db
+        .read_conn()
+        .map_err(|error| anyhow!("db read connection for invariant events: {error}"))?;
+    query_invariant_events_sqlite(&conn, filters, limit)
+}
+
 async fn query_events_db(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -884,6 +1034,93 @@ fn query_events_sqlite(
     Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
+fn query_invariant_counts_sqlite(
+    conn: &Connection,
+    filters: &InvariantAnalyticsFilters,
+) -> Result<Vec<InvariantViolationCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(status, 'unknown') AS invariant,
+                COUNT(*) AS violation_count
+         FROM observability_events
+         WHERE event_type = 'invariant_violation'
+           AND (?1 IS NULL OR provider = ?1)
+           AND (?2 IS NULL OR channel_id = ?2)
+           AND (?3 IS NULL OR status = ?3)
+         GROUP BY COALESCE(status, 'unknown')
+         ORDER BY violation_count DESC, invariant ASC",
+    )?;
+    let rows = stmt.query_map(
+        libsql_rusqlite::params![
+            filters.provider.as_deref(),
+            filters.channel_id.as_deref(),
+            filters.invariant.as_deref(),
+        ],
+        |row| {
+            Ok(InvariantViolationCount {
+                invariant: row.get(0)?,
+                count: row.get::<_, i64>(1)?.max(0) as u64,
+            })
+        },
+    )?;
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+}
+
+fn query_invariant_events_sqlite(
+    conn: &Connection,
+    filters: &InvariantAnalyticsFilters,
+    limit: usize,
+) -> Result<Vec<InvariantViolationRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,
+                provider,
+                channel_id,
+                dispatch_id,
+                session_key,
+                turn_id,
+                status,
+                payload_json,
+                datetime(created_at, '+9 hours') AS created_at_kst
+         FROM observability_events
+         WHERE event_type = 'invariant_violation'
+           AND (?1 IS NULL OR provider = ?1)
+           AND (?2 IS NULL OR channel_id = ?2)
+           AND (?3 IS NULL OR status = ?3)
+         ORDER BY id DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        libsql_rusqlite::params![
+            filters.provider.as_deref(),
+            filters.channel_id.as_deref(),
+            filters.invariant.as_deref(),
+            limit as i64,
+        ],
+        |row| {
+            let payload_json: Option<String> = row.get(7)?;
+            let payload = payload_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .unwrap_or_else(|| json!({}));
+            let invariant = row
+                .get::<_, Option<String>>(6)?
+                .or_else(|| payload.get("invariant").and_then(value_as_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(invariant_record_from_parts(
+                row.get(0)?,
+                invariant,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                payload,
+                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            ))
+        },
+    )?;
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+}
+
 async fn query_events_pg(
     pool: &PgPool,
     filters: &AnalyticsFilters,
@@ -953,6 +1190,110 @@ async fn query_events_pg(
                     .try_get("created_at_kst")
                     .map_err(|error| anyhow!("decode observability created_at: {error}"))?,
             })
+        })
+        .collect()
+}
+
+async fn query_invariant_counts_pg(
+    pool: &PgPool,
+    filters: &InvariantAnalyticsFilters,
+) -> Result<Vec<InvariantViolationCount>> {
+    let rows = sqlx::query(
+        "SELECT COALESCE(status, 'unknown') AS invariant,
+                COUNT(*) AS violation_count
+         FROM observability_events
+         WHERE event_type = 'invariant_violation'
+           AND ($1::text IS NULL OR provider = $1)
+           AND ($2::text IS NULL OR channel_id = $2)
+           AND ($3::text IS NULL OR status = $3)
+         GROUP BY COALESCE(status, 'unknown')
+         ORDER BY violation_count DESC, invariant ASC",
+    )
+    .bind(filters.provider.as_deref())
+    .bind(filters.channel_id.as_deref())
+    .bind(filters.invariant.as_deref())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query postgres invariant counts: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(InvariantViolationCount {
+                invariant: row
+                    .try_get("invariant")
+                    .map_err(|error| anyhow!("decode invariant: {error}"))?,
+                count: row
+                    .try_get::<i64, _>("violation_count")
+                    .map_err(|error| anyhow!("decode violation_count: {error}"))?
+                    .max(0) as u64,
+            })
+        })
+        .collect()
+}
+
+async fn query_invariant_events_pg(
+    pool: &PgPool,
+    filters: &InvariantAnalyticsFilters,
+    limit: usize,
+) -> Result<Vec<InvariantViolationRecord>> {
+    let rows = sqlx::query(
+        "SELECT id,
+                provider,
+                channel_id,
+                dispatch_id,
+                session_key,
+                turn_id,
+                status,
+                payload_json::text AS payload_json,
+                to_char(created_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS created_at_kst
+         FROM observability_events
+         WHERE event_type = 'invariant_violation'
+           AND ($1::text IS NULL OR provider = $1)
+           AND ($2::text IS NULL OR channel_id = $2)
+           AND ($3::text IS NULL OR status = $3)
+         ORDER BY id DESC
+         LIMIT $4",
+    )
+    .bind(filters.provider.as_deref())
+    .bind(filters.channel_id.as_deref())
+    .bind(filters.invariant.as_deref())
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query postgres invariant events: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let payload_json: Option<String> = row
+                .try_get("payload_json")
+                .map_err(|error| anyhow!("decode invariant payload_json: {error}"))?;
+            let payload = payload_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .unwrap_or_else(|| json!({}));
+            let invariant = row
+                .try_get::<Option<String>, _>("status")
+                .map_err(|error| anyhow!("decode invariant status: {error}"))?
+                .or_else(|| payload.get("invariant").and_then(value_as_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(invariant_record_from_parts(
+                row.try_get("id")
+                    .map_err(|error| anyhow!("decode invariant event id: {error}"))?,
+                invariant,
+                row.try_get("provider")
+                    .map_err(|error| anyhow!("decode invariant provider: {error}"))?,
+                row.try_get("channel_id")
+                    .map_err(|error| anyhow!("decode invariant channel_id: {error}"))?,
+                row.try_get("dispatch_id")
+                    .map_err(|error| anyhow!("decode invariant dispatch_id: {error}"))?,
+                row.try_get("session_key")
+                    .map_err(|error| anyhow!("decode invariant session_key: {error}"))?,
+                row.try_get("turn_id")
+                    .map_err(|error| anyhow!("decode invariant turn_id: {error}"))?,
+                payload,
+                row.try_get("created_at_kst")
+                    .map_err(|error| anyhow!("decode invariant created_at: {error}"))?,
+            ))
         })
         .collect()
 }
@@ -1507,6 +1848,42 @@ fn normalize_quality_event_type(value: &str) -> Option<String> {
         .then_some(normalized)
 }
 
+fn value_as_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn invariant_record_from_parts(
+    id: i64,
+    invariant: String,
+    provider: Option<String>,
+    channel_id: Option<String>,
+    dispatch_id: Option<String>,
+    session_key: Option<String>,
+    turn_id: Option<String>,
+    payload: Value,
+    created_at: String,
+) -> InvariantViolationRecord {
+    let message = payload.get("message").and_then(value_as_string);
+    let code_location = payload.get("code_location").and_then(value_as_string);
+    let details = payload.get("details").cloned().unwrap_or_else(|| json!({}));
+    InvariantViolationRecord {
+        id,
+        invariant,
+        provider,
+        channel_id,
+        dispatch_id,
+        session_key,
+        turn_id,
+        message,
+        code_location,
+        details,
+        created_at,
+    }
+}
+
 fn normalized_event_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_EVENT_LIMIT,
@@ -1518,6 +1895,13 @@ fn normalized_counter_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_COUNTER_LIMIT,
         value => value.min(MAX_COUNTER_LIMIT),
+    }
+}
+
+fn normalized_invariant_limit(limit: usize) -> usize {
+    match limit {
+        0 => DEFAULT_INVARIANT_LIMIT,
+        value => value.min(MAX_INVARIANT_LIMIT),
     }
 }
 
@@ -1645,6 +2029,102 @@ mod tests {
                 .events
                 .iter()
                 .any(|event| event.event_type == "turn_finished")
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_true_check_does_not_record_violation() {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        assert!(record_invariant_check(
+            true,
+            InvariantViolation {
+                provider: Some("codex"),
+                channel_id: Some(7),
+                dispatch_id: None,
+                session_key: None,
+                turn_id: Some("discord:7:70"),
+                invariant: "response_sent_offset_monotonic",
+                code_location: "src/services/discord/turn_bridge/mod.rs:test",
+                message: "known-true invariant check should not emit",
+                details: json!({
+                    "previous": 8,
+                    "next": 12,
+                }),
+            },
+        ));
+        flush_for_tests().await;
+
+        let response = query_invariant_analytics(
+            &db,
+            None,
+            &InvariantAnalyticsFilters {
+                provider: Some("codex".to_string()),
+                channel_id: Some("7".to_string()),
+                invariant: Some("response_sent_offset_monotonic".to_string()),
+                limit: 10,
+            },
+        )
+        .await
+        .expect("query invariant analytics");
+
+        assert_eq!(response.total_violations, 0);
+        assert!(response.counts.is_empty());
+        assert!(response.recent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invariant_violation_emit_and_query_round_trip() {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        assert!(!record_invariant_check(
+            false,
+            InvariantViolation {
+                provider: Some("claude"),
+                channel_id: Some(42),
+                dispatch_id: Some("dispatch-invariant"),
+                session_key: Some("host:session"),
+                turn_id: Some("discord:42:420"),
+                invariant: "inflight_tmux_one_to_one",
+                code_location: "src/services/discord/inflight.rs:test",
+                message: "test violation",
+                details: json!({
+                    "tmux_session_name": "AgentDesk-claude-test",
+                }),
+            },
+        ));
+        flush_for_tests().await;
+
+        let response = query_invariant_analytics(
+            &db,
+            None,
+            &InvariantAnalyticsFilters {
+                provider: Some("claude".to_string()),
+                channel_id: Some("42".to_string()),
+                invariant: Some("inflight_tmux_one_to_one".to_string()),
+                limit: 10,
+            },
+        )
+        .await
+        .expect("query invariant analytics");
+
+        assert_eq!(response.total_violations, 1);
+        assert_eq!(response.counts[0].invariant, "inflight_tmux_one_to_one");
+        assert_eq!(response.counts[0].count, 1);
+        assert_eq!(response.recent.len(), 1);
+        assert_eq!(
+            response.recent[0].message.as_deref(),
+            Some("test violation")
+        );
+        assert_eq!(
+            response.recent[0].details["tmux_session_name"],
+            "AgentDesk-claude-test"
         );
     }
 

@@ -48,6 +48,15 @@ pub struct QualityEventsQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct InvariantsQuery {
+    pub provider: Option<String>,
+    #[serde(rename = "channelId")]
+    pub channel_id: Option<String>,
+    pub invariant: Option<String>,
+    pub limit: Option<usize>,
+}
+
 /// GET /api/analytics
 pub async fn analytics(
     State(state): State<AppState>,
@@ -109,6 +118,39 @@ pub async fn quality_events(
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("query agent quality events: {error}")})),
+        ),
+    }
+}
+
+/// GET /api/analytics/invariants
+pub async fn invariants(
+    State(state): State<AppState>,
+    Query(params): Query<InvariantsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let filters = crate::services::observability::InvariantAnalyticsFilters {
+        provider: params.provider,
+        channel_id: params.channel_id,
+        invariant: params.invariant,
+        limit: params.limit.unwrap_or(50),
+    };
+
+    match crate::services::observability::query_invariant_analytics(
+        state.sqlite_db(),
+        state.pg_pool_ref(),
+        &filters,
+    )
+    .await
+    {
+        Ok(response) => match serde_json::to_value(response) {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize invariant analytics response: {error}")})),
+            ),
+        },
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query invariant analytics: {error}")})),
         ),
     }
 }
@@ -1236,6 +1278,49 @@ mod tests {
                 .iter()
                 .any(|event| event["event_type"] == json!("turn_finished"))
         );
+    }
+
+    #[tokio::test]
+    async fn invariants_route_returns_violation_payload() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        let db = crate::db::test_db();
+        crate::services::observability::init_observability(db.clone(), None);
+        crate::services::observability::record_invariant_check(
+            false,
+            crate::services::observability::InvariantViolation {
+                provider: Some("codex"),
+                channel_id: Some(5150),
+                dispatch_id: Some("dispatch-route"),
+                session_key: None,
+                turn_id: Some("discord:5150:1"),
+                invariant: "watcher_one_per_channel",
+                code_location: "src/services/discord/tmux.rs:test",
+                message: "route test violation",
+                details: json!({ "source": "test" }),
+            },
+        );
+        crate::services::observability::flush_for_tests().await;
+
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let (status, Json(body)) = invariants(
+            State(state),
+            Query(InvariantsQuery {
+                provider: Some("codex".to_string()),
+                channel_id: Some("5150".to_string()),
+                invariant: Some("watcher_one_per_channel".to_string()),
+                limit: Some(10),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total_violations"], json!(1));
+        assert_eq!(
+            body["counts"][0]["invariant"],
+            json!("watcher_one_per_channel")
+        );
+        assert_eq!(body["recent"][0]["message"], json!("route test violation"));
     }
 
     #[tokio::test]

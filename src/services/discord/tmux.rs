@@ -173,6 +173,31 @@ fn normalize_response_sent_offset(full_response: &str, response_sent_offset: usi
     offset
 }
 
+fn record_watcher_invariant(
+    condition: bool,
+    provider: Option<&ProviderKind>,
+    channel_id: ChannelId,
+    invariant: &'static str,
+    code_location: &'static str,
+    message: &'static str,
+    details: serde_json::Value,
+) -> bool {
+    crate::services::observability::record_invariant_check(
+        condition,
+        crate::services::observability::InvariantViolation {
+            provider: provider.map(ProviderKind::as_str),
+            channel_id: Some(channel_id.get()),
+            dispatch_id: None,
+            session_key: None,
+            turn_id: None,
+            invariant,
+            code_location,
+            message,
+            details,
+        },
+    )
+}
+
 pub(super) fn restored_watcher_turn_from_inflight(
     state: &super::inflight::InflightTurnState,
     tmux_session_name: &str,
@@ -2044,13 +2069,31 @@ pub(super) fn try_claim_watcher(
     handle: TmuxWatcherHandle,
 ) -> bool {
     use dashmap::mapref::entry::Entry;
-    match watchers.entry(channel_id) {
+    let claimed = match watchers.entry(channel_id) {
         Entry::Occupied(_) => false,
         Entry::Vacant(entry) => {
             entry.insert(handle);
             true
         }
-    }
+    };
+    let slot_present = watchers.contains_key(&channel_id);
+    record_watcher_invariant(
+        slot_present,
+        None,
+        channel_id,
+        "watcher_one_per_channel",
+        "src/services/discord/tmux.rs:try_claim_watcher",
+        "watcher claim must leave a single channel-owned watcher slot",
+        serde_json::json!({
+            "claimed": claimed,
+            "watcher_slots": watchers.len(),
+        }),
+    );
+    debug_assert!(
+        slot_present,
+        "watcher claim must leave a channel-owned watcher slot"
+    );
+    claimed
 }
 
 /// #243: Claim a channel for watcher creation, cancelling any existing watcher.
@@ -2065,7 +2108,7 @@ pub(super) fn claim_or_replace_watcher(
     source: &str,
 ) -> bool {
     use dashmap::mapref::entry::Entry;
-    match watchers.entry(channel_id) {
+    let fresh = match watchers.entry(channel_id) {
         Entry::Occupied(mut entry) => {
             // Cancel the existing watcher — it will exit on its next loop iteration
             // and skip DashMap removal (since cancel is set).
@@ -2073,6 +2116,25 @@ pub(super) fn claim_or_replace_watcher(
                 .get()
                 .cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+            let stale_cancelled = entry
+                .get()
+                .cancel
+                .load(std::sync::atomic::Ordering::Relaxed);
+            record_watcher_invariant(
+                stale_cancelled,
+                Some(provider),
+                channel_id,
+                "watcher_replacement_cancels_stale",
+                "src/services/discord/tmux.rs:claim_or_replace_watcher",
+                "replacing a watcher must cancel the stale watcher before installing the new handle",
+                serde_json::json!({
+                    "source": source,
+                }),
+            );
+            debug_assert!(
+                stale_cancelled,
+                "stale watcher must be cancelled before replacement"
+            );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ♻ watcher replaced for channel {} — cancelled stale watcher",
@@ -2090,7 +2152,26 @@ pub(super) fn claim_or_replace_watcher(
             entry.insert(handle);
             true
         }
-    }
+    };
+    let slot_present = watchers.contains_key(&channel_id);
+    record_watcher_invariant(
+        slot_present,
+        Some(provider),
+        channel_id,
+        "watcher_one_per_channel",
+        "src/services/discord/tmux.rs:claim_or_replace_watcher",
+        "watcher replacement must leave exactly one channel-owned watcher slot",
+        serde_json::json!({
+            "fresh": fresh,
+            "source": source,
+            "watcher_slots": watchers.len(),
+        }),
+    );
+    debug_assert!(
+        slot_present,
+        "watcher replacement must leave a channel-owned watcher slot"
+    );
+    fresh
 }
 
 use crate::services::tmux_common::{current_tmux_owner_marker, tmux_owner_path};
@@ -2170,9 +2251,47 @@ fn persist_watcher_stream_progress(
     if let Some(msg_id) = current_msg_id {
         inflight.current_msg_id = msg_id.get();
     }
-    inflight.full_response = full_response.to_string();
-    inflight.response_sent_offset =
+    let normalized_response_sent_offset =
         normalize_response_sent_offset(full_response, response_sent_offset);
+    let monotonic_offset = normalized_response_sent_offset >= inflight.response_sent_offset;
+    record_watcher_invariant(
+        monotonic_offset,
+        Some(provider),
+        channel_id,
+        "response_sent_offset_monotonic",
+        "src/services/discord/tmux.rs:persist_watcher_stream_progress",
+        "watcher response_sent_offset must not move backwards",
+        serde_json::json!({
+            "previous": inflight.response_sent_offset,
+            "next": normalized_response_sent_offset,
+            "tmux_session_name": tmux_session_name,
+        }),
+    );
+    debug_assert!(
+        monotonic_offset,
+        "watcher response_sent_offset must not move backwards"
+    );
+    let offset_in_bounds = normalized_response_sent_offset <= full_response.len()
+        && full_response.is_char_boundary(normalized_response_sent_offset);
+    record_watcher_invariant(
+        offset_in_bounds,
+        Some(provider),
+        channel_id,
+        "response_sent_offset_in_bounds",
+        "src/services/discord/tmux.rs:persist_watcher_stream_progress",
+        "watcher response_sent_offset must stay on a full_response boundary",
+        serde_json::json!({
+            "next": normalized_response_sent_offset,
+            "full_response_len": full_response.len(),
+            "tmux_session_name": tmux_session_name,
+        }),
+    );
+    debug_assert!(
+        offset_in_bounds,
+        "watcher response_sent_offset must stay on a full_response boundary"
+    );
+    inflight.full_response = full_response.to_string();
+    inflight.response_sent_offset = normalized_response_sent_offset;
     inflight.current_tool_line = current_tool_line.map(str::to_string);
     inflight.prev_tool_status = prev_tool_status.map(str::to_string);
     if task_notification_kind.is_some() {
@@ -3865,6 +3984,27 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     Err(observed) => cur = observed,
                 }
             }
+            let confirmed_end = relay_coord
+                .confirmed_end_offset
+                .load(std::sync::atomic::Ordering::Acquire);
+            let confirmed_reached_current = confirmed_end >= current_offset;
+            record_watcher_invariant(
+                confirmed_reached_current,
+                Some(&watcher_provider),
+                channel_id,
+                "tmux_confirmed_end_monotonic",
+                "src/services/discord/tmux.rs:tmux_output_watcher_confirmed_end",
+                "watcher confirmed_end_offset must reach the committed tmux output end",
+                serde_json::json!({
+                    "current_offset": current_offset,
+                    "confirmed_end": confirmed_end,
+                    "tmux_session_name": tmux_session_name.as_str(),
+                }),
+            );
+            debug_assert!(
+                confirmed_reached_current,
+                "watcher confirmed_end_offset must reach committed output end"
+            );
         }
         // Release the emission slot regardless of success. If delivery failed
         // the local `last_relayed_offset` also stayed put, so the same watcher

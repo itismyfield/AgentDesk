@@ -182,6 +182,120 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
     full_response.get(response_sent_offset..).unwrap_or("")
 }
 
+fn record_turn_bridge_invariant(
+    condition: bool,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    invariant: &'static str,
+    code_location: &'static str,
+    message: &'static str,
+    details: serde_json::Value,
+) -> bool {
+    crate::services::observability::record_invariant_check(
+        condition,
+        crate::services::observability::InvariantViolation {
+            provider: Some(provider.as_str()),
+            channel_id: Some(channel_id.get()),
+            dispatch_id,
+            session_key,
+            turn_id,
+            invariant,
+            code_location,
+            message,
+            details,
+        },
+    )
+}
+
+fn discord_turn_id(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    session_key: Option<&str>,
+) -> String {
+    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+    let nonzero_components = channel_id.get() != 0 && user_msg_id.get() != 0;
+    record_turn_bridge_invariant(
+        nonzero_components,
+        provider,
+        channel_id,
+        None,
+        session_key,
+        Some(turn_id.as_str()),
+        "turn_id_unique_within_session",
+        "src/services/discord/turn_bridge/mod.rs:discord_turn_id",
+        "turn_id must be built from non-zero Discord channel/message ids",
+        serde_json::json!({
+            "channel_id": channel_id.get(),
+            "user_msg_id": user_msg_id.get(),
+            "turn_id": turn_id.as_str(),
+        }),
+    );
+    debug_assert!(
+        nonzero_components,
+        "turn_id requires non-zero Discord channel/message ids"
+    );
+    turn_id
+}
+
+fn assert_response_sent_offset_progress(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: &str,
+    previous: usize,
+    next: usize,
+    full_response: &str,
+    code_location: &'static str,
+) {
+    let monotonic = next >= previous;
+    record_turn_bridge_invariant(
+        monotonic,
+        provider,
+        channel_id,
+        dispatch_id,
+        session_key,
+        Some(turn_id),
+        "response_sent_offset_monotonic",
+        code_location,
+        "turn_bridge response_sent_offset must not move backwards",
+        serde_json::json!({
+            "previous": previous,
+            "next": next,
+            "full_response_len": full_response.len(),
+        }),
+    );
+    debug_assert!(
+        monotonic,
+        "turn_bridge response_sent_offset must not move backwards"
+    );
+
+    let in_bounds = next <= full_response.len() && full_response.is_char_boundary(next);
+    record_turn_bridge_invariant(
+        in_bounds,
+        provider,
+        channel_id,
+        dispatch_id,
+        session_key,
+        Some(turn_id),
+        "response_sent_offset_in_bounds",
+        code_location,
+        "turn_bridge response_sent_offset must stay on a full_response boundary",
+        serde_json::json!({
+            "next": next,
+            "full_response_len": full_response.len(),
+        }),
+    );
+    debug_assert!(
+        in_bounds,
+        "turn_bridge response_sent_offset must stay on a full_response boundary"
+    );
+}
+
 fn advance_tmux_relay_confirmed_end(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -207,6 +321,32 @@ fn advance_tmux_relay_confirmed_end(
             Err(observed) => current = observed,
         }
     }
+
+    let confirmed_end = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_reached_target = confirmed_end >= target_end;
+    crate::services::observability::record_invariant_check(
+        confirmed_reached_target,
+        crate::services::observability::InvariantViolation {
+            provider: None,
+            channel_id: Some(channel_id.get()),
+            dispatch_id: None,
+            session_key: None,
+            turn_id: None,
+            invariant: "tmux_confirmed_end_monotonic",
+            code_location: "src/services/discord/turn_bridge/mod.rs:advance_tmux_relay_confirmed_end",
+            message: "tmux relay confirmed_end_offset must reach the delivered output end",
+            details: serde_json::json!({
+                "target_end": target_end,
+                "confirmed_end": confirmed_end,
+            }),
+        },
+    );
+    debug_assert!(
+        confirmed_reached_target,
+        "tmux relay confirmed_end_offset must reach target end"
+    );
 }
 
 fn active_turn_thread_channel_id(
@@ -447,7 +587,7 @@ pub(super) fn persist_turn_analytics_row_with_handles(
                 .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
                 .map(|value| value.to_string())
         });
-    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+    let turn_id = discord_turn_id(provider, channel_id, user_msg_id, session_key);
     let session_key = session_key.map(str::to_string);
     let thread_title = inflight_state.thread_title.clone();
     let persisted_channel_id = inflight_state
@@ -550,7 +690,12 @@ pub(super) fn spawn_turn_bridge(
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
         let user_msg_id = bridge.user_msg_id;
-        let turn_id = format!("discord:{}:{}", bridge.channel_id.get(), bridge.user_msg_id.get());
+        let turn_id = discord_turn_id(
+            &provider,
+            bridge.channel_id,
+            bridge.user_msg_id,
+            bridge.adk_session_key.as_deref(),
+        );
         let user_text_owned = bridge.user_text_owned.clone();
         let request_owner_name = bridge.request_owner_name.clone();
         let role_binding = bridge.role_binding.clone();
@@ -1192,7 +1337,19 @@ pub(super) fn spawn_turn_bridge(
                 {
                     Ok(()) => match gateway.send_message(channel_id, &status_block).await {
                         Ok(next_msg_id) => {
-                            response_sent_offset += plan.split_at;
+                            let next_response_sent_offset = response_sent_offset + plan.split_at;
+                            assert_response_sent_offset_progress(
+                                &provider,
+                                channel_id,
+                                dispatch_id.as_deref(),
+                                adk_session_key.as_deref(),
+                                &turn_id,
+                                response_sent_offset,
+                                next_response_sent_offset,
+                                &full_response,
+                                "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
+                            );
+                            response_sent_offset = next_response_sent_offset;
                             current_msg_id = next_msg_id;
                             last_edit_text = status_block;
                             last_status_edit = tokio::time::Instant::now() - status_interval;
@@ -1382,6 +1539,21 @@ pub(super) fn spawn_turn_bridge(
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+        record_turn_bridge_invariant(
+            finish.removed_token.is_some(),
+            &provider,
+            channel_id,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            Some(turn_id.as_str()),
+            "mailbox_active_turn_matches_dispatch",
+            "src/services/discord/turn_bridge/mod.rs:mailbox_finish_turn",
+            "turn_bridge finalization expected exactly one active mailbox turn",
+            serde_json::json!({
+                "has_pending": finish.has_pending,
+                "mailbox_online": finish.mailbox_online,
+            }),
+        );
         if let Some(removed_token) = finish.removed_token {
             // Mark the token as cancelled so any lingering watchdog timer exits cleanly
             // instead of mistakenly firing on a newer turn's token.
