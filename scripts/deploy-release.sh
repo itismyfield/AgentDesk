@@ -281,7 +281,11 @@ if setup_sccache_env; then
 else
     echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
     echo "  Install it first for faster release builds (for example: brew install sccache)"
+    echo "  See docs/ci/sccache-setup.md"
+    # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
+    # don't fail the build when the binary is missing.
     export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
 # Build the release binary from the current workspace by default so deploy
