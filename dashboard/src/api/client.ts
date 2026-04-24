@@ -1166,7 +1166,15 @@ export interface AgentQualitySummary {
   generatedAt: string;
   agentId: string;
   latest: AgentQualityDailyRecord | null;
+  /** #1102: alias for `latest` — DoD-mandated field. */
+  current?: AgentQualityDailyRecord | null;
   daily: AgentQualityDailyRecord[];
+  /** #1102: last 7 days of daily rows (newest-first). */
+  trend7d?: AgentQualityDailyRecord[];
+  /** #1102: last 30 days of daily rows (newest-first). */
+  trend30d?: AgentQualityDailyRecord[];
+  /** #1102: true when `daily` is synthesized from agent_quality_event. */
+  fallbackFromEvents?: boolean;
 }
 
 export interface AgentQualityRankingEntry {
@@ -1178,10 +1186,21 @@ export interface AgentQualityRankingEntry {
   latestDay: string;
   rolling7d: AgentQualityWindow;
   rolling30d: AgentQualityWindow;
+  /** #1102: value of the chosen (metric, window). null when unavailable. */
+  metricValue?: number | null;
 }
+
+export type AgentQualityRankingMetric = "turn_success_rate" | "review_pass_rate";
+export type AgentQualityRankingWindow = "7d" | "30d";
 
 export interface AgentQualityRankingResponse {
   generatedAt: string;
+  /** #1102 */
+  metric?: AgentQualityRankingMetric;
+  /** #1102 */
+  window?: AgentQualityRankingWindow;
+  /** #1102: sample_size threshold applied to the requested window. */
+  minSampleSize?: number;
   agents: AgentQualityRankingEntry[];
 }
 
@@ -1195,8 +1214,13 @@ export async function getAgentQuality(
 
 export async function getAgentQualityRanking(
   limit = 20,
+  metric?: AgentQualityRankingMetric,
+  window?: AgentQualityRankingWindow,
 ): Promise<AgentQualityRankingResponse> {
-  return request(`/api/agents/quality/ranking?limit=${limit}`);
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (metric) params.set("metric", metric);
+  if (window) params.set("window", window);
+  return request(`/api/agents/quality/ranking?${params.toString()}`);
 }
 
 // ── Agent Timeline ──

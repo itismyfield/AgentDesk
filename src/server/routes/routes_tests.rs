@@ -8573,7 +8573,7 @@ async fn cron_api_response_includes_maintenance_section() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
+async fn agent_quality_api_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
     let db = test_db();
     seed_test_agents(&db);
     {
@@ -8671,6 +8671,11 @@ async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std
     assert_eq!(json["latest"]["rolling7d"]["measurementUnavailable"], false);
     assert_eq!(json["latest"]["rolling7d"]["turnSuccessRate"], json!(0.8));
     assert_eq!(json["daily"].as_array().map(Vec::len), Some(1));
+    // #1102: DoD-mandated current / trend_7d / trend_30d fields.
+    assert_eq!(json["current"]["agentId"], "agent-1");
+    assert_eq!(json["trend7d"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["trend30d"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["fallbackFromEvents"], false);
 
     let ranking_response = app
         .oneshot(
@@ -8683,7 +8688,179 @@ async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std
     let ranking_body = axum::body::to_bytes(ranking_response.into_body(), usize::MAX).await?;
     let ranking_json: serde_json::Value = serde_json::from_slice(&ranking_body)?;
     assert_eq!(ranking_json["agents"][0]["agentId"], "agent-1");
+    assert_eq!(ranking_json["metric"], "turn_success_rate");
+    assert_eq!(ranking_json["window"], "7d");
+    assert_eq!(ranking_json["minSampleSize"], 5);
+    // metric_value for rolling_7d turn_success_rate on the seeded row is 0.8.
+    assert_eq!(ranking_json["agents"][0]["metricValue"], json!(0.8));
 
+    Ok(())
+}
+
+/// #1102 DoD: ranking excludes agents whose rolling_7d sample_size < 5 so
+/// the client doesn't have to filter client-side.
+#[tokio::test]
+async fn agent_quality_api_ranking_excludes_low_sample_size()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    seed_test_agents(&db);
+    {
+        let conn = db.lock()?;
+        // agent-1: sample_size_7d = 2 (below threshold, measurement_unavailable=1)
+        conn.execute(
+            "INSERT INTO agent_quality_daily (
+                agent_id, day, provider, channel_id,
+                turn_success_count, turn_error_count, review_pass_count, review_fail_count,
+                turn_sample_size, review_sample_size, sample_size,
+                turn_success_rate, review_pass_rate,
+                turn_success_count_7d, turn_error_count_7d, review_pass_count_7d, review_fail_count_7d,
+                turn_sample_size_7d, review_sample_size_7d, sample_size_7d,
+                turn_success_rate_7d, review_pass_rate_7d, measurement_unavailable_7d,
+                turn_success_count_30d, turn_error_count_30d, review_pass_count_30d, review_fail_count_30d,
+                turn_sample_size_30d, review_sample_size_30d, sample_size_30d,
+                turn_success_rate_30d, review_pass_rate_30d, measurement_unavailable_30d
+             ) VALUES (
+                'agent-1', date('now'), 'codex', '555',
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0,
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0, 1,
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0, 1
+             )",
+            [],
+        )?;
+        // ag1: sample_size_7d = 10 (well above threshold)
+        conn.execute(
+            "INSERT INTO agent_quality_daily (
+                agent_id, day, provider, channel_id,
+                turn_success_count, turn_error_count, review_pass_count, review_fail_count,
+                turn_sample_size, review_sample_size, sample_size,
+                turn_success_rate, review_pass_rate,
+                turn_success_count_7d, turn_error_count_7d, review_pass_count_7d, review_fail_count_7d,
+                turn_sample_size_7d, review_sample_size_7d, sample_size_7d,
+                turn_success_rate_7d, review_pass_rate_7d, measurement_unavailable_7d,
+                turn_success_count_30d, turn_error_count_30d, review_pass_count_30d, review_fail_count_30d,
+                turn_sample_size_30d, review_sample_size_30d, sample_size_30d,
+                turn_success_rate_30d, review_pass_rate_30d, measurement_unavailable_30d
+             ) VALUES (
+                'ag1', date('now'), 'codex', '333',
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0,
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0, 0,
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0, 0
+             )",
+            [],
+        )?;
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/quality/ranking?metric=turn_success_rate&window=7d")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let agents = json["agents"].as_array().expect("agents array");
+    assert_eq!(agents.len(), 1, "only ag1 (sample_size_7d=10) should pass");
+    assert_eq!(agents[0]["agentId"], "ag1");
+    assert_eq!(agents[0]["rank"], 1);
+    Ok(())
+}
+
+/// #1102 DoD: when `agent_quality_daily` has no rows, the per-agent summary
+/// falls back to an on-the-fly mini-rollup over `agent_quality_event`.
+#[tokio::test]
+async fn agent_quality_api_event_fallback_mini_rollup() -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    seed_test_agents(&db);
+    {
+        let conn = db.lock()?;
+        // Seed 6 events (enough to exceed QUALITY_SAMPLE_GUARD=5 → window
+        // should be measurable).
+        for (i, etype) in [
+            "turn_complete",
+            "turn_complete",
+            "turn_complete",
+            "turn_complete",
+            "turn_error",
+            "review_pass",
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO agent_quality_event (
+                    source_event_id, correlation_id, agent_id, provider, channel_id,
+                    card_id, dispatch_id, event_type, payload_json, created_at
+                 ) VALUES (?1, NULL, 'agent-1', 'codex', '555', NULL, NULL, ?2, '{}', datetime('now'))",
+                libsql_rusqlite::params![format!("evt-{i}"), etype],
+            )?;
+        }
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-1/quality")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["agentId"], "agent-1");
+    assert_eq!(
+        json["fallbackFromEvents"], true,
+        "fallbackFromEvents must be true when daily is empty"
+    );
+    let daily_len = json["daily"].as_array().map(Vec::len).unwrap_or(0);
+    assert!(daily_len >= 1, "expected synthesized daily rows");
+    let current_sample = json["current"]["sampleSize"].as_i64().unwrap_or(-1);
+    assert_eq!(current_sample, 6, "6 events synthesized for today");
+    Ok(())
+}
+
+/// #1102 DoD: docs catalog exposes both new quality endpoints.
+#[tokio::test]
+async fn agent_quality_api_docs_catalog_includes_endpoints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/agents?format=flat")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("/api/agents/{id}/quality"),
+        "docs must list /api/agents/{{id}}/quality, got: {text}"
+    );
+    assert!(
+        text.contains("/api/agents/quality/ranking"),
+        "docs must list /api/agents/quality/ranking, got: {text}"
+    );
     Ok(())
 }
 
