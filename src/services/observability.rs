@@ -20,6 +20,27 @@ const DEFAULT_EVENT_LIMIT: usize = 100;
 const DEFAULT_COUNTER_LIMIT: usize = 200;
 const MAX_EVENT_LIMIT: usize = 500;
 const MAX_COUNTER_LIMIT: usize = 500;
+const DEFAULT_QUALITY_LIMIT: usize = 200;
+const MAX_QUALITY_LIMIT: usize = 500;
+const DEFAULT_QUALITY_DAYS: i64 = 7;
+const MAX_QUALITY_DAYS: i64 = 365;
+const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
+    "turn_start",
+    "turn_complete",
+    "turn_error",
+    "review_pass",
+    "review_fail",
+    "dispatch_dispatched",
+    "dispatch_completed",
+    "recovery_fired",
+    "escalation",
+    "card_transitioned",
+    "stream_reattached",
+    "watcher_lost",
+    "outbox_delivery_failed",
+    "ci_check_red",
+    "queue_stuck",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CounterKey {
@@ -110,9 +131,23 @@ struct QueuedEvent {
     payload_json: String,
 }
 
+#[derive(Debug, Clone)]
+struct QueuedQualityEvent {
+    source_event_id: Option<String>,
+    correlation_id: Option<String>,
+    agent_id: Option<String>,
+    provider: Option<String>,
+    channel_id: Option<String>,
+    card_id: Option<String>,
+    dispatch_id: Option<String>,
+    event_type: String,
+    payload_json: String,
+}
+
 #[derive(Debug)]
 enum WorkerMessage {
     Event(QueuedEvent),
+    QualityEvent(QueuedQualityEvent),
     Flush(oneshot::Sender<()>),
 }
 
@@ -190,6 +225,41 @@ pub struct AnalyticsResponse {
     pub generated_at: String,
     pub counters: Vec<AnalyticsCounterSnapshot>,
     pub events: Vec<AnalyticsEventRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentQualityEvent {
+    pub source_event_id: Option<String>,
+    pub correlation_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub card_id: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub event_type: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentQualityFilters {
+    pub agent_id: Option<String>,
+    pub days: i64,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentQualityEventRecord {
+    pub id: i64,
+    pub source_event_id: Option<String>,
+    pub correlation_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub card_id: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub event_type: String,
+    pub payload: Value,
+    pub created_at: String,
 }
 
 static OBSERVABILITY_RUNTIME: OnceLock<Arc<ObservabilityRuntime>> = OnceLock::new();
@@ -366,6 +436,32 @@ pub fn emit_dispatch_result(
     );
 }
 
+pub fn emit_agent_quality_event(event: AgentQualityEvent) {
+    let Some(event_type) = normalize_quality_event_type(&event.event_type) else {
+        tracing::warn!(
+            event_type = %event.event_type,
+            "[quality] dropping unknown agent quality event type"
+        );
+        return;
+    };
+
+    let queued = QueuedQualityEvent {
+        source_event_id: event.source_event_id.as_deref().and_then(normalize_string),
+        correlation_id: event.correlation_id.as_deref().and_then(normalize_string),
+        agent_id: event.agent_id.as_deref().and_then(normalize_string),
+        provider: event.provider.as_deref().and_then(normalize_string),
+        channel_id: event.channel_id.as_deref().and_then(normalize_string),
+        card_id: event.card_id.as_deref().and_then(normalize_string),
+        dispatch_id: event.dispatch_id.as_deref().and_then(normalize_string),
+        event_type,
+        payload_json: serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string()),
+    };
+
+    if let Some(sender) = worker_sender() {
+        let _ = sender.send(WorkerMessage::QualityEvent(queued));
+    }
+}
+
 fn emit_event(
     event_type: &str,
     provider: Option<&str>,
@@ -466,6 +562,7 @@ async fn worker_loop(
     mut rx: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
     let mut batch = Vec::new();
+    let mut quality_batch = Vec::new();
     let mut flush_tick = tokio::time::interval(EVENT_FLUSH_INTERVAL);
     let mut snapshot_tick = tokio::time::interval(SNAPSHOT_FLUSH_INTERVAL);
     flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -481,8 +578,15 @@ async fn worker_loop(
                             flush_event_batch(&runtime, &mut batch).await;
                         }
                     }
+                    Some(WorkerMessage::QualityEvent(event)) => {
+                        quality_batch.push(event);
+                        if quality_batch.len() >= EVENT_BATCH_SIZE {
+                            flush_quality_event_batch(&runtime, &mut quality_batch).await;
+                        }
+                    }
                     Some(WorkerMessage::Flush(done)) => {
                         flush_event_batch(&runtime, &mut batch).await;
+                        flush_quality_event_batch(&runtime, &mut quality_batch).await;
                         flush_counter_snapshots(&runtime).await;
                         let _ = done.send(());
                     }
@@ -491,6 +595,7 @@ async fn worker_loop(
             }
             _ = flush_tick.tick() => {
                 flush_event_batch(&runtime, &mut batch).await;
+                flush_quality_event_batch(&runtime, &mut quality_batch).await;
             }
             _ = snapshot_tick.tick() => {
                 flush_counter_snapshots(&runtime).await;
@@ -499,6 +604,7 @@ async fn worker_loop(
     }
 
     flush_event_batch(&runtime, &mut batch).await;
+    flush_quality_event_batch(&runtime, &mut quality_batch).await;
     flush_counter_snapshots(&runtime).await;
 }
 
@@ -522,6 +628,32 @@ async fn flush_event_batch(runtime: &Arc<ObservabilityRuntime>, batch: &mut Vec<
         && let Err(error) = insert_events_sqlite(db, &events)
     {
         tracing::warn!("[observability] sqlite event flush failed: {error}");
+    }
+}
+
+async fn flush_quality_event_batch(
+    runtime: &Arc<ObservabilityRuntime>,
+    batch: &mut Vec<QueuedQualityEvent>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let events = std::mem::take(batch);
+    let handles = storage_handles(runtime);
+
+    if let Some(pool) = handles.pg_pool.as_ref() {
+        match insert_quality_events_pg(pool, &events).await {
+            Ok(()) => return,
+            Err(error) => {
+                tracing::warn!("[quality] postgres event flush failed: {error}");
+            }
+        }
+    }
+
+    if let Some(db) = handles.db.as_ref()
+        && let Err(error) = insert_quality_events_sqlite(db, &events)
+    {
+        tracing::warn!("[quality] sqlite event flush failed: {error}");
     }
 }
 
@@ -634,6 +766,28 @@ pub async fn query_analytics(
         counters,
         events,
     })
+}
+
+pub async fn query_agent_quality_events(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    filters: &AgentQualityFilters,
+) -> Result<Vec<AgentQualityEventRecord>> {
+    let days = normalized_quality_days(filters.days);
+    let limit = normalized_quality_limit(filters.limit);
+    if let Some(pool) = pg_pool {
+        match query_agent_quality_events_pg(pool, filters.agent_id.as_deref(), days, limit).await {
+            Ok(records) => return Ok(records),
+            Err(error) => {
+                tracing::warn!("[quality] postgres event query failed: {error}");
+            }
+        }
+    }
+
+    let conn = db
+        .read_conn()
+        .map_err(|error| anyhow!("db read connection for agent quality events: {error}"))?;
+    query_agent_quality_events_sqlite(&conn, filters.agent_id.as_deref(), days, limit)
 }
 
 async fn query_events_db(
@@ -798,6 +952,131 @@ async fn query_events_pg(
                 created_at: row
                     .try_get("created_at_kst")
                     .map_err(|error| anyhow!("decode observability created_at: {error}"))?,
+            })
+        })
+        .collect()
+}
+
+fn query_agent_quality_events_sqlite(
+    conn: &Connection,
+    agent_id: Option<&str>,
+    days: i64,
+    limit: usize,
+) -> Result<Vec<AgentQualityEventRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,
+                source_event_id,
+                correlation_id,
+                agent_id,
+                provider,
+                channel_id,
+                card_id,
+                dispatch_id,
+                event_type,
+                payload_json,
+                datetime(created_at, '+9 hours') AS created_at_kst
+         FROM agent_quality_event
+         WHERE (?1 IS NULL OR agent_id = ?1)
+           AND created_at >= datetime('now', '-' || ?2 || ' days')
+         ORDER BY id DESC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        libsql_rusqlite::params![agent_id, days, limit as i64],
+        |row| {
+            let payload_json: Option<String> = row.get(9)?;
+            Ok(AgentQualityEventRecord {
+                id: row.get(0)?,
+                source_event_id: row.get(1)?,
+                correlation_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                provider: row.get(4)?,
+                channel_id: row.get(5)?,
+                card_id: row.get(6)?,
+                dispatch_id: row.get(7)?,
+                event_type: row.get(8)?,
+                payload: payload_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok())
+                    .unwrap_or_else(|| json!({})),
+                created_at: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+            })
+        },
+    )?;
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+}
+
+async fn query_agent_quality_events_pg(
+    pool: &PgPool,
+    agent_id: Option<&str>,
+    days: i64,
+    limit: usize,
+) -> Result<Vec<AgentQualityEventRecord>> {
+    let rows = sqlx::query(
+        "SELECT id,
+                source_event_id,
+                correlation_id,
+                agent_id,
+                provider,
+                channel_id,
+                card_id,
+                dispatch_id,
+                event_type::text AS event_type,
+                payload::text AS payload_json,
+                to_char(created_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS created_at_kst
+         FROM agent_quality_event
+         WHERE ($1::text IS NULL OR agent_id = $1)
+           AND created_at >= NOW() - ($2::int * INTERVAL '1 day')
+         ORDER BY created_at DESC, id DESC
+         LIMIT $3",
+    )
+    .bind(agent_id)
+    .bind(days as i32)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query postgres agent quality events: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let payload_json: Option<String> = row
+                .try_get("payload_json")
+                .map_err(|error| anyhow!("decode agent quality payload_json: {error}"))?;
+            Ok(AgentQualityEventRecord {
+                id: row
+                    .try_get("id")
+                    .map_err(|error| anyhow!("decode agent quality event id: {error}"))?,
+                source_event_id: row
+                    .try_get("source_event_id")
+                    .map_err(|error| anyhow!("decode agent quality source_event_id: {error}"))?,
+                correlation_id: row
+                    .try_get("correlation_id")
+                    .map_err(|error| anyhow!("decode agent quality correlation_id: {error}"))?,
+                agent_id: row
+                    .try_get("agent_id")
+                    .map_err(|error| anyhow!("decode agent quality agent_id: {error}"))?,
+                provider: row
+                    .try_get("provider")
+                    .map_err(|error| anyhow!("decode agent quality provider: {error}"))?,
+                channel_id: row
+                    .try_get("channel_id")
+                    .map_err(|error| anyhow!("decode agent quality channel_id: {error}"))?,
+                card_id: row
+                    .try_get("card_id")
+                    .map_err(|error| anyhow!("decode agent quality card_id: {error}"))?,
+                dispatch_id: row
+                    .try_get("dispatch_id")
+                    .map_err(|error| anyhow!("decode agent quality dispatch_id: {error}"))?,
+                event_type: row
+                    .try_get("event_type")
+                    .map_err(|error| anyhow!("decode agent quality event_type: {error}"))?,
+                payload: payload_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str(value).ok())
+                    .unwrap_or_else(|| json!({})),
+                created_at: row
+                    .try_get("created_at_kst")
+                    .map_err(|error| anyhow!("decode agent quality created_at: {error}"))?,
             })
         })
         .collect()
@@ -1014,6 +1293,83 @@ async fn insert_events_pg(pool: &PgPool, events: &[QueuedEvent]) -> Result<()> {
     Ok(())
 }
 
+fn insert_quality_events_sqlite(db: &Db, events: &[QueuedQualityEvent]) -> Result<()> {
+    let mut conn = db
+        .separate_conn()
+        .map_err(|error| anyhow!("open sqlite agent quality event connection: {error}"))?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| anyhow!("begin sqlite agent quality event tx: {error}"))?;
+    for event in events {
+        tx.execute(
+            "INSERT INTO agent_quality_event (
+                source_event_id,
+                correlation_id,
+                agent_id,
+                provider,
+                channel_id,
+                card_id,
+                dispatch_id,
+                event_type,
+                payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            libsql_rusqlite::params![
+                event.source_event_id,
+                event.correlation_id,
+                event.agent_id,
+                event.provider,
+                event.channel_id,
+                event.card_id,
+                event.dispatch_id,
+                event.event_type,
+                event.payload_json,
+            ],
+        )
+        .map_err(|error| anyhow!("insert sqlite agent quality event: {error}"))?;
+    }
+    tx.commit()
+        .map_err(|error| anyhow!("commit sqlite agent quality event tx: {error}"))?;
+    Ok(())
+}
+
+async fn insert_quality_events_pg(pool: &PgPool, events: &[QueuedQualityEvent]) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow!("begin postgres agent quality event tx: {error}"))?;
+    for event in events {
+        sqlx::query(
+            "INSERT INTO agent_quality_event (
+                source_event_id,
+                correlation_id,
+                agent_id,
+                provider,
+                channel_id,
+                card_id,
+                dispatch_id,
+                event_type,
+                payload
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::agent_quality_event_type, CAST($9 AS jsonb))",
+        )
+        .bind(&event.source_event_id)
+        .bind(&event.correlation_id)
+        .bind(&event.agent_id)
+        .bind(&event.provider)
+        .bind(&event.channel_id)
+        .bind(&event.card_id)
+        .bind(&event.dispatch_id)
+        .bind(&event.event_type)
+        .bind(&event.payload_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow!("insert postgres agent quality event: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| anyhow!("commit postgres agent quality event tx: {error}"))?;
+    Ok(())
+}
+
 fn insert_snapshots_sqlite(db: &Db, snapshots: &[SnapshotRow]) -> Result<()> {
     let mut conn = db
         .separate_conn()
@@ -1143,6 +1499,14 @@ fn normalize_string(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn normalize_quality_event_type(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    AGENT_QUALITY_EVENT_TYPES
+        .iter()
+        .any(|candidate| *candidate == normalized)
+        .then_some(normalized)
+}
+
 fn normalized_event_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_EVENT_LIMIT,
@@ -1154,6 +1518,20 @@ fn normalized_counter_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_COUNTER_LIMIT,
         value => value.min(MAX_COUNTER_LIMIT),
+    }
+}
+
+fn normalized_quality_limit(limit: usize) -> usize {
+    match limit {
+        0 => DEFAULT_QUALITY_LIMIT,
+        value => value.min(MAX_QUALITY_LIMIT),
+    }
+}
+
+fn normalized_quality_days(days: i64) -> i64 {
+    match days {
+        value if value <= 0 => DEFAULT_QUALITY_DAYS,
+        value => value.min(MAX_QUALITY_DAYS),
     }
 }
 
@@ -1268,6 +1646,48 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "turn_finished")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_quality_emit_and_query_round_trip() -> Result<()> {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-1".to_string()),
+            correlation_id: Some("dispatch-1".to_string()),
+            agent_id: Some("agent-1".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("42".to_string()),
+            card_id: Some("card-1".to_string()),
+            dispatch_id: Some("dispatch-1".to_string()),
+            event_type: "review_pass".to_string(),
+            payload: json!({
+                "verdict": "pass",
+            }),
+        });
+        flush_for_tests().await;
+
+        let events = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-1".to_string()),
+                days: 7,
+                limit: 10,
+            },
+        )
+        .await?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "review_pass");
+        assert_eq!(events[0].agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(events[0].dispatch_id.as_deref(), Some("dispatch-1"));
+        assert_eq!(events[0].payload["verdict"], "pass");
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

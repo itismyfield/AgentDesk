@@ -2174,6 +2174,26 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     query_param("integer", false, "Maximum recent events to return").with_default(100),
                 ),
             ]),
+        ep(
+            "GET",
+            "/api/quality/events",
+            "analytics",
+            "Agent quality raw event stream",
+        )
+        .with_params([
+            (
+                "agent_id",
+                query_param("string", false, "Filter by agent id"),
+            ),
+            (
+                "days",
+                query_param("integer", false, "Lookback window in days").with_default(7),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Maximum recent events to return").with_default(200),
+            ),
+        ]),
         ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
         ep("GET", "/api/achievements", "analytics", "Agent achievements"),
         ep(

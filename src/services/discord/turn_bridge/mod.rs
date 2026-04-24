@@ -95,6 +95,37 @@ fn merge_task_notification_kind(
     }
 }
 
+fn emit_turn_quality_event(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: &str,
+    role_binding: Option<&RoleBinding>,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    crate::services::observability::emit_agent_quality_event(
+        crate::services::observability::AgentQualityEvent {
+            source_event_id: Some(turn_id.to_string()),
+            correlation_id: dispatch_id
+                .map(str::to_string)
+                .or_else(|| Some(turn_id.to_string())),
+            agent_id: role_binding.map(|binding| binding.role_id.clone()),
+            provider: Some(provider.as_str().to_string()),
+            channel_id: Some(channel_id.get().to_string()),
+            card_id: None,
+            dispatch_id: dispatch_id.map(str::to_string),
+            event_type: event_type.to_string(),
+            payload: serde_json::json!({
+                "turn_id": turn_id,
+                "session_key": session_key,
+                "details": payload,
+            }),
+        },
+    );
+}
+
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -590,6 +621,19 @@ pub(super) fn spawn_turn_bridge(
             dispatch_id.as_deref(),
             adk_session_key.as_deref(),
             Some(turn_id.as_str()),
+        );
+        emit_turn_quality_event(
+            &provider,
+            channel_id,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            turn_id.as_str(),
+            role_binding.as_ref(),
+            "turn_start",
+            serde_json::json!({
+                "user_msg_id": user_msg_id.get(),
+                "request_owner_name": request_owner_name.as_str(),
+            }),
         );
 
         while !done {
@@ -1957,6 +2001,28 @@ pub(super) fn spawn_turn_bridge(
             turn_outcome,
             turn_duration_ms(turn_start),
             rx_disconnected && tmux_handed_off && full_response.is_empty(),
+        );
+        let turn_quality_event_type = if matches!(turn_outcome, "completed" | "tmux_handoff") {
+            "turn_complete"
+        } else {
+            "turn_error"
+        };
+        emit_turn_quality_event(
+            &provider,
+            channel_id,
+            dispatch_id.as_deref(),
+            adk_session_key.as_deref(),
+            turn_id.as_str(),
+            role_binding.as_ref(),
+            turn_quality_event_type,
+            serde_json::json!({
+                "outcome": turn_outcome,
+                "duration_ms": turn_duration_ms(turn_start),
+                "cancelled": cancelled,
+                "recovery_retry": recovery_retry,
+                "transport_error": transport_error,
+                "tmux_handoff": rx_disconnected && tmux_handed_off && full_response.is_empty(),
+            }),
         );
 
         if should_persist_transcript
