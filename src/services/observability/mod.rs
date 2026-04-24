@@ -3221,6 +3221,163 @@ mod tests {
         Ok(())
     }
 
+    /// #930: query_agent_quality_events must filter out rows older than the
+    /// requested `days` window.
+    #[tokio::test]
+    async fn agent_quality_query_excludes_rows_older_than_days_window() -> Result<()> {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        // Insert directly so we can control created_at: one row at "now" and
+        // one row 30 days in the past for the same agent.
+        let conn = db
+            .separate_conn()
+            .expect("open sqlite agent quality test connection");
+        conn.execute(
+            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
+        )
+        .expect("insert recent quality event");
+        conn.execute(
+            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
+             VALUES (?1, ?2, ?3, datetime('now', '-30 days'))",
+            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
+        )
+        .expect("insert old quality event");
+
+        let recent = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-window".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(
+            recent.len(),
+            1,
+            "days=7 must exclude the 30-day-old row, got {recent:?}"
+        );
+
+        // days=60 must include both rows.
+        let wide = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-window".to_string()),
+                days: 60,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(
+            wide.len(),
+            2,
+            "days=60 must include both rows, got {wide:?}"
+        );
+
+        Ok(())
+    }
+
+    /// #930: query_agent_quality_events must scope rows to the requested
+    /// `agent_id` and never bleed events from other agents.
+    #[tokio::test]
+    async fn agent_quality_query_filters_by_agent_id() -> Result<()> {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-A".to_string()),
+            correlation_id: Some("dispatch-A".to_string()),
+            agent_id: Some("agent-A".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("100".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-A".to_string()),
+            event_type: "turn_complete".to_string(),
+            payload: json!({"who": "A"}),
+        });
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-B".to_string()),
+            correlation_id: Some("dispatch-B".to_string()),
+            agent_id: Some("agent-B".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("200".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-B".to_string()),
+            event_type: "turn_complete".to_string(),
+            payload: json!({"who": "B"}),
+        });
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-A2".to_string()),
+            correlation_id: Some("dispatch-A2".to_string()),
+            agent_id: Some("agent-A".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("100".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-A2".to_string()),
+            event_type: "review_pass".to_string(),
+            payload: json!({"who": "A2"}),
+        });
+        flush_for_tests().await;
+
+        let only_a = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-A".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(only_a.len(), 2, "agent-A should have 2 events");
+        assert!(
+            only_a
+                .iter()
+                .all(|e| e.agent_id.as_deref() == Some("agent-A")),
+            "filter must not return rows from other agents: {only_a:?}"
+        );
+
+        let only_b = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-B".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].agent_id.as_deref(), Some("agent-B"));
+
+        // No agent_id filter → both agents' events come back.
+        let unscoped = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: None,
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert!(
+            unscoped.len() >= 3,
+            "unscoped query should include events from both agents, got {unscoped:?}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn counter_updates_are_thread_safe() {
         let _guard = test_runtime_lock();
