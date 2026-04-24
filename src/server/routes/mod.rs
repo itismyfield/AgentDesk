@@ -21,6 +21,7 @@ pub mod kanban;
 pub mod kanban_repos;
 mod maintenance;
 pub mod meetings;
+pub mod memory_api;
 pub mod messages;
 pub mod monitoring;
 pub mod offices;

@@ -175,7 +175,8 @@ fn canonical_category(category: &str) -> &'static str {
         "auto-queue" | "cron" | "queue" => "queue",
         "analytics" | "auth" | "docs" | "health" | "monitoring" | "stats" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
-        "departments" | "offices" | "onboarding" | "policies" | "settings" | "skills" => "admin",
+        "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
+        | "skills" => "admin",
         _ => "ops",
     }
 }
@@ -224,8 +225,8 @@ fn category_to_group(category: &str) -> &'static str {
         // automation — auto-queue, policies, scheduler, cron, maintenance
         "auto-queue" | "queue" | "cron" | "policies" => "automation",
         // config — settings, onboarding, knowledge, source-of-truth, skills,
-        // offices, departments
-        "settings" | "onboarding" | "skills" | "offices" | "departments" => "config",
+        // offices, departments, memory (#1066 /api/memory dual-mode)
+        "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
         // observability — analytics, metrics, events, slo, diagnostics,
         // monitoring, stats, health, auth
         "analytics" | "monitoring" | "stats" | "health" | "auth" => "observability",
@@ -313,6 +314,9 @@ fn category_description(category: &str) -> &'static str {
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
         "kanban-repos" => "Kanban repository settings and ownership metadata.",
         "meetings" => "Round-table meeting lifecycle and issue generation.",
+        "memory" => {
+            "Memory fragment CRUD (recall/remember/forget) with auto-selected memento-or-local backend."
+        }
         "messages" => "Message log read/write APIs.",
         "monitoring" => "Channel monitoring status entries and rendered status updates.",
         "offices" => "Office CRUD, ordering, and agent membership.",
@@ -2741,6 +2745,84 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"card_id": "card-1", "decision": "requeue", "comment": "needs reprioritization"}}),
             json!({"ok": true, "card_id": "card-1", "decision": "requeue", "message": "Card moved back to ready for reprioritization"}),
+        ),
+        // #1066 /api/memory dual-mode
+        ep(
+            "POST",
+            "/api/memory/recall",
+            "memory",
+            "Recall memory fragments by keyword/text. Auto-selects memento or local backend (ADK_FORCE_LOCAL_MEMORY=1 forces local).",
+        )
+        .with_params([
+            (
+                "keywords",
+                body_param("array", false, "List of keywords matched via LIKE in local mode"),
+            ),
+            (
+                "text",
+                body_param("string", false, "Free-form text appended to keyword filters"),
+            ),
+            (
+                "workspace",
+                body_param("string", false, "Optional workspace scope filter"),
+            ),
+            (
+                "limit",
+                body_param("integer", false, "Max fragments returned (default 20, max 200)"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"keywords": ["postgres"], "workspace": "ops", "limit": 5}}),
+            json!({
+                "fragments": [{"id": "mem-abc", "content": "PostgreSQL cutover done", "topic": "pg-cutover"}],
+                "source": "local",
+                "detected_backend": "local"
+            }),
+        ),
+        ep(
+            "POST",
+            "/api/memory/remember",
+            "memory",
+            "Persist a memory fragment. Auto-selects memento or local backend.",
+        )
+        .with_params([
+            ("content", body_param("string", true, "Fragment content")),
+            ("topic", body_param("string", true, "Topic label for grouping")),
+            (
+                "type",
+                body_param(
+                    "string",
+                    true,
+                    "Fragment type: fact/decision/error/preference/procedure/relation/episode",
+                ),
+            ),
+            (
+                "importance",
+                body_param("number", false, "Importance score 0.0–1.0"),
+            ),
+            (
+                "workspace",
+                body_param("string", false, "Optional workspace scope"),
+            ),
+            (
+                "keywords",
+                body_param("array", false, "Optional keyword array"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"content": "Agent #1066 landed", "topic": "release", "type": "decision"}}),
+            json!({"id": "mem-abc", "source": "local"}),
+        ),
+        ep(
+            "POST",
+            "/api/memory/forget",
+            "memory",
+            "Remove a memory fragment by id. Returns 404 when the id is not found.",
+        )
+        .with_params([("id", body_param("string", true, "Fragment id returned by remember"))])
+        .with_example(
+            json!({"body": {"id": "mem-abc"}}),
+            json!({"ok": true, "source": "local"}),
         ),
     ]
 }

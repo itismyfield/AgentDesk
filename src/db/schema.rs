@@ -119,6 +119,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         backfill_session_transcript_agent_ids,
     )?;
     ensure_memento_feedback_stats_schema(conn)?;
+    ensure_local_memory_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -2361,6 +2362,29 @@ fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
             END AS coverage_rate
          FROM memento_feedback_turn_stats
          GROUP BY stat_date, agent_id, provider;",
+    )?;
+
+    Ok(())
+}
+
+/// #1066 — local_memory backing table for `/api/memory/{recall,remember,forget}`.
+/// Used when memento MCP is unavailable or `ADK_FORCE_LOCAL_MEMORY=1`.
+fn ensure_local_memory_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS local_memory (
+            id          TEXT PRIMARY KEY,
+            content     TEXT NOT NULL,
+            topic       TEXT NOT NULL DEFAULT '',
+            kind        TEXT NOT NULL DEFAULT '',
+            importance  REAL,
+            workspace   TEXT,
+            keywords    TEXT,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_local_memory_workspace
+            ON local_memory (workspace);
+        CREATE INDEX IF NOT EXISTS idx_local_memory_topic
+            ON local_memory (topic);",
     )?;
 
     Ok(())
