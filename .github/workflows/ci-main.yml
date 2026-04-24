@@ -76,7 +76,7 @@ jobs:
             ${{ runner.os }}-cargo-main-full-
 
       - name: cargo test (non-PG)
-        run: cargo test --all-targets -- --skip _pg_ --skip postgres_
+        run: cargo test --all-targets -- --skip _pg --skip pg_ --skip postgres
         env:
           RUST_BACKTRACE: 1
 
@@ -130,7 +130,12 @@ jobs:
 
       - name: cargo test (PG routes)
         timeout-minutes: 15
-        run: cargo test _pg_ -- --nocapture --test-threads=1
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test _pg -- --nocapture --test-threads=1
+          cargo test pg_ -- --nocapture --test-threads=1
+          cargo test postgres -- --nocapture --test-threads=1
 
   high-risk-recovery:
     name: High-risk recovery
