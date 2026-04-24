@@ -249,12 +249,11 @@ function maybeSuppressDuplicateCodeFailure(cardId, repo, pr, branch, headSha, ru
     "escalated",
     escalationReason
   );
-  var cards = agentdesk.db.query(
-    "SELECT status FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
+  // typed-facade-slice:start ci-recovery (#1007)
+  var cardStatus = agentdesk.ciRecovery.getCardStatus(cardId);
+  // typed-facade-slice:end ci-recovery
   var opts = {};
-  if (cards.length > 0 && cards[0].status === "review") {
+  if (cardStatus && cardStatus.status === "review") {
     opts.review = true;
   }
   escalateToManualIntervention(cardId, escalationReason, opts);
@@ -485,10 +484,7 @@ function processWaitingCard(cardId, blockedReason) {
     agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
     noteCiLoopReset(cardId, currentSha, "head_sha_changed");
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha, "wait-ci", null);
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
-      [cardId]
-    );
+    agentdesk.ciRecovery.setBlockedReason(cardId, "ci:waiting");
   }
   if (currentSha) {
     agentdesk.kv.set("ci:" + cardId + ":head_sha", currentSha, 86400);
@@ -544,10 +540,7 @@ function processWaitingCard(cardId, blockedReason) {
   if (run.status !== "completed") {
     // Still running — update blocked reason if needed
     if (blockedReason !== "ci:rerunning") {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'ci:running' WHERE id = ?",
-        [cardId]
-      );
+      agentdesk.ciRecovery.setBlockedReason(cardId, "ci:running");
     }
     return;
   }
@@ -573,10 +566,7 @@ function processWaitingCard(cardId, blockedReason) {
       escalated_at: null
     });
     upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "merge", null);
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
-      [cardId]
-    );
+    agentdesk.ciRecovery.setBlockedReason(cardId, null);
     var termState = resolveTerminalState(cardId);
     agentdesk.kanban.setStatus(cardId, termState);
     agentdesk.log.info("[ci-recovery] Card " + cardId + " → " + termState);
@@ -628,10 +618,7 @@ function processWaitingCard(cardId, blockedReason) {
         escalation_reason: null,
         escalated_at: null
       });
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'ci:rerunning' WHERE id = ?",
-        [cardId]
-      );
+      agentdesk.ciRecovery.setBlockedReason(cardId, "ci:rerunning");
       // Clear last_run_id so we re-evaluate the new run
       agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
       agentdesk.log.info("[ci-recovery] Rerunning failed jobs for card " + cardId + " (retry " + (retryCount + 1) + "/" + CI_MAX_RETRIES + ")");
@@ -657,17 +644,13 @@ function processWaitingCard(cardId, blockedReason) {
     }
 
     // Create rework dispatch to assigned agent
-    var cards = agentdesk.db.query(
-      "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
-      [cardId]
-    );
-    if (cards.length === 0 || !cards[0].assigned_agent_id) {
+    var card = agentdesk.ciRecovery.getReworkCardInfo(cardId);
+    if (!card || !card.assigned_agent_id) {
       upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "escalated", "CI code failure but no assigned agent");
       escalateToManualDecision(cardId, "CI code failure but no assigned agent");
       return;
     }
 
-    var card = cards[0];
     var issueNum = card.github_issue_number || "?";
     var runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     var failedJobName = (classification.failedJobs && classification.failedJobs.length > 0)
@@ -732,10 +715,7 @@ function processWaitingCard(cardId, blockedReason) {
       escalation_reason: null,
       escalated_at: null
     });
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = 'ci:rework' WHERE id = ?",
-      [cardId]
-    );
+    agentdesk.ciRecovery.setBlockedReason(cardId, "ci:rework");
     var cfg = agentdesk.pipeline.resolveForCard(cardId);
     var init = agentdesk.pipeline.kickoffState(cfg);
     var ip = agentdesk.pipeline.nextGatedTarget(init, cfg);
@@ -798,13 +778,7 @@ var ciRecovery = {
     prTracking.importLegacyOnce("wait-ci");
 
     // Find canonical PR lifecycle entries that are waiting for CI.
-    var cards = agentdesk.db.query(
-      "SELECT p.card_id AS id, c.blocked_reason AS blocked_reason " +
-      "FROM pr_tracking p " +
-      "JOIN kanban_cards c ON c.id = p.card_id " +
-      "WHERE p.state = 'wait-ci'",
-      []
-    );
+    var cards = agentdesk.ciRecovery.listWaitingForCi();
 
     if (cards.length === 0) return;
 

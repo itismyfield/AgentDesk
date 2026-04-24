@@ -630,6 +630,124 @@ fn test_review_entry_slice_blocks_raw_db_reintroduction() {
     );
 }
 
+/// #1007: Guard the first migrated slice — `ci-recovery.js` must not
+/// regress to raw `agentdesk.db.query/execute` callsites.
+#[test]
+fn policies_raw_db_ci_recovery_slice_stays_typed() {
+    let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/ci-recovery.js");
+    let policy = fs::read_to_string(&policy_path).expect("ci-recovery policy must be readable");
+    assert!(
+        !policy.contains("agentdesk.db.query") && !policy.contains("agentdesk.db.execute"),
+        "ci-recovery.js must stay on typed facades (agentdesk.ciRecovery.*): {policy_path:?}"
+    );
+    // The in-body slice marker must also still be present so future edits
+    // around the escalation status check keep the typed call.
+    assert!(
+        policy.contains("// typed-facade-slice:start ci-recovery"),
+        "ci-recovery.js must keep the typed-facade slice start marker"
+    );
+    assert!(
+        policy.contains("// typed-facade-slice:end ci-recovery"),
+        "ci-recovery.js must keep the typed-facade slice end marker"
+    );
+}
+
+/// #1007: Budget guard — the total count of `agentdesk.db.query` and
+/// `agentdesk.db.execute` callsites across `policies/*.js` must not grow
+/// beyond the whitelist captured at the time of the first migration slice.
+///
+/// New policies / new callsites MUST either:
+///   1. migrate to a typed facade under `agentdesk.<domain>.*`, or
+///   2. annotate the raw-db callsite with the escape-hatch marker
+///      `/* legacy-raw-db: policy=<name> capability=<intent> source_event=<hook> */`
+///      so the audit log at `policy.raw_db_audit` can attribute them.
+///
+/// If this test fails after a legitimate raw-db addition, either lift the
+/// budget here with a PR comment explaining why migration isn't possible
+/// yet, or add the escape-hatch marker and update
+/// `RAW_DB_ESCAPE_HATCH_ALLOWANCE` below.
+#[test]
+fn policies_raw_db_count_stays_within_budget() {
+    // Captured after ci-recovery migration (#1007 first slice). See
+    // docs/generated/policy-db-inventory.md for the classified listing.
+    const RAW_DB_BUDGET: usize = 189;
+    // Number of callsites that are currently annotated with the
+    // escape-hatch marker (`/* legacy-raw-db: ... */`). Starts at 0 and
+    // grows only when a caller explicitly justifies a raw callsite.
+    const RAW_DB_ESCAPE_HATCH_ALLOWANCE: usize = 0;
+
+    let policies_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    let mut total_callsites = 0usize;
+    let mut marked_callsites = 0usize;
+    let mut unmarked_callsites = 0usize;
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip test fixtures
+                    if path.file_name().and_then(|n| n.to_str()) == Some("__tests__") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(&policies_dir, &mut files);
+
+    for file in &files {
+        let src = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for (lineno, line) in src.lines().enumerate() {
+            if line.contains("agentdesk.db.query") || line.contains("agentdesk.db.execute") {
+                total_callsites += 1;
+                // Check whether the callsite (this line or the 3 preceding
+                // lines) carries an escape-hatch marker comment.
+                let marker_window_start = lineno.saturating_sub(3);
+                let window: Vec<&str> = src
+                    .lines()
+                    .skip(marker_window_start)
+                    .take(lineno - marker_window_start + 1)
+                    .collect();
+                let window_text = window.join("\n");
+                if window_text.contains("legacy-raw-db:") {
+                    marked_callsites += 1;
+                } else {
+                    unmarked_callsites += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        unmarked_callsites <= RAW_DB_BUDGET,
+        "#1007 raw-db budget exceeded: unmarked callsites={} budget={} (total={} marked={}). \
+         Either migrate the new callsite to a typed facade (see src/engine/ops/ci_recovery_ops.rs for an example) \
+         or annotate it with /* legacy-raw-db: policy=<name> capability=<intent> source_event=<hook> */ \
+         and bump RAW_DB_ESCAPE_HATCH_ALLOWANCE in this test.",
+        unmarked_callsites,
+        RAW_DB_BUDGET,
+        total_callsites,
+        marked_callsites
+    );
+
+    assert!(
+        marked_callsites <= RAW_DB_ESCAPE_HATCH_ALLOWANCE,
+        "#1007 escape-hatch allowance exceeded: marked={} allowance={}. \
+         Bump RAW_DB_ESCAPE_HATCH_ALLOWANCE only if the new annotated callsite is genuinely justified.",
+        marked_callsites,
+        RAW_DB_ESCAPE_HATCH_ALLOWANCE
+    );
+}
+
 #[test]
 fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
     let db = test_db();

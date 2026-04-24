@@ -7,6 +7,7 @@
 mod agent_ops;
 mod auto_queue_ops;
 mod cards_ops;
+mod ci_recovery_ops;
 mod config_ops;
 mod db_ops;
 mod dispatch_ops;
@@ -100,6 +101,9 @@ pub fn register_globals_with_supervisor_and_pg(
 
     // ── agentdesk.kanban ────────────────────────────────────────
     kanban_ops::register_kanban_ops(ctx, db.clone(), pg_pool.clone())?;
+
+    // ── agentdesk.ciRecovery (#1007) ─────────────────────────────
+    ci_recovery_ops::register_ci_recovery_ops(ctx, db.clone(), pg_pool.clone())?;
 
     // ── agentdesk.kv ─────────────────────────────────────────────
     kv_ops::register_kv_ops(ctx, db.clone(), pg_pool.clone())?;
