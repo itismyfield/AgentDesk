@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
@@ -50,8 +51,86 @@ const SUPPRESSED_RESTART_LABEL: &str =
 const MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS: usize = 3;
 const MISSING_INFLIGHT_REATTACH_GRACE_DELAY: tokio::time::Duration =
     tokio::time::Duration::from_millis(200);
+const RECENT_WATCHER_REATTACH_OFFSET_CAPACITY: usize = 32;
+const RECENT_WATCHER_REATTACH_OFFSET_TTL: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
+
+#[derive(Debug, Clone)]
+struct RecentWatcherReattachOffset {
+    channel_id: ChannelId,
+    tmux_session_name: String,
+    offset: u64,
+    recorded_at: std::time::Instant,
+}
+
+static RECENT_WATCHER_REATTACH_OFFSETS: LazyLock<Mutex<VecDeque<RecentWatcherReattachOffset>>> =
+    LazyLock::new(|| {
+        Mutex::new(VecDeque::with_capacity(
+            RECENT_WATCHER_REATTACH_OFFSET_CAPACITY,
+        ))
+    });
+
+fn recent_watcher_reattach_offsets()
+-> std::sync::MutexGuard<'static, VecDeque<RecentWatcherReattachOffset>> {
+    match RECENT_WATCHER_REATTACH_OFFSETS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn prune_recent_watcher_reattach_offsets(
+    offsets: &mut VecDeque<RecentWatcherReattachOffset>,
+    now: std::time::Instant,
+) {
+    offsets.retain(|entry| {
+        now.saturating_duration_since(entry.recorded_at) <= RECENT_WATCHER_REATTACH_OFFSET_TTL
+    });
+}
+
+fn record_recent_watcher_reattach_offset(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    offset: u64,
+) {
+    let now = std::time::Instant::now();
+    let mut offsets = recent_watcher_reattach_offsets();
+    prune_recent_watcher_reattach_offsets(&mut offsets, now);
+    while offsets.len() >= RECENT_WATCHER_REATTACH_OFFSET_CAPACITY {
+        offsets.pop_front();
+    }
+    offsets.push_back(RecentWatcherReattachOffset {
+        channel_id,
+        tmux_session_name: tmux_session_name.to_string(),
+        offset,
+        recorded_at: now,
+    });
+}
+
+fn matching_recent_watcher_reattach_offset(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+) -> Option<RecentWatcherReattachOffset> {
+    let now = std::time::Instant::now();
+    let mut offsets = recent_watcher_reattach_offsets();
+    prune_recent_watcher_reattach_offsets(&mut offsets, now);
+    offsets
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.channel_id == channel_id
+                && entry.tmux_session_name == tmux_session_name
+                && entry.offset == data_start_offset
+        })
+        .cloned()
+}
+
+#[cfg(test)]
+fn clear_recent_watcher_reattach_offsets_for_tests() {
+    recent_watcher_reattach_offsets().clear();
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct WatcherLineOutcome {
@@ -1931,6 +2010,7 @@ fn trigger_missing_inflight_reattach(
         provider,
         "watcher_missing_inflight_fallback",
     );
+    record_recent_watcher_reattach_offset(channel_id, tmux_session_name, initial_offset);
     tokio::spawn(tmux_output_watcher(
         channel_id,
         http.clone(),
@@ -3320,8 +3400,53 @@ pub(super) async fn tmux_output_watcher_with_restore(
             data_start_offset,
             current_offset,
         ) {
-            if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(&http, msg_id).await;
+            if let Some(reattach) = matching_recent_watcher_reattach_offset(
+                channel_id,
+                &tmux_session_name,
+                data_start_offset,
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 Bridge guard: preserved placeholder for {} (range {}..{} matches reattach at {})",
+                    tmux_session_name,
+                    data_start_offset,
+                    current_offset,
+                    reattach.offset
+                );
+            } else {
+                match suppressed_placeholder_action(
+                    placeholder_msg_id.is_some(),
+                    response_sent_offset,
+                    &last_edit_text,
+                ) {
+                    SuppressedPlaceholderAction::None => {}
+                    SuppressedPlaceholderAction::Delete => {
+                        if let Some(msg_id) = placeholder_msg_id {
+                            let _ = channel_id.delete_message(&http, msg_id).await;
+                        }
+                    }
+                    SuppressedPlaceholderAction::Edit(content) => {
+                        if let Some(msg_id) = placeholder_msg_id {
+                            rate_limit_wait(&shared, channel_id).await;
+                            if let Err(error) = channel_id
+                                .edit_message(
+                                    &http,
+                                    msg_id,
+                                    serenity::EditMessage::new().content(&content),
+                                )
+                                .await
+                            {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] ⚠ active bridge suppressed placeholder final edit failed for channel {} msg {}: {}",
+                                    channel_id.get(),
+                                    msg_id.get(),
+                                    error
+                                );
+                            }
+                        }
+                    }
+                }
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
@@ -5453,13 +5578,14 @@ mod tests {
         MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
         SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
         TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
-        claim_or_replace_watcher, dead_session_cleanup_plan,
-        enqueue_background_trigger_response_to_notify_outbox,
+        claim_or_replace_watcher, clear_recent_watcher_reattach_offsets_for_tests,
+        dead_session_cleanup_plan, enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
-        load_restored_provider_session_id, missing_inflight_fallback_plan,
-        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
-        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
+        load_restored_provider_session_id, matching_recent_watcher_reattach_offset,
+        missing_inflight_fallback_plan, notify_path_offset_advance_decision,
+        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, record_recent_watcher_reattach_offset,
         refresh_session_heartbeat_from_tmux_output, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
@@ -5724,6 +5850,115 @@ mod tests {
 
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_guard_preserves_placeholder_when_range_matches_recent_reattach()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_watcher_reattach_offsets_for_tests();
+        let tmp = tempfile::tempdir()?;
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(987_1044_002);
+        let channel_name = "adk-cdx-issue-1044b";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let reattach_offset = 7_628_900_u64;
+        let suppressed_end_offset = 7_636_322_u64;
+        let placeholder_body = "real response body already delivered by watcher reattach";
+
+        let test_result = async {
+            super::super::inflight::clear_inflight_state(&provider, channel.get());
+            let terminal_success_plan = missing_inflight_fallback_plan(true, false, true);
+            assert!(terminal_success_plan.trigger_reattach);
+            assert!(
+                super::super::inflight::load_inflight_state(&provider, channel.get()).is_none()
+            );
+
+            let bridge_reacquired = wait_for_reacquired_turn_bridge_inflight_state(
+                &provider,
+                channel,
+                &tmux_name,
+                1,
+                Duration::from_millis(1),
+            )
+            .await;
+            assert!(
+                !bridge_reacquired,
+                "grace window should still see no bridge-owned inflight state"
+            );
+
+            record_recent_watcher_reattach_offset(channel, &tmux_name, reattach_offset);
+
+            let mut state = InflightTurnState::new(
+                provider.clone(),
+                channel.get(),
+                Some(channel_name.to_string()),
+                0,
+                0,
+                44,
+                "watcher missing-inflight reattach".to_string(),
+                None,
+                Some(tmux_name.clone()),
+                Some("/tmp/issue-1044b.jsonl".to_string()),
+                Some("/tmp/issue-1044b.fifo".to_string()),
+                reattach_offset,
+            );
+            state.rebind_origin = true;
+            state.full_response = placeholder_body.to_string();
+            state.response_sent_offset = placeholder_body.len();
+            super::super::inflight::save_inflight_state_create_new(&state).map_err(|error| {
+                std::io::Error::other(format!("failed to save reattach inflight state: {error}"))
+            })?;
+
+            assert!(watcher_should_yield_to_inflight_state(
+                Some(&state),
+                &tmux_name,
+                reattach_offset,
+                suppressed_end_offset,
+            ));
+            let matched_reattach =
+                matching_recent_watcher_reattach_offset(channel, &tmux_name, reattach_offset);
+            assert!(
+                matched_reattach.is_some(),
+                "suppressed range start should match the recent watcher reattach offset"
+            );
+
+            let final_placeholder_body = if matched_reattach.is_some() {
+                placeholder_body.to_string()
+            } else {
+                match suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body)
+                {
+                    SuppressedPlaceholderAction::Edit(content) => content,
+                    SuppressedPlaceholderAction::Delete | SuppressedPlaceholderAction::None => {
+                        String::new()
+                    }
+                }
+            };
+
+            assert_eq!(final_placeholder_body, placeholder_body);
+            assert!(!final_placeholder_body.contains(SUPPRESSED_INTERNAL_LABEL));
+
+            let non_reattach_suppress =
+                suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body);
+            assert!(matches!(
+                non_reattach_suppress,
+                SuppressedPlaceholderAction::Edit(ref content)
+                    if content.contains(SUPPRESSED_INTERNAL_LABEL)
+            ));
+
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }
+        .await;
+
+        super::super::inflight::clear_inflight_state(&provider, channel.get());
+        clear_recent_watcher_reattach_offsets_for_tests();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        test_result
     }
 
     #[test]
