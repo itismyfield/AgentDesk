@@ -110,6 +110,7 @@ struct TestPostgresDb {
     admin_url: String,
     database_name: String,
     database_url: String,
+    cleanup_armed: bool,
 }
 
 impl TestPostgresDb {
@@ -127,6 +128,7 @@ impl TestPostgresDb {
             admin_url,
             database_name,
             database_url,
+            cleanup_armed: true,
         }
     }
 
@@ -136,14 +138,67 @@ impl TestPostgresDb {
             .unwrap()
     }
 
-    async fn drop(self) {
-        crate::db::postgres::drop_test_database(
+    async fn drop(mut self) {
+        let drop_result = crate::db::postgres::drop_test_database(
             &self.admin_url,
             &self.database_name,
             "routes tests",
         )
-        .await
-        .unwrap();
+        .await;
+        if drop_result.is_ok() {
+            self.cleanup_armed = false;
+        }
+        drop_result.expect("drop postgres test db");
+    }
+}
+
+impl Drop for TestPostgresDb {
+    fn drop(&mut self) {
+        if !self.cleanup_armed {
+            return;
+        }
+
+        cleanup_test_postgres_db_from_drop(self.admin_url.clone(), self.database_name.clone());
+    }
+}
+
+fn cleanup_test_postgres_db_from_drop(admin_url: String, database_name: String) {
+    let cleanup_database_name = database_name.clone();
+    let thread_name = format!("routes tests cleanup {cleanup_database_name}");
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("routes tests cleanup runtime failed for {database_name}: {error}");
+                    return;
+                }
+            };
+
+            if let Err(error) = runtime.block_on(crate::db::postgres::drop_test_database(
+                &admin_url,
+                &database_name,
+                "routes tests",
+            )) {
+                eprintln!("routes tests cleanup failed for {database_name}: {error}");
+            }
+        });
+
+    match spawn_result {
+        Ok(handle) => {
+            if handle.join().is_err() {
+                eprintln!("routes tests cleanup thread panicked for {cleanup_database_name}");
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "routes tests cleanup thread spawn failed for {cleanup_database_name}: {error}"
+            );
+        }
     }
 }
 

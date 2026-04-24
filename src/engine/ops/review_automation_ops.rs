@@ -1185,49 +1185,117 @@ fn reseed_pr_tracking_tx(db: &Db, card_id: &str) -> anyhow::Result<serde_json::V
 mod tests {
     use super::*;
 
+    const REVIEW_AUTOMATION_PG_TEST_LABEL: &str = "review automation pg tests";
+
     struct TestDatabase {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
         database_url: String,
+        cleanup_armed: bool,
     }
 
     impl TestDatabase {
         async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
             let admin_url = admin_database_url();
             let database_name = format!("agentdesk_review_auto_{}", uuid::Uuid::new_v4().simple());
             let database_url = format!("{}/{}", base_database_url(), database_name);
             crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
-                "review automation pg tests",
+                REVIEW_AUTOMATION_PG_TEST_LABEL,
             )
             .await
             .expect("create postgres test db");
 
             Self {
+                _lock: lock,
                 admin_url,
                 database_name,
                 database_url,
+                cleanup_armed: true,
             }
         }
 
         async fn migrate(&self) -> sqlx::PgPool {
             crate::db::postgres::connect_test_pool_and_migrate(
                 &self.database_url,
-                "review automation pg tests",
+                REVIEW_AUTOMATION_PG_TEST_LABEL,
             )
             .await
             .expect("migrate postgres test db")
         }
 
-        async fn drop(self) {
-            crate::db::postgres::drop_test_database(
+        async fn drop(mut self) {
+            let drop_result = crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,
-                "review automation pg tests",
+                REVIEW_AUTOMATION_PG_TEST_LABEL,
             )
-            .await
-            .expect("drop postgres test db");
+            .await;
+            if drop_result.is_ok() {
+                self.cleanup_armed = false;
+            }
+            drop_result.expect("drop postgres test db");
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            if !self.cleanup_armed {
+                return;
+            }
+
+            cleanup_test_database_from_drop(
+                self.admin_url.clone(),
+                self.database_name.clone(),
+                REVIEW_AUTOMATION_PG_TEST_LABEL,
+            );
+        }
+    }
+
+    fn cleanup_test_database_from_drop(
+        admin_url: String,
+        database_name: String,
+        label: &'static str,
+    ) {
+        let cleanup_database_name = database_name.clone();
+        let thread_name = format!("{label} cleanup {cleanup_database_name}");
+        let spawn_result = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!("{label} cleanup runtime failed for {database_name}: {error}");
+                        return;
+                    }
+                };
+
+                if let Err(error) = runtime.block_on(crate::db::postgres::drop_test_database(
+                    &admin_url,
+                    &database_name,
+                    label,
+                )) {
+                    eprintln!("{label} cleanup failed for {database_name}: {error}");
+                }
+            });
+
+        match spawn_result {
+            Ok(handle) => {
+                if handle.join().is_err() {
+                    eprintln!("{label} cleanup thread panicked for {cleanup_database_name}");
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "{label} cleanup thread spawn failed for {cleanup_database_name}: {error}"
+                );
+            }
         }
     }
 
@@ -1475,6 +1543,23 @@ mod tests {
 
         assert_eq!(active.0, "dispatch-sqlite-fallback");
         assert_eq!(active.1, "tracked-generation-42");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn review_automation_pg_repeated_test_database_lifecycle_releases_admin_pool() {
+        for _ in 0..4 {
+            let test_db = TestDatabase::create().await;
+            let pool = test_db.migrate().await;
+
+            let one: i64 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(&pool)
+                .await
+                .expect("test postgres pool should answer after migration");
+            assert_eq!(one, 1);
+
+            pool.close().await;
+            test_db.drop().await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
