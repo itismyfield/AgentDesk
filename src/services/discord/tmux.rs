@@ -447,6 +447,160 @@ fn orphan_suppressed_placeholder_action(
     ))
 }
 
+/// Unified entry point for every placeholder-suppression decision.
+///
+/// Three production sites produced identical edit/delete/log scaffolding before
+/// #1055 (bridge-guard duplicate relay at `tmux_output_watcher_with_restore`,
+/// task-notification terminal suppress at the same function, and
+/// `reconcile_orphan_suppressed_placeholder_for_restored_watcher`). The
+/// `decide_placeholder_suppression` + `apply_placeholder_suppression` pair
+/// replaces those copies so a future placeholder-suppression regression can be
+/// fixed in exactly one location. See also `Shared Agent Rules` — DRY 강제.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceholderSuppressOrigin {
+    OrphanRestartHandoff,
+    ActiveBridgeTurnGuard,
+    TaskNotificationTerminal,
+}
+
+impl PlaceholderSuppressOrigin {
+    fn log_scope(self) -> &'static str {
+        match self {
+            Self::OrphanRestartHandoff => "orphan suppressed placeholder reconcile",
+            Self::ActiveBridgeTurnGuard => "active bridge suppressed placeholder",
+            Self::TaskNotificationTerminal => "suppressed placeholder",
+        }
+    }
+}
+
+struct PlaceholderSuppressContext<'a> {
+    origin: PlaceholderSuppressOrigin,
+    placeholder_msg_id: Option<serenity::MessageId>,
+    response_sent_offset: usize,
+    last_edit_text: &'a str,
+    inflight_state: Option<&'a super::inflight::InflightTurnState>,
+    has_active_turn: bool,
+    tmux_session_name: &'a str,
+    task_notification_kind: Option<TaskNotificationKind>,
+    reattach_offset_match: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlaceholderSuppressDecision {
+    None,
+    Preserve { reason: &'static str },
+    Edit(String),
+    Delete,
+}
+
+fn decide_placeholder_suppression(
+    ctx: &PlaceholderSuppressContext<'_>,
+) -> PlaceholderSuppressDecision {
+    match ctx.origin {
+        PlaceholderSuppressOrigin::OrphanRestartHandoff => {
+            let Some(state) = ctx.inflight_state else {
+                return PlaceholderSuppressDecision::None;
+            };
+            match orphan_suppressed_placeholder_action(
+                state,
+                ctx.has_active_turn,
+                ctx.tmux_session_name,
+            ) {
+                SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
+                SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
+                SuppressedPlaceholderAction::Edit(content) => {
+                    PlaceholderSuppressDecision::Edit(content)
+                }
+            }
+        }
+        PlaceholderSuppressOrigin::ActiveBridgeTurnGuard => {
+            if ctx.reattach_offset_match {
+                return PlaceholderSuppressDecision::Preserve {
+                    reason: "reattach-offset-match",
+                };
+            }
+            match suppressed_placeholder_action(
+                ctx.placeholder_msg_id.is_some(),
+                ctx.response_sent_offset,
+                ctx.last_edit_text,
+            ) {
+                SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
+                SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
+                SuppressedPlaceholderAction::Edit(content) => {
+                    PlaceholderSuppressDecision::Edit(content)
+                }
+            }
+        }
+        PlaceholderSuppressOrigin::TaskNotificationTerminal => {
+            let preserves_body = matches!(
+                ctx.task_notification_kind,
+                Some(TaskNotificationKind::Background | TaskNotificationKind::Subagent)
+            );
+            match suppressed_placeholder_action(
+                ctx.placeholder_msg_id.is_some(),
+                ctx.response_sent_offset,
+                ctx.last_edit_text,
+            ) {
+                SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
+                SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
+                SuppressedPlaceholderAction::Edit(_) if preserves_body => {
+                    PlaceholderSuppressDecision::Preserve {
+                        reason: "background-or-subagent-kind",
+                    }
+                }
+                SuppressedPlaceholderAction::Edit(content) => {
+                    PlaceholderSuppressDecision::Edit(content)
+                }
+            }
+        }
+    }
+}
+
+async fn apply_placeholder_suppression(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    placeholder_msg_id: Option<serenity::MessageId>,
+    origin: PlaceholderSuppressOrigin,
+    decision: PlaceholderSuppressDecision,
+    detail: Option<&str>,
+) {
+    match decision {
+        PlaceholderSuppressDecision::None => {}
+        PlaceholderSuppressDecision::Preserve { reason } => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
+            tracing::info!(
+                "  [{ts}] 👁 {} preserved placeholder ({reason}){detail_suffix}",
+                origin.log_scope()
+            );
+        }
+        PlaceholderSuppressDecision::Delete => {
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(http, msg_id).await;
+            }
+        }
+        PlaceholderSuppressDecision::Edit(content) => {
+            if let Some(msg_id) = placeholder_msg_id {
+                rate_limit_wait(shared, channel_id).await;
+                if let Err(error) = channel_id
+                    .edit_message(http, msg_id, serenity::EditMessage::new().content(&content))
+                    .await
+                {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ {} final edit failed for channel {} msg {}: {}",
+                        origin.log_scope(),
+                        channel_id.get(),
+                        msg_id.get(),
+                        error
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn suppressed_placeholder_action(
     has_placeholder: bool,
     response_sent_offset: usize,
@@ -2210,34 +2364,38 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
         return;
     };
-    let SuppressedPlaceholderAction::Edit(content) =
-        orphan_suppressed_placeholder_action(&state, has_active_turn, tmux_session_name)
-    else {
-        return;
+    let ctx = PlaceholderSuppressContext {
+        origin: PlaceholderSuppressOrigin::OrphanRestartHandoff,
+        placeholder_msg_id: Some(MessageId::new(state.current_msg_id)),
+        response_sent_offset: state.response_sent_offset,
+        last_edit_text: "",
+        inflight_state: Some(&state),
+        has_active_turn,
+        tmux_session_name,
+        task_notification_kind: None,
+        reattach_offset_match: false,
     };
-
+    let decision = decide_placeholder_suppression(&ctx);
+    let is_edit = matches!(decision, PlaceholderSuppressDecision::Edit(_));
     let msg_id = MessageId::new(state.current_msg_id);
-    rate_limit_wait(shared, channel_id).await;
-    if let Err(error) = channel_id
-        .edit_message(http, msg_id, serenity::EditMessage::new().content(&content))
-        .await
-    {
+    apply_placeholder_suppression(
+        http,
+        channel_id,
+        shared,
+        ctx.placeholder_msg_id,
+        ctx.origin,
+        decision,
+        None,
+    )
+    .await;
+    if is_edit {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ orphan suppressed placeholder reconcile failed for channel {} msg {}: {}",
+        tracing::info!(
+            "  [{ts}] ✓ reconciled orphan suppressed placeholder for channel {} msg {}",
             channel_id.get(),
-            msg_id.get(),
-            error
+            msg_id.get()
         );
-        return;
     }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] ✓ reconciled orphan suppressed placeholder for channel {} msg {}",
-        channel_id.get(),
-        msg_id.get()
-    );
 }
 
 fn persist_watcher_stream_progress(
@@ -3530,54 +3688,38 @@ pub(super) async fn tmux_output_watcher_with_restore(
             data_start_offset,
             current_offset,
         ) {
-            if let Some(reattach) = matching_recent_watcher_reattach_offset(
+            let matched_reattach = matching_recent_watcher_reattach_offset(
                 channel_id,
                 &tmux_session_name,
                 data_start_offset,
-            ) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 Bridge guard: preserved placeholder for {} (range {}..{} matches reattach at {})",
-                    tmux_session_name,
-                    data_start_offset,
-                    current_offset,
-                    reattach.offset
-                );
-            } else {
-                match suppressed_placeholder_action(
-                    placeholder_msg_id.is_some(),
-                    response_sent_offset,
-                    &last_edit_text,
-                ) {
-                    SuppressedPlaceholderAction::None => {}
-                    SuppressedPlaceholderAction::Delete => {
-                        if let Some(msg_id) = placeholder_msg_id {
-                            let _ = channel_id.delete_message(&http, msg_id).await;
-                        }
-                    }
-                    SuppressedPlaceholderAction::Edit(content) => {
-                        if let Some(msg_id) = placeholder_msg_id {
-                            rate_limit_wait(&shared, channel_id).await;
-                            if let Err(error) = channel_id
-                                .edit_message(
-                                    &http,
-                                    msg_id,
-                                    serenity::EditMessage::new().content(&content),
-                                )
-                                .await
-                            {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ active bridge suppressed placeholder final edit failed for channel {} msg {}: {}",
-                                    channel_id.get(),
-                                    msg_id.get(),
-                                    error
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            );
+            let reattach_detail = matched_reattach.as_ref().map(|r| {
+                format!(
+                    "{} range {}..{} matches reattach at {}",
+                    tmux_session_name, data_start_offset, current_offset, r.offset
+                )
+            });
+            let ctx = PlaceholderSuppressContext {
+                origin: PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+                placeholder_msg_id,
+                response_sent_offset,
+                last_edit_text: &last_edit_text,
+                inflight_state: None,
+                has_active_turn: false,
+                tmux_session_name: &tmux_session_name,
+                task_notification_kind: None,
+                reattach_offset_match: matched_reattach.is_some(),
+            };
+            apply_placeholder_suppression(
+                &http,
+                channel_id,
+                &shared,
+                placeholder_msg_id,
+                ctx.origin,
+                decide_placeholder_suppression(&ctx),
+                reattach_detail.as_deref(),
+            )
+            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] 👁 Active bridge turn guard: suppressed duplicate relay for {} (range {}..{})",
@@ -3924,53 +4066,35 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     tool_state.transcript_events.len(),
                 );
             }
-            let placeholder_preserves_content = matches!(
-                task_notification_kind,
-                Some(TaskNotificationKind::Background | TaskNotificationKind::Subagent)
+            let task_notification_detail = format!(
+                "{} kind={} offset={}",
+                tmux_session_name,
+                task_notification_kind
+                    .map(TaskNotificationKind::as_str)
+                    .unwrap_or("none"),
+                data_start_offset,
             );
-            match suppressed_placeholder_action(
-                placeholder_msg_id.is_some(),
+            let ctx = PlaceholderSuppressContext {
+                origin: PlaceholderSuppressOrigin::TaskNotificationTerminal,
+                placeholder_msg_id,
                 response_sent_offset,
-                &last_edit_text,
-            ) {
-                SuppressedPlaceholderAction::None => {}
-                SuppressedPlaceholderAction::Delete => {
-                    if let Some(msg_id) = placeholder_msg_id {
-                        let _ = channel_id.delete_message(&http, msg_id).await;
-                    }
-                }
-                SuppressedPlaceholderAction::Edit(content) => {
-                    if placeholder_preserves_content {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] 👁 Task-notification suppress: preserved placeholder body for {} (kind={}, offset {})",
-                            tmux_session_name,
-                            task_notification_kind
-                                .map(TaskNotificationKind::as_str)
-                                .unwrap_or("none"),
-                            data_start_offset
-                        );
-                    } else if let Some(msg_id) = placeholder_msg_id {
-                        rate_limit_wait(&shared, channel_id).await;
-                        if let Err(error) = channel_id
-                            .edit_message(
-                                &http,
-                                msg_id,
-                                serenity::EditMessage::new().content(&content),
-                            )
-                            .await
-                        {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
-                                "  [{ts}] ⚠ suppressed placeholder final edit failed for channel {} msg {}: {}",
-                                channel_id.get(),
-                                msg_id.get(),
-                                error
-                            );
-                        }
-                    }
-                }
-            }
+                last_edit_text: &last_edit_text,
+                inflight_state: None,
+                has_active_turn: false,
+                tmux_session_name: &tmux_session_name,
+                task_notification_kind,
+                reattach_offset_match: false,
+            };
+            apply_placeholder_suppression(
+                &http,
+                channel_id,
+                &shared,
+                placeholder_msg_id,
+                ctx.origin,
+                decide_placeholder_suppression(&ctx),
+                Some(&task_notification_detail),
+            )
+            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 Suppressed task-notification relay for {} (kind={}, offset {})",
@@ -5740,11 +5864,13 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
-        MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
+        MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, PlaceholderSuppressContext,
+        PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
         SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
         TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
         claim_or_replace_watcher, clear_recent_watcher_reattach_offsets_for_tests,
-        dead_session_cleanup_plan, enqueue_background_trigger_response_to_notify_outbox,
+        dead_session_cleanup_plan, decide_placeholder_suppression,
+        enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
         load_restored_provider_session_id, matching_recent_watcher_reattach_offset,
@@ -7005,6 +7131,140 @@ mod tests {
         assert_eq!(
             suppressed_placeholder_action(false, 99, "already visible"),
             SuppressedPlaceholderAction::None
+        );
+    }
+
+    fn test_placeholder_suppress_context<'a>(
+        origin: PlaceholderSuppressOrigin,
+        placeholder_msg_id: Option<MessageId>,
+        response_sent_offset: usize,
+        last_edit_text: &'a str,
+        tmux_session_name: &'a str,
+        task_notification_kind: Option<TaskNotificationKind>,
+        reattach_offset_match: bool,
+    ) -> PlaceholderSuppressContext<'a> {
+        PlaceholderSuppressContext {
+            origin,
+            placeholder_msg_id,
+            response_sent_offset,
+            last_edit_text,
+            inflight_state: None,
+            has_active_turn: false,
+            tmux_session_name,
+            task_notification_kind,
+            reattach_offset_match,
+        }
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_bridge_guard_preserves_on_reattach_match() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+            Some(MessageId::new(1)),
+            42,
+            "already delivered body",
+            "AgentDesk-claude-adk-cc",
+            None,
+            true,
+        );
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Preserve {
+                reason: "reattach-offset-match"
+            }
+        );
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_bridge_guard_falls_through_to_edit_label_without_match() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+            Some(MessageId::new(1)),
+            42,
+            "visible body",
+            "AgentDesk-claude-adk-cc",
+            None,
+            false,
+        );
+        match decide_placeholder_suppression(&ctx) {
+            PlaceholderSuppressDecision::Edit(content) => {
+                assert!(content.contains(SUPPRESSED_INTERNAL_LABEL))
+            }
+            other => panic!("expected Edit with label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_task_notification_preserves_background_body() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::TaskNotificationTerminal,
+            Some(MessageId::new(1)),
+            42,
+            "live user-facing content",
+            "AgentDesk-claude-adk-cc",
+            Some(TaskNotificationKind::Background),
+            false,
+        );
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Preserve {
+                reason: "background-or-subagent-kind"
+            }
+        );
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_task_notification_preserves_subagent_body() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::TaskNotificationTerminal,
+            Some(MessageId::new(1)),
+            42,
+            "subagent body",
+            "AgentDesk-claude-adk-cc",
+            Some(TaskNotificationKind::Subagent),
+            false,
+        );
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Preserve {
+                reason: "background-or-subagent-kind"
+            }
+        );
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_task_notification_edits_for_monitor_auto_turn() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::TaskNotificationTerminal,
+            Some(MessageId::new(1)),
+            42,
+            "monitor-auto body",
+            "AgentDesk-claude-adk-cc",
+            Some(TaskNotificationKind::MonitorAutoTurn),
+            false,
+        );
+        match decide_placeholder_suppression(&ctx) {
+            PlaceholderSuppressDecision::Edit(content) => {
+                assert!(content.contains(SUPPRESSED_INTERNAL_LABEL))
+            }
+            other => panic!("expected Edit with label, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_task_notification_deletes_unexposed_placeholder() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::TaskNotificationTerminal,
+            Some(MessageId::new(1)),
+            0,
+            "",
+            "AgentDesk-claude-adk-cc",
+            Some(TaskNotificationKind::MonitorAutoTurn),
+            false,
+        );
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
         );
     }
 
