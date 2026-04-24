@@ -519,7 +519,7 @@ pub fn enqueue_alert_sqlite(db: &Db, target: &str, content: &str) -> Result<()> 
     let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
     conn.execute(
         "INSERT INTO message_outbox (target, content, bot, source, reason_code)
-         VALUES (?1, ?2, 'announce', 'slo_alerter', 'slo_threshold_breach')",
+         VALUES (?1, ?2, 'notify', 'slo_alerter', 'slo_threshold_breach')",
         libsql_rusqlite::params![target, content],
     )?;
     Ok(())
@@ -528,7 +528,7 @@ pub fn enqueue_alert_sqlite(db: &Db, target: &str, content: &str) -> Result<()> 
 pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO message_outbox (target, content, bot, source, reason_code, status)
-         VALUES ($1, $2, 'announce', 'slo_alerter', 'slo_threshold_breach', 'pending')",
+         VALUES ($1, $2, 'notify', 'slo_alerter', 'slo_threshold_breach', 'pending')",
     )
     .bind(target)
     .bind(content)
