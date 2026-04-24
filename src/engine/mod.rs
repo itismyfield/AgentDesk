@@ -1152,6 +1152,17 @@ impl PolicyEngine {
             .collect()
     }
 
+    /// Run a closure with a clone of the JS context (test-only helper used by
+    /// hook-orchestration pre-validation tests, #1079).
+    #[cfg(test)]
+    pub(crate) fn with_js_context<R>(&self, f: impl FnOnce(&Context) -> R) -> Result<R> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        Ok(f(&inner.context))
+    }
+
     /// Evaluate arbitrary JS in the engine context (useful for testing).
     #[cfg(test)]
     pub fn eval_js<T: for<'js> rquickjs::FromJs<'js> + Send>(&self, code: &str) -> Result<T> {
@@ -1876,5 +1887,181 @@ mod tests {
             )
             .expect("terminal follow-up hook must fire for queued review transitions");
         assert_eq!(terminal_marker, "card-deferred-review");
+    }
+
+    // ── Hook orchestration determinism (#1079) ──────────────────────────
+
+    /// Helper: write a policy JS file into a tmpdir and return the dir.
+    fn policy_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn hook_orchestr_duplicate_priority_hook_rejected() {
+        // Two policies share priority 200 AND onCardTerminal, with no
+        // after/before annotation → pre-validation must reject.
+        let dir = policy_dir(&[
+            (
+                "a.js",
+                r#"agentdesk.registerPolicy({
+                    name: "policy-a",
+                    priority: 200,
+                    onCardTerminal: function(p) {}
+                });"#,
+            ),
+            (
+                "b.js",
+                r#"agentdesk.registerPolicy({
+                    name: "policy-b",
+                    priority: 200,
+                    onCardTerminal: function(p) {}
+                });"#,
+            ),
+        ]);
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+        // The validated path is what hot-reload uses.
+        let result = engine
+            .with_js_context(|ctx| loader::load_policies_from_dir_validated(ctx, dir.path()))
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "expected conflict error for duplicate (priority, hook)"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("onCardTerminal") && err.contains("200"),
+            "error should mention hook + priority: {err}"
+        );
+    }
+
+    #[test]
+    fn hook_orchestr_after_annotation_disambiguates() {
+        // Same collision as above, but policy-b declares `after: ["policy-a"]`.
+        // Pre-validation must accept and topological order puts a before b.
+        let dir = policy_dir(&[
+            (
+                "a.js",
+                r#"agentdesk.registerPolicy({
+                    name: "policy-a",
+                    priority: 200,
+                    onCardTerminal: function(p) {}
+                });"#,
+            ),
+            (
+                "b.js",
+                r#"agentdesk.registerPolicy({
+                    name: "policy-b",
+                    priority: 200,
+                    after: ["policy-a"],
+                    onCardTerminal: function(p) {}
+                });"#,
+            ),
+        ]);
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+        let policies = engine
+            .with_js_context(|ctx| loader::load_policies_from_dir_validated(ctx, dir.path()))
+            .unwrap()
+            .expect("after annotation should disambiguate");
+        let order: Vec<&str> = policies.iter().map(|p| p.name.as_str()).collect();
+        let a = order.iter().position(|n| *n == "policy-a").unwrap();
+        let b = order.iter().position(|n| *n == "policy-b").unwrap();
+        assert!(a < b, "policy-a must precede policy-b: {order:?}");
+    }
+
+    #[test]
+    fn hook_orchestr_syntax_error_preserves_loaded_version() {
+        // Load a valid policy, then simulate hot-reload with a broken file.
+        // Pre-validation must fail and the previously loaded store stays
+        // intact.
+        let dir = policy_dir(&[(
+            "good.js",
+            r#"agentdesk.registerPolicy({
+                name: "good-policy",
+                priority: 100,
+                onCardTerminal: function(p) {}
+            });"#,
+        )]);
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+
+        // Pre-condition: the good policy loaded.
+        let loaded = engine
+            .with_js_context(|ctx| loader::load_policies_from_dir_validated(ctx, dir.path()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "good-policy");
+
+        // Inject a syntactically broken file.
+        std::fs::write(
+            dir.path().join("broken.js"),
+            "this is not valid javascript $$$$ {",
+        )
+        .unwrap();
+
+        let result = engine
+            .with_js_context(|ctx| loader::load_policies_from_dir_validated(ctx, dir.path()))
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "pre-validation must reject broken.js instead of half-swapping"
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("broken.js"),
+            "error should name the broken file: {err}"
+        );
+    }
+
+    #[test]
+    fn hook_orchestr_pipeline_merge_automation_no_p200_conflict() {
+        // Guard against regression of the #1079 fix: pipeline.js and
+        // merge-automation.js must not share (priority, hook).
+        // We reconstruct the conflict detector input with just metadata.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pipeline.js"),
+            r#"agentdesk.registerPolicy({
+                name: "pipeline",
+                priority: 200,
+                onCardTransition: function(p) {},
+                onDispatchCompleted: function(p) {}
+            });"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("merge-automation.js"),
+            r#"agentdesk.registerPolicy({
+                name: "merge-automation",
+                priority: 201,
+                onCardTerminal: function(p) {},
+                onTick5min: function() {}
+            });"#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db).unwrap();
+        let policies = engine
+            .with_js_context(|ctx| loader::load_policies_from_dir_validated(ctx, dir.path()))
+            .unwrap()
+            .expect("pipeline + merge-automation must not conflict after #1079 fix");
+        assert_eq!(policies.len(), 2);
+        // pipeline (200) must come before merge-automation (201).
+        let names: Vec<&str> = policies.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["pipeline", "merge-automation"]);
     }
 }

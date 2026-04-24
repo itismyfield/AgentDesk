@@ -48,6 +48,11 @@ var pipeline = {
   // Implementation dispatch completion routes to review (via kanban-rules),
   // and the next stage dispatches only after review passes.
   // This prevents pipeline/review lifecycle conflicts (#110).
+  //
+  // Ordering (#1079): pipeline runs at priority 200; merge-automation at 201
+  // (no onDispatchCompleted of its own). Kanban-rules (P10) fires first on
+  // this hook to resolve the dispatch record; pipeline is intentionally a
+  // no-op here so the hook sequence is deterministic.
   onDispatchCompleted: function(payload) {
     // No-op: stage advance removed. Review-automation handles post-review pipeline progression.
   }

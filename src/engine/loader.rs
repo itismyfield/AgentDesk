@@ -1,6 +1,6 @@
 //! Policy loader: scans policies/ directory, evaluates JS files, extracts hooks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,12 @@ pub struct LoadedPolicy {
     /// Dynamic hooks: custom function names not in the Hook enum.
     /// Keyed by the JS function name (e.g. "onCustomStateEnter").
     pub dynamic_hooks: HashMap<String, Persistent<Function<'static>>>,
+    /// Ordering annotations (optional): `after` = this policy must run after
+    /// the listed policy names for the same hook; `before` = this policy must
+    /// run before them. Enables an explicit DAG override when multiple
+    /// policies must register the same hook (issue #1079).
+    pub after: Vec<String>,
+    pub before: Vec<String>,
 }
 
 // SAFETY: LoadedPolicy is only accessed while holding a Mutex.
@@ -76,9 +82,53 @@ pub fn load_policies_from_dir(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPol
         }
     }
 
-    // Sort by priority (lower number = higher priority)
-    policies.sort_by_key(|p| p.priority);
+    // Conflict detection: reject duplicate (priority, hook) unless
+    // disambiguated by an explicit `after`/`before` annotation.
+    if let Err(msg) = detect_hook_conflicts(&policies) {
+        // At initial load we warn rather than hard-fail so a broken policy
+        // never bricks startup. Hot-reload pre-validation returns the error
+        // to the caller so the previous version stays loaded (#1079).
+        tracing::error!("policy hook orchestration issues:\n{msg}");
+    }
 
+    // Sort by priority, then refine within equal-priority tiers using
+    // any `after` / `before` annotations (issue #1079).
+    policies = order_policies_with_dag(policies);
+
+    Ok(policies)
+}
+
+/// Load policies from a directory, returning an error if any validation fails.
+/// Used by hot-reload pre-validation so the previous loaded version can be
+/// preserved on failure.
+pub fn load_policies_from_dir_validated(ctx: &Context, dir: &Path) -> Result<Vec<LoadedPolicy>> {
+    let mut policies = Vec::new();
+
+    if !dir.exists() {
+        return Ok(policies);
+    }
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "js"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        // Syntax + eval check: any single-file load error fails the whole
+        // pre-validation so the previously loaded set stays intact.
+        let policy = load_single_policy(ctx, &path)
+            .map_err(|e| anyhow::anyhow!("policy {} failed to load: {e}", path.display()))?;
+        policies.push(policy);
+    }
+
+    // Reject any orchestration conflicts during pre-validation.
+    if let Err(msg) = detect_hook_conflicts(&policies) {
+        return Err(anyhow::anyhow!("hook orchestration conflict(s):\n{msg}"));
+    }
+
+    policies = order_policies_with_dag(policies);
     Ok(policies)
 }
 
@@ -170,7 +220,7 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
 
         // Extract dynamic hooks: any function starting with "on" that isn't a known hook
         let mut dynamic_hooks = HashMap::new();
-        let skip_keys = ["name", "priority"];
+        let skip_keys = ["name", "priority", "after", "before"];
         let props = policy_obj.keys::<String>();
         for key_result in props {
             if let Ok(key) = key_result {
@@ -187,16 +237,237 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
             }
         }
 
+        // Extract optional ordering annotations: `after: ["policy-name", ...]`
+        // and `before: [...]`. These provide an explicit DAG override for
+        // policies that must register the same hook at similar priorities.
+        let after = extract_string_array(&policy_obj, "after");
+        let before = extract_string_array(&policy_obj, "before");
+
         Ok(LoadedPolicy {
             name,
             file: path.to_path_buf(),
             priority,
             hooks,
             dynamic_hooks,
+            after,
+            before,
         })
     })?;
 
     Ok(policy)
+}
+
+/// Read an optional `string[]` property from a JS object. Missing or wrongly
+/// typed values return an empty Vec (permissive — annotations are optional).
+fn extract_string_array(obj: &rquickjs::Object<'_>, key: &str) -> Vec<String> {
+    let Ok(val) = obj.get::<_, rquickjs::Value>(key) else {
+        return Vec::new();
+    };
+    let Some(arr) = val.into_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..arr.len() {
+        if let Ok(item) = arr.get::<rquickjs::Value>(i) {
+            if let Some(s) = item.as_string().and_then(|s| s.to_string().ok()) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Detect `(priority, hook)` collisions and missing `after/before` referents.
+///
+/// Returns a formatted error string if any conflict is found, `Ok(())` otherwise.
+/// A collision is: two policies with the **same priority** registered for the
+/// **same hook**, where *neither* policy uses an `after` / `before` annotation
+/// naming the other to disambiguate ordering.
+///
+/// This is used both at startup (warn + keep policies) and during hot-reload
+/// pre-validation (reject new version, keep old one loaded).
+pub fn detect_hook_conflicts(policies: &[LoadedPolicy]) -> std::result::Result<(), String> {
+    // Known policy names — used to validate `after`/`before` references.
+    let known_names: HashSet<&str> = policies.iter().map(|p| p.name.as_str()).collect();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Check dangling `after` / `before` references (warn-level, still collected).
+    for p in policies {
+        for dep in p.after.iter().chain(p.before.iter()) {
+            if !known_names.contains(dep.as_str()) {
+                errors.push(format!(
+                    "policy '{}' references unknown policy '{}' in after/before",
+                    p.name, dep
+                ));
+            }
+        }
+    }
+
+    // Group by (hook_name, priority) → list of policy names.
+    let mut groups: HashMap<(String, i32), Vec<&LoadedPolicy>> = HashMap::new();
+
+    for p in policies {
+        for hook in p.hooks.keys() {
+            groups
+                .entry((hook.js_name().to_string(), p.priority))
+                .or_default()
+                .push(p);
+        }
+        for hook_name in p.dynamic_hooks.keys() {
+            groups
+                .entry((hook_name.clone(), p.priority))
+                .or_default()
+                .push(p);
+        }
+    }
+
+    for ((hook_name, priority), policies_in_group) in &groups {
+        if policies_in_group.len() < 2 {
+            continue;
+        }
+        // Have two+ policies at the same (hook, priority). Accept if every
+        // pair is disambiguated by an `after` / `before` annotation naming
+        // at least one side.
+        let mut disambiguated = true;
+        'outer: for i in 0..policies_in_group.len() {
+            for j in (i + 1)..policies_in_group.len() {
+                let a = policies_in_group[i];
+                let b = policies_in_group[j];
+                let a_refs_b =
+                    a.after.iter().any(|n| n == &b.name) || a.before.iter().any(|n| n == &b.name);
+                let b_refs_a =
+                    b.after.iter().any(|n| n == &a.name) || b.before.iter().any(|n| n == &a.name);
+                if !a_refs_b && !b_refs_a {
+                    disambiguated = false;
+                    break 'outer;
+                }
+            }
+        }
+        if !disambiguated {
+            let names: Vec<&str> = policies_in_group.iter().map(|p| p.name.as_str()).collect();
+            errors.push(format!(
+                "hook orchestration conflict: hook '{}' priority {} has {} policies with \
+                 ambiguous ordering ({:?}). Change one priority or add `after`/`before` \
+                 annotations to disambiguate.",
+                hook_name,
+                priority,
+                policies_in_group.len(),
+                names
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+/// Topologically order policies using priority as the primary key and
+/// `after`/`before` DAG edges as ties/overrides.
+///
+/// Priority is the primary sort key (lower = earlier), matching existing
+/// semantics. Within a priority tier, `after` / `before` annotations refine
+/// the order. Cycles fall back to input order (warn logged).
+pub fn order_policies_with_dag(mut policies: Vec<LoadedPolicy>) -> Vec<LoadedPolicy> {
+    // Stable sort by priority first.
+    policies.sort_by_key(|p| p.priority);
+
+    // Build an index and adjacency list of directed edges (earlier -> later)
+    // across policies sharing compatible priorities. We only apply DAG edges
+    // when both endpoints have equal priority, so we don't break the priority
+    // contract (lower priority always runs first).
+    let n = policies.len();
+    let name_to_idx: HashMap<String, usize> = policies
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name.clone(), i))
+        .collect();
+
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (i, p) in policies.iter().enumerate() {
+        for dep in &p.after {
+            if let Some(&j) = name_to_idx.get(dep) {
+                if policies[j].priority == p.priority {
+                    // dep must run before p → j -> i
+                    edges.push((j, i));
+                }
+            }
+        }
+        for dep in &p.before {
+            if let Some(&j) = name_to_idx.get(dep) {
+                if policies[j].priority == p.priority {
+                    // p must run before dep → i -> j
+                    edges.push((i, j));
+                }
+            }
+        }
+    }
+
+    if edges.is_empty() {
+        return policies;
+    }
+
+    let mut result_idx: Vec<usize> = Vec::with_capacity(n);
+    // Walk in current priority order; inject dependencies before each node.
+    let mut visited = vec![false; n];
+    let mut stack_mark = vec![false; n];
+
+    fn dfs(
+        node: usize,
+        adj_rev: &[Vec<usize>],
+        visited: &mut [bool],
+        stack_mark: &mut [bool],
+        out: &mut Vec<usize>,
+    ) -> bool {
+        if stack_mark[node] {
+            return false; // cycle
+        }
+        if visited[node] {
+            return true;
+        }
+        stack_mark[node] = true;
+        for &pred in &adj_rev[node] {
+            if !dfs(pred, adj_rev, visited, stack_mark, out) {
+                stack_mark[node] = false;
+                return false;
+            }
+        }
+        stack_mark[node] = false;
+        visited[node] = true;
+        out.push(node);
+        true
+    }
+
+    // Reverse adjacency: for each node, which nodes must precede it.
+    let mut adj_rev: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (from, to) in &edges {
+        adj_rev[*to].push(*from);
+    }
+
+    // Iterate in current priority order, DFS-emit predecessors first.
+    for i in 0..n {
+        if !visited[i] && !dfs(i, &adj_rev, &mut visited, &mut stack_mark, &mut result_idx) {
+            tracing::warn!(
+                "policy ordering DAG has cycle involving '{}'; falling back to priority order",
+                policies[i].name
+            );
+            // Fallback: return priority-sorted list as-is.
+            return policies;
+        }
+    }
+
+    // Reassemble in topological order (but only swaps within equal-priority
+    // tiers because we only added edges for equal-priority pairs).
+    let mut out: Vec<Option<LoadedPolicy>> = policies.into_iter().map(Some).collect();
+    let mut sorted: Vec<LoadedPolicy> = Vec::with_capacity(n);
+    for idx in result_idx {
+        if let Some(p) = out[idx].take() {
+            sorted.push(p);
+        }
+    }
+    sorted
 }
 
 fn js_module_error(message: impl Into<String>) -> JsError {
@@ -410,8 +681,11 @@ pub fn start_hot_reload(
                         // Drain any queued events
                         while rx.try_recv().is_ok() {}
 
-                        tracing::info!("Policy file change detected, reloading...");
-                        match load_policies_from_dir(&ctx, &dir) {
+                        tracing::info!("Policy file change detected, pre-validating...");
+                        // Hot-reload pre-validation (#1079): syntax/eval check
+                        // plus hook orchestration conflict check. If either
+                        // fails we keep the currently loaded version.
+                        match load_policies_from_dir_validated(&ctx, &dir) {
                             Ok(new_policies) => {
                                 let count = new_policies.len();
                                 if let Ok(mut guard) = store.lock() {
@@ -420,7 +694,11 @@ pub fn start_hot_reload(
                                 tracing::info!("Reloaded {count} policies");
                             }
                             Err(e) => {
-                                tracing::error!("Failed to reload policies: {e}");
+                                tracing::warn!(
+                                    policies_dir = %dir.display(),
+                                    error = %e,
+                                    "hot-reload pre-validation failed; keeping previously loaded policies"
+                                );
                             }
                         }
                         last_reload = Instant::now();
