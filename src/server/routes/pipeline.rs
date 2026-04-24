@@ -8,6 +8,46 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 
 use super::AppState;
+use crate::db::table_metadata;
+
+/// #1097 (910-3) — readonly guard.
+///
+/// Returns an HTTP 405 response when `db_source_of_truth(table) == 'file'`
+/// or `'file-canonical'`.  Call at the top of any mutating route that
+/// targets a table whose canonical source lives on disk.
+async fn reject_if_readonly(
+    state: &AppState,
+    table: &str,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let source = if let Some(pool) = state.pg_pool_ref() {
+        table_metadata::source_of_truth_pg(pool, table).await
+    } else {
+        match state.sqlite_db().read_conn() {
+            Ok(conn) => table_metadata::source_of_truth_sqlite(&conn, table),
+            Err(_) => None,
+        }
+    };
+
+    match source {
+        Some(s) if s.is_readonly() => Some((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "error": format!(
+                    "table '{}' is file-canonical; edit policies/default-pipeline.yaml \
+                     and restart the server to apply changes",
+                    table
+                ),
+                "table": table,
+                "source_of_truth": match s {
+                    table_metadata::Source::File => "file",
+                    table_metadata::Source::FileCanonical => "file-canonical",
+                    table_metadata::Source::Db => "db",
+                },
+            })),
+        )),
+        _ => None,
+    }
+}
 
 // ── Query / Body types ─────────────────────────────────────────
 
@@ -100,6 +140,11 @@ pub async fn put_stages(
     State(state): State<AppState>,
     Json(body): Json<PutStagesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // #1097: reject when pipeline_stages is file-canonical.
+    if let Some(resp) = reject_if_readonly(&state, "pipeline_stages").await {
+        return resp;
+    }
+
     let stages = if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
@@ -266,6 +311,11 @@ pub async fn delete_stages(
     State(state): State<AppState>,
     Query(params): Query<DeleteStagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // #1097: reject when pipeline_stages is file-canonical.
+    if let Some(resp) = reject_if_readonly(&state, "pipeline_stages").await {
+        return resp;
+    }
+
     if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
             .bind(&params.repo)
@@ -1497,5 +1547,54 @@ mod tests {
         assert_eq!(body["transcripts"][0]["github_issue_number"], 525);
         assert_eq!(body["transcripts"][0]["events"][0]["kind"], "result");
         assert_eq!(body["transcripts"][0]["duration_ms"], 6100);
+    }
+
+    /// #1097 (910-3): pipeline_stages is file-canonical, so PUT/DELETE
+    /// must be rejected with HTTP 405.
+    #[tokio::test]
+    async fn put_stages_rejected_when_db_source_of_truth_is_file() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        // pipeline_stages is seeded as file-canonical by the schema migrator.
+        let body = PutStagesBody {
+            repo: "owner/repo".to_string(),
+            stages: vec![PutStageItem {
+                stage_name: "build".to_string(),
+                stage_order: Some(1),
+                trigger_after: None,
+                entry_skill: None,
+                provider: None,
+                agent_override_id: None,
+                timeout_minutes: None,
+                on_failure: None,
+                on_failure_target: None,
+                max_retries: None,
+                skip_condition: None,
+                parallel_with: None,
+            }],
+        };
+
+        let (status, Json(json)) = put_stages(State(state.clone()), Json(body)).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(json["table"], "pipeline_stages");
+        assert_eq!(json["source_of_truth"], "file-canonical");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("file-canonical")
+        );
+
+        let (status2, Json(json2)) = delete_stages(
+            State(state),
+            Query(DeleteStagesQuery {
+                repo: "owner/repo".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status2, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(json2["table"], "pipeline_stages");
     }
 }

@@ -120,6 +120,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )?;
     ensure_memento_feedback_stats_schema(conn)?;
     ensure_local_memory_schema(conn)?;
+    ensure_db_table_metadata_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -2362,6 +2363,34 @@ fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
             END AS coverage_rate
          FROM memento_feedback_turn_stats
          GROUP BY stat_date, agent_id, provider;",
+    )?;
+
+    Ok(())
+}
+
+/// #1097 (910-3) — per-table source-of-truth metadata.
+///
+/// Mirrors `migrations/postgres/0019_db_table_metadata.sql`.  Tables
+/// marked `file` or `file-canonical` here are readonly at the API
+/// layer; see `src/db/table_metadata.rs` and the `pipeline_stages`
+/// guard in `src/server/routes/pipeline.rs`.
+fn ensure_db_table_metadata_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS db_table_metadata (
+            table_name      TEXT PRIMARY KEY,
+            source_of_truth TEXT NOT NULL
+                CHECK (source_of_truth IN ('db', 'file', 'file-canonical')),
+            file_path       TEXT,
+            last_synced_at  DATETIME
+        );",
+    )?;
+
+    // Seed pipeline_stages as file-canonical (policies/default-pipeline.yaml).
+    conn.execute(
+        "INSERT OR IGNORE INTO db_table_metadata
+             (table_name, source_of_truth, file_path, last_synced_at)
+         VALUES ('pipeline_stages', 'file-canonical', 'policies/default-pipeline.yaml', NULL)",
+        [],
     )?;
 
     Ok(())
