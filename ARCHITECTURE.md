@@ -72,6 +72,7 @@ src/
 │   │   ├── log_ops.rs
 │   │   ├── message_ops.rs
 │   │   ├── pipeline_ops.rs
+│   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
@@ -127,6 +128,7 @@ src/
 │   │   │   └── verdict_route.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
+│   │   ├── agents_setup.rs
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
