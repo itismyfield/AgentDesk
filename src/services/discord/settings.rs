@@ -669,6 +669,7 @@ memory:
 
                     let prompt = super::super::prompt_builder::build_system_prompt(
                         "ctx",
+                        &[],
                         "/tmp",
                         ChannelId::new(1),
                         "tok",

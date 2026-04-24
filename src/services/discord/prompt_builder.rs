@@ -580,8 +580,30 @@ impl DispatchProfile {
     }
 }
 
+fn render_channel_participants(
+    discord_context: &str,
+    channel_participants: &[UserRecord],
+) -> String {
+    let is_dm_context = discord_context.trim() == "Discord context: DM";
+    let mut lines = vec!["Channel participants:".to_string()];
+    if channel_participants.is_empty() {
+        lines.push("- none recorded yet".to_string());
+        return lines.join("\n");
+    }
+
+    for (idx, user) in channel_participants.iter().enumerate() {
+        let mut line = format!("- {}", user.label());
+        if is_dm_context && channel_participants.len() == 1 && idx == 0 {
+            line.push_str(" [DM requester]");
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
 pub(super) fn build_system_prompt(
     discord_context: &str,
+    channel_participants: &[UserRecord],
     current_path: &str,
     channel_id: ChannelId,
     token: &str,
@@ -598,6 +620,7 @@ pub(super) fn build_system_prompt(
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
          {}\n\
+         {}\n\
          Current working directory: {}\n\n\
          When your work produces a file the user would want (generated code, reports, images, archives, etc.),\n\
          send it by running this bash command:\n\n\
@@ -612,9 +635,11 @@ pub(super) fn build_system_prompt(
          - Avoid decorative separators or long horizontal lines.\n\n\
          This Discord channel does not support interactive prompts. Do NOT call AskUserQuestion, EnterPlanMode, or ExitPlanMode. \
          Ask in plain text if you need clarification.\n\n\
+         Message author prefix: Direct user messages are prefixed as `[User: NAME (ID: N)]`; use that marker to distinguish speakers in shared channels.\n\n\
          Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
          not necessarily your most recent message. Prioritize the reply target; ask if ambiguous.",
         discord_context,
+        render_channel_participants(discord_context, channel_participants),
         current_path,
         channel_id.get(),
         discord_token_hash(token),
@@ -781,6 +806,7 @@ mod tests {
     ) -> String {
         build_system_prompt(
             discord_context,
+            &[],
             current_path,
             ChannelId::new(channel_id),
             token,
@@ -809,6 +835,59 @@ mod tests {
             output.contains("Channel: #general (guild: TestServer)"),
             "System prompt should contain the discord_context string"
         );
+    }
+
+    #[test]
+    fn test_build_system_prompt_lists_channel_participants_without_inline_context_user() {
+        let participants = [UserRecord::new(UserId::new(77), "Alice")];
+        let output = build_system_prompt(
+            "Discord context: channel #general (ID: 42)",
+            &participants,
+            "/tmp/work",
+            ChannelId::new(42),
+            "fake-token",
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert!(output.contains("Channel participants:\n- Alice (ID: 77)"));
+        assert!(output.contains("[User: NAME (ID: N)]"));
+        let discord_context_line = output
+            .lines()
+            .find(|line| line.starts_with("Discord context:"))
+            .expect("discord context line");
+        assert!(!discord_context_line.contains("user: Alice"));
+        assert!(!discord_context_line.contains("ID: 77"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_marks_dm_single_participant() {
+        let participants = [UserRecord::new(UserId::new(77), "Alice")];
+        let output = build_system_prompt(
+            "Discord context: DM",
+            &participants,
+            "/tmp/work",
+            ChannelId::new(42),
+            "fake-token",
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert!(output.contains("Channel participants:\n- Alice (ID: 77) [DM requester]"));
     }
 
     #[test]
@@ -905,6 +984,7 @@ mod tests {
     fn test_empty_skills_notice_omits_skills_for_full_profile() {
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -928,6 +1008,7 @@ mod tests {
     fn test_review_lite_omits_context_compression_guidance() {
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -951,6 +1032,7 @@ mod tests {
     fn test_review_lite_includes_tool_output_efficiency_guidance() {
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -983,6 +1065,7 @@ mod tests {
         };
         let review_prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -998,6 +1081,7 @@ mod tests {
         );
         let decision_prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1036,6 +1120,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1488022491992424448),
             "tok",
@@ -1069,6 +1154,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1102,6 +1188,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/Users/test/.adk/release/workspaces/agentdesk",
             ChannelId::new(1),
             "tok",
@@ -1138,6 +1225,7 @@ mod tests {
     fn test_full_prompt_omits_memento_memory_guidance_without_mcp() {
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/Users/test/.adk/release/workspaces/agentdesk",
             ChannelId::new(1),
             "tok",
@@ -1164,6 +1252,7 @@ mod tests {
     fn test_review_lite_omits_memory_guidance() {
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1198,6 +1287,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1256,6 +1346,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1315,6 +1406,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1349,6 +1441,7 @@ mod tests {
         let current_task = CurrentTaskContext::default();
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1385,6 +1478,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1421,6 +1515,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
@@ -1452,6 +1547,7 @@ mod tests {
         };
         let prompt = build_system_prompt(
             "ctx",
+            &[],
             "/tmp",
             ChannelId::new(1),
             "tok",
