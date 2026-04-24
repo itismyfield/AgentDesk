@@ -177,6 +177,29 @@ pub fn send_keys(session_name: &str, keys: &[&str]) -> Result<Output, String> {
         .map_err(|e| format!("tmux send-keys failed: {e}"))
 }
 
+/// Return the PID of the active pane process for a tmux session.
+#[cfg(unix)]
+pub fn pane_pid(session_name: &str) -> Option<u32> {
+    let output = tmux_command()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &exact_target(session_name),
+            "#{pane_pid}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 /// Capture pane content from a tmux session.
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
