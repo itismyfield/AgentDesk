@@ -29,6 +29,8 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::json;
 
+pub mod jobs;
+
 /// How often the scheduler wakes up to re-check job schedules. Individual jobs
 /// fire on their own `interval`; this tick just bounds scheduling latency.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(30);
