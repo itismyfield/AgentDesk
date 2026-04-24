@@ -4209,7 +4209,7 @@ async fn maybe_finalize_run_after_terminal_entry_pg(
     maybe_finalize_run_if_ready_pg(tx, run_id).await
 }
 
-async fn maybe_finalize_run_if_ready_pg(
+pub(crate) async fn maybe_finalize_run_if_ready_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<bool, String> {
