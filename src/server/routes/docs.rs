@@ -335,8 +335,54 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/agents", "agents", "List all agents"),
         ep("POST", "/api/agents", "agents", "Create an agent"),
         ep("GET", "/api/agents/{id}", "agents", "Get agent by ID"),
-        ep("PATCH", "/api/agents/{id}", "agents", "Update agent"),
+        ep("PATCH", "/api/agents/{id}", "agents", "Update agent metadata and prompt content")
+            .with_params([
+                ("id", path_param("Agent id")),
+                ("name", body_param("string", false, "Display name")),
+                ("department_id", body_param("string", false, "Department id")),
+                ("prompt_content", body_param("string", false, "Full prompt markdown content to rewrite")),
+                ("auto_commit", body_param("boolean", false, "Commit prompt rewrite with git when available").with_default(false)),
+            ])
+            .with_example(
+                json!({"path": {"id": "project-agentdesk"}, "body": {"name": "AgentDesk", "prompt_content": "# role\n...", "auto_commit": false}}),
+                json!({"agent": {"id": "project-agentdesk"}, "prompt": {"changed": true}}),
+            ),
         ep("DELETE", "/api/agents/{id}", "agents", "Delete agent"),
+        ep(
+            "POST",
+            "/api/agents/{id}/archive",
+            "agents",
+            "Soft-archive an agent: blocks active turns, disables config binding, records agent_archive state, and optionally applies Discord readonly/move action.",
+        )
+        .with_params([
+            ("id", path_param("Agent id")),
+            ("reason", body_param("string", false, "Archive reason")),
+            ("discord_action", body_param("string", false, "none, readonly, or move").with_enum(&["none", "readonly", "move"])),
+            ("archive_category_id", body_param("string", false, "Discord category id for move action")),
+        ])
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}, "body": {"reason": "temporary pause", "discord_action": "readonly"}}),
+            json!({"ok": true, "archive_state": "archived"}),
+        ),
+        ep(
+            "POST",
+            "/api/agents/{id}/unarchive",
+            "agents",
+            "Restore an archived agent config binding and mark archive state unarchived.",
+        ),
+        ep(
+            "POST",
+            "/api/agents/{id}/duplicate",
+            "agents",
+            "Duplicate an agent by reusing /api/agents/setup with the source prompt as template.",
+        )
+        .with_params([
+            ("id", path_param("Source agent id")),
+            ("new_agent_id", body_param("string", true, "New role id")),
+            ("channel_id", body_param("string", true, "Existing Discord channel snowflake")),
+            ("provider", body_param("string", false, "Provider override")),
+            ("dry_run", body_param("boolean", false, "Preview setup mutations only").with_default(false)),
+        ]),
         ep(
             "GET",
             "/api/onboarding/status",

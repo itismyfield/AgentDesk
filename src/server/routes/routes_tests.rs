@@ -6563,6 +6563,270 @@ async fn agent_setup_rolls_back_when_mid_step_fails() {
     assert!(runtime_root.path().join("config/.audit").is_dir());
 }
 
+async fn seed_setup_agent_for_management_test(
+    app: axum::Router,
+    runtime_root: &std::path::Path,
+    agent_id: &str,
+    channel_id: &str,
+) -> serde_json::Value {
+    let config_path = crate::runtime_layout::config_file_path(runtime_root);
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+    let prompt_template = crate::runtime_layout::shared_prompt_path(runtime_root);
+    fs::create_dir_all(prompt_template.parent().unwrap()).unwrap();
+    fs::write(&prompt_template, "source prompt\n").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "agent_id": agent_id,
+                        "channel_id": channel_id,
+                        "provider": "codex",
+                        "prompt_template_path": "config/agents/_shared.prompt.md"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn agent_patch_updates_metadata_and_prompt_content() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/agents/managed-agent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "Managed Agent",
+                        "cli_provider": "codex",
+                        "sprite_number": 42,
+                        "personality": "operational prompt summary",
+                        "prompt_content": "updated prompt\n",
+                        "auto_commit": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["prompt"]["changed"], true);
+    assert_eq!(
+        fs::read_to_string(
+            runtime_root
+                .path()
+                .join("config/agents/managed-agent/IDENTITY.md")
+        )
+        .unwrap(),
+        "updated prompt\n"
+    );
+    let row: (String, Option<i64>, Option<String>) = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT name, sprite_number, system_prompt FROM agents WHERE id = 'managed-agent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "Managed Agent");
+    assert_eq!(row.1, Some(42));
+    assert_eq!(row.2.as_deref(), Some("operational prompt summary"));
+}
+
+#[tokio::test]
+async fn agent_archive_and_unarchive_record_state_and_restore_config() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+
+    let archived = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/archive")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "reason": "test archive",
+                        "discord_action": "none"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(archived.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["archive_state"], "archived");
+    let config = crate::config::load_from_path(&crate::runtime_layout::config_file_path(
+        runtime_root.path(),
+    ))
+    .unwrap();
+    assert!(
+        config
+            .agents
+            .iter()
+            .all(|agent| agent.id != "managed-agent")
+    );
+    let archive_state: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_state, "archived");
+
+    let unarchived = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/unarchive")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unarchived.status(), StatusCode::OK);
+    let config = crate::config::load_from_path(&crate::runtime_layout::config_file_path(
+        runtime_root.path(),
+    ))
+    .unwrap();
+    assert!(
+        config
+            .agents
+            .iter()
+            .any(|agent| agent.id == "managed-agent")
+    );
+    let archive_state: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_state, "unarchived");
+}
+
+#[tokio::test]
+async fn agent_duplicate_reuses_setup_and_copies_prompt() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+    fs::write(
+        runtime_root
+            .path()
+            .join("config/agents/managed-agent/IDENTITY.md"),
+        "source identity prompt\n",
+    )
+    .unwrap();
+
+    let duplicated = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/duplicate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "new_agent_id": "managed-copy",
+                        "channel_id": "1473922824350601298",
+                        "name": "Managed Copy"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(duplicated.status(), StatusCode::CREATED);
+    assert_eq!(
+        fs::read_to_string(
+            runtime_root
+                .path()
+                .join("config/agents/managed-copy/IDENTITY.md")
+        )
+        .unwrap(),
+        "source identity prompt\n"
+    );
+    let copied_name: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT name FROM agents WHERE id = 'managed-copy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copied_name, "Managed Copy");
+}
+
 #[tokio::test]
 async fn create_issue_route_builds_pmd_body_and_agent_label() {
     let _env_lock = env_lock();

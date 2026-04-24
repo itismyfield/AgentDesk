@@ -8,11 +8,13 @@ import {
   SurfaceActionButton,
   SurfaceCard,
   SurfaceEmptyState,
+  SurfaceNotice,
   SurfaceSegmentButton,
 } from "../common/SurfacePrimitives";
 import AgentCard from "./AgentCard";
 import { getAgentLevel, getAgentTitle } from "./AgentInfoCard";
 import type { Translator } from "./types";
+import type { AgentSortMode } from "./useAgentManagerController";
 
 interface AgentsTabProps {
   tr: Translator;
@@ -26,12 +28,19 @@ interface AgentsTabProps {
   setSearch: (next: string) => void;
   statusFilter: string;
   setStatusFilter: (next: string) => void;
+  sortMode: AgentSortMode;
+  setSortMode: (next: AgentSortMode) => void;
   sortedAgents: Agent[];
   spriteMap: Map<string, number>;
   confirmDeleteId: string | null;
   setConfirmDeleteId: (id: string | null) => void;
+  confirmArchiveId: string | null;
+  setConfirmArchiveId: (id: string | null) => void;
   onOpenAgent: (agent: Agent) => void;
   onEditAgent: (agent: Agent) => void;
+  onDuplicateAgent: (agent: Agent) => void;
+  onArchiveAgent: (agentId: string) => void;
+  onUnarchiveAgent: (agentId: string) => void;
   onEditDepartment: (department: Department) => void;
   onDeleteAgent: (agentId: string) => void;
   saving: boolean;
@@ -103,12 +112,19 @@ export default function AgentsTab({
   setSearch,
   statusFilter,
   setStatusFilter,
+  sortMode,
+  setSortMode,
   sortedAgents,
   spriteMap,
   confirmDeleteId,
   setConfirmDeleteId,
+  confirmArchiveId,
+  setConfirmArchiveId,
   onOpenAgent,
   onEditAgent,
+  onDuplicateAgent,
+  onArchiveAgent,
+  onUnarchiveAgent,
   onEditDepartment,
   onDeleteAgent,
   saving,
@@ -245,6 +261,23 @@ export default function AgentsTab({
               <option value="idle">{tr("대기", "Idle")}</option>
               <option value="break">{tr("휴식", "Break")}</option>
               <option value="offline">{tr("오프라인", "Offline")}</option>
+              <option value="archived">{tr("보관됨", "Archived")}</option>
+            </select>
+            <select
+              value={sortMode}
+              onChange={(event) => setSortMode(event.target.value as AgentSortMode)}
+              className="rounded-xl px-3 py-2 text-xs outline-none"
+              style={{
+                background: "var(--th-input-bg)",
+                border: "1px solid var(--th-input-border)",
+                color: "var(--th-text-primary)",
+              }}
+            >
+              <option value="status">{tr("정렬: 상태", "Sort: Status")}</option>
+              <option value="name">{tr("정렬: 이름", "Sort: Name")}</option>
+              <option value="xp">{tr("정렬: XP", "Sort: XP")}</option>
+              <option value="created">{tr("정렬: 생성일", "Sort: Created")}</option>
+              <option value="archived">{tr("정렬: 보관일", "Sort: Archived")}</option>
             </select>
             <input
               type="text"
@@ -307,9 +340,11 @@ export default function AgentsTab({
                             ? "bg-emerald-400"
                             : agent.status === "break"
                               ? "bg-amber-300"
-                              : agent.status === "offline"
-                                ? "bg-slate-500"
-                                : "bg-sky-400"
+                            : agent.status === "offline"
+                              ? "bg-slate-500"
+                              : agent.status === "archived"
+                                ? "bg-zinc-400"
+                              : "bg-sky-400"
                         }`}
                         style={{ borderColor: "var(--th-card-bg)" }}
                       />
@@ -409,7 +444,9 @@ export default function AgentsTab({
                                 ? tr("휴식", "Break")
                                 : selectedAgent.status === "offline"
                                   ? tr("오프라인", "Offline")
-                                  : tr("대기", "Idle"),
+                                  : selectedAgent.status === "archived"
+                                    ? tr("보관됨", "Archived")
+                                    : tr("대기", "Idle"),
                         },
                         {
                           label: tr("부서", "Department"),
@@ -487,13 +524,77 @@ export default function AgentsTab({
                       </div>
                     </div>
 
+                    {selectedAgent.archive_state || selectedAgent.archive_reason ? (
+                      <SurfaceNotice tone="neutral" compact>
+                        <div className="space-y-1">
+                          <div>
+                            {tr("보관 상태", "Archive State")}: {selectedAgent.archive_state ?? selectedAgent.status}
+                          </div>
+                          {selectedAgent.archive_reason && (
+                            <div>{selectedAgent.archive_reason}</div>
+                          )}
+                        </div>
+                      </SurfaceNotice>
+                    ) : null}
+
+                    {confirmArchiveId === selectedAgent.id && (
+                      <SurfaceNotice tone="warn">
+                        <div className="space-y-2">
+                          <div className="font-medium">
+                            {tr("보관하면 role_map에서 비활성화되고 Discord 채널은 readonly 처리됩니다.", "Archiving disables the role map entry and makes the Discord channel readonly.")}
+                          </div>
+                          <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                            {tr("진행 중 세션이 있으면 API가 거부합니다. 필요하면 이 화면에서 다시 시도할 수 있습니다.", "The API refuses active sessions. You can retry from this panel.")}
+                          </div>
+                        </div>
+                      </SurfaceNotice>
+                    )}
+
                     <div className="flex flex-wrap gap-2">
                       <SurfaceActionButton onClick={() => onEditAgent(selectedAgent)} tone="neutral">
                         {tr("편집", "Edit")}
                       </SurfaceActionButton>
+                      <SurfaceActionButton onClick={() => onDuplicateAgent(selectedAgent)} tone="info">
+                        {tr("복제", "Duplicate")}
+                      </SurfaceActionButton>
                       <SurfaceActionButton onClick={() => onOpenAgent(selectedAgent)}>
                         {tr("상세 보기", "Open Detail")}
                       </SurfaceActionButton>
+                      {selectedAgent.status === "archived" ? (
+                        <SurfaceActionButton
+                          onClick={() => onUnarchiveAgent(selectedAgent.id)}
+                          disabled={saving}
+                          tone="success"
+                        >
+                          {tr("보관 해제", "Unarchive")}
+                        </SurfaceActionButton>
+                      ) : confirmArchiveId === selectedAgent.id ? (
+                        <>
+                          <SurfaceActionButton
+                            onClick={() => onArchiveAgent(selectedAgent.id)}
+                            disabled={saving || selectedAgent.status === "working"}
+                            tone="warn"
+                          >
+                            {tr("보관", "Archive")}
+                          </SurfaceActionButton>
+                          <SurfaceActionButton
+                            onClick={() => setConfirmArchiveId(null)}
+                            tone="neutral"
+                          >
+                            {tr("취소", "Cancel")}
+                          </SurfaceActionButton>
+                        </>
+                      ) : (
+                        <SurfaceActionButton
+                          onClick={() => {
+                            setConfirmDeleteId(null);
+                            setConfirmArchiveId(selectedAgent.id);
+                          }}
+                          tone="neutral"
+                        >
+                          {tr("보관", "Archive")}
+                        </SurfaceActionButton>
+                      )}
                       {confirmDeleteId === selectedAgent.id ? (
                         <>
                           <SurfaceActionButton
@@ -512,7 +613,10 @@ export default function AgentsTab({
                         </>
                       ) : (
                         <SurfaceActionButton
-                          onClick={() => setConfirmDeleteId(selectedAgent.id)}
+                          onClick={() => {
+                            setConfirmArchiveId(null);
+                            setConfirmDeleteId(selectedAgent.id);
+                          }}
                           tone="neutral"
                         >
                           {tr("삭제", "Delete")}

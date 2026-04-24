@@ -16,6 +16,25 @@ CREATE TABLE IF NOT EXISTS agents (
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS agent_archive (
+    agent_id               TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    state                  TEXT NOT NULL DEFAULT 'archived',
+    reason                 TEXT,
+    previous_status        TEXT,
+    config_agent_json      TEXT,
+    role_map_snapshot_json TEXT,
+    prompt_path            TEXT,
+    discord_channels_json  TEXT,
+    discord_action         TEXT,
+    discord_result_json    TEXT,
+    archived_at            DATETIME,
+    unarchived_at          DATETIME,
+    updated_at             DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_archive_state
+    ON agent_archive(state);
+
 CREATE TABLE IF NOT EXISTS kanban_cards (
     id                  TEXT PRIMARY KEY,
     repo_id             TEXT,

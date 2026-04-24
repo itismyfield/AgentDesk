@@ -7,6 +7,7 @@ export const STATUS_DOT: Record<string, string> = {
   working: "bg-emerald-400 shadow-emerald-400/50 shadow-sm",
   break: "bg-amber-400",
   offline: "bg-red-400",
+  archived: "bg-zinc-400",
   idle: "bg-slate-500",
 };
 
@@ -45,6 +46,8 @@ export const BLANK: FormData = {
   avatar_emoji: "🤖",
   sprite_number: null,
   personality: "",
+  prompt_content: "",
+  auto_commit: false,
 };
 
 export const DEPT_COLORS = [

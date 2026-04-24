@@ -89,6 +89,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // #135: Per-repo and per-agent pipeline override (JSON)
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN pipeline_config TEXT;");
+    ensure_agent_archive_schema(conn)?;
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN context TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
     let _ =
@@ -907,6 +908,29 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pdr_user_status ON pending_dm_replies(user_id, status);",
     )?;
 
+    Ok(())
+}
+
+fn ensure_agent_archive_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_archive (
+            agent_id              TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+            state                 TEXT NOT NULL DEFAULT 'archived',
+            reason                TEXT,
+            previous_status       TEXT,
+            config_agent_json     TEXT,
+            role_map_snapshot_json TEXT,
+            prompt_path           TEXT,
+            discord_channels_json TEXT,
+            discord_action        TEXT,
+            discord_result_json   TEXT,
+            archived_at           DATETIME,
+            unarchived_at         DATETIME,
+            updated_at            DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_archive_state
+            ON agent_archive(state);",
+    )?;
     Ok(())
 }
 

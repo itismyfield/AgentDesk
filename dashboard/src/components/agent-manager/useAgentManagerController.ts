@@ -8,6 +8,7 @@ import { BLANK, ICON_SPRITE_POOL } from "./constants";
 import type { FormData } from "./types";
 
 export type AgentManagerTab = "agents" | "departments" | "backlog" | "dispatch";
+export type AgentSortMode = "status" | "name" | "xp" | "created" | "archived";
 
 interface UseAgentManagerControllerParams {
   agents: Agent[];
@@ -44,14 +45,21 @@ export function useAgentManagerController({
   const [internalTab, setInternalTab] = useState<AgentManagerTab>("agents");
   const [deptTab, setDeptTab] = useState("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [search, setSearch] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dispatchOpen, setDispatchOpen] = useState(activeTab === "dispatch");
   const [agentModal, setAgentModal] = useState<{
     open: boolean;
     editAgent: Agent | null;
   }>({ open: false, editAgent: null });
+  const [setupWizard, setSetupWizard] = useState<{
+    open: boolean;
+    mode: "create" | "duplicate";
+    sourceAgent: Agent | null;
+  }>({ open: false, mode: "create", sourceAgent: null });
   const [form, setForm] = useState<FormData>(BLANK);
   const [deptModal, setDeptModal] = useState<{
     open: boolean;
@@ -116,32 +124,80 @@ export function useAgentManagerController({
     }
 
     return [...filtered].sort((left, right) => {
-      const statusOrder = { working: 0, idle: 1, break: 2, offline: 3 };
-      const leftStatus = statusOrder[left.status] ?? 4;
-      const rightStatus = statusOrder[right.status] ?? 4;
+      const statusOrder: Record<string, number> = {
+        working: 0,
+        idle: 1,
+        break: 2,
+        offline: 3,
+        archived: 4,
+      };
+      if (sortMode === "name") {
+        return left.name.localeCompare(right.name);
+      }
+      if (sortMode === "xp") {
+        return (right.stats_xp ?? 0) - (left.stats_xp ?? 0);
+      }
+      if (sortMode === "created") {
+        return (right.created_at ?? 0) - (left.created_at ?? 0);
+      }
+      if (sortMode === "archived") {
+        return (right.archived_at ?? 0) - (left.archived_at ?? 0);
+      }
+      const leftStatus = statusOrder[left.status] ?? 5;
+      const rightStatus = statusOrder[right.status] ?? 5;
       if (leftStatus !== rightStatus) return leftStatus - rightStatus;
       return left.name.localeCompare(right.name);
     });
-  }, [agents, deptTab, search, statusFilter]);
+  }, [agents, deptTab, search, sortMode, statusFilter]);
 
   const openCreateAgent = useCallback(() => {
-    setForm(BLANK);
-    setAgentModal({ open: true, editAgent: null });
+    setSetupWizard({ open: true, mode: "create", sourceAgent: null });
   }, []);
 
   const openEditAgent = useCallback((agent: Agent) => {
-    setForm({
-      name: agent.name,
-      name_ko: agent.name_ko ?? "",
-      name_ja: agent.name_ja ?? "",
-      name_zh: agent.name_zh ?? "",
-      department_id: agent.department_id ?? "",
-      cli_provider: agent.cli_provider ?? "claude",
-      avatar_emoji: agent.avatar_emoji ?? "🤖",
-      sprite_number: agent.sprite_number ?? null,
-      personality: agent.personality ?? "",
+    const applyAgentToForm = (target: Agent) => setForm({
+      ...BLANK,
+      name: target.name,
+      name_ko: target.name_ko ?? "",
+      name_ja: target.name_ja ?? "",
+      name_zh: target.name_zh ?? "",
+      department_id: target.department_id ?? "",
+      cli_provider: target.cli_provider ?? "claude",
+      avatar_emoji: target.avatar_emoji ?? "🤖",
+      sprite_number: target.sprite_number ?? null,
+      personality: target.personality ?? "",
+      prompt_content: target.prompt_content ?? "",
+      auto_commit: false,
     });
+    applyAgentToForm(agent);
     setAgentModal({ open: true, editAgent: agent });
+    api.getAgent(agent.id)
+      .then((detail) => {
+        applyAgentToForm(detail);
+        setAgentModal((current) =>
+          current.open && current.editAgent?.id === agent.id
+            ? { open: true, editAgent: detail }
+            : current,
+        );
+      })
+      .catch((error) => {
+        console.error("Agent detail load failed:", error);
+      });
+  }, []);
+
+  const openDuplicateAgent = useCallback((agent: Agent) => {
+    setSetupWizard({ open: true, mode: "duplicate", sourceAgent: agent });
+    api.getAgent(agent.id)
+      .then((detail) => {
+        setSetupWizard((current) =>
+          current.open && current.mode === "duplicate" && current.sourceAgent?.id === agent.id
+            ? { open: true, mode: "duplicate", sourceAgent: detail }
+            : current,
+        );
+      })
+      .catch((error) => {
+        console.error("Agent detail load failed:", error);
+      });
   }, []);
 
   const handleSaveAgent = useCallback(async () => {
@@ -157,6 +213,8 @@ export function useAgentManagerController({
         avatar_emoji: form.avatar_emoji,
         sprite_number: form.sprite_number,
         personality: form.personality.trim() || null,
+        prompt_content: form.prompt_content,
+        auto_commit: form.auto_commit,
       };
 
       if (!agentModal.editAgent && officeId) {
@@ -186,6 +244,33 @@ export function useAgentManagerController({
       onAgentsChange();
     } catch (error) {
       console.error("Agent delete failed:", error);
+    } finally {
+      setSaving(false);
+    }
+  }, [onAgentsChange]);
+
+  const handleArchiveAgent = useCallback(async (id: string) => {
+    setSaving(true);
+    try {
+      await api.archiveAgent(id, {
+        reason: "Archived from dashboard",
+      });
+      setConfirmArchiveId(null);
+      onAgentsChange();
+    } catch (error) {
+      console.error("Agent archive failed:", error);
+    } finally {
+      setSaving(false);
+    }
+  }, [onAgentsChange]);
+
+  const handleUnarchiveAgent = useCallback(async (id: string) => {
+    setSaving(true);
+    try {
+      await api.unarchiveAgent(id);
+      onAgentsChange();
+    } catch (error) {
+      console.error("Agent unarchive failed:", error);
     } finally {
       setSaving(false);
     }
@@ -276,6 +361,7 @@ export function useAgentManagerController({
   return {
     canShowDispatch,
     confirmDeleteId,
+    confirmArchiveId,
     deptModal,
     deptOrder,
     deptOrderDirty,
@@ -287,6 +373,7 @@ export function useAgentManagerController({
     agentModal,
     handleCancelOrder,
     handleDeleteAgent,
+    handleArchiveAgent,
     handleDragEnd,
     handleDragOver,
     handleDragStart,
@@ -295,6 +382,7 @@ export function useAgentManagerController({
     handleSaveAgent,
     handleSaveOrder,
     handleTabChange,
+    handleUnarchiveAgent,
     isKo,
     locale,
     dispatchOpen,
@@ -302,19 +390,25 @@ export function useAgentManagerController({
     openCreateDept,
     openEditAgent,
     openEditDept,
+    openDuplicateAgent,
     randomIconSprites,
     reorderSaving,
     resolvedTab,
     saving,
     search,
     setAgentModal,
+    setConfirmArchiveId,
     setConfirmDeleteId,
     setDeptModal,
     setDeptTab,
     setForm,
     setDispatchOpen,
     setSearch,
+    setSortMode,
     setStatusFilter,
+    setupWizard,
+    setSetupWizard,
+    sortMode,
     sortedAgents,
     spriteMap,
     statusFilter,

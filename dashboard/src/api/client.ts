@@ -310,6 +310,11 @@ export async function getAgents(
   return data.agents.map(normalizeAgent);
 }
 
+export async function getAgent(id: string): Promise<Agent> {
+  const data = await request<{ agent: Agent }>(`/api/agents/${id}`);
+  return normalizeAgent(data.agent);
+}
+
 export async function createAgent(
   agent: Partial<Agent> & { office_id?: string },
 ): Promise<Agent> {
@@ -321,16 +326,115 @@ export async function createAgent(
 
 export async function updateAgent(
   id: string,
-  patch: Partial<Agent>,
+  patch: Partial<Agent> & {
+    prompt_content?: string;
+    auto_commit?: boolean;
+    commit_message?: string;
+  },
 ): Promise<Agent> {
-  return request(`/api/agents/${id}`, {
+  const data = await request<{ agent: Agent } | Agent>(`/api/agents/${id}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+  return normalizeAgent("agent" in data ? data.agent : data);
 }
 
 export async function deleteAgent(id: string): Promise<void> {
   await request(`/api/agents/${id}`, { method: "DELETE" });
+}
+
+export interface AgentSetupRequest {
+  agent_id: string;
+  channel_id: string;
+  provider?: string;
+  prompt_template_path?: string;
+  skills?: string[];
+  dry_run?: boolean;
+}
+
+export interface AgentSetupResponse {
+  ok?: boolean;
+  dry_run?: boolean;
+  agent_id?: string;
+  role_id?: string;
+  channel_id?: string;
+  provider?: string;
+  steps?: Array<{ name?: string; status?: string; detail?: string }>;
+  errors?: string[];
+  warnings?: string[];
+  rollback?: unknown;
+}
+
+export async function setupAgent(
+  body: AgentSetupRequest,
+): Promise<AgentSetupResponse> {
+  return request("/api/agents/setup", {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutMs: 60_000,
+  });
+}
+
+export interface ArchiveAgentRequest {
+  reason?: string;
+  discord_action?: "none" | "readonly" | "move";
+  archive_category_id?: string;
+}
+
+export interface ArchiveAgentResponse {
+  ok: boolean;
+  agent_id: string;
+  status?: string;
+  archive_state?: string;
+  discord?: unknown;
+}
+
+export async function archiveAgent(
+  id: string,
+  body: ArchiveAgentRequest = {},
+): Promise<ArchiveAgentResponse> {
+  return request(`/api/agents/${id}/archive`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutMs: 60_000,
+  });
+}
+
+export async function unarchiveAgent(id: string): Promise<ArchiveAgentResponse> {
+  return request(`/api/agents/${id}/unarchive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+    timeoutMs: 60_000,
+  });
+}
+
+export interface DuplicateAgentRequest {
+  new_agent_id: string;
+  channel_id: string;
+  provider?: string;
+  name?: string;
+  name_ko?: string;
+  department_id?: string | null;
+  skills?: string[];
+  dry_run?: boolean;
+}
+
+export async function duplicateAgent(
+  id: string,
+  body: DuplicateAgentRequest,
+): Promise<AgentSetupResponse & { agent?: Agent }> {
+  const data = await request<AgentSetupResponse & { agent?: Agent }>(
+    `/api/agents/${id}/duplicate`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+      timeoutMs: 60_000,
+    },
+  );
+  if (data.agent) {
+    return { ...data, agent: normalizeAgent(data.agent) };
+  }
+  return data;
 }
 
 export interface AgentOfficeMembership extends Office {
