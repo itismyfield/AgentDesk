@@ -136,7 +136,7 @@
 | `PATCH` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::update_repo` | `src/server/routes/kanban_repos.rs:258` | `src/server/routes/domains/kanban.rs:69` |
 | `PATCH` | `/api/kanban-reviews/{id}/decisions` | `reviews::update_decisions` | `src/server/routes/reviews.rs:136` | `src/server/routes/domains/reviews.rs:18` |
 | `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:233` | `src/server/routes/domains/reviews.rs:22` |
-| `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:664` | `src/server/routes/domains/admin.rs:75` |
+| `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:725` | `src/server/routes/domains/admin.rs:75` |
 | `GET` | `/api/maintenance/jobs` | `maintenance::list_jobs` | `src/server/routes/maintenance.rs:7` | `src/server/routes/domains/ops.rs:127` |
 | `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:41` | `src/server/routes/domains/ops.rs:119` |
 | `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:128` | `src/server/routes/domains/ops.rs:119` |
@@ -175,7 +175,7 @@
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:2430` | `src/server/routes/domains/kanban.rs:73` |
 | `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:2558` | `src/server/routes/domains/agents.rs:48` |
 | `GET` | `/api/quality/events` | `analytics::quality_events` | `src/server/routes/analytics.rs:95` | `src/server/routes/domains/admin.rs:70` |
-| `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:720` | `src/server/routes/domains/admin.rs:76` |
+| `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:750` | `src/server/routes/domains/admin.rs:76` |
 | `POST` | `/api/re-review` | `deprecated_batch_rereview` | `src/server/routes/domains/kanban.rs:77` | `src/server/routes/domains/kanban.rs:34` |
 | `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:22` | `src/server/routes/domains/admin.rs:77` |
 | `POST` | `/api/review-decision` | `deprecated_submit_review_decision` | `src/server/routes/domains/reviews.rs:52` | `src/server/routes/domains/reviews.rs:32` |
@@ -208,7 +208,7 @@
 | `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1792` | `src/server/routes/domains/admin.rs:60` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:653` | `src/server/routes/domains/admin.rs:56` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:663` | `src/server/routes/domains/admin.rs:56` |
-| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:1037` | `src/server/routes/domains/admin.rs:79` |
+| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:1067` | `src/server/routes/domains/admin.rs:79` |
 | `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:370` | `src/server/routes/domains/ops.rs:123` |
 | `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:651` | `src/server/routes/domains/ops.rs:125` |
 | `GET` | `/api/skills/ranking` | `skills_api::ranking` | `src/server/routes/skills_api.rs:477` | `src/server/routes/domains/ops.rs:124` |

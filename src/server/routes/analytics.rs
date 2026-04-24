@@ -658,26 +658,9 @@ pub async fn audit_logs(
     (StatusCode::OK, Json(json!({ "logs": logs })))
 }
 
-/// GET /api/machine-status
-/// Machine list from kv_meta key 'machines' (JSON array of {name, host}).
-/// Falls back to current hostname if not configured.
-pub async fn machine_status(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Read machine list from config
-    let machines_config: Vec<(String, String)> = state
-        .db
-        .lock()
+fn parse_machine_config(value: &str) -> Option<Vec<(String, String)>> {
+    serde_json::from_str::<Vec<serde_json::Value>>(value)
         .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = 'machines'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(&v).ok())
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| {
@@ -691,11 +674,58 @@ pub async fn machine_status(
                 })
                 .collect()
         })
-        .unwrap_or_else(|| {
-            // Default: current hostname
-            let hostname = crate::services::platform::hostname_short();
-            vec![(hostname.clone(), hostname)]
-        });
+        .filter(|machines: &Vec<(String, String)>| !machines.is_empty())
+}
+
+fn default_machine_config() -> Vec<(String, String)> {
+    let hostname = crate::services::platform::hostname_short();
+    vec![(hostname.clone(), hostname)]
+}
+
+async fn load_machine_config_pg(pool: &sqlx::PgPool) -> Option<Vec<(String, String)>> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+        .bind("machines")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| parse_machine_config(&value))
+}
+
+fn load_machine_config_sqlite(db: &crate::db::Db) -> Option<Vec<(String, String)>> {
+    db.lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'machines'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .and_then(|value| parse_machine_config(&value))
+}
+
+async fn load_machine_config(
+    db: &crate::db::Db,
+    pg_pool: Option<&sqlx::PgPool>,
+) -> Vec<(String, String)> {
+    if let Some(pool) = pg_pool {
+        return load_machine_config_pg(pool)
+            .await
+            .unwrap_or_else(default_machine_config);
+    }
+
+    load_machine_config_sqlite(db).unwrap_or_else(default_machine_config)
+}
+
+/// GET /api/machine-status
+/// Machine list from kv_meta key 'machines' (JSON array of {name, host}).
+/// Falls back to current hostname if not configured.
+pub async fn machine_status(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let machines_config = load_machine_config(state.sqlite_db(), state.pg_pool_ref()).await;
 
     let result = tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
@@ -1178,6 +1208,157 @@ mod tests {
     fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
         let config = crate::config::Config::default();
         crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_prefers_postgres_when_pool_exists() {
+        let sqlite_db = crate::db::test_db();
+        {
+            let conn = sqlite_db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![
+                    "machines",
+                    serde_json::json!([{ "name": "sqlite-machine", "host": "sqlite-host" }])
+                        .to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind("machines")
+        .bind(serde_json::json!([{ "name": "pg-machine", "host": "pg-host" }]).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let machines = load_machine_config(&sqlite_db, Some(&pool)).await;
+
+        assert_eq!(
+            machines,
+            vec![("pg-machine".to_string(), "pg-host.local".to_string())]
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_uses_hostname_when_postgres_is_unconfigured() {
+        let sqlite_db = crate::db::test_db();
+        {
+            let conn = sqlite_db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![
+                    "machines",
+                    serde_json::json!([{ "name": "stale-sqlite-machine", "host": "stale-host" }])
+                        .to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let hostname = crate::services::platform::hostname_short();
+
+        let machines = load_machine_config(&sqlite_db, Some(&pool)).await;
+
+        assert_eq!(machines, vec![(hostname.clone(), hostname)]);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_uses_hostname_for_empty_postgres_config() {
+        let sqlite_db = crate::db::test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind("machines")
+        .bind("[]")
+        .execute(&pool)
+        .await
+        .unwrap();
+        let hostname = crate::services::platform::hostname_short();
+
+        let machines = load_machine_config(&sqlite_db, Some(&pool)).await;
+
+        assert_eq!(machines, vec![(hostname.clone(), hostname)]);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_uses_sqlite_without_pg_pool() {
+        let sqlite_db = crate::db::test_db();
+        {
+            let conn = sqlite_db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![
+                    "machines",
+                    serde_json::json!([{ "name": "sqlite-machine", "host": "sqlite-host" }])
+                        .to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let machines = load_machine_config(&sqlite_db, None).await;
+
+        assert_eq!(
+            machines,
+            vec![(
+                "sqlite-machine".to_string(),
+                "sqlite-host.local".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_uses_hostname_for_invalid_sqlite_entries() {
+        let sqlite_db = crate::db::test_db();
+        {
+            let conn = sqlite_db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                libsql_rusqlite::params![
+                    "machines",
+                    serde_json::json!([{ "host": "missing-name" }]).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        let hostname = crate::services::platform::hostname_short();
+
+        let machines = load_machine_config(&sqlite_db, None).await;
+
+        assert_eq!(machines, vec![(hostname.clone(), hostname)]);
+    }
+
+    #[tokio::test]
+    async fn machine_status_machines_config_falls_back_to_hostname_when_unconfigured() {
+        let sqlite_db = crate::db::test_db();
+        let hostname = crate::services::platform::hostname_short();
+
+        let machines = load_machine_config(&sqlite_db, None).await;
+
+        assert_eq!(machines, vec![(hostname.clone(), hostname)]);
     }
 
     #[test]

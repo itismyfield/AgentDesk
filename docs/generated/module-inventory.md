@@ -130,7 +130,7 @@
 | `server::routes::agents` | `src/server/routes/agents.rs` | 1818 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 2573 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1419 | giant-file |
-| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1389 | giant-file |
+| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1570 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 92 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 11596 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 168 |  |
@@ -250,7 +250,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 213 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 7575 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 7905 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
