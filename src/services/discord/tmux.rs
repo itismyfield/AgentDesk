@@ -488,9 +488,20 @@ struct PlaceholderSuppressContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PlaceholderSuppressDecision {
     None,
-    Preserve { reason: &'static str },
+    /// Keep the user-facing body already streamed to the placeholder; strip
+    /// the in-progress spinner/status-block suffix so the message is not
+    /// frozen mid-stream. `reason` feeds the observability log only.
+    /// `cleaned_body` is the stripped body that should be written back.
+    Preserve {
+        reason: &'static str,
+        cleaned_body: String,
+    },
     Edit(String),
     Delete,
+}
+
+fn strip_placeholder_indicators_for_preserve(text: &str) -> String {
+    strip_inprogress_indicators(text).trim_end().to_string()
 }
 
 fn decide_placeholder_suppression(
@@ -517,6 +528,7 @@ fn decide_placeholder_suppression(
             if ctx.reattach_offset_match {
                 return PlaceholderSuppressDecision::Preserve {
                     reason: "reattach-offset-match",
+                    cleaned_body: strip_placeholder_indicators_for_preserve(ctx.last_edit_text),
                 };
             }
             match suppressed_placeholder_action(
@@ -546,6 +558,7 @@ fn decide_placeholder_suppression(
                 SuppressedPlaceholderAction::Edit(_) if preserves_body => {
                     PlaceholderSuppressDecision::Preserve {
                         reason: "background-or-subagent-kind",
+                        cleaned_body: strip_placeholder_indicators_for_preserve(ctx.last_edit_text),
                     }
                 }
                 SuppressedPlaceholderAction::Edit(content) => {
@@ -567,13 +580,40 @@ async fn apply_placeholder_suppression(
 ) {
     match decision {
         PlaceholderSuppressDecision::None => {}
-        PlaceholderSuppressDecision::Preserve { reason } => {
+        PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
             tracing::info!(
                 "  [{ts}] 👁 {} preserved placeholder ({reason}){detail_suffix}",
                 origin.log_scope()
             );
+            if let Some(msg_id) = placeholder_msg_id {
+                if cleaned_body.is_empty() {
+                    let _ = channel_id.delete_message(http, msg_id).await;
+                } else {
+                    rate_limit_wait(shared, channel_id).await;
+                    if let Err(error) = channel_id
+                        .edit_message(
+                            http,
+                            msg_id,
+                            serenity::EditMessage::new().content(&cleaned_body),
+                        )
+                        .await
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ {} preserve finalize edit failed for channel {} msg {}: {}",
+                            origin.log_scope(),
+                            channel_id.get(),
+                            msg_id.get(),
+                            error
+                        );
+                    }
+                }
+            }
         }
         PlaceholderSuppressDecision::Delete => {
             if let Some(msg_id) = placeholder_msg_id {
@@ -7167,12 +7207,36 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(
-            decide_placeholder_suppression(&ctx),
+        match decide_placeholder_suppression(&ctx) {
             PlaceholderSuppressDecision::Preserve {
-                reason: "reattach-offset-match"
+                reason: "reattach-offset-match",
+                cleaned_body,
+            } => {
+                assert_eq!(cleaned_body, "already delivered body");
             }
+            other => panic!("expected Preserve reattach-offset-match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_placeholder_suppression_preserve_strips_inprogress_indicators() {
+        let ctx = test_placeholder_suppress_context(
+            PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+            Some(MessageId::new(1)),
+            42,
+            "real body\n\n⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed\n",
+            "AgentDesk-claude-adk-cc",
+            None,
+            true,
         );
+        match decide_placeholder_suppression(&ctx) {
+            PlaceholderSuppressDecision::Preserve { cleaned_body, .. } => {
+                assert_eq!(cleaned_body, "real body");
+                assert!(!cleaned_body.contains("⠼"));
+                assert!(!cleaned_body.contains("⚙"));
+            }
+            other => panic!("expected Preserve with stripped body, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7205,12 +7269,15 @@ mod tests {
             Some(TaskNotificationKind::Background),
             false,
         );
-        assert_eq!(
-            decide_placeholder_suppression(&ctx),
+        match decide_placeholder_suppression(&ctx) {
             PlaceholderSuppressDecision::Preserve {
-                reason: "background-or-subagent-kind"
+                reason: "background-or-subagent-kind",
+                cleaned_body,
+            } => {
+                assert_eq!(cleaned_body, "live user-facing content");
             }
-        );
+            other => panic!("expected Preserve background-or-subagent-kind, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7224,12 +7291,15 @@ mod tests {
             Some(TaskNotificationKind::Subagent),
             false,
         );
-        assert_eq!(
-            decide_placeholder_suppression(&ctx),
+        match decide_placeholder_suppression(&ctx) {
             PlaceholderSuppressDecision::Preserve {
-                reason: "background-or-subagent-kind"
+                reason: "background-or-subagent-kind",
+                cleaned_body,
+            } => {
+                assert_eq!(cleaned_body, "subagent body");
             }
-        );
+            other => panic!("expected Preserve background-or-subagent-kind, got {other:?}"),
+        }
     }
 
     #[test]
