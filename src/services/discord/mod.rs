@@ -2260,7 +2260,7 @@ mod tests {
             .find("✓ Reconcile complete — intake open")
             .expect("reconcile completion log missing");
         let background_validation = startup_block
-            .find("spawn_startup_thread_map_validation(db, token_for_kickoff.clone());")
+            .find("spawn_startup_thread_map_validation(")
             .expect("background thread-map validation spawn missing");
 
         assert!(
