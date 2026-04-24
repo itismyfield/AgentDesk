@@ -600,6 +600,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
+        channel_rosters: dashmap::DashMap::new(),
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: token_hash.clone(),

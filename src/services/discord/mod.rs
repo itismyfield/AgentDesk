@@ -504,6 +504,40 @@ pub(super) struct CoreState {
     active_meetings: HashMap<ChannelId, meeting::Meeting>,
 }
 
+const CHANNEL_ROSTER_MAX_USERS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UserRecord {
+    pub(super) id: UserId,
+    pub(super) name: String,
+}
+
+impl UserRecord {
+    pub(super) fn new(id: UserId, name: &str) -> Self {
+        let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let base = if collapsed.is_empty() {
+            format!("user {}", id.get())
+        } else {
+            collapsed
+        };
+        let sanitized = base
+            .chars()
+            .map(|ch| match ch {
+                '\r' | '\n' => ' ',
+                _ => ch,
+            })
+            .collect::<String>();
+        Self {
+            id,
+            name: sanitized.split_whitespace().collect::<Vec<_>>().join(" "),
+        }
+    }
+
+    pub(super) fn label(&self) -> String {
+        format!("{} (ID: {})", self.name, self.id.get())
+    }
+}
+
 /// Shared state for the Discord bot — split into independently-lockable groups
 pub(super) struct SharedData {
     /// Core state (sessions + request lifecycle) — requires atomic access
@@ -599,6 +633,8 @@ pub(super) struct SharedData {
     pub(super) last_message_ids: dashmap::DashMap<ChannelId, u64>,
     /// Per-channel turn start time — used for metrics duration calculation.
     pub(super) turn_start_times: dashmap::DashMap<ChannelId, std::time::Instant>,
+    /// Per-channel known speakers collected lazily from incoming messages.
+    pub(super) channel_rosters: dashmap::DashMap<ChannelId, Vec<UserRecord>>,
     /// Cached serenity context for deferred queue drain (set once during ready event).
     pub(super) cached_serenity_ctx: tokio::sync::OnceCell<serenity::Context>,
     /// Cached bot token for deferred queue drain.
@@ -641,6 +677,47 @@ impl SharedData {
             .entry(channel_id)
             .or_insert_with(|| Arc::new(TmuxRelayCoord::new()))
             .clone()
+    }
+
+    pub(super) fn record_channel_speaker(
+        &self,
+        channel_id: ChannelId,
+        user_id: UserId,
+        user_name: &str,
+        is_dm: bool,
+    ) {
+        let record = UserRecord::new(user_id, user_name);
+        if is_dm {
+            self.channel_rosters.insert(channel_id, vec![record]);
+            return;
+        }
+
+        match self.channel_rosters.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let roster = entry.get_mut();
+                if let Some(existing) = roster.iter_mut().find(|user| user.id == user_id) {
+                    existing.name = record.name;
+                } else if roster.len() < CHANNEL_ROSTER_MAX_USERS {
+                    roster.push(record);
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(vec![record]);
+            }
+        }
+    }
+
+    pub(super) fn channel_roster(
+        &self,
+        channel_id: ChannelId,
+        fallback_user_id: UserId,
+        fallback_user_name: &str,
+    ) -> Vec<UserRecord> {
+        self.channel_rosters
+            .get(&channel_id)
+            .map(|entry| entry.clone())
+            .filter(|users| !users.is_empty())
+            .unwrap_or_else(|| vec![UserRecord::new(fallback_user_id, fallback_user_name)])
     }
 }
 
@@ -691,6 +768,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
+        channel_rosters: dashmap::DashMap::new(),
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: "test-token-hash".to_string(),

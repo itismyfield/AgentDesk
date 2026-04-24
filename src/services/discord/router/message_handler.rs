@@ -242,9 +242,17 @@ fn normalize_turn_author_name(request_owner_name: &str, request_owner: UserId) -
     sanitized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn build_turn_author_prefix(request_owner_name: &str, request_owner: UserId) -> String {
+fn wrap_user_prompt_with_author(
+    request_owner_name: &str,
+    request_owner: UserId,
+    sanitized_prompt: String,
+) -> String {
     let author = normalize_turn_author_name(request_owner_name, request_owner);
-    format!("[from {author}]\nauthor_id: {}", request_owner.get())
+    format!(
+        "[User: {author} (ID: {})]\n{}",
+        request_owner.get(),
+        sanitized_prompt
+    )
 }
 
 pub(in crate::services::discord) async fn start_headless_turn(
@@ -266,6 +274,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
     }
 
     let request_owner = UserId::new(1);
+    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, false);
     let user_msg_id = next_headless_turn_message_id();
     let placeholder_msg_id = next_headless_turn_message_id();
     let mut session_reset_reason = None;
@@ -521,7 +530,6 @@ pub(in crate::services::discord) async fn start_headless_turn(
         dispatch_profile,
         &memory_recall,
     );
-    context_chunks.push(build_turn_author_prefix(request_owner_name, request_owner));
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
@@ -537,7 +545,11 @@ pub(in crate::services::discord) async fn start_headless_turn(
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
     }
-    context_chunks.push(ai_screen::sanitize_user_input(prompt));
+    context_chunks.push(wrap_user_prompt_with_author(
+        request_owner_name,
+        request_owner,
+        ai_screen::sanitize_user_input(prompt),
+    ));
     let context_prompt = context_chunks.join("\n\n");
 
     let discord_context = build_system_discord_context(
@@ -550,8 +562,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
     let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
+    let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
     let system_prompt_owned = build_system_prompt(
         &discord_context,
+        &channel_participants,
         &current_path,
         channel_id,
         token,
@@ -1460,6 +1474,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         Some(serenity::Channel::Private(_))
     );
     let is_dm_channel = super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
+    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
     let dm_default_agent = if is_dm_channel {
         super::super::agentdesk_config::resolve_dm_default_agent(&provider)
     } else {
@@ -2228,7 +2243,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         dispatch_profile,
         &memory_recall,
     );
-    context_chunks.push(build_turn_author_prefix(request_owner_name, request_owner));
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
@@ -2241,7 +2255,11 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
     }
-    context_chunks.push(sanitized_input);
+    context_chunks.push(wrap_user_prompt_with_author(
+        request_owner_name,
+        request_owner,
+        sanitized_input,
+    ));
     let context_prompt = context_chunks.join("\n\n");
 
     // Build Discord context info
@@ -2271,9 +2289,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
+    let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
 
     let system_prompt_owned = build_system_prompt(
         &discord_context,
+        &channel_participants,
         &current_path,
         channel_id,
         token,
@@ -5111,10 +5131,26 @@ mod tests {
     }
 
     #[test]
-    fn build_turn_author_prefix_starts_with_from_header() {
-        let prefix = build_turn_author_prefix("  Alice [ops]\nteam  ", UserId::new(77));
+    fn wrap_user_prompt_with_author_adds_user_prefix() {
+        let prompt = wrap_user_prompt_with_author(
+            "  Alice [ops]\nteam  ",
+            UserId::new(77),
+            "deploy it".to_string(),
+        );
 
-        assert_eq!(prefix, "[from Alice (ops) team]\nauthor_id: 77");
+        assert_eq!(prompt, "[User: Alice (ops) team (ID: 77)]\ndeploy it");
+    }
+
+    #[test]
+    fn dm_channel_roster_keeps_single_requester() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(42);
+        shared.record_channel_speaker(channel_id, UserId::new(101), "Alice", false);
+        shared.record_channel_speaker(channel_id, UserId::new(202), "Bob", false);
+        shared.record_channel_speaker(channel_id, UserId::new(101), "Alice", true);
+
+        let roster = shared.channel_roster(channel_id, UserId::new(999), "Fallback");
+        assert_eq!(roster, vec![UserRecord::new(UserId::new(101), "Alice")]);
     }
 
     #[test]
@@ -5128,6 +5164,7 @@ mod tests {
 
         let alice_system = prompt_builder::build_system_prompt(
             &discord_context,
+            &[],
             "/tmp/work",
             ChannelId::new(9001),
             "token",
@@ -5143,6 +5180,7 @@ mod tests {
         );
         let bob_system = prompt_builder::build_system_prompt(
             &discord_context,
+            &[],
             "/tmp/work",
             ChannelId::new(9001),
             "token",
@@ -5159,19 +5197,13 @@ mod tests {
 
         assert_eq!(alice_system.as_bytes(), bob_system.as_bytes());
 
-        let alice_user_prompt = [
-            build_turn_author_prefix("Alice", UserId::new(101)),
-            "same task".to_string(),
-        ]
-        .join("\n\n");
-        let bob_user_prompt = [
-            build_turn_author_prefix("Bob", UserId::new(202)),
-            "same task".to_string(),
-        ]
-        .join("\n\n");
+        let alice_user_prompt =
+            wrap_user_prompt_with_author("Alice", UserId::new(101), "same task".to_string());
+        let bob_user_prompt =
+            wrap_user_prompt_with_author("Bob", UserId::new(202), "same task".to_string());
 
-        assert!(alice_user_prompt.starts_with("[from Alice]\nauthor_id: 101"));
-        assert!(bob_user_prompt.starts_with("[from Bob]\nauthor_id: 202"));
+        assert!(alice_user_prompt.starts_with("[User: Alice (ID: 101)]"));
+        assert!(bob_user_prompt.starts_with("[User: Bob (ID: 202)]"));
         assert_ne!(alice_user_prompt, bob_user_prompt);
     }
 }

@@ -314,6 +314,7 @@ fn default_shared_prompt() -> &'static str {
 ## Communication
 - Respond in the user's language.
 - Be concise and direct.
+- Discord 발신자는 `[User: NAME (ID: N)]` prefix로 구분한다. 발신자가 바뀌어도 이전 요청자의 의도를 자동으로 무효화하지 않는다.
 
 ## Work Style
 - Plan before implementing.
