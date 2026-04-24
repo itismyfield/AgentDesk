@@ -177,7 +177,7 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 | `merge-automation.js` | PR auto-merge, worktree cleanup after merge |
 | `deploy-pipeline.js` | E2E test dispatch and deploy stage advancement |
 
-Policies are not checked into the repository — they are created at runtime and loaded from the configured `policies.dir` path.
+Repository policy files under `policies/` are canonical for shipped behavior. Release copies under `~/.adk/release/policies/` are deployment replicas, and operator-local policy directories are extensions selected by `policies.dir`. For the complete policy/config source map, see [`docs/source-of-truth.md`](docs/source-of-truth.md).
 
 ### Policy Tests
 Local policy development now has a dedicated Node runner for the repository copies under `policies/`.
@@ -601,7 +601,7 @@ AgentDesk/
 │       ├── turn_orchestrator.rs # Turn lifecycle management
 │       ├── retrospectives.rs   # Terminal card retrospectives
 │       └── api_friction.rs     # API friction reporting
-├── policies/                   # JavaScript policy files (hot-reload, runtime-only)
+├── policies/                   # JavaScript policy files (repo canonical; release mirror hot-reload)
 ├── dashboard/                  # React 19 + TypeScript + Vite + Tailwind
 ├── docs/                       # ADRs and design documents
 └── scripts/                    # Install, build, deploy, verify scripts

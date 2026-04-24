@@ -1,3 +1,9 @@
+---
+deprecated: true
+deprecated_by: docs/source-of-truth.md
+deprecated_note: "Legacy architecture/config references are retained for context only; use docs/source-of-truth.md for canonical operational paths."
+---
+
 # AgentDesk Architecture
 
 > AI 에이전트 조직을 원격으로 운영하는 단일 바이너리 오케스트레이션 플랫폼
