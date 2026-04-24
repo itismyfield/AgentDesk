@@ -5,6 +5,7 @@ use std::time::Duration;
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::Row;
 
 use crate::server::routes;
 
@@ -296,6 +297,99 @@ pub(crate) fn get_kv_value(key: &str) -> Result<Option<String>, String> {
             .fetch_optional(&bridge_pool)
             .await
             .map_err(|err| format!("load pg kv_meta {key}: {err}"))
+        },
+        |error| error,
+    )
+}
+
+fn format_quality_rate(value: Option<f64>, unavailable: bool) -> String {
+    if unavailable {
+        return "측정 불가".to_string();
+    }
+    value
+        .map(|rate| format!("{:.1}%", rate * 100.0))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+pub(crate) fn get_agent_quality_prompt_section(agent_id: &str) -> Result<Option<String>, String> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() {
+        return Ok(None);
+    }
+    let ctx = load_context()?;
+    let Some(pool) = ctx.pg_pool.as_ref() else {
+        return Ok(None);
+    };
+    let agent_id_owned = agent_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            let row = sqlx::query(
+                "SELECT to_char(day, 'YYYY-MM-DD') AS day_text,
+                        sample_size_7d,
+                        measurement_unavailable_7d,
+                        turn_sample_size_7d,
+                        turn_success_rate_7d,
+                        review_sample_size_7d,
+                        review_pass_rate_7d,
+                        turn_success_rate_30d,
+                        review_pass_rate_30d
+                 FROM agent_quality_daily
+                 WHERE agent_id = $1
+                 ORDER BY day DESC
+                 LIMIT 1",
+            )
+            .bind(&agent_id_owned)
+            .fetch_optional(&bridge_pool)
+            .await
+            .map_err(|err| format!("load agent quality prompt section {agent_id_owned}: {err}"))?;
+
+            let Some(row) = row else {
+                return Ok(None);
+            };
+
+            let day: String = row
+                .try_get("day_text")
+                .map_err(|err| format!("decode quality prompt day: {err}"))?;
+            let sample_size: i64 = row
+                .try_get("sample_size_7d")
+                .map_err(|err| format!("decode quality prompt sample size: {err}"))?;
+            let unavailable: bool = row
+                .try_get("measurement_unavailable_7d")
+                .map_err(|err| format!("decode quality prompt unavailable: {err}"))?;
+            let turn_sample: i64 = row
+                .try_get("turn_sample_size_7d")
+                .map_err(|err| format!("decode quality prompt turn sample: {err}"))?;
+            let review_sample: i64 = row
+                .try_get("review_sample_size_7d")
+                .map_err(|err| format!("decode quality prompt review sample: {err}"))?;
+            let turn_7d: Option<f64> = row
+                .try_get("turn_success_rate_7d")
+                .map_err(|err| format!("decode quality prompt turn 7d: {err}"))?;
+            let review_7d: Option<f64> = row
+                .try_get("review_pass_rate_7d")
+                .map_err(|err| format!("decode quality prompt review 7d: {err}"))?;
+            let turn_30d: Option<f64> = row
+                .try_get("turn_success_rate_30d")
+                .map_err(|err| format!("decode quality prompt turn 30d: {err}"))?;
+            let review_30d: Option<f64> = row
+                .try_get("review_pass_rate_30d")
+                .map_err(|err| format!("decode quality prompt review 30d: {err}"))?;
+
+            let section = format!(
+                "[Agent Performance — Last 7 Days]\n\
+                 - Latest rollup day: {day}\n\
+                 - sample_size: {sample_size}{}\n\
+                 - turn success rate: {} (30d baseline: {}, n={turn_sample})\n\
+                 - review pass rate: {} (30d baseline: {}, n={review_sample})\n\
+                 - Self-feedback: when a rate is down or unavailable, keep turns smaller, verify before final status, and leave explicit evidence.",
+                if unavailable { " / 측정 불가" } else { "" },
+                format_quality_rate(turn_7d, unavailable),
+                format_quality_rate(turn_30d, false),
+                format_quality_rate(review_7d, unavailable),
+                format_quality_rate(review_30d, false),
+            );
+            Ok(Some(section))
         },
         |error| error,
     )

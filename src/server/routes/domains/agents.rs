@@ -18,11 +18,16 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/agents/setup", post(agents_setup::setup_agent))
             .route(
+                "/agents/quality/ranking",
+                get(agents::agents_quality_ranking),
+            )
+            .route(
                 "/agents/{id}",
                 get(agents_crud::get_agent)
                     .patch(agents_crud::update_agent)
                     .delete(agents_crud::delete_agent),
             )
+            .route("/agents/{id}/quality", get(agents::agent_quality))
             .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
             .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))

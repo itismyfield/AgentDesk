@@ -26,6 +26,14 @@ const DEFAULT_QUALITY_LIMIT: usize = 200;
 const MAX_QUALITY_LIMIT: usize = 500;
 const DEFAULT_QUALITY_DAYS: i64 = 7;
 const MAX_QUALITY_DAYS: i64 = 365;
+const DEFAULT_QUALITY_DAILY_LIMIT: usize = 60;
+const MAX_QUALITY_DAILY_LIMIT: usize = 180;
+const DEFAULT_QUALITY_RANKING_LIMIT: usize = 50;
+const MAX_QUALITY_RANKING_LIMIT: usize = 200;
+const QUALITY_SAMPLE_GUARD: i64 = 5;
+const QUALITY_ALERT_DEDUPE_MS: i64 = 24 * 60 * 60 * 1000;
+const QUALITY_REVIEW_DROP_THRESHOLD: f64 = 0.20;
+const QUALITY_TURN_DROP_THRESHOLD: f64 = 0.15;
 const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
     "turn_start",
     "turn_complete",
@@ -311,6 +319,76 @@ pub struct AgentQualityEventRecord {
     pub event_type: String,
     pub payload: Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualityWindow {
+    pub days: i64,
+    pub sample_size: i64,
+    pub measurement_unavailable: bool,
+    pub measurement_label: Option<String>,
+    pub turn_sample_size: i64,
+    pub turn_success_rate: Option<f64>,
+    pub review_sample_size: i64,
+    pub review_pass_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualityDailyRecord {
+    pub agent_id: String,
+    pub day: String,
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub turn_success_count: i64,
+    pub turn_error_count: i64,
+    pub review_pass_count: i64,
+    pub review_fail_count: i64,
+    pub turn_sample_size: i64,
+    pub review_sample_size: i64,
+    pub sample_size: i64,
+    pub turn_success_rate: Option<f64>,
+    pub review_pass_rate: Option<f64>,
+    pub rolling_7d: AgentQualityWindow,
+    pub rolling_30d: AgentQualityWindow,
+    pub computed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualitySummary {
+    pub generated_at: String,
+    pub agent_id: String,
+    pub latest: Option<AgentQualityDailyRecord>,
+    pub daily: Vec<AgentQualityDailyRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualityRankingEntry {
+    pub rank: i64,
+    pub agent_id: String,
+    pub agent_name: Option<String>,
+    pub provider: Option<String>,
+    pub channel_id: Option<String>,
+    pub latest_day: String,
+    pub rolling_7d: AgentQualityWindow,
+    pub rolling_30d: AgentQualityWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualityRankingResponse {
+    pub generated_at: String,
+    pub agents: Vec<AgentQualityRankingEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQualityRollupReport {
+    pub upserted_rows: u64,
+    pub alert_count: u64,
 }
 
 static OBSERVABILITY_RUNTIME: OnceLock<Arc<ObservabilityRuntime>> = OnceLock::new();
@@ -881,6 +959,86 @@ pub async fn query_agent_quality_events(
     query_agent_quality_events_sqlite(&conn, filters.agent_id.as_deref(), days, limit)
 }
 
+pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRollupReport> {
+    let upserted_rows = upsert_agent_quality_daily_pg(pool).await?;
+    let alert_count = enqueue_quality_regression_alerts_pg(pool).await?;
+    Ok(AgentQualityRollupReport {
+        upserted_rows,
+        alert_count,
+    })
+}
+
+pub async fn query_agent_quality_summary(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    agent_id: &str,
+    days: i64,
+    limit: usize,
+) -> Result<AgentQualitySummary> {
+    let days = normalized_quality_days(days);
+    let limit = normalized_quality_daily_limit(limit);
+    let daily = if let Some(pool) = pg_pool {
+        match query_agent_quality_daily_pg(pool, Some(agent_id), days, limit).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!("[quality] postgres daily query failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let daily = if pg_pool.is_some() {
+        daily
+    } else {
+        let conn = db
+            .read_conn()
+            .map_err(|error| anyhow!("db read connection for agent quality daily: {error}"))?;
+        query_agent_quality_daily_sqlite(&conn, Some(agent_id), days, limit)?
+    };
+
+    Ok(AgentQualitySummary {
+        generated_at: now_kst(),
+        agent_id: agent_id.to_string(),
+        latest: daily.first().cloned(),
+        daily,
+    })
+}
+
+pub async fn query_agent_quality_ranking(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    limit: usize,
+) -> Result<AgentQualityRankingResponse> {
+    let limit = normalized_quality_ranking_limit(limit);
+    let agents = if let Some(pool) = pg_pool {
+        match query_agent_quality_ranking_pg(pool, limit).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!("[quality] postgres ranking query failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let agents = if pg_pool.is_some() {
+        agents
+    } else {
+        let conn = db
+            .read_conn()
+            .map_err(|error| anyhow!("db read connection for agent quality ranking: {error}"))?;
+        query_agent_quality_ranking_sqlite(&conn, limit)?
+    };
+
+    Ok(AgentQualityRankingResponse {
+        generated_at: now_kst(),
+        agents,
+    })
+}
+
 pub async fn query_invariant_analytics(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -1423,6 +1581,825 @@ async fn query_agent_quality_events_pg(
         .collect()
 }
 
+async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
+    let row_count = sqlx::query_scalar::<_, i64>(
+        "WITH daily_counts AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    MAX(provider) FILTER (WHERE provider IS NOT NULL AND btrim(provider) <> '') AS provider,
+                    MAX(channel_id) FILTER (WHERE channel_id IS NOT NULL AND btrim(channel_id) <> '') AS channel_id,
+                    COUNT(*) FILTER (WHERE event_type = 'turn_complete')::bigint AS turn_success_count,
+                    COUNT(*) FILTER (WHERE event_type = 'turn_error')::bigint AS turn_error_count,
+                    COUNT(*) FILTER (WHERE event_type = 'review_pass')::bigint AS review_pass_count,
+                    COUNT(*) FILTER (WHERE event_type = 'review_fail')::bigint AS review_fail_count
+             FROM agent_quality_event
+             WHERE agent_id IS NOT NULL
+               AND btrim(agent_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
+         ),
+         windowed AS (
+             SELECT d.agent_id,
+                    d.day,
+                    d.provider,
+                    d.channel_id,
+                    d.turn_success_count,
+                    d.turn_error_count,
+                    d.review_pass_count,
+                    d.review_fail_count,
+                    d.turn_success_count + d.turn_error_count AS turn_sample_size,
+                    d.review_pass_count + d.review_fail_count AS review_sample_size,
+                    d.turn_success_count + d.turn_error_count + d.review_pass_count + d.review_fail_count AS sample_size,
+                    COALESCE(SUM(w.turn_success_count) FILTER (WHERE w.day >= d.day - 6), 0)::bigint AS turn_success_count_7d,
+                    COALESCE(SUM(w.turn_error_count) FILTER (WHERE w.day >= d.day - 6), 0)::bigint AS turn_error_count_7d,
+                    COALESCE(SUM(w.review_pass_count) FILTER (WHERE w.day >= d.day - 6), 0)::bigint AS review_pass_count_7d,
+                    COALESCE(SUM(w.review_fail_count) FILTER (WHERE w.day >= d.day - 6), 0)::bigint AS review_fail_count_7d,
+                    COALESCE(SUM(w.turn_success_count), 0)::bigint AS turn_success_count_30d,
+                    COALESCE(SUM(w.turn_error_count), 0)::bigint AS turn_error_count_30d,
+                    COALESCE(SUM(w.review_pass_count), 0)::bigint AS review_pass_count_30d,
+                    COALESCE(SUM(w.review_fail_count), 0)::bigint AS review_fail_count_30d
+             FROM daily_counts d
+             JOIN daily_counts w
+               ON w.agent_id = d.agent_id
+              AND w.day BETWEEN d.day - 29 AND d.day
+             GROUP BY d.agent_id,
+                      d.day,
+                      d.provider,
+                      d.channel_id,
+                      d.turn_success_count,
+                      d.turn_error_count,
+                      d.review_pass_count,
+                      d.review_fail_count
+         ),
+         normalized AS (
+             SELECT *,
+                    turn_success_count_7d + turn_error_count_7d AS turn_sample_size_7d,
+                    review_pass_count_7d + review_fail_count_7d AS review_sample_size_7d,
+                    turn_success_count_7d + turn_error_count_7d + review_pass_count_7d + review_fail_count_7d AS sample_size_7d,
+                    turn_success_count_30d + turn_error_count_30d AS turn_sample_size_30d,
+                    review_pass_count_30d + review_fail_count_30d AS review_sample_size_30d,
+                    turn_success_count_30d + turn_error_count_30d + review_pass_count_30d + review_fail_count_30d AS sample_size_30d
+             FROM windowed
+         ),
+         upserted AS (
+             INSERT INTO agent_quality_daily (
+                 agent_id,
+                 day,
+                 provider,
+                 channel_id,
+                 turn_success_count,
+                 turn_error_count,
+                 review_pass_count,
+                 review_fail_count,
+                 turn_sample_size,
+                 review_sample_size,
+                 sample_size,
+                 turn_success_rate,
+                 review_pass_rate,
+                 turn_success_count_7d,
+                 turn_error_count_7d,
+                 review_pass_count_7d,
+                 review_fail_count_7d,
+                 turn_sample_size_7d,
+                 review_sample_size_7d,
+                 sample_size_7d,
+                 turn_success_rate_7d,
+                 review_pass_rate_7d,
+                 measurement_unavailable_7d,
+                 turn_success_count_30d,
+                 turn_error_count_30d,
+                 review_pass_count_30d,
+                 review_fail_count_30d,
+                 turn_sample_size_30d,
+                 review_sample_size_30d,
+                 sample_size_30d,
+                 turn_success_rate_30d,
+                 review_pass_rate_30d,
+                 measurement_unavailable_30d,
+                 computed_at
+             )
+             SELECT agent_id,
+                    day,
+                    provider,
+                    channel_id,
+                    turn_success_count,
+                    turn_error_count,
+                    review_pass_count,
+                    review_fail_count,
+                    turn_sample_size,
+                    review_sample_size,
+                    sample_size,
+                    CASE WHEN turn_sample_size > 0 THEN turn_success_count::double precision / turn_sample_size ELSE NULL END,
+                    CASE WHEN review_sample_size > 0 THEN review_pass_count::double precision / review_sample_size ELSE NULL END,
+                    turn_success_count_7d,
+                    turn_error_count_7d,
+                    review_pass_count_7d,
+                    review_fail_count_7d,
+                    turn_sample_size_7d,
+                    review_sample_size_7d,
+                    sample_size_7d,
+                    CASE WHEN turn_sample_size_7d > 0 THEN turn_success_count_7d::double precision / turn_sample_size_7d ELSE NULL END,
+                    CASE WHEN review_sample_size_7d > 0 THEN review_pass_count_7d::double precision / review_sample_size_7d ELSE NULL END,
+                    sample_size_7d < $1,
+                    turn_success_count_30d,
+                    turn_error_count_30d,
+                    review_pass_count_30d,
+                    review_fail_count_30d,
+                    turn_sample_size_30d,
+                    review_sample_size_30d,
+                    sample_size_30d,
+                    CASE WHEN turn_sample_size_30d > 0 THEN turn_success_count_30d::double precision / turn_sample_size_30d ELSE NULL END,
+                    CASE WHEN review_sample_size_30d > 0 THEN review_pass_count_30d::double precision / review_sample_size_30d ELSE NULL END,
+                    sample_size_30d < $1,
+                    NOW()
+             FROM normalized
+             ON CONFLICT (agent_id, day) DO UPDATE SET
+                 provider = EXCLUDED.provider,
+                 channel_id = EXCLUDED.channel_id,
+                 turn_success_count = EXCLUDED.turn_success_count,
+                 turn_error_count = EXCLUDED.turn_error_count,
+                 review_pass_count = EXCLUDED.review_pass_count,
+                 review_fail_count = EXCLUDED.review_fail_count,
+                 turn_sample_size = EXCLUDED.turn_sample_size,
+                 review_sample_size = EXCLUDED.review_sample_size,
+                 sample_size = EXCLUDED.sample_size,
+                 turn_success_rate = EXCLUDED.turn_success_rate,
+                 review_pass_rate = EXCLUDED.review_pass_rate,
+                 turn_success_count_7d = EXCLUDED.turn_success_count_7d,
+                 turn_error_count_7d = EXCLUDED.turn_error_count_7d,
+                 review_pass_count_7d = EXCLUDED.review_pass_count_7d,
+                 review_fail_count_7d = EXCLUDED.review_fail_count_7d,
+                 turn_sample_size_7d = EXCLUDED.turn_sample_size_7d,
+                 review_sample_size_7d = EXCLUDED.review_sample_size_7d,
+                 sample_size_7d = EXCLUDED.sample_size_7d,
+                 turn_success_rate_7d = EXCLUDED.turn_success_rate_7d,
+                 review_pass_rate_7d = EXCLUDED.review_pass_rate_7d,
+                 measurement_unavailable_7d = EXCLUDED.measurement_unavailable_7d,
+                 turn_success_count_30d = EXCLUDED.turn_success_count_30d,
+                 turn_error_count_30d = EXCLUDED.turn_error_count_30d,
+                 review_pass_count_30d = EXCLUDED.review_pass_count_30d,
+                 review_fail_count_30d = EXCLUDED.review_fail_count_30d,
+                 turn_sample_size_30d = EXCLUDED.turn_sample_size_30d,
+                 review_sample_size_30d = EXCLUDED.review_sample_size_30d,
+                 sample_size_30d = EXCLUDED.sample_size_30d,
+                 turn_success_rate_30d = EXCLUDED.turn_success_rate_30d,
+                 review_pass_rate_30d = EXCLUDED.review_pass_rate_30d,
+                 measurement_unavailable_30d = EXCLUDED.measurement_unavailable_30d,
+                 computed_at = EXCLUDED.computed_at
+             RETURNING 1
+         )
+         SELECT COUNT(*) FROM upserted",
+    )
+    .bind(QUALITY_SAMPLE_GUARD)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| anyhow!("upsert postgres agent quality daily: {error}"))?;
+
+    Ok(row_count.max(0) as u64)
+}
+
+fn measurement_label(unavailable: bool) -> Option<String> {
+    unavailable.then(|| "측정 불가".to_string())
+}
+
+fn quality_window(
+    days: i64,
+    sample_size: i64,
+    measurement_unavailable: bool,
+    turn_sample_size: i64,
+    turn_success_rate: Option<f64>,
+    review_sample_size: i64,
+    review_pass_rate: Option<f64>,
+) -> AgentQualityWindow {
+    AgentQualityWindow {
+        days,
+        sample_size: sample_size.max(0),
+        measurement_unavailable,
+        measurement_label: measurement_label(measurement_unavailable),
+        turn_sample_size: turn_sample_size.max(0),
+        turn_success_rate,
+        review_sample_size: review_sample_size.max(0),
+        review_pass_rate,
+    }
+}
+
+fn quality_daily_record_from_sqlite_row(
+    row: &libsql_rusqlite::Row<'_>,
+) -> libsql_rusqlite::Result<AgentQualityDailyRecord> {
+    let measurement_unavailable_7d = row.get::<_, i64>(18)? != 0;
+    let measurement_unavailable_30d = row.get::<_, i64>(24)? != 0;
+    Ok(AgentQualityDailyRecord {
+        agent_id: row.get(0)?,
+        day: row.get(1)?,
+        provider: row.get(2)?,
+        channel_id: row.get(3)?,
+        turn_success_count: row.get::<_, i64>(4)?.max(0),
+        turn_error_count: row.get::<_, i64>(5)?.max(0),
+        review_pass_count: row.get::<_, i64>(6)?.max(0),
+        review_fail_count: row.get::<_, i64>(7)?.max(0),
+        turn_sample_size: row.get::<_, i64>(8)?.max(0),
+        review_sample_size: row.get::<_, i64>(9)?.max(0),
+        sample_size: row.get::<_, i64>(10)?.max(0),
+        turn_success_rate: row.get(11)?,
+        review_pass_rate: row.get(12)?,
+        rolling_7d: quality_window(
+            7,
+            row.get(14)?,
+            measurement_unavailable_7d,
+            row.get(13)?,
+            row.get(15)?,
+            row.get(16)?,
+            row.get(17)?,
+        ),
+        rolling_30d: quality_window(
+            30,
+            row.get(20)?,
+            measurement_unavailable_30d,
+            row.get(19)?,
+            row.get(21)?,
+            row.get(22)?,
+            row.get(23)?,
+        ),
+        computed_at: row.get::<_, Option<String>>(25)?.unwrap_or_default(),
+    })
+}
+
+fn quality_daily_record_from_pg_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AgentQualityDailyRecord> {
+    let measurement_unavailable_7d = row
+        .try_get::<bool, _>("measurement_unavailable_7d")
+        .map_err(|error| anyhow!("decode measurement_unavailable_7d: {error}"))?;
+    let measurement_unavailable_30d = row
+        .try_get::<bool, _>("measurement_unavailable_30d")
+        .map_err(|error| anyhow!("decode measurement_unavailable_30d: {error}"))?;
+    Ok(AgentQualityDailyRecord {
+        agent_id: row
+            .try_get("agent_id")
+            .map_err(|error| anyhow!("decode agent quality daily agent_id: {error}"))?,
+        day: row
+            .try_get("day_text")
+            .map_err(|error| anyhow!("decode agent quality daily day: {error}"))?,
+        provider: row
+            .try_get("provider")
+            .map_err(|error| anyhow!("decode agent quality daily provider: {error}"))?,
+        channel_id: row
+            .try_get("channel_id")
+            .map_err(|error| anyhow!("decode agent quality daily channel_id: {error}"))?,
+        turn_success_count: row
+            .try_get::<i64, _>("turn_success_count")
+            .map_err(|error| anyhow!("decode turn_success_count: {error}"))?
+            .max(0),
+        turn_error_count: row
+            .try_get::<i64, _>("turn_error_count")
+            .map_err(|error| anyhow!("decode turn_error_count: {error}"))?
+            .max(0),
+        review_pass_count: row
+            .try_get::<i64, _>("review_pass_count")
+            .map_err(|error| anyhow!("decode review_pass_count: {error}"))?
+            .max(0),
+        review_fail_count: row
+            .try_get::<i64, _>("review_fail_count")
+            .map_err(|error| anyhow!("decode review_fail_count: {error}"))?
+            .max(0),
+        turn_sample_size: row
+            .try_get::<i64, _>("turn_sample_size")
+            .map_err(|error| anyhow!("decode turn_sample_size: {error}"))?
+            .max(0),
+        review_sample_size: row
+            .try_get::<i64, _>("review_sample_size")
+            .map_err(|error| anyhow!("decode review_sample_size: {error}"))?
+            .max(0),
+        sample_size: row
+            .try_get::<i64, _>("sample_size")
+            .map_err(|error| anyhow!("decode sample_size: {error}"))?
+            .max(0),
+        turn_success_rate: row
+            .try_get("turn_success_rate")
+            .map_err(|error| anyhow!("decode turn_success_rate: {error}"))?,
+        review_pass_rate: row
+            .try_get("review_pass_rate")
+            .map_err(|error| anyhow!("decode review_pass_rate: {error}"))?,
+        rolling_7d: quality_window(
+            7,
+            row.try_get("sample_size_7d")
+                .map_err(|error| anyhow!("decode sample_size_7d: {error}"))?,
+            measurement_unavailable_7d,
+            row.try_get("turn_sample_size_7d")
+                .map_err(|error| anyhow!("decode turn_sample_size_7d: {error}"))?,
+            row.try_get("turn_success_rate_7d")
+                .map_err(|error| anyhow!("decode turn_success_rate_7d: {error}"))?,
+            row.try_get("review_sample_size_7d")
+                .map_err(|error| anyhow!("decode review_sample_size_7d: {error}"))?,
+            row.try_get("review_pass_rate_7d")
+                .map_err(|error| anyhow!("decode review_pass_rate_7d: {error}"))?,
+        ),
+        rolling_30d: quality_window(
+            30,
+            row.try_get("sample_size_30d")
+                .map_err(|error| anyhow!("decode sample_size_30d: {error}"))?,
+            measurement_unavailable_30d,
+            row.try_get("turn_sample_size_30d")
+                .map_err(|error| anyhow!("decode turn_sample_size_30d: {error}"))?,
+            row.try_get("turn_success_rate_30d")
+                .map_err(|error| anyhow!("decode turn_success_rate_30d: {error}"))?,
+            row.try_get("review_sample_size_30d")
+                .map_err(|error| anyhow!("decode review_sample_size_30d: {error}"))?,
+            row.try_get("review_pass_rate_30d")
+                .map_err(|error| anyhow!("decode review_pass_rate_30d: {error}"))?,
+        ),
+        computed_at: row
+            .try_get("computed_at_kst")
+            .map_err(|error| anyhow!("decode computed_at_kst: {error}"))?,
+    })
+}
+
+fn agent_quality_daily_select_sqlite() -> &'static str {
+    "SELECT agent_id,
+            day,
+            provider,
+            channel_id,
+            turn_success_count,
+            turn_error_count,
+            review_pass_count,
+            review_fail_count,
+            turn_sample_size,
+            review_sample_size,
+            sample_size,
+            turn_success_rate,
+            review_pass_rate,
+            turn_sample_size_7d,
+            sample_size_7d,
+            turn_success_rate_7d,
+            review_sample_size_7d,
+            review_pass_rate_7d,
+            measurement_unavailable_7d,
+            turn_sample_size_30d,
+            sample_size_30d,
+            turn_success_rate_30d,
+            review_sample_size_30d,
+            review_pass_rate_30d,
+            measurement_unavailable_30d,
+            datetime(computed_at, '+9 hours') AS computed_at_kst
+     FROM agent_quality_daily"
+}
+
+fn agent_quality_daily_select_pg() -> &'static str {
+    "SELECT agent_id,
+            to_char(day, 'YYYY-MM-DD') AS day_text,
+            provider,
+            channel_id,
+            turn_success_count,
+            turn_error_count,
+            review_pass_count,
+            review_fail_count,
+            turn_sample_size,
+            review_sample_size,
+            sample_size,
+            turn_success_rate,
+            review_pass_rate,
+            turn_sample_size_7d,
+            sample_size_7d,
+            turn_success_rate_7d,
+            review_sample_size_7d,
+            review_pass_rate_7d,
+            measurement_unavailable_7d,
+            turn_sample_size_30d,
+            sample_size_30d,
+            turn_success_rate_30d,
+            review_sample_size_30d,
+            review_pass_rate_30d,
+            measurement_unavailable_30d,
+            to_char(computed_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS computed_at_kst
+     FROM agent_quality_daily"
+}
+
+fn query_agent_quality_daily_sqlite(
+    conn: &Connection,
+    agent_id: Option<&str>,
+    days: i64,
+    limit: usize,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let sql = format!(
+        "{} WHERE (?1 IS NULL OR agent_id = ?1)
+              AND day >= date('now', '-' || ?2 || ' days')
+            ORDER BY day DESC, agent_id ASC
+            LIMIT ?3",
+        agent_quality_daily_select_sqlite()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        libsql_rusqlite::params![agent_id, days, limit as i64],
+        quality_daily_record_from_sqlite_row,
+    )?;
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+}
+
+async fn query_agent_quality_daily_pg(
+    pool: &PgPool,
+    agent_id: Option<&str>,
+    days: i64,
+    limit: usize,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let sql = format!(
+        "{} WHERE ($1::text IS NULL OR agent_id = $1)
+              AND day >= (CURRENT_DATE - $2::int)
+            ORDER BY day DESC, agent_id ASC
+            LIMIT $3",
+        agent_quality_daily_select_pg()
+    );
+    let rows = sqlx::query(&sql)
+        .bind(agent_id)
+        .bind(days as i32)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| anyhow!("query postgres agent quality daily: {error}"))?;
+
+    rows.iter().map(quality_daily_record_from_pg_row).collect()
+}
+
+fn quality_ranking_entry_from_daily(
+    rank: i64,
+    record: AgentQualityDailyRecord,
+    agent_name: Option<String>,
+) -> AgentQualityRankingEntry {
+    AgentQualityRankingEntry {
+        rank,
+        agent_id: record.agent_id,
+        agent_name,
+        provider: record.provider,
+        channel_id: record.channel_id,
+        latest_day: record.day,
+        rolling_7d: record.rolling_7d,
+        rolling_30d: record.rolling_30d,
+    }
+}
+
+fn query_agent_quality_ranking_sqlite(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<AgentQualityRankingEntry>> {
+    let sql = format!(
+        "WITH latest_day AS (
+             SELECT agent_id, MAX(day) AS day
+             FROM agent_quality_daily
+             GROUP BY agent_id
+         )
+         SELECT d.agent_id,
+                d.day,
+                d.provider,
+                d.channel_id,
+                d.turn_success_count,
+                d.turn_error_count,
+                d.review_pass_count,
+                d.review_fail_count,
+                d.turn_sample_size,
+                d.review_sample_size,
+                d.sample_size,
+                d.turn_success_rate,
+                d.review_pass_rate,
+                d.turn_sample_size_7d,
+                d.sample_size_7d,
+                d.turn_success_rate_7d,
+                d.review_sample_size_7d,
+                d.review_pass_rate_7d,
+                d.measurement_unavailable_7d,
+                d.turn_sample_size_30d,
+                d.sample_size_30d,
+                d.turn_success_rate_30d,
+                d.review_sample_size_30d,
+                d.review_pass_rate_30d,
+                d.measurement_unavailable_30d,
+                datetime(d.computed_at, '+9 hours') AS computed_at_kst,
+                COALESCE(a.name_ko, a.name) AS agent_name
+         FROM agent_quality_daily d
+         JOIN latest_day latest
+           ON latest.agent_id = d.agent_id
+          AND latest.day = d.day
+         LEFT JOIN agents a
+           ON a.id = d.agent_id
+         ORDER BY d.measurement_unavailable_7d ASC,
+                  d.turn_success_rate_7d IS NULL ASC,
+                  d.turn_success_rate_7d DESC,
+                  d.review_pass_rate_7d IS NULL ASC,
+                  d.review_pass_rate_7d DESC,
+                  d.sample_size_7d DESC,
+                  d.agent_id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], |row| {
+        let record = quality_daily_record_from_sqlite_row(row)?;
+        let agent_name = row.get::<_, Option<String>>(26)?;
+        Ok((record, agent_name))
+    })?;
+    let records = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
+    Ok(records
+        .into_iter()
+        .enumerate()
+        .map(|(index, (record, agent_name))| {
+            quality_ranking_entry_from_daily((index + 1) as i64, record, agent_name)
+        })
+        .collect())
+}
+
+async fn query_agent_quality_ranking_pg(
+    pool: &PgPool,
+    limit: usize,
+) -> Result<Vec<AgentQualityRankingEntry>> {
+    let sql = format!(
+        "WITH latest AS (
+             SELECT DISTINCT ON (agent_id) *
+             FROM agent_quality_daily
+             ORDER BY agent_id, day DESC
+         ),
+         ranked AS (
+             SELECT row_number() OVER (
+                        ORDER BY measurement_unavailable_7d ASC,
+                                 turn_success_rate_7d DESC NULLS LAST,
+                                 review_pass_rate_7d DESC NULLS LAST,
+                                 sample_size_7d DESC,
+                                 agent_id ASC
+                    )::bigint AS rank,
+                    latest.*,
+                    COALESCE(a.name_ko, a.name) AS agent_name
+             FROM latest
+             LEFT JOIN agents a
+               ON a.id = latest.agent_id
+         )
+         SELECT rank,
+                agent_id,
+                to_char(day, 'YYYY-MM-DD') AS day_text,
+                provider,
+                channel_id,
+                turn_success_count,
+                turn_error_count,
+                review_pass_count,
+                review_fail_count,
+                turn_sample_size,
+                review_sample_size,
+                sample_size,
+                turn_success_rate,
+                review_pass_rate,
+                turn_sample_size_7d,
+                sample_size_7d,
+                turn_success_rate_7d,
+                review_sample_size_7d,
+                review_pass_rate_7d,
+                measurement_unavailable_7d,
+                turn_sample_size_30d,
+                sample_size_30d,
+                turn_success_rate_30d,
+                review_sample_size_30d,
+                review_pass_rate_30d,
+                measurement_unavailable_30d,
+                to_char(computed_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS computed_at_kst,
+                agent_name
+         FROM ranked
+         ORDER BY rank ASC
+         LIMIT $1"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| anyhow!("query postgres agent quality ranking: {error}"))?;
+
+    rows.iter()
+        .map(|row| {
+            let rank = row
+                .try_get::<i64, _>("rank")
+                .map_err(|error| anyhow!("decode quality rank: {error}"))?;
+            let agent_name = row
+                .try_get("agent_name")
+                .map_err(|error| anyhow!("decode quality ranking agent_name: {error}"))?;
+            Ok(quality_ranking_entry_from_daily(
+                rank,
+                quality_daily_record_from_pg_row(row)?,
+                agent_name,
+            ))
+        })
+        .collect()
+}
+
+fn normalize_channel_target(channel: &str) -> Option<String> {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return None;
+    }
+    Some(if channel.starts_with("channel:") {
+        channel.to_string()
+    } else {
+        format!("channel:{channel}")
+    })
+}
+
+async fn quality_alert_target_pg(pool: &PgPool) -> Result<Option<String>> {
+    let value = sqlx::query_scalar::<_, String>(
+        "SELECT value
+         FROM kv_meta
+         WHERE key IN ('agent_quality_monitoring_channel_id', 'kanban_human_alert_channel_id')
+           AND value IS NOT NULL
+           AND btrim(value) <> ''
+         ORDER BY CASE key
+                      WHEN 'agent_quality_monitoring_channel_id' THEN 0
+                      ELSE 1
+                  END
+         LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("load agent quality alert target: {error}"))?;
+    Ok(value.as_deref().and_then(normalize_channel_target))
+}
+
+async fn quality_alert_recently_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<bool> {
+    let last_ms =
+        sqlx::query_scalar::<_, Option<String>>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| anyhow!("load quality alert dedupe key {key}: {error}"))?
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok());
+    Ok(last_ms.is_some_and(|last_ms| now_ms.saturating_sub(last_ms) < QUALITY_ALERT_DEDUPE_MS))
+}
+
+async fn mark_quality_alert_sent_pg(pool: &PgPool, key: &str, now_ms: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(key)
+    .bind(now_ms.to_string())
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow!("mark quality alert dedupe key {key}: {error}"))?;
+    Ok(())
+}
+
+fn format_rate_for_alert(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
+}
+
+fn quality_alert_content(
+    agent_id: &str,
+    metric_label: &str,
+    rate_7d: f64,
+    rate_30d: f64,
+    sample_7d: i64,
+    sample_30d: i64,
+) -> String {
+    let drop_points = (rate_30d - rate_7d) * 100.0;
+    format!(
+        "에이전트 품질 회귀 감지: `{agent_id}` {metric_label} 7d {} / 30d {} ({drop_points:.1}%p 하락, sample {sample_7d}/{sample_30d})",
+        format_rate_for_alert(rate_7d),
+        format_rate_for_alert(rate_30d),
+    )
+}
+
+async fn enqueue_quality_alert_pg(
+    pool: &PgPool,
+    target: &str,
+    dedupe_key: &str,
+    content: &str,
+    now_ms: i64,
+) -> Result<bool> {
+    if quality_alert_recently_sent_pg(pool, dedupe_key, now_ms).await? {
+        return Ok(false);
+    }
+    let enqueued = crate::services::message_outbox::enqueue_outbox_pg(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target,
+            content,
+            bot: "notify",
+            source: "agent_quality_rollup",
+            reason_code: Some("agent_quality.regression"),
+            session_key: Some(dedupe_key),
+        },
+    )
+    .await
+    .map_err(|error| anyhow!("enqueue quality regression alert: {error}"))?;
+    if enqueued {
+        mark_quality_alert_sent_pg(pool, dedupe_key, now_ms).await?;
+    }
+    Ok(enqueued)
+}
+
+async fn enqueue_quality_regression_alerts_pg(pool: &PgPool) -> Result<u64> {
+    let Some(target) = quality_alert_target_pg(pool).await? else {
+        return Ok(0);
+    };
+
+    let rows = sqlx::query(
+        "WITH latest AS (
+             SELECT DISTINCT ON (agent_id)
+                    agent_id,
+                    day,
+                    turn_success_rate_7d,
+                    turn_success_rate_30d,
+                    review_pass_rate_7d,
+                    review_pass_rate_30d,
+                    turn_sample_size_7d,
+                    turn_sample_size_30d,
+                    review_sample_size_7d,
+                    review_sample_size_30d,
+                    measurement_unavailable_7d,
+                    measurement_unavailable_30d
+             FROM agent_quality_daily
+             ORDER BY agent_id, day DESC
+         )
+         SELECT *
+         FROM latest
+         WHERE measurement_unavailable_7d = FALSE
+           AND measurement_unavailable_30d = FALSE
+           AND (
+               (review_pass_rate_7d IS NOT NULL
+                AND review_pass_rate_30d IS NOT NULL
+                AND review_pass_rate_30d - review_pass_rate_7d > $1)
+            OR (turn_success_rate_7d IS NOT NULL
+                AND turn_success_rate_30d IS NOT NULL
+                AND turn_success_rate_30d - turn_success_rate_7d > $2)
+           )",
+    )
+    .bind(QUALITY_REVIEW_DROP_THRESHOLD)
+    .bind(QUALITY_TURN_DROP_THRESHOLD)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("query quality regression alert candidates: {error}"))?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut alert_count = 0u64;
+    for row in rows {
+        let agent_id: String = row
+            .try_get("agent_id")
+            .map_err(|error| anyhow!("decode alert agent_id: {error}"))?;
+        let review_7d: Option<f64> = row
+            .try_get("review_pass_rate_7d")
+            .map_err(|error| anyhow!("decode alert review_pass_rate_7d: {error}"))?;
+        let review_30d: Option<f64> = row
+            .try_get("review_pass_rate_30d")
+            .map_err(|error| anyhow!("decode alert review_pass_rate_30d: {error}"))?;
+        let turn_7d: Option<f64> = row
+            .try_get("turn_success_rate_7d")
+            .map_err(|error| anyhow!("decode alert turn_success_rate_7d: {error}"))?;
+        let turn_30d: Option<f64> = row
+            .try_get("turn_success_rate_30d")
+            .map_err(|error| anyhow!("decode alert turn_success_rate_30d: {error}"))?;
+        let review_sample_7d: i64 = row
+            .try_get("review_sample_size_7d")
+            .map_err(|error| anyhow!("decode alert review_sample_size_7d: {error}"))?;
+        let review_sample_30d: i64 = row
+            .try_get("review_sample_size_30d")
+            .map_err(|error| anyhow!("decode alert review_sample_size_30d: {error}"))?;
+        let turn_sample_7d: i64 = row
+            .try_get("turn_sample_size_7d")
+            .map_err(|error| anyhow!("decode alert turn_sample_size_7d: {error}"))?;
+        let turn_sample_30d: i64 = row
+            .try_get("turn_sample_size_30d")
+            .map_err(|error| anyhow!("decode alert turn_sample_size_30d: {error}"))?;
+
+        if let (Some(rate_7d), Some(rate_30d)) = (review_7d, review_30d)
+            && rate_30d - rate_7d > QUALITY_REVIEW_DROP_THRESHOLD
+        {
+            let key = format!("agent_quality_alert:{agent_id}:review_pass_rate");
+            let content = quality_alert_content(
+                &agent_id,
+                "review pass rate",
+                rate_7d,
+                rate_30d,
+                review_sample_7d,
+                review_sample_30d,
+            );
+            if enqueue_quality_alert_pg(pool, &target, &key, &content, now_ms).await? {
+                alert_count = alert_count.saturating_add(1);
+            }
+        }
+
+        if let (Some(rate_7d), Some(rate_30d)) = (turn_7d, turn_30d)
+            && rate_30d - rate_7d > QUALITY_TURN_DROP_THRESHOLD
+        {
+            let key = format!("agent_quality_alert:{agent_id}:turn_success_rate");
+            let content = quality_alert_content(
+                &agent_id,
+                "turn success rate",
+                rate_7d,
+                rate_30d,
+                turn_sample_7d,
+                turn_sample_30d,
+            );
+            if enqueue_quality_alert_pg(pool, &target, &key, &content, now_ms).await? {
+                alert_count = alert_count.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(alert_count)
+}
+
 fn query_counter_snapshots_sqlite(
     conn: &Connection,
     filters: &AnalyticsFilters,
@@ -1909,6 +2886,20 @@ fn normalized_quality_limit(limit: usize) -> usize {
     match limit {
         0 => DEFAULT_QUALITY_LIMIT,
         value => value.min(MAX_QUALITY_LIMIT),
+    }
+}
+
+fn normalized_quality_daily_limit(limit: usize) -> usize {
+    match limit {
+        0 => DEFAULT_QUALITY_DAILY_LIMIT,
+        value => value.min(MAX_QUALITY_DAILY_LIMIT),
+    }
+}
+
+fn normalized_quality_ranking_limit(limit: usize) -> usize {
+    match limit {
+        0 => DEFAULT_QUALITY_RANKING_LIMIT,
+        value => value.min(MAX_QUALITY_RANKING_LIMIT),
     }
 }
 

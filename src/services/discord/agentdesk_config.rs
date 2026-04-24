@@ -140,6 +140,7 @@ fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel
         model: None,
         reasoning_effort: None,
         peer_agents: None,
+        quality_feedback_injection: None,
     }))
 }
 
@@ -326,6 +327,7 @@ fn role_binding_from_channel(
         model: channel.model(),
         reasoning_effort: channel.reasoning_effort(),
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
+        quality_feedback_injection_enabled: channel.quality_feedback_injection().unwrap_or(true),
         memory: resolve_memory_settings(None, None),
     }
 }
@@ -338,6 +340,7 @@ fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKi
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
+        quality_feedback_injection_enabled: true,
         memory: resolve_memory_settings(None, None),
     }
 }

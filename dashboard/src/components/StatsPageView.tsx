@@ -35,6 +35,7 @@ import {
   ShieldAlert,
   Users,
 } from "lucide-react";
+import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
 
 type Period = "7d" | "30d" | "90d";
 type DailySeriesKey =
@@ -1287,6 +1288,14 @@ export default function StatsPageView({
               loading={loading}
               rows={agentCacheRows}
               overallCacheHitRate={overallCacheHitRate}
+            />
+          </div>
+
+          <div data-testid="stats-agent-quality">
+            <AgentQualityWidget
+              agents={agents ?? []}
+              t={t}
+              localeTag={localeTag}
             />
           </div>
 

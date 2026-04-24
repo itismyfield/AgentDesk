@@ -8193,6 +8193,18 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
         noop_job["state"]["nextRunAtMs"],
         json!(1_700_000_000_000i64)
     );
+    let quality_job = jobs
+        .iter()
+        .find(|job| job["id"] == "agent_quality_rollup")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "maintenance response must include agent quality rollup job",
+            )
+        })?;
+    assert_eq!(quality_job["schedule"]["kind"], "every");
+    assert_eq!(quality_job["schedule"]["everyMs"], 3_600_000);
+    assert_eq!(quality_job["enabled"], true);
 
     let cron_response = app
         .oneshot(Request::builder().uri("/cron-jobs").body(Body::empty())?)
@@ -8216,6 +8228,121 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
             )
         })?;
     assert_eq!(cron_maintenance_job["state"]["status"], "active");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    seed_test_agents(&db);
+    {
+        let conn = db.lock()?;
+        conn.execute(
+            "INSERT INTO agent_quality_daily (
+                agent_id,
+                day,
+                provider,
+                channel_id,
+                turn_success_count,
+                turn_error_count,
+                review_pass_count,
+                review_fail_count,
+                turn_sample_size,
+                review_sample_size,
+                sample_size,
+                turn_success_rate,
+                review_pass_rate,
+                turn_success_count_7d,
+                turn_error_count_7d,
+                review_pass_count_7d,
+                review_fail_count_7d,
+                turn_sample_size_7d,
+                review_sample_size_7d,
+                sample_size_7d,
+                turn_success_rate_7d,
+                review_pass_rate_7d,
+                measurement_unavailable_7d,
+                turn_success_count_30d,
+                turn_error_count_30d,
+                review_pass_count_30d,
+                review_fail_count_30d,
+                turn_sample_size_30d,
+                review_sample_size_30d,
+                sample_size_30d,
+                turn_success_rate_30d,
+                review_pass_rate_30d,
+                measurement_unavailable_30d
+             ) VALUES (
+                'agent-1',
+                date('now'),
+                'codex',
+                '555',
+                4,
+                1,
+                3,
+                1,
+                5,
+                4,
+                9,
+                0.8,
+                0.75,
+                4,
+                1,
+                3,
+                1,
+                5,
+                4,
+                9,
+                0.8,
+                0.75,
+                0,
+                20,
+                5,
+                12,
+                4,
+                25,
+                16,
+                41,
+                0.8,
+                0.75,
+                0
+             )",
+            [],
+        )?;
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-1/quality")
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["agentId"], "agent-1");
+    assert_eq!(json["latest"]["rolling7d"]["sampleSize"], 9);
+    assert_eq!(json["latest"]["rolling7d"]["measurementUnavailable"], false);
+    assert_eq!(json["latest"]["rolling7d"]["turnSuccessRate"], json!(0.8));
+    assert_eq!(json["daily"].as_array().map(Vec::len), Some(1));
+
+    let ranking_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/quality/ranking")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(ranking_response.status(), StatusCode::OK);
+    let ranking_body = axum::body::to_bytes(ranking_response.into_body(), usize::MAX).await?;
+    let ranking_json: serde_json::Value = serde_json::from_slice(&ranking_body)?;
+    assert_eq!(ranking_json["agents"][0]["agentId"], "agent-1");
 
     Ok(())
 }

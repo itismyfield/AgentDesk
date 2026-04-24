@@ -86,6 +86,8 @@ import {
   getMissionTotalXp,
   type DailyMissionViewModel,
 } from "../components/gamification/GamificationShared";
+import { AgentQualityWidget } from "../components/dashboard/ExtraWidgets";
+import type { TFunction } from "../components/dashboard/model";
 
 const OfficeView = lazy(() => import("../components/OfficeView"));
 const AchievementsPage = lazy(() => import("../components/AchievementsPage"));
@@ -123,6 +125,7 @@ const HOME_DEFAULT_WIDGETS = [
   "m_streak",
   "office",
   "missions",
+  "quality",
   "roster",
   "activity",
   "kanban",
@@ -1754,6 +1757,11 @@ function HomeOverviewPage({
   kanbanCards: KanbanCard[];
 }) {
   const tr = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
+  const t: TFunction = useCallback(
+    (messages) => (isKo ? messages.ko : messages.en ?? messages.ko),
+    [isKo],
+  );
+  const localeTag = isKo ? "ko-KR" : "en-US";
   const [editing, setEditing] = useLocalStorage<boolean>(STORAGE_KEYS.homeEditing, false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
@@ -2215,6 +2223,17 @@ function HomeOverviewPage({
           </HomeWidgetShell>
         ),
       },
+      quality: {
+        className: "lg:col-span-6",
+        render: () => (
+          <AgentQualityWidget
+            agents={agents}
+            t={t}
+            localeTag={localeTag}
+            compact
+          />
+        ),
+      },
       roster: {
         className: "lg:col-span-7",
         render: () => (
@@ -2360,6 +2379,7 @@ function HomeOverviewPage({
     }),
     [
       analytics,
+      agents,
       blockedCards,
       costTrend,
       currentOfficeLabel,
@@ -2390,6 +2410,8 @@ function HomeOverviewPage({
       missionXpLabel,
       reviewQueue,
       streakLeader,
+      t,
+      localeTag,
     ],
   );
 

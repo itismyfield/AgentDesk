@@ -1026,6 +1026,75 @@ export async function getAgentSkills(
   return request(`/api/agents/${agentId}/skills`);
 }
 
+// ── Agent Quality ──
+
+export interface AgentQualityWindow {
+  days: number;
+  sampleSize: number;
+  measurementUnavailable: boolean;
+  measurementLabel: string | null;
+  turnSampleSize: number;
+  turnSuccessRate: number | null;
+  reviewSampleSize: number;
+  reviewPassRate: number | null;
+}
+
+export interface AgentQualityDailyRecord {
+  agentId: string;
+  day: string;
+  provider: string | null;
+  channelId: string | null;
+  turnSuccessCount: number;
+  turnErrorCount: number;
+  reviewPassCount: number;
+  reviewFailCount: number;
+  turnSampleSize: number;
+  reviewSampleSize: number;
+  sampleSize: number;
+  turnSuccessRate: number | null;
+  reviewPassRate: number | null;
+  rolling7d: AgentQualityWindow;
+  rolling30d: AgentQualityWindow;
+  computedAt: string;
+}
+
+export interface AgentQualitySummary {
+  generatedAt: string;
+  agentId: string;
+  latest: AgentQualityDailyRecord | null;
+  daily: AgentQualityDailyRecord[];
+}
+
+export interface AgentQualityRankingEntry {
+  rank: number;
+  agentId: string;
+  agentName: string | null;
+  provider: string | null;
+  channelId: string | null;
+  latestDay: string;
+  rolling7d: AgentQualityWindow;
+  rolling30d: AgentQualityWindow;
+}
+
+export interface AgentQualityRankingResponse {
+  generatedAt: string;
+  agents: AgentQualityRankingEntry[];
+}
+
+export async function getAgentQuality(
+  agentId: string,
+  days = 30,
+  limit = 30,
+): Promise<AgentQualitySummary> {
+  return request(`/api/agents/${encodeURIComponent(agentId)}/quality?days=${days}&limit=${limit}`);
+}
+
+export async function getAgentQualityRanking(
+  limit = 20,
+): Promise<AgentQualityRankingResponse> {
+  return request(`/api/agents/quality/ranking?limit=${limit}`);
+}
+
 // ── Agent Timeline ──
 
 export interface TimelineEvent {

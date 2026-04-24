@@ -58,6 +58,7 @@ import {
 } from "./dashboard/HeroSections";
 import {
   AchievementWidget,
+  AgentQualityWidget,
   AutoQueueHistoryWidget,
   BottleneckWidget,
   CronTimelineWidget,
@@ -81,6 +82,7 @@ type HomeWidgetId =
   | "metric_followups"
   | "office"
   | "signals"
+  | "quality"
   | "roster"
   | "activity";
 type HomeSignalTone = "info" | "warn" | "danger" | "success";
@@ -148,6 +150,7 @@ const DEFAULT_HOME_WIDGET_ORDER: HomeWidgetId[] = [
   "metric_followups",
   "office",
   "signals",
+  "quality",
   "roster",
   "activity",
 ];
@@ -756,6 +759,17 @@ export default function DashboardPageView({
         />
       ),
     },
+    quality: {
+      className: "col-span-12 xl:col-span-6",
+      render: () => (
+        <AgentQualityWidget
+          agents={agents}
+          t={t}
+          localeTag={localeTag}
+          compact
+        />
+      ),
+    },
     roster: {
       className: "col-span-12 xl:col-span-7",
       render: () => (
@@ -1034,6 +1048,7 @@ export default function DashboardPageView({
             <HealthWidget t={t} localeTag={localeTag} />
             <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           </div>
+          <AgentQualityWidget agents={agents} t={t} localeTag={localeTag} />
           <BottleneckWidget t={t} />
       </DashboardTabPanel>
 

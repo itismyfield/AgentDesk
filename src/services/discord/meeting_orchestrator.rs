@@ -166,6 +166,7 @@ impl MeetingParticipant {
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             peer_agents_enabled: self.peer_agents_enabled,
+            quality_feedback_injection_enabled: true,
             memory: self.memory.clone(),
         }
     }
@@ -445,6 +446,7 @@ fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -
         model: agent.model.clone(),
         reasoning_effort: agent.reasoning_effort.clone(),
         peer_agents_enabled: agent.peer_agents_enabled,
+        quality_feedback_injection_enabled: true,
         memory: agent.memory.clone(),
     })
     .unwrap_or_else(|| {

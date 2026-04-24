@@ -1954,6 +1954,55 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_quality_event_correlation
             ON agent_quality_event (correlation_id, created_at DESC);",
     )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_quality_daily (
+            agent_id                       TEXT NOT NULL,
+            day                            TEXT NOT NULL,
+            provider                       TEXT,
+            channel_id                     TEXT,
+            turn_success_count             INTEGER NOT NULL DEFAULT 0,
+            turn_error_count               INTEGER NOT NULL DEFAULT 0,
+            review_pass_count              INTEGER NOT NULL DEFAULT 0,
+            review_fail_count              INTEGER NOT NULL DEFAULT 0,
+            turn_sample_size               INTEGER NOT NULL DEFAULT 0,
+            review_sample_size             INTEGER NOT NULL DEFAULT 0,
+            sample_size                    INTEGER NOT NULL DEFAULT 0,
+            turn_success_rate              REAL,
+            review_pass_rate               REAL,
+            turn_success_count_7d          INTEGER NOT NULL DEFAULT 0,
+            turn_error_count_7d            INTEGER NOT NULL DEFAULT 0,
+            review_pass_count_7d           INTEGER NOT NULL DEFAULT 0,
+            review_fail_count_7d           INTEGER NOT NULL DEFAULT 0,
+            turn_sample_size_7d            INTEGER NOT NULL DEFAULT 0,
+            review_sample_size_7d          INTEGER NOT NULL DEFAULT 0,
+            sample_size_7d                 INTEGER NOT NULL DEFAULT 0,
+            turn_success_rate_7d           REAL,
+            review_pass_rate_7d            REAL,
+            measurement_unavailable_7d     INTEGER NOT NULL DEFAULT 1,
+            turn_success_count_30d         INTEGER NOT NULL DEFAULT 0,
+            turn_error_count_30d           INTEGER NOT NULL DEFAULT 0,
+            review_pass_count_30d          INTEGER NOT NULL DEFAULT 0,
+            review_fail_count_30d          INTEGER NOT NULL DEFAULT 0,
+            turn_sample_size_30d           INTEGER NOT NULL DEFAULT 0,
+            review_sample_size_30d         INTEGER NOT NULL DEFAULT 0,
+            sample_size_30d                INTEGER NOT NULL DEFAULT 0,
+            turn_success_rate_30d          REAL,
+            review_pass_rate_30d           REAL,
+            measurement_unavailable_30d    INTEGER NOT NULL DEFAULT 1,
+            computed_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (agent_id, day)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_day
+            ON agent_quality_daily (day DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_agent_day
+            ON agent_quality_daily (agent_id, day DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_turn_success_7d
+            ON agent_quality_daily (turn_success_rate_7d DESC)
+            WHERE measurement_unavailable_7d = 0;
+        CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_review_pass_7d
+            ON agent_quality_daily (review_pass_rate_7d DESC)
+            WHERE measurement_unavailable_7d = 0;",
+    )?;
     Ok(())
 }
 

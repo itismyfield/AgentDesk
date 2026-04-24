@@ -7,6 +7,8 @@ use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
 };
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 const CONTEXT_COMPRESSION_SECTION_ORDER: &str = "`Goal`, `Progress`, `Decisions`, `Files`, `Next`";
 const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
@@ -581,6 +583,62 @@ impl DispatchProfile {
     }
 }
 
+#[derive(Clone, Debug)]
+struct AgentPerformancePromptCacheEntry {
+    hour_bucket: i64,
+    section: Option<String>,
+}
+
+static AGENT_PERFORMANCE_PROMPT_CACHE: OnceLock<
+    Mutex<HashMap<String, AgentPerformancePromptCacheEntry>>,
+> = OnceLock::new();
+
+fn agent_performance_hour_bucket() -> i64 {
+    chrono::Utc::now().timestamp() / 3600
+}
+
+fn agent_performance_prompt_section(
+    role_binding: Option<&RoleBinding>,
+    profile: DispatchProfile,
+) -> Option<String> {
+    let binding = role_binding?;
+    if profile != DispatchProfile::Full || !binding.quality_feedback_injection_enabled {
+        return None;
+    }
+
+    let hour_bucket = agent_performance_hour_bucket();
+    let cache_key = binding.role_id.clone();
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(entry) = guard.get(&cache_key)
+        && entry.hour_bucket == hour_bucket
+    {
+        return entry.section.clone();
+    }
+
+    let section = match super::internal_api::get_agent_quality_prompt_section(&binding.role_id) {
+        Ok(section) => section,
+        Err(error) => {
+            tracing::warn!(
+                role_id = %binding.role_id,
+                "[quality] failed to load agent performance prompt section: {error}"
+            );
+            return None;
+        }
+    };
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            cache_key,
+            AgentPerformancePromptCacheEntry {
+                hour_bucket,
+                section: section.clone(),
+            },
+        );
+    }
+    section
+}
+
 fn render_channel_participants(
     discord_context: &str,
     channel_participants: &[UserRecord],
@@ -762,6 +820,10 @@ pub(super) fn build_system_prompt(
     }
     if let Some(api_friction_guidance) = api_friction_guidance(profile) {
         system_prompt_owned.push_str(&api_friction_guidance);
+    }
+    if let Some(performance_section) = agent_performance_prompt_section(role_binding, profile) {
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(&performance_section);
     }
 
     if queued_turn {
@@ -1064,6 +1126,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
         let review_prompt = build_system_prompt(
@@ -1118,6 +1181,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
 
@@ -1152,6 +1216,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
 
@@ -1187,6 +1252,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
         let prompt = build_system_prompt(
@@ -1404,6 +1470,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
 
