@@ -16,6 +16,7 @@ use super::restart_report::{RestartCompletionReport, clear_restart_report, save_
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned_on_separate_conn};
+use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -76,6 +77,22 @@ fn sync_inflight_restart_mode_from_cancel(
         None => inflight_state.clear_restart_mode(),
     }
     true
+}
+
+fn merge_task_notification_kind(
+    current: Option<TaskNotificationKind>,
+    new_kind: TaskNotificationKind,
+) -> Option<TaskNotificationKind> {
+    let priority = |kind: TaskNotificationKind| match kind {
+        TaskNotificationKind::Subagent => 0,
+        TaskNotificationKind::Background => 1,
+        TaskNotificationKind::MonitorAutoTurn => 2,
+    };
+
+    match current {
+        Some(existing) if priority(existing) >= priority(new_kind) => Some(existing),
+        _ => Some(new_kind),
+    }
 }
 
 pub(super) struct TurnBridgeContext {
@@ -812,7 +829,10 @@ pub(super) fn spawn_turn_bridge(
                                 },
                             );
                         }
-                        StreamMessage::TaskNotification { summary, .. } => {
+                        StreamMessage::TaskNotification { summary, kind, .. } => {
+                            inflight_state.task_notification_kind =
+                                merge_task_notification_kind(inflight_state.task_notification_kind, kind);
+                            state_dirty = true;
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {

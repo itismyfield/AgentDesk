@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightRestartMode;
 use super::runtime_store::{atomic_write, discord_inflight_root};
+use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
 const INFLIGHT_STATE_VERSION: u32 = 5;
@@ -49,6 +50,12 @@ pub(super) struct InflightTurnState {
     pub current_tool_line: Option<String>,
     #[serde(default)]
     pub prev_tool_status: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_task_notification_kind",
+        deserialize_with = "deserialize_task_notification_kind"
+    )]
+    pub task_notification_kind: Option<TaskNotificationKind>,
     pub started_at: String,
     pub updated_at: String,
     /// Restart generation at which this turn was born.
@@ -134,6 +141,7 @@ impl InflightTurnState {
             response_sent_offset: 0,
             current_tool_line: None,
             prev_tool_status: None,
+            task_notification_kind: None,
             started_at: now.clone(),
             updated_at: now,
             born_generation: super::runtime_store::load_generation(),
@@ -172,6 +180,29 @@ impl InflightTurnState {
         self.worktree_branch = worktree_branch;
         self.base_commit = base_commit;
     }
+}
+
+fn serialize_task_notification_kind<S>(
+    value: &Option<TaskNotificationKind>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(kind) => serializer.serialize_some(kind.as_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_task_notification_kind<'de, D>(
+    deserializer: D,
+) -> Result<Option<TaskNotificationKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.as_deref().and_then(TaskNotificationKind::from_str))
 }
 
 pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
