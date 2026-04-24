@@ -18357,10 +18357,11 @@ async fn auto_queue_status_pg_exposes_explicit_thread_links_from_configured_chan
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let thread_links = json["entries"][0]["thread_links"]
         .as_array()

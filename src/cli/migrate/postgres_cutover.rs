@@ -5,6 +5,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use clap::Args;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -1779,7 +1780,7 @@ fn sqlite_cutover_counts(conn: &Connection) -> Result<SqliteCutoverCounts, Strin
         open_dispatch_outbox: query_count_if_table_exists(
             conn,
             "dispatch_outbox",
-            "SELECT COUNT(*) FROM dispatch_outbox WHERE status <> 'done' OR processed_at IS NULL",
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE status NOT IN ('done', 'failed')",
         )?,
         pending_message_outbox: query_count_if_table_exists(
             conn,
@@ -1882,11 +1883,13 @@ fn load_session_transcripts(conn: &Connection) -> Result<Vec<SessionTranscriptRo
                 agent_id: row.get(3)?,
                 provider: row.get(4)?,
                 dispatch_id: row.get(5)?,
-                user_message: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                assistant_message: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                events_json: row
-                    .get::<_, Option<String>>(8)?
-                    .unwrap_or_else(|| "[]".to_string()),
+                user_message: sanitize_pg_text(
+                    &row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                ),
+                assistant_message: sanitize_pg_text(
+                    &row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                ),
+                events_json: normalize_required_json(row.get::<_, Option<String>>(8)?, "[]"),
                 duration_ms: row.get(9)?,
                 created_at: row.get(10)?,
             })
@@ -2855,8 +2858,8 @@ fn load_all_meetings(conn: &Connection) -> Result<Vec<MeetingRow>, String> {
                 title: row.get(2)?,
                 status: row.get(3)?,
                 effective_rounds: row.get(4)?,
-                started_at: row.get(5)?,
-                completed_at: row.get(6)?,
+                started_at: sqlite_meeting_timestamp_to_pg_text(row, 5),
+                completed_at: sqlite_meeting_timestamp_to_pg_text(row, 6),
                 summary: row.get(7)?,
                 thread_id: row.get(8)?,
                 primary_provider: row.get(9)?,
@@ -2869,6 +2872,40 @@ fn load_all_meetings(conn: &Connection) -> Result<Vec<MeetingRow>, String> {
         .map_err(|e| format!("query meetings export: {e}"))?;
     rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect meetings export: {e}"))
+}
+
+fn sqlite_meeting_timestamp_to_pg_text(
+    row: &libsql_rusqlite::Row<'_>,
+    idx: usize,
+) -> Option<String> {
+    use libsql_rusqlite::types::ValueRef;
+
+    match row.get_ref(idx).ok()? {
+        ValueRef::Null => None,
+        ValueRef::Integer(value) => unix_millis_to_rfc3339(value),
+        ValueRef::Real(value) => unix_millis_to_rfc3339(value as i64),
+        ValueRef::Text(bytes) => {
+            let text = std::str::from_utf8(bytes).ok()?.trim();
+            if text.is_empty() {
+                None
+            } else if let Ok(value) = text.parse::<i64>() {
+                unix_millis_to_rfc3339(value)
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+                Some(dt.with_timezone(&Utc).to_rfc3339())
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f") {
+                Some(dt.and_utc().to_rfc3339())
+            } else {
+                Some(text.to_string())
+            }
+        }
+        ValueRef::Blob(_) => None,
+    }
+}
+
+fn unix_millis_to_rfc3339(value: i64) -> Option<String> {
+    Utc.timestamp_millis_opt(value)
+        .single()
+        .map(|dt| dt.to_rfc3339())
 }
 
 fn load_all_meeting_transcripts(conn: &Connection) -> Result<Vec<MeetingTranscriptRow>, String> {
@@ -3747,9 +3784,44 @@ fn normalize_optional_json(value: Option<String>) -> Option<String> {
         if trimmed.is_empty() {
             None
         } else {
-            Some(trimmed.to_string())
+            Some(sanitize_json_text_for_pg(trimmed))
         }
     })
+}
+
+fn sanitize_json_text_for_pg(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(mut value) => {
+            sanitize_json_value_for_pg(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| sanitize_pg_text(raw))
+        }
+        Err(_) => sanitize_pg_text(raw).replace("\\u0000", "\\uFFFD"),
+    }
+}
+
+fn sanitize_json_value_for_pg(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains('\0') {
+                *text = text.replace('\0', "\u{FFFD}");
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_json_value_for_pg(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                sanitize_json_value_for_pg(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn sanitize_pg_text(raw: &str) -> String {
+    raw.replace('\0', "\u{FFFD}")
 }
 
 fn write_archive_files(
@@ -3817,7 +3889,7 @@ async fn load_pg_cutover_counts(pool: &PgPool) -> Result<PgCutoverCounts, String
     .await
     .map_err(|e| format!("count postgres live sessions: {e}"))?;
     let open_dispatch_outbox = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM dispatch_outbox WHERE status <> 'done' OR processed_at IS NULL",
+        "SELECT COUNT(*) FROM dispatch_outbox WHERE status NOT IN ('done', 'failed')",
     )
     .fetch_one(pool)
     .await
@@ -4467,6 +4539,9 @@ async fn import_history_into_pg(
 
     let mut upserted_session_transcripts = 0i64;
     for row in session_transcripts {
+        let user_message = sanitize_pg_text(&row.user_message);
+        let assistant_message = sanitize_pg_text(&row.assistant_message);
+        let events_json = sanitize_json_text_for_pg(&row.events_json);
         let result = sqlx::query(
             "INSERT INTO session_transcripts (
                 turn_id,
@@ -4511,9 +4586,9 @@ async fn import_history_into_pg(
         .bind(&row.agent_id)
         .bind(&row.provider)
         .bind(&row.dispatch_id)
-        .bind(&row.user_message)
-        .bind(&row.assistant_message)
-        .bind(&row.events_json)
+        .bind(&user_message)
+        .bind(&assistant_message)
+        .bind(&events_json)
         .bind(row.duration_ms)
         .bind(&row.created_at)
         .execute(&mut *tx)
@@ -6329,6 +6404,33 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_cutover_counts_treats_terminal_failed_dispatch_outbox_as_closed() {
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
+        crate::db::schema::migrate(&conn).expect("sqlite migrate");
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status, processed_at, error)
+             VALUES ('dispatch-terminal-failed', 'notify', 'failed', datetime('now'), 'permanent failure')",
+            [],
+        )
+        .unwrap();
+
+        let counts = sqlite_cutover_counts(&conn).expect("count sqlite cutover state");
+        assert_eq!(counts.open_dispatch_outbox, 0);
+        assert!(!counts.has_live_state());
+
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status)
+             VALUES ('dispatch-replayable-pending', 'notify', 'pending')",
+            [],
+        )
+        .unwrap();
+
+        let counts = sqlite_cutover_counts(&conn).expect("recount sqlite cutover state");
+        assert_eq!(counts.open_dispatch_outbox, 1);
+        assert!(counts.has_live_state());
+    }
+
+    #[test]
     fn archive_only_cutover_blocks_when_live_state_exists() {
         let args = PostgresCutoverArgs {
             dry_run: false,
@@ -6458,6 +6560,41 @@ mod tests {
         assert!(blocker.contains("drain outbox"));
     }
 
+    #[tokio::test]
+    async fn pg_cutover_counts_treat_terminal_failed_dispatch_outbox_as_closed() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status, processed_at, error)
+             VALUES ('dispatch-terminal-failed', 'notify', 'failed', NOW(), 'permanent failure')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed terminal failed dispatch_outbox");
+
+        let counts = load_pg_cutover_counts(&pool)
+            .await
+            .expect("count postgres terminal failed outbox");
+        assert_eq!(counts.open_dispatch_outbox, 0);
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status)
+             VALUES ('dispatch-replayable-pending', 'notify', 'pending')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending dispatch_outbox");
+
+        let counts = load_pg_cutover_counts(&pool)
+            .await
+            .expect("count postgres pending outbox");
+        assert_eq!(counts.open_dispatch_outbox, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[test]
     fn pg_cutover_blocks_when_message_outbox_has_pending_rows() {
         let args = PostgresCutoverArgs {
@@ -6574,6 +6711,35 @@ mod tests {
         assert_eq!(snapshot.agents.len(), 1);
         assert_eq!(snapshot.kanban_cards[0].id, "card-cutover");
         assert_eq!(snapshot.agents[0].id, "project-agentdesk");
+    }
+
+    #[test]
+    fn load_sqlite_cutover_snapshot_normalizes_meeting_integer_timestamps() {
+        let conn = Connection::open_in_memory().expect("sqlite in memory");
+        crate::db::schema::migrate(&conn).expect("sqlite migrate");
+        let started_at_ms = 1_760_000_000_123_i64;
+        let completed_at_ms = 1_760_000_005_456_i64;
+        conn.execute(
+            "INSERT INTO meetings (
+                id, channel_id, title, status, effective_rounds, started_at, completed_at, created_at
+             ) VALUES (
+                'meeting-cutover', 'channel-1', 'PG cutover meeting', 'completed', 2, ?1, ?2, ?1
+             )",
+            [started_at_ms, completed_at_ms],
+        )
+        .unwrap();
+
+        let snapshot = load_sqlite_cutover_snapshot(&conn, false, true).expect("sqlite snapshot");
+
+        assert_eq!(snapshot.meetings.len(), 1);
+        assert_eq!(
+            snapshot.meetings[0].started_at.as_deref(),
+            super::unix_millis_to_rfc3339(started_at_ms).as_deref()
+        );
+        assert_eq!(
+            snapshot.meetings[0].completed_at.as_deref(),
+            super::unix_millis_to_rfc3339(completed_at_ms).as_deref()
+        );
     }
 
     #[test]

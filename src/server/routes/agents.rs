@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -527,6 +528,87 @@ fn find_agent_turn_session(
             thread_channel_id,
             runtime_channel_id,
         ) = row?;
+        let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
+        let effective = resolver.resolve(
+            session_key_ref,
+            raw_status.as_deref(),
+            active_dispatch_id.as_deref(),
+            last_heartbeat.as_deref(),
+        );
+        let candidate = AgentTurnSession {
+            session_key,
+            provider,
+            last_heartbeat,
+            created_at,
+            thread_channel_id,
+            runtime_channel_id,
+            effective_status: effective.status,
+            effective_active_dispatch_id: effective.active_dispatch_id,
+            is_working: effective.is_working,
+        };
+        if latest.is_none() {
+            latest = Some(candidate.clone());
+        }
+        if candidate.is_working {
+            return Ok(Some(candidate));
+        }
+    }
+
+    Ok(latest)
+}
+
+async fn agent_exists_pg(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM agents WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.try_get::<i64, _>("count").unwrap_or(0) > 0)
+}
+
+fn pg_timestamp_to_rfc3339(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(|value| value.to_rfc3339())
+}
+
+async fn find_agent_turn_session_pg(
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+) -> Result<Option<AgentTurnSession>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT COALESCE(s.session_key, '') AS session_key,
+                s.provider,
+                s.status,
+                s.active_dispatch_id,
+                s.last_heartbeat,
+                s.created_at,
+                s.thread_channel_id::TEXT AS thread_channel_id,
+                COALESCE(
+                    s.thread_channel_id::TEXT,
+                    a.discord_channel_id,
+                    a.discord_channel_alt,
+                    a.discord_channel_cc,
+                    a.discord_channel_cdx
+                ) AS runtime_channel_id
+         FROM sessions s
+         LEFT JOIN agents a ON a.id = s.agent_id
+         WHERE s.agent_id = $1
+         ORDER BY s.last_heartbeat DESC NULLS LAST, s.created_at DESC NULLS LAST, s.id DESC",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut resolver = SessionActivityResolver::new();
+    let mut latest = None;
+
+    for row in rows {
+        let session_key: String = row.try_get("session_key")?;
+        let provider: Option<String> = row.try_get("provider")?;
+        let raw_status: Option<String> = row.try_get("status")?;
+        let active_dispatch_id: Option<String> = row.try_get("active_dispatch_id")?;
+        let last_heartbeat = pg_timestamp_to_rfc3339(row.try_get("last_heartbeat")?);
+        let created_at = pg_timestamp_to_rfc3339(row.try_get("created_at")?);
+        let thread_channel_id: Option<String> = row.try_get("thread_channel_id")?;
+        let runtime_channel_id: Option<String> = row.try_get("runtime_channel_id")?;
         let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
         let effective = resolver.resolve(
             session_key_ref,
@@ -1165,7 +1247,33 @@ pub async fn stop_agent_turn(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let session = {
+    let session = if let Some(pool) = state.pg_pool.as_ref() {
+        match agent_exists_pg(pool, &id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "agent not found"})),
+                );
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query: {e}")})),
+                );
+            }
+        }
+
+        match find_agent_turn_session_pg(pool, &id).await {
+            Ok(session) => session,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query: {e}")})),
+                );
+            }
+        }
+    } else {
         let conn = match state.sqlite_db().lock() {
             Ok(c) => c,
             Err(e) => {
@@ -1229,10 +1337,26 @@ pub async fn stop_agent_turn(
     )
     .await;
 
-    if let Ok(conn) = state.sqlite_db().lock() {
+    if let Some(pool) = state.pg_pool.as_ref() {
+        sqlx::query(
+            "UPDATE sessions
+             SET status = 'disconnected',
+                 active_dispatch_id = NULL,
+                 claude_session_id = NULL,
+                 raw_provider_session_id = NULL
+             WHERE session_key = $1",
+        )
+        .bind(&session_key)
+        .execute(pool)
+        .await
+        .ok();
+    } else if let Ok(conn) = state.sqlite_db().lock() {
         conn.execute(
             "UPDATE sessions
-             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+             SET status = 'disconnected',
+                 active_dispatch_id = NULL,
+                 claude_session_id = NULL,
+                 raw_provider_session_id = NULL
              WHERE session_key = ?1",
             [&session_key],
         )
@@ -1516,6 +1640,19 @@ mod tests {
     fn test_engine(db: &Db) -> PolicyEngine {
         let config = crate::config::Config::default();
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
+    #[test]
+    fn pg_timestamp_to_rfc3339_keeps_timezone_marker_for_activity_resolution() {
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-04-24T10:15:30+09:00")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let formatted = pg_timestamp_to_rfc3339(Some(timestamp)).unwrap();
+
+        assert_eq!(formatted, "2026-04-24T01:15:30+00:00");
+        assert!(chrono::DateTime::parse_from_rfc3339(&formatted).is_ok());
+        assert_ne!(formatted, "2026-04-24 01:15:30");
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@
 
 - Production Rust modules: `268`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `85`
+- Giant files: `87`
 
 ## Namespace Summary
 
@@ -52,7 +52,7 @@
 | `cli::migrate` | `src/cli/migrate.rs` | 321 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
-| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7405 | giant-file |
+| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7571 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::monitoring` | `src/cli/monitoring.rs` | 141 |  |
 | `cli::run` | `src/cli/run.rs` | 406 |  |
@@ -61,12 +61,12 @@
 | `crate` | `src/main.rs` | 42 |  |
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 243 |  |
-| `db::agents` | `src/db/agents.rs` | 645 |  |
+| `db::agents` | `src/db/agents.rs` | 1045 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 6276 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 487 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
-| `db::postgres` | `src/db/postgres.rs` | 913 |  |
-| `db::schema` | `src/db/schema.rs` | 3028 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 1327 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 3052 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1246 | giant-file |
 | `db::turns` | `src/db/turns.rs` | 572 |  |
@@ -127,8 +127,8 @@
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 80 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 900 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 238 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 1681 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1081 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 1818 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 2573 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1419 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1389 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 92 |  |
@@ -143,11 +143,11 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2615 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1499 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 2684 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 2730 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 62 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 82 |  |
-| `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 48 |  |
+| `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 51 |  |
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 79 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 98 |  |
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 |  |
@@ -250,7 +250,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 213 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 7537 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 7575 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |

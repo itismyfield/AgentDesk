@@ -14,7 +14,9 @@ historical totals and live-state pressure:
   and/or copied into PG.
 - `active_dispatches` — `task_dispatches` rows in `pending` or `dispatched`.
 - `working_sessions` — `sessions` rows in `working`.
-- `open_dispatch_outbox` — `dispatch_outbox` rows that have not reached `done`.
+- `open_dispatch_outbox` — replayable `dispatch_outbox` rows that have not
+  reached a terminal status. `done` and retry-exhausted `failed` rows are
+  terminal; the outbox worker only claims `pending` rows.
 - `pending_message_outbox` — `message_outbox` rows still in `status = 'pending'`.
   These are Discord messages enqueued by the policy engine that the
   message-outbox worker has not yet delivered.
@@ -30,8 +32,10 @@ before/after import.
    SQLite still has any in-flight dispatch, working session, open dispatch
    outbox, or pending message outbox row, the cutover refuses. An archive-only
    run cannot carry live state forward, so it would silently drop work.
-2. **Open `dispatch_outbox`.** With PG import enabled, leftover dispatch
-   outbox rows would replay and double-fire after cutover. Drain them first.
+2. **Open `dispatch_outbox`.** With PG import enabled, leftover replayable
+   dispatch outbox rows would replay and double-fire after cutover. Drain
+   `pending`/`processing` rows first. Terminal `done` and `failed` rows are
+   imported as history but do not block cutover.
 3. **Pending `message_outbox`.** With PG import enabled, leftover Discord
    messages would never be delivered (the worker switches to PG and forgets
    the SQLite rows). The cutover refuses unless the operator passes

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use libsql_rusqlite::{Connection, OptionalExtension}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
@@ -7,6 +7,8 @@ use sqlx::{PgPool, Row as SqlxRow};
 use crate::config::{AgentChannel, AgentDef};
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
+
+const LEGACY_AGENT_PREFIX: &str = "openclaw-";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentChannelBindings {
@@ -283,12 +285,16 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
     let conn = db
         .lock()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-    let mut count = 0;
+
+    let config_ids: HashSet<&str> = agents.iter().map(|a| a.id.as_str()).collect();
+
+    for agent in agents {
+        upsert_agent_from_config_sqlite(&conn, agent)?;
+    }
+    migrate_legacy_agent_aliases_sqlite(&conn, agents, &config_ids)?;
 
     // Remove DB agents that are no longer in yaml config
     {
-        let config_ids: std::collections::HashSet<&str> =
-            agents.iter().map(|a| a.id.as_str()).collect();
         let mut stmt = conn.prepare("SELECT id FROM agents")?;
         let db_ids: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
@@ -302,50 +308,181 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
         }
     }
 
-    for agent in agents {
-        let discord_channel_cc = agent
-            .channels
-            .claude
-            .as_ref()
-            .and_then(AgentChannel::target);
-        let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-        let discord_channel_id = discord_channel_cc.clone();
-        let discord_channel_alt = discord_channel_cdx.clone();
+    Ok(agents.len())
+}
 
-        conn.execute(
-            "INSERT INTO agents (
-                id, name, name_ko, provider, department, avatar_emoji,
-                discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                name_ko = excluded.name_ko,
-                provider = excluded.provider,
-                department = excluded.department,
-                avatar_emoji = excluded.avatar_emoji,
-                discord_channel_id = excluded.discord_channel_id,
-                discord_channel_alt = excluded.discord_channel_alt,
-                discord_channel_cc = excluded.discord_channel_cc,
-                discord_channel_cdx = excluded.discord_channel_cdx,
-                updated_at = CURRENT_TIMESTAMP",
-            libsql_rusqlite::params![
-                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                agent.id,
-                agent.name,
-                agent.name_ko,
-                agent.provider,
-                agent.department,
-                agent.avatar_emoji,
-                discord_channel_id,
-                discord_channel_alt,
-                discord_channel_cc,
-                discord_channel_cdx,
-            ],
-        )?;
-        count += 1;
+fn legacy_agent_alias(agent_id: &str) -> Option<String> {
+    if agent_id.starts_with(LEGACY_AGENT_PREFIX) {
+        return None;
+    }
+    Some(format!("{LEGACY_AGENT_PREFIX}{agent_id}"))
+}
+
+fn sqlite_agent_exists(conn: &Connection, agent_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE id = ?1)",
+        [agent_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Result<()> {
+    let discord_channel_cc = agent
+        .channels
+        .claude
+        .as_ref()
+        .and_then(AgentChannel::target);
+    let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
+    let discord_channel_id = discord_channel_cc.clone();
+    let discord_channel_alt = discord_channel_cdx.clone();
+
+    conn.execute(
+        "INSERT INTO agents (
+            id, name, name_ko, provider, department, avatar_emoji,
+            discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            name_ko = excluded.name_ko,
+            provider = excluded.provider,
+            department = excluded.department,
+            avatar_emoji = excluded.avatar_emoji,
+            discord_channel_id = excluded.discord_channel_id,
+            discord_channel_alt = excluded.discord_channel_alt,
+            discord_channel_cc = excluded.discord_channel_cc,
+            discord_channel_cdx = excluded.discord_channel_cdx,
+            updated_at = CURRENT_TIMESTAMP",
+        libsql_rusqlite::params![
+            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+            agent.id,
+            agent.name,
+            agent.name_ko,
+            agent.provider,
+            agent.department,
+            agent.avatar_emoji,
+            discord_channel_id,
+            discord_channel_alt,
+            discord_channel_cc,
+            discord_channel_cdx,
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn migrate_legacy_agent_aliases_sqlite(
+    conn: &Connection,
+    agents: &[AgentDef],
+    config_ids: &HashSet<&str>,
+) -> Result<()> {
+    for agent in agents {
+        let Some(legacy_id) = legacy_agent_alias(&agent.id) else {
+            continue;
+        };
+        if config_ids.contains(legacy_id.as_str()) {
+            tracing::info!(
+                "[agent-sync] Preserving configured legacy agent '{}' while syncing '{}'",
+                legacy_id,
+                agent.id
+            );
+            continue;
+        }
+
+        if sqlite_agent_exists(conn, &legacy_id)? {
+            copy_runtime_fields_from_legacy_sqlite(conn, &legacy_id, &agent.id)?;
+        }
+        move_legacy_agent_references_sqlite(conn, &legacy_id, &agent.id)?;
+
+        if sqlite_agent_exists(conn, &legacy_id)? {
+            conn.execute("DELETE FROM agents WHERE id = ?1", [&legacy_id])?;
+            tracing::info!(
+                "[agent-sync] Migrated legacy agent '{}' -> '{}'",
+                legacy_id,
+                agent.id
+            );
+        }
     }
 
-    Ok(count)
+    Ok(())
+}
+
+fn copy_runtime_fields_from_legacy_sqlite(
+    conn: &Connection,
+    legacy_id: &str,
+    canonical_id: &str,
+) -> Result<()> {
+    if !sqlite_agent_exists(conn, legacy_id)? || !sqlite_agent_exists(conn, canonical_id)? {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE agents
+         SET status = (SELECT status FROM agents WHERE id = ?1),
+             xp = (SELECT xp FROM agents WHERE id = ?1),
+             skills = (SELECT skills FROM agents WHERE id = ?1),
+             created_at = COALESCE((SELECT created_at FROM agents WHERE id = ?1), created_at),
+             sprite_number = COALESCE((SELECT sprite_number FROM agents WHERE id = ?1), sprite_number),
+             description = COALESCE((SELECT description FROM agents WHERE id = ?1), description),
+             system_prompt = COALESCE((SELECT system_prompt FROM agents WHERE id = ?1), system_prompt),
+             pipeline_config = COALESCE((SELECT pipeline_config FROM agents WHERE id = ?1), pipeline_config)
+         WHERE id = ?2",
+        libsql_rusqlite::params![legacy_id, canonical_id],
+    )?;
+
+    Ok(())
+}
+
+fn move_legacy_agent_references_sqlite(
+    conn: &Connection,
+    legacy_id: &str,
+    canonical_id: &str,
+) -> Result<()> {
+    for sql in [
+        "UPDATE github_repos SET default_agent_id = ?1 WHERE default_agent_id = ?2",
+        "UPDATE pipeline_stages SET agent_override_id = ?1 WHERE agent_override_id = ?2",
+        "UPDATE kanban_cards SET assigned_agent_id = ?1 WHERE assigned_agent_id = ?2",
+        "UPDATE kanban_cards SET owner_agent_id = ?1 WHERE owner_agent_id = ?2",
+        "UPDATE kanban_cards SET requester_agent_id = ?1 WHERE requester_agent_id = ?2",
+        "UPDATE task_dispatches SET from_agent_id = ?1 WHERE from_agent_id = ?2",
+        "UPDATE task_dispatches SET to_agent_id = ?1 WHERE to_agent_id = ?2",
+        "UPDATE sessions SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE meeting_transcripts SET speaker_agent_id = ?1 WHERE speaker_agent_id = ?2",
+        "UPDATE skill_usage SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE turns SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE dispatch_outbox SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE auto_queue_runs SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE auto_queue_entries SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE api_friction_events SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE session_transcripts SET agent_id = ?1 WHERE agent_id = ?2",
+        "UPDATE memento_feedback_turn_stats SET agent_id = ?1 WHERE agent_id = ?2",
+    ] {
+        conn.execute(sql, libsql_rusqlite::params![canonical_id, legacy_id])?;
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO office_agents (office_id, agent_id, department_id, joined_at)
+         SELECT office_id, ?1, department_id, joined_at
+           FROM office_agents
+          WHERE agent_id = ?2",
+        libsql_rusqlite::params![canonical_id, legacy_id],
+    )?;
+    conn.execute("DELETE FROM office_agents WHERE agent_id = ?1", [legacy_id])?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO auto_queue_slots (
+            agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at
+         )
+         SELECT ?1, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at
+           FROM auto_queue_slots
+          WHERE agent_id = ?2",
+        libsql_rusqlite::params![canonical_id, legacy_id],
+    )?;
+    conn.execute(
+        "DELETE FROM auto_queue_slots WHERE agent_id = ?1",
+        [legacy_id],
+    )?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -477,6 +614,269 @@ mod tests {
         let db = test_db();
         let count = sync_agents_from_config(&db, &[]).unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn sync_migrates_legacy_openclaw_agent_ids_and_references() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider, status, xp, sprite_number, description, system_prompt, pipeline_config
+             ) VALUES (?1, ?2, 'codex', 'working', 42, 7, 'legacy-desc', 'legacy-prompt', '{\"k\":1}')",
+            libsql_rusqlite::params!["openclaw-maker", "Legacy Maker"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO github_repos (id, default_agent_id) VALUES ('owner/repo', 'openclaw-maker')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, assigned_agent_id) VALUES ('card-1', 'Card', 'openclaw-maker')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title)
+             VALUES ('dispatch-1', 'card-1', 'openclaw-maker', 'openclaw-maker', 'implementation', 'pending', 'Dispatch')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, status) VALUES ('sess-1', 'openclaw-maker', 'working')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meetings (id, title, status) VALUES ('meeting-1', 'Meeting', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meeting_transcripts (meeting_id, seq, round, speaker_agent_id, speaker_name, content)
+             VALUES ('meeting-1', 1, 1, 'openclaw-maker', 'Maker', 'hello')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO office_agents (office_id, agent_id, department_id) VALUES ('office-1', 'openclaw-maker', 'engineering')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-1', 'owner/repo', 'openclaw-maker', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id) VALUES ('entry-1', 'run-1', 'card-1', 'openclaw-maker')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id) VALUES ('openclaw-maker', 0, 'run-1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_transcripts (turn_id, agent_id, user_message, assistant_message) VALUES ('turn-1', 'openclaw-maker', 'u', 'a')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO turns (turn_id, channel_id, agent_id, provider, started_at, finished_at)
+             VALUES ('turn-row-1', 'channel-1', 'openclaw-maker', 'codex', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        let agents = vec![AgentDef {
+            id: "maker".into(),
+            name: "Maker".into(),
+            name_ko: Some("뚝딱이".into()),
+            provider: "codex".into(),
+            channels: AgentChannels {
+                codex: Some("maker-cdx".into()),
+                ..Default::default()
+            },
+            keywords: Vec::new(),
+            department: Some("engineering".into()),
+            avatar_emoji: Some("🛠️".into()),
+        }];
+        sync_agents_from_config(&db, &agents).unwrap();
+
+        let conn = db.lock().unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM agents ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect();
+        assert_eq!(ids, vec!["maker".to_string()]);
+
+        let (status, xp, sprite_number, description, system_prompt, pipeline_config): (
+            String,
+            i64,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, xp, sprite_number, description, system_prompt, pipeline_config
+                 FROM agents
+                 WHERE id = 'maker'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(status, "working");
+        assert_eq!(xp, 42);
+        assert_eq!(sprite_number, Some(7));
+        assert_eq!(description.as_deref(), Some("legacy-desc"));
+        assert_eq!(system_prompt.as_deref(), Some("legacy-prompt"));
+        assert_eq!(pipeline_config.as_deref(), Some("{\"k\":1}"));
+
+        for (sql, expected) in [
+            (
+                "SELECT default_agent_id FROM github_repos WHERE id = 'owner/repo'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT assigned_agent_id FROM kanban_cards WHERE id = 'card-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT to_agent_id FROM task_dispatches WHERE id = 'dispatch-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM sessions WHERE session_key = 'sess-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT speaker_agent_id FROM meeting_transcripts WHERE meeting_id = 'meeting-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM office_agents WHERE office_id = 'office-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM auto_queue_runs WHERE id = 'run-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM auto_queue_entries WHERE id = 'entry-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM auto_queue_slots WHERE slot_index = 0",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM session_transcripts WHERE turn_id = 'turn-1'",
+                Some("maker".to_string()),
+            ),
+            (
+                "SELECT agent_id FROM turns WHERE turn_id = 'turn-row-1'",
+                Some("maker".to_string()),
+            ),
+        ] {
+            let actual: Option<String> = conn.query_row(sql, [], |row| row.get(0)).unwrap();
+            assert_eq!(actual, expected, "query `{sql}`");
+        }
+    }
+
+    #[test]
+    fn sync_preserves_configured_legacy_openclaw_agent_id() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider, status, xp
+             ) VALUES (?1, ?2, 'codex', 'working', 42)",
+            libsql_rusqlite::params!["openclaw-maker", "Configured Legacy Maker"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO github_repos (id, default_agent_id) VALUES ('owner/repo', 'openclaw-maker')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let agents = vec![
+            AgentDef {
+                id: "maker".into(),
+                name: "Maker".into(),
+                name_ko: None,
+                provider: "codex".into(),
+                channels: AgentChannels {
+                    codex: Some("maker-cdx".into()),
+                    ..Default::default()
+                },
+                keywords: Vec::new(),
+                department: Some("engineering".into()),
+                avatar_emoji: None,
+            },
+            AgentDef {
+                id: "openclaw-maker".into(),
+                name: "Legacy Maker".into(),
+                name_ko: None,
+                provider: "codex".into(),
+                channels: AgentChannels {
+                    codex: Some("legacy-cdx".into()),
+                    ..Default::default()
+                },
+                keywords: Vec::new(),
+                department: Some("legacy".into()),
+                avatar_emoji: None,
+            },
+        ];
+        sync_agents_from_config(&db, &agents).unwrap();
+
+        let conn = db.lock().unwrap();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM agents ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect();
+        assert_eq!(ids, vec!["maker".to_string(), "openclaw-maker".to_string()]);
+
+        let (status, xp): (String, i64) = conn
+            .query_row(
+                "SELECT status, xp FROM agents WHERE id = 'openclaw-maker'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "working");
+        assert_eq!(xp, 42);
+
+        let github_default: Option<String> = conn
+            .query_row(
+                "SELECT default_agent_id FROM github_repos WHERE id = 'owner/repo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(github_default.as_deref(), Some("openclaw-maker"));
     }
 
     #[test]
