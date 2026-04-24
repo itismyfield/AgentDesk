@@ -111,6 +111,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/sessions/{session_key}/force-kill",
                 post(dispatched_sessions::force_kill_session),
             )
+            // #1067: watch-agent-turn skill promotion — capture the last N lines
+            // of the tmux pane bound to a session id.
+            .route(
+                "/sessions/{id}/tmux-output",
+                get(dispatched_sessions::tmux_output),
+            )
             .route(
                 "/session-termination-events",
                 get(termination_events::list_termination_events),

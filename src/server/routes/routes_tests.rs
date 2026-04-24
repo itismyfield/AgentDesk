@@ -7444,6 +7444,167 @@ async fn create_issue_route_rejects_more_than_ten_dod_items() {
     assert_eq!(json["error"], "dod items must be 10 or fewer");
 }
 
+// #1067: skill promotion integration test — exercise the canonical
+// `/api/github/issues/create` path end-to-end via the mounted Axum router to
+// confirm the create-issue skill body is absorbed by the server endpoint.
+#[cfg(unix)]
+#[tokio::test]
+async fn github_issues_create_canonical_path_returns_created_issue() {
+    let _env_lock = env_lock();
+    let _gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 1067);
+    let db = test_db();
+    let engine = test_engine(&db);
+    db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agents (id, name) VALUES (?1, ?2)",
+            libsql_rusqlite::params!["adk-backend", "ADK Backend"],
+        )
+        .unwrap();
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/issues/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "#1067 skill promotion",
+                        "background": "create-issue 스킬을 서버 API로 흡수한다.",
+                        "content": [
+                            "POST /api/github/issues/create 엔드포인트 사용.",
+                            "skill body는 서버에서 PMD 포맷으로 변환된다."
+                        ],
+                        "dod": [
+                            "canonical path (/api/github/issues/create)를 통해 이슈가 생성된다",
+                            "응답에 issue_number와 url이 포함된다"
+                        ],
+                        "agent_id": "adk-backend"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["issue"]["number"], 1067);
+    assert_eq!(
+        json["issue"]["url"],
+        "https://github.com/itismyfield/AgentDesk/issues/1067"
+    );
+    assert_eq!(json["issue"]["repo"], "itismyfield/AgentDesk");
+    assert_eq!(
+        json["applied_labels"]
+            .as_array()
+            .and_then(|v| v.first())
+            .and_then(|v| v.as_str()),
+        Some("agent:adk-backend")
+    );
+}
+
+// #1067: skill promotion integration test — watch-agent-turn.
+#[tokio::test]
+async fn sessions_tmux_output_http_route_returns_shape_for_seeded_session() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let session_id: i64;
+    let tmux_name = format!("AgentDesk-codex-1067-http-{}", std::process::id());
+    let session_key = format!("mac-mini:{tmux_name}");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-1067-http', 'Agent 1067', 'codex', '123456789012345678', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-1067-http', 'codex', 'working', datetime('now'), datetime('now'))",
+            libsql_rusqlite::params![session_key.clone()],
+        )
+        .unwrap();
+        session_id = conn
+            .query_row(
+                "SELECT id FROM sessions WHERE session_key = ?1",
+                [&session_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+    }
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/sessions/{session_id}/tmux-output?lines=25"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_id"], session_id);
+    assert_eq!(json["session_key"], session_key);
+    assert_eq!(json["tmux_name"], tmux_name);
+    assert_eq!(json["agent_id"], "agent-1067-http");
+    assert_eq!(json["provider"], "codex");
+    assert_eq!(json["status"], "working");
+    assert_eq!(json["lines_requested"], 25);
+    assert_eq!(json["lines_effective"], 25);
+    // tmux session was never created, so capture returns empty and tmux_alive=false.
+    assert_eq!(json["tmux_alive"], false);
+    assert_eq!(json["recent_output"], "");
+    assert!(json["captured_at_ms"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn sessions_tmux_output_http_route_returns_404_for_unknown_session() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/sessions/987654321/tmux-output")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_id"], 987654321);
+    assert!(
+        json["error"]
+            .as_str()
+            .map(|s| s.contains("not found"))
+            .unwrap_or(false)
+    );
+}
+
 #[tokio::test]
 async fn github_docs_include_issue_creation_endpoint() {
     let db = test_db();
@@ -7555,6 +7716,7 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/docs/{group}",
         "/api/docs/{group}/{category}",
         "/api/github/issues/create",
+        "/api/sessions/{id}/tmux-output",
         "/api/stats/memento",
     ] {
         assert!(

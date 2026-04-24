@@ -1849,6 +1849,40 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "GET",
+            "/api/sessions/{id}/tmux-output",
+            "sessions",
+            "Capture recent tmux pane output for a session (watch-agent-turn skill promotion)",
+        )
+        .with_params([
+            ("id", path_param("Session id (sessions.id)")),
+            (
+                "lines",
+                query_param(
+                    "integer",
+                    false,
+                    "Trailing tmux pane lines to capture (1..=2000)",
+                )
+                .with_default(80),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"lines": 40}}),
+            json!({
+                "session_id": 42,
+                "session_key": "mac-mini:remoteCC-claude-foo",
+                "tmux_name": "remoteCC-claude-foo",
+                "tmux_alive": true,
+                "agent_id": "ch-dd",
+                "provider": "claude",
+                "status": "working",
+                "lines_requested": 40,
+                "lines_effective": 40,
+                "recent_output": "...tail of tmux pane...",
+                "captured_at_ms": 1_745_000_000_000_i64
+            }),
+        ),
+        ep(
+            "GET",
             "/api/session-termination-events",
             "sessions",
             "List recorded session termination events",
