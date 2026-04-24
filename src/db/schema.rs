@@ -2014,6 +2014,10 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
             turn_success_rate_30d          REAL,
             review_pass_rate_30d           REAL,
             measurement_unavailable_30d    INTEGER NOT NULL DEFAULT 1,
+            avg_rework_count               REAL,
+            cost_per_done_card             REAL,
+            latency_p50_ms                 INTEGER,
+            latency_p99_ms                 INTEGER,
             computed_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, day)
         );
@@ -2028,6 +2032,16 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
             ON agent_quality_daily (review_pass_rate_7d DESC)
             WHERE measurement_unavailable_7d = 0;",
     )?;
+    // #1101 extended metrics — ALTERs handle pre-existing DBs that already
+    // have the base table from the #930 era. `execute_batch` errors on
+    // duplicate columns are swallowed via `let _`.
+    let _ = conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN avg_rework_count REAL;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN cost_per_done_card REAL;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN latency_p50_ms INTEGER;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN latency_p99_ms INTEGER;");
     Ok(())
 }
 

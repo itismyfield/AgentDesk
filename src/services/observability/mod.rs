@@ -1642,6 +1642,19 @@ async fn query_agent_quality_events_pg(
 }
 
 async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
+    // #1101 extends #930's rollup with four additional daily metrics:
+    //   * avg_rework_count   — avg(review_fail per card) over cards that had
+    //                          at least one review_fail that day.
+    //   * cost_per_done_card — sum(card_transitioned.payload->>'cost') /
+    //                          count(card_transitioned → done).
+    //   * latency_p50_ms     — percentile_cont(0.5) over turn_complete
+    //                          payload->>'duration_ms'.
+    //   * latency_p99_ms     — percentile_cont(0.99) over turn_complete
+    //                          payload->>'duration_ms'.
+    //
+    // All four are nullable; they land as NULL when the requisite events are
+    // absent for an agent/day, which is also how the dashboard renders
+    // "측정 불가" downstream.
     let row_count = sqlx::query_scalar::<_, i64>(
         "WITH daily_counts AS (
              SELECT agent_id,
@@ -1655,6 +1668,52 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
              FROM agent_quality_event
              WHERE agent_id IS NOT NULL
                AND btrim(agent_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
+         ),
+         rework_per_card AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    card_id,
+                    COUNT(*)::double precision AS review_fail_count
+             FROM agent_quality_event
+             WHERE event_type = 'review_fail'
+               AND agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND card_id IS NOT NULL AND btrim(card_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date, card_id
+         ),
+         rework_agg AS (
+             SELECT agent_id, day, AVG(review_fail_count) AS avg_rework_count
+             FROM rework_per_card
+             GROUP BY agent_id, day
+         ),
+         cost_agg AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    SUM(COALESCE(NULLIF(payload->>'cost', ''), '0')::double precision) AS cost_total,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'card_transitioned'
+                          AND payload->>'to' = 'done'
+                    )::bigint AS done_card_count
+             FROM agent_quality_event
+             WHERE agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
+         ),
+         latency_agg AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    percentile_cont(0.5) WITHIN GROUP (
+                        ORDER BY NULLIF(payload->>'duration_ms', '')::double precision
+                    ) AS latency_p50_ms,
+                    percentile_cont(0.99) WITHIN GROUP (
+                        ORDER BY NULLIF(payload->>'duration_ms', '')::double precision
+                    ) AS latency_p99_ms
+             FROM agent_quality_event
+             WHERE event_type = 'turn_complete'
+               AND agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND payload ? 'duration_ms'
                AND created_at >= NOW() - INTERVAL '45 days'
              GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
          ),
@@ -1692,14 +1751,23 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                       d.review_fail_count
          ),
          normalized AS (
-             SELECT *,
-                    turn_success_count_7d + turn_error_count_7d AS turn_sample_size_7d,
-                    review_pass_count_7d + review_fail_count_7d AS review_sample_size_7d,
-                    turn_success_count_7d + turn_error_count_7d + review_pass_count_7d + review_fail_count_7d AS sample_size_7d,
-                    turn_success_count_30d + turn_error_count_30d AS turn_sample_size_30d,
-                    review_pass_count_30d + review_fail_count_30d AS review_sample_size_30d,
-                    turn_success_count_30d + turn_error_count_30d + review_pass_count_30d + review_fail_count_30d AS sample_size_30d
-             FROM windowed
+             SELECT w.*,
+                    w.turn_success_count_7d + w.turn_error_count_7d AS turn_sample_size_7d,
+                    w.review_pass_count_7d + w.review_fail_count_7d AS review_sample_size_7d,
+                    w.turn_success_count_7d + w.turn_error_count_7d + w.review_pass_count_7d + w.review_fail_count_7d AS sample_size_7d,
+                    w.turn_success_count_30d + w.turn_error_count_30d AS turn_sample_size_30d,
+                    w.review_pass_count_30d + w.review_fail_count_30d AS review_sample_size_30d,
+                    w.turn_success_count_30d + w.turn_error_count_30d + w.review_pass_count_30d + w.review_fail_count_30d AS sample_size_30d,
+                    r.avg_rework_count,
+                    CASE WHEN COALESCE(c.done_card_count, 0) > 0
+                         THEN COALESCE(c.cost_total, 0) / c.done_card_count
+                         ELSE NULL END AS cost_per_done_card,
+                    l.latency_p50_ms,
+                    l.latency_p99_ms
+             FROM windowed w
+             LEFT JOIN rework_agg  r ON r.agent_id = w.agent_id AND r.day = w.day
+             LEFT JOIN cost_agg    c ON c.agent_id = w.agent_id AND c.day = w.day
+             LEFT JOIN latency_agg l ON l.agent_id = w.agent_id AND l.day = w.day
          ),
          upserted AS (
              INSERT INTO agent_quality_daily (
@@ -1736,6 +1804,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                  turn_success_rate_30d,
                  review_pass_rate_30d,
                  measurement_unavailable_30d,
+                 avg_rework_count,
+                 cost_per_done_card,
+                 latency_p50_ms,
+                 latency_p99_ms,
                  computed_at
              )
              SELECT agent_id,
@@ -1771,6 +1843,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                     CASE WHEN turn_sample_size_30d > 0 THEN turn_success_count_30d::double precision / turn_sample_size_30d ELSE NULL END,
                     CASE WHEN review_sample_size_30d > 0 THEN review_pass_count_30d::double precision / review_sample_size_30d ELSE NULL END,
                     sample_size_30d < $1,
+                    avg_rework_count,
+                    cost_per_done_card,
+                    CASE WHEN latency_p50_ms IS NULL THEN NULL ELSE latency_p50_ms::bigint END,
+                    CASE WHEN latency_p99_ms IS NULL THEN NULL ELSE latency_p99_ms::bigint END,
                     NOW()
              FROM normalized
              ON CONFLICT (agent_id, day) DO UPDATE SET
@@ -1805,6 +1881,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                  turn_success_rate_30d = EXCLUDED.turn_success_rate_30d,
                  review_pass_rate_30d = EXCLUDED.review_pass_rate_30d,
                  measurement_unavailable_30d = EXCLUDED.measurement_unavailable_30d,
+                 avg_rework_count = EXCLUDED.avg_rework_count,
+                 cost_per_done_card = EXCLUDED.cost_per_done_card,
+                 latency_p50_ms = EXCLUDED.latency_p50_ms,
+                 latency_p99_ms = EXCLUDED.latency_p99_ms,
                  computed_at = EXCLUDED.computed_at
              RETURNING 1
          )
@@ -3467,5 +3547,255 @@ mod tests {
             overhead_per_emit_ns < 50_000,
             "emit overhead too high: {overhead_per_emit_ns}ns/op"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #1101 agent_quality_daily rollup PG integration tests.
+    //
+    // These tests create a scratch Postgres DB via the admin connection,
+    // run migrations, seed `agent_quality_event` rows, invoke the rollup,
+    // and assert the upserted `agent_quality_daily` row matches the
+    // expected metrics. They are gated on a live Postgres admin URL,
+    // matching the retrospectives PG test harness.
+    // -----------------------------------------------------------------
+
+    fn quality_rollup_postgres_base_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        format!("postgresql://{user}@{host}:{port}")
+    }
+
+    fn quality_rollup_admin_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", quality_rollup_postgres_base_url(), admin_db)
+    }
+
+    struct QualityRollupPgHarness {
+        admin_url: String,
+        database_name: String,
+        pool: PgPool,
+    }
+
+    impl QualityRollupPgHarness {
+        async fn try_setup() -> Option<Self> {
+            let admin_url = quality_rollup_admin_url();
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!(
+                        "[agent_quality_daily tests] skipping — Postgres admin unavailable: {error}"
+                    );
+                    return None;
+                }
+            };
+            let database_name = format!("agentdesk_aqd_{}", uuid::Uuid::new_v4().simple());
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!("[agent_quality_daily tests] CREATE DATABASE failed, skipping: {error}");
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+
+            let db_url = format!("{}/{}", quality_rollup_postgres_base_url(), database_name);
+            let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("[agent_quality_daily tests] migrate failed, skipping: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(Self {
+                admin_url,
+                database_name,
+                pool,
+            })
+        }
+
+        async fn teardown(self) {
+            self.pool.close().await;
+            if let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await {
+                let _ = sqlx::query(
+                    "SELECT pg_terminate_backend(pid)
+                     FROM pg_stat_activity
+                     WHERE datname = $1 AND pid <> pg_backend_pid()",
+                )
+                .bind(&self.database_name)
+                .execute(&admin_pool)
+                .await;
+                let _ = sqlx::query(&format!(
+                    "DROP DATABASE IF EXISTS \"{}\"",
+                    self.database_name
+                ))
+                .execute(&admin_pool)
+                .await;
+                admin_pool.close().await;
+            }
+        }
+    }
+
+    async fn insert_quality_event(
+        pool: &PgPool,
+        agent_id: &str,
+        event_type: &str,
+        card_id: Option<&str>,
+        payload: Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_quality_event (
+                agent_id, event_type, card_id, payload, created_at
+             ) VALUES ($1, $2::agent_quality_event_type, $3, CAST($4 AS jsonb), NOW())",
+        )
+        .bind(agent_id)
+        .bind(event_type)
+        .bind(card_id)
+        .bind(payload.to_string())
+        .execute(pool)
+        .await
+        .expect("insert agent_quality_event");
+    }
+
+    #[tokio::test]
+    async fn agent_quality_daily_rollup_computes_core_metrics_for_two_agents() {
+        let Some(harness) = QualityRollupPgHarness::try_setup().await else {
+            return;
+        };
+        let pool = harness.pool.clone();
+
+        // agent-A — meets sample-size guard (>=5 events), with reworks on card-1.
+        for _ in 0..4 {
+            insert_quality_event(
+                &pool,
+                "agent-A",
+                "turn_complete",
+                None,
+                json!({"duration_ms": 500}),
+            )
+            .await;
+        }
+        insert_quality_event(&pool, "agent-A", "turn_error", None, json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_pass", Some("card-1"), json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_fail", Some("card-1"), json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_fail", Some("card-1"), json!({})).await;
+
+        // agent-B — below guard (only 2 events).
+        insert_quality_event(
+            &pool,
+            "agent-B",
+            "turn_complete",
+            None,
+            json!({"duration_ms": 100}),
+        )
+        .await;
+        insert_quality_event(&pool, "agent-B", "review_pass", Some("card-2"), json!({})).await;
+
+        let report = run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("rollup succeeds");
+        assert!(
+            report.upserted_rows >= 2,
+            "expected 2+ rows, got {:?}",
+            report
+        );
+
+        let row_a = sqlx::query(
+            "SELECT turn_success_rate, review_pass_rate, sample_size, avg_rework_count,
+                    measurement_unavailable_7d
+             FROM agent_quality_daily WHERE agent_id = 'agent-A'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent-A row");
+        let turn_rate: Option<f64> = row_a.try_get("turn_success_rate").unwrap();
+        let review_rate: Option<f64> = row_a.try_get("review_pass_rate").unwrap();
+        let sample_size: i64 = row_a.try_get("sample_size").unwrap();
+        let rework: Option<f64> = row_a.try_get("avg_rework_count").unwrap();
+        assert_eq!(sample_size, 8, "agent-A sample_size (4+1+1+2)");
+        assert!(
+            (turn_rate.unwrap() - 0.8).abs() < 1e-6,
+            "turn_rate={turn_rate:?}"
+        );
+        assert!(
+            (review_rate.unwrap() - (1.0 / 3.0)).abs() < 1e-6,
+            "review_rate={review_rate:?}"
+        );
+        assert_eq!(rework, Some(2.0), "avg_rework_count for card-1 = 2 fails");
+
+        // agent-B sample_size=2 < 5 guard → measurement_unavailable_7d = TRUE.
+        let row_b = sqlx::query(
+            "SELECT sample_size, measurement_unavailable_7d FROM agent_quality_daily
+             WHERE agent_id = 'agent-B'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent-B row");
+        let sb: i64 = row_b.try_get("sample_size").unwrap();
+        let unavail: bool = row_b.try_get("measurement_unavailable_7d").unwrap();
+        assert_eq!(sb, 2);
+        assert!(unavail, "agent-B must trigger 측정 불가 guard");
+
+        harness.teardown().await;
+    }
+
+    #[tokio::test]
+    async fn agent_quality_daily_rollup_is_idempotent_on_repeated_runs() {
+        let Some(harness) = QualityRollupPgHarness::try_setup().await else {
+            return;
+        };
+        let pool = harness.pool.clone();
+
+        for _ in 0..5 {
+            insert_quality_event(&pool, "agent-idem", "turn_complete", None, json!({})).await;
+        }
+
+        run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("first rollup");
+        let row_count_1: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_quality_daily WHERE agent_id = 'agent-idem'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count_1, 1);
+
+        // Re-run — row count must stay 1 (upsert, not append).
+        run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("second rollup");
+        let row_count_2: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_quality_daily WHERE agent_id = 'agent-idem'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count_2, 1, "re-running rollup must not duplicate row");
+
+        harness.teardown().await;
     }
 }
