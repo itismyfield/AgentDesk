@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::args::{
     AutoQueueAction, CardAction, Commands, ConfigAction, DispatchAction, MigrateAction,
-    ReportProvider,
+    MonitoringAction, ReportProvider,
 };
 
 fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
@@ -158,6 +158,14 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::GithubSync { repo } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_github_sync(repo.as_deref()),
         )),
+        Commands::Monitoring { action } => exit_for_cli(match action {
+            MonitoringAction::Start {
+                channel,
+                key,
+                description,
+            } => super::monitoring::start(channel, &key, &description),
+            MonitoringAction::Stop { channel, key } => super::monitoring::stop(channel, &key),
+        }),
         Commands::Discord { action } => exit_for_cli(match action {
             super::args::DiscordAction::Read {
                 channel_id,

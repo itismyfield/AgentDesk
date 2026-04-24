@@ -148,6 +148,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Monitor status commands for Discord channels
+    Monitoring {
+        #[command(subcommand)]
+        action: MonitoringAction,
+    },
     /// Discord utility commands without HTTP server dependency
     Discord {
         #[command(subcommand)]
@@ -457,6 +462,31 @@ pub(crate) enum DiscordAction {
         /// Read messages after this message ID
         #[arg(long)]
         after: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MonitoringAction {
+    /// Register or refresh a monitor status entry
+    Start {
+        /// Discord channel ID
+        #[arg(long)]
+        channel: u64,
+        /// Monitor key, stable across refreshes
+        #[arg(long)]
+        key: String,
+        /// Human-readable monitor description
+        #[arg(long)]
+        description: String,
+    },
+    /// Remove a monitor status entry
+    Stop {
+        /// Discord channel ID
+        #[arg(long)]
+        channel: u64,
+        /// Monitor key to remove
+        #[arg(long)]
+        key: String,
     },
 }
 
