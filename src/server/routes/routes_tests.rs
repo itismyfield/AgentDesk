@@ -7807,6 +7807,168 @@ async fn api_docs_category_exposes_skill_prune_and_filter_params() {
     assert_eq!(prune["params"]["dry_run"]["type"], "boolean");
 }
 
+/// #1068 (904-6) — every path in `TOP_40_PAIRED_PATHS` must ship BOTH a
+/// happy-path example AND an error example, plus a curl 1-liner.
+#[tokio::test]
+async fn api_docs_exposes_paired_examples_for_top_40() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("flat docs must return endpoint array");
+
+    let mut missing = Vec::new();
+    for (method, path) in crate::server::routes::docs::TOP_40_PAIRED_PATHS {
+        let Some(ep) = endpoints
+            .iter()
+            .find(|ep| ep["method"] == *method && ep["path"] == *path)
+        else {
+            missing.push(format!("endpoint not found: {method} {path}"));
+            continue;
+        };
+        if !ep["example"].is_object() {
+            missing.push(format!("{method} {path}: example (happy path) is missing"));
+        }
+        if !ep["error_example"].is_object() {
+            missing.push(format!("{method} {path}: error_example is missing"));
+        }
+        let curl = ep["curl_example"].as_str().unwrap_or("");
+        if curl.is_empty() || !curl.starts_with("curl ") {
+            missing.push(format!(
+                "{method} {path}: curl_example is missing or not a curl 1-liner (got {curl:?})"
+            ));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "top-40 paired-scenario coverage is incomplete:\n- {}",
+        missing.join("\n- ")
+    );
+
+    // Guard against the list shrinking below 40.
+    assert_eq!(
+        crate::server::routes::docs::TOP_40_PAIRED_PATHS.len(),
+        40,
+        "#1068 (904-6) requires exactly 40 paired-scenario endpoints"
+    );
+}
+
+/// #1068 (904-6) — `/retry`, `/redispatch`, `/resume`, and `/reopen`
+/// descriptions must make their semantic distinctions explicit so callers stop
+/// conflating them.
+#[tokio::test]
+async fn api_docs_retry_redispatch_resume_reopen_semantics_are_distinguished() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("flat docs must return endpoint array");
+
+    let find_desc = |path: &str| -> String {
+        endpoints
+            .iter()
+            .find(|ep| ep["path"] == path)
+            .and_then(|ep| ep["description"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let retry = find_desc("/api/kanban-cards/{id}/retry").to_lowercase();
+    let redispatch = find_desc("/api/kanban-cards/{id}/redispatch").to_lowercase();
+    let resume = find_desc("/api/kanban-cards/{id}/resume").to_lowercase();
+    let reopen = find_desc("/api/kanban-cards/{id}/reopen").to_lowercase();
+
+    // retry: re-execute the SAME failed step with the same params.
+    assert!(
+        retry.contains("re-execute")
+            || retry.contains("re-run")
+            || retry.contains("same failed step"),
+        "/retry description must explain it re-executes the same failed step: {retry}"
+    );
+    assert!(
+        retry.contains("same"),
+        "/retry description must contrast against /redispatch by mentioning 'same': {retry}"
+    );
+
+    // redispatch: new dispatch id, same intent.
+    assert!(
+        redispatch.contains("new dispatch") || redispatch.contains("new dispatch id"),
+        "/redispatch description must mention that a NEW dispatch id is created: {redispatch}"
+    );
+
+    // resume: continue from a paused/checkpointed state.
+    assert!(
+        resume.contains("continue") || resume.contains("checkpoint"),
+        "/resume description must mention continuing from a checkpoint: {resume}"
+    );
+    assert!(
+        resume.contains("paused") || resume.contains("stuck") || resume.contains("checkpoint"),
+        "/resume description must mention paused/checkpointed state: {resume}"
+    );
+
+    // reopen: move closed/done card back to active.
+    assert!(
+        reopen.contains("closed") || reopen.contains("terminal") || reopen.contains("done"),
+        "/reopen description must mention the card's terminal/closed/done state: {reopen}"
+    );
+    assert!(
+        reopen.contains("active") || reopen.contains("re-admit") || reopen.contains("ready"),
+        "/reopen description must mention re-admitting the card into an active state: {reopen}"
+    );
+
+    // Each of retry/redispatch/resume must reference the others to make the
+    // distinction explicit (reopen already checked via 'closed' + 'active').
+    for (name, desc) in [
+        ("retry", &retry),
+        ("redispatch", &redispatch),
+        ("resume", &resume),
+    ] {
+        let other_refs = ["retry", "redispatch", "resume", "reopen"]
+            .iter()
+            .filter(|n| **n != name)
+            .filter(|n| desc.contains(*n))
+            .count();
+        assert!(
+            other_refs >= 2,
+            "/{name} description must reference at least two of the sibling semantics (retry/redispatch/resume/reopen) to disambiguate; got {other_refs}: {desc}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
     let _env_lock = env_lock();
