@@ -165,45 +165,37 @@ async fn stop_turn_with_policy(
     }
 }
 
-/// Scan inflight directory for the provider and delete the file matching the given tmux session.
+/// Scan inflight directory for the provider and delete the file matching the
+/// given tmux session.
+///
+/// Thin wrapper that delegates to the single-owner implementation in
+/// `services::discord::inflight` (see `docs/recovery-paths.md` — inflight
+/// cleanup SSoT, issue #1074). Kept as a function rather than inlined so that
+/// existing call sites in this module continue to read naturally.
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
-    let inflight_root = match crate::config::runtime_root() {
-        Some(root) => root.join("runtime").join("discord_inflight"),
-        None => return false,
-    };
-
-    let provider_dir = inflight_root.join(provider.as_str());
-    let Ok(entries) = std::fs::read_dir(&provider_dir) else {
-        return false;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(data) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(state) = serde_json::from_str::<serde_json::Value>(&data) else {
-            continue;
-        };
-        if state
-            .get("tmux_session_name")
-            .and_then(|value| value.as_str())
-            == Some(tmux_name)
-        {
-            let _ = std::fs::remove_file(&path);
-            return true;
-        }
-    }
-    false
+    crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::services::discord::health::TestHealthHarness;
     use crate::services::provider::ProviderKind;
+
+    // #1074: the turn_lifecycle wrapper must delegate to the discord SSoT
+    // rather than re-implement the inflight directory scan. Hitting the
+    // wrapper with a tmux name that cannot exist still returns `false`
+    // cleanly — no panic from an unresolved code path.
+    #[test]
+    fn clear_inflight_by_tmux_name_delegates_to_discord_ssot() {
+        let result = super::clear_inflight_by_tmux_name(
+            &ProviderKind::Codex,
+            "AgentDesk-codex-ssot-probe-1074-lifecycle-cdx",
+        );
+        assert!(
+            !result,
+            "turn_lifecycle wrapper must delegate cleanly and return false for unknown tmux name"
+        );
+    }
 
     #[test]
     fn preserve_session_handoff_policy_keeps_inflight_metadata() {
