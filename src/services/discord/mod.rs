@@ -22,13 +22,20 @@ pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod prompt_builder;
 mod queue_io;
+// #1074: landing zone for the future recovery-engine module split
+// (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
+// Named `recovery_paths` to avoid shadowing the existing
+// `recovery_engine as recovery` alias below until the mechanical split lands.
 mod recovery_engine;
+mod recovery_paths;
 mod restart_mode;
+// #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
 pub mod runtime_store;
+pub(crate) mod session_identity;
 mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
