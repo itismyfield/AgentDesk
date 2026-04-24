@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     routing::{delete, get, patch, post},
 };
@@ -40,13 +40,16 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                     .put(pipeline::put_stages)
                     .delete(pipeline::delete_stages),
             )
-            .route("/pipeline/cards/{cardId}", get(pipeline::get_card_pipeline))
             .route(
-                "/pipeline/cards/{cardId}/history",
+                "/pipeline/cards/{card_id}",
+                get(pipeline::get_card_pipeline),
+            )
+            .route(
+                "/pipeline/cards/{card_id}/history",
                 get(pipeline::get_card_history),
             )
             .route(
-                "/pipeline/cards/{cardId}/transcripts",
+                "/pipeline/cards/{card_id}/transcripts",
                 get(pipeline::get_card_transcripts),
             )
             .route(
@@ -86,10 +89,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/dispatched-sessions/webhook",
                 post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
             )
-            .route(
-                "/hook/session",
-                post(deprecated_hook_session).delete(deprecated_delete_session),
-            )
             .route("/hook/reset-status", post(hooks::reset_status))
             .route("/hook/skill-usage", post(hooks::skill_usage))
             .route(
@@ -126,9 +125,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/cron-jobs", get(cron_api::list_cron_jobs))
             .route("/maintenance/jobs", get(maintenance::list_jobs))
             .route("/auto-queue/generate", post(auto_queue::generate))
-            .route("/auto-queue/dispatch", post(auto_queue::dispatch))
+            // #1064: /auto-queue/dispatch is deprecated; prefer /generate + /dispatch-next.
+            // Kept as a functional deprecated alias (logs warning) for CLI callers
+            // that still send the legacy `groups` body shape. TODO(#1064): remove
+            // after migrating src/cli/client.rs::cmd_dispatch to /generate.
+            .route("/auto-queue/dispatch", post(deprecated_auto_queue_dispatch))
             .route("/auto-queue/dispatch-next", post(auto_queue::activate))
-            .route("/auto-queue/activate", post(deprecated_auto_queue_activate))
             .route("/auto-queue/status", get(auto_queue::status))
             .route("/auto-queue/history", get(auto_queue::history))
             .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
@@ -189,26 +191,15 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
     )
 }
 
-async fn deprecated_hook_session(
+/// #1064: Deprecated alias for /api/auto-queue/generate (+ /dispatch-next when
+/// the caller set `activate=true`). Kept functional until CLI callers migrate.
+async fn deprecated_auto_queue_dispatch(
     State(state): State<AppState>,
-    Json(body): Json<dispatched_sessions::HookSessionBody>,
+    Json(body): Json<auto_queue::DispatchBody>,
 ) -> (StatusCode, Json<Value>) {
-    log_deprecated_alias("/api/hook/session", "/api/dispatched-sessions/webhook");
-    dispatched_sessions::hook_session(State(state), Json(body)).await
-}
-
-async fn deprecated_delete_session(
-    State(state): State<AppState>,
-    Query(params): Query<dispatched_sessions::DeleteSessionQuery>,
-) -> (StatusCode, Json<Value>) {
-    log_deprecated_alias("/api/hook/session", "/api/dispatched-sessions/webhook");
-    dispatched_sessions::delete_session(State(state), Query(params)).await
-}
-
-async fn deprecated_auto_queue_activate(
-    State(state): State<AppState>,
-    Json(body): Json<auto_queue::ActivateBody>,
-) -> (StatusCode, Json<Value>) {
-    log_deprecated_alias("/api/auto-queue/activate", "/api/auto-queue/dispatch-next");
-    auto_queue::activate(State(state), Json(body)).await
+    log_deprecated_alias(
+        "/api/auto-queue/dispatch",
+        "/api/auto-queue/generate (+ /api/auto-queue/dispatch-next)",
+    );
+    auto_queue::dispatch(State(state), Json(body)).await
 }

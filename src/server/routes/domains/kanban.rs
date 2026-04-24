@@ -1,14 +1,9 @@
 use axum::{
-    Json, Router,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    Router,
     routing::{get, patch, post},
 };
-use serde_json::Value;
 
-use super::super::{
-    ApiRouter, AppState, kanban, kanban_repos, log_deprecated_alias, protected_api_domain, resume,
-};
+use super::super::{ApiRouter, AppState, kanban, kanban_repos, protected_api_domain, resume};
 
 // Category: kanban
 
@@ -20,7 +15,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(kanban::list_cards).post(kanban::create_card),
             )
             .route("/kanban-cards/stalled", get(kanban::stalled_cards))
-            .route("/kanban-cards/bulk-action", post(kanban::bulk_action))
             .route("/kanban-cards/assign-issue", post(kanban::assign_issue))
             .route(
                 "/kanban-cards/{id}",
@@ -31,19 +25,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/kanban-cards/{id}/assign", post(kanban::assign_card))
             .route("/kanban-cards/{id}/rereview", post(kanban::rereview_card))
             .route("/kanban-cards/batch-rereview", post(kanban::batch_rereview))
-            .route("/re-review", post(deprecated_batch_rereview))
-            .route(
-                "/kanban-cards/batch-transition",
-                post(kanban::batch_transition),
-            )
             .route("/kanban-cards/{id}/reopen", post(kanban::reopen_card))
             .route(
                 "/kanban-cards/{id}/transition",
                 post(kanban::force_transition),
-            )
-            .route(
-                "/kanban-cards/{id}/force-transition",
-                post(deprecated_force_transition),
             )
             .route("/kanban-cards/{id}/retry", post(kanban::retry_card))
             .route(
@@ -73,26 +58,4 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/pm-decision", post(kanban::pm_decision)),
         state,
     )
-}
-
-async fn deprecated_batch_rereview(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<kanban::BatchRereviewBody>,
-) -> (StatusCode, Json<Value>) {
-    log_deprecated_alias("/api/re-review", "/api/kanban-cards/batch-rereview");
-    kanban::batch_rereview(State(state), headers, Json(body)).await
-}
-
-async fn deprecated_force_transition(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<kanban::ForceTransitionBody>,
-) -> (StatusCode, Json<Value>) {
-    log_deprecated_alias(
-        "/api/kanban-cards/{id}/force-transition",
-        "/api/kanban-cards/{id}/transition",
-    );
-    kanban::force_transition(State(state), Path(id), headers, Json(body)).await
 }

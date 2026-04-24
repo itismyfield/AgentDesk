@@ -1094,7 +1094,7 @@ pub async fn list_dispatched_sessions(
     (StatusCode::OK, Json(json!({"sessions": sessions})))
 }
 
-/// POST /api/hook/session — upsert session from dcserver
+/// POST /api/dispatched-sessions/webhook — upsert session from dcserver
 pub async fn hook_session(
     State(state): State<AppState>,
     Json(body): Json<HookSessionBody>,
@@ -1130,7 +1130,7 @@ pub async fn hook_session(
                 .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
-    // /api/hook/session is intentionally auth-exempt, so never trust a client-supplied
+    // /api/dispatched-sessions/webhook is intentionally auth-exempt, so never trust a client-supplied
     // agent_id from this payload. Resolve ownership from session/channel/dispatch context only.
     let agent_id = resolve_session_agent_id(
         &conn,
@@ -1409,7 +1409,7 @@ pub async fn gc_thread_sessions(
     )
 }
 
-/// DELETE /api/hook/session — delete a session by session_key
+/// DELETE /api/dispatched-sessions/webhook — delete a session by session_key
 pub async fn delete_session(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
