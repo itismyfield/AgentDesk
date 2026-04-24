@@ -44,6 +44,10 @@ pub struct AtomicCounters {
     pub watcher_replacements: AtomicU64,
     pub success: AtomicU64,
     pub fail: AtomicU64,
+    /// #1085: turn entered with `session_id.is_some()` — provider session reused.
+    pub session_reused: AtomicU64,
+    /// #1085: turn entered with `session_id.is_none()` — provider session created fresh.
+    pub session_new: AtomicU64,
 }
 
 impl AtomicCounters {
@@ -54,6 +58,8 @@ impl AtomicCounters {
             watcher_replacements: self.watcher_replacements.load(Ordering::Relaxed),
             success: self.success.load(Ordering::Relaxed),
             fail: self.fail.load(Ordering::Relaxed),
+            session_reused: self.session_reused.load(Ordering::Relaxed),
+            session_new: self.session_new.load(Ordering::Relaxed),
         }
     }
 }
@@ -65,6 +71,8 @@ pub struct AtomicCountersSnapshot {
     pub watcher_replacements: u64,
     pub success: u64,
     pub fail: u64,
+    pub session_reused: u64,
+    pub session_new: u64,
 }
 
 /// One row emitted by `ObservabilityCounters::snapshot()`.
@@ -78,6 +86,12 @@ pub struct CounterSnapshotRow {
     pub success: u64,
     pub fail: u64,
     pub success_rate: f64,
+    /// #1085: cumulative count of turns that entered with an existing provider session_id.
+    pub session_reused: u64,
+    /// #1085: cumulative count of turns that started without an existing provider session_id.
+    pub session_new: u64,
+    /// #1085: ratio `session_reused / (session_reused + session_new)`; 0.0 when both zero.
+    pub session_reuse_rate: f64,
 }
 
 /// In-process registry of `(channel_id, provider) -> AtomicCounters`.
@@ -135,6 +149,17 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// #1085: record whether the turn entered with an existing provider session.
+    /// `session_id_present == true` increments `session_reused`, else `session_new`.
+    pub fn record_session_entry(&self, channel_id: u64, provider: &str, session_id_present: bool) {
+        let slot = self.slot(channel_id, provider);
+        if session_id_present {
+            slot.session_reused.fetch_add(1, Ordering::Relaxed);
+        } else {
+            slot.session_new.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Serde-friendly snapshot. Does not clear counters.
     pub fn snapshot(&self) -> Vec<CounterSnapshotRow> {
         let mut rows: Vec<CounterSnapshotRow> = self
@@ -149,6 +174,12 @@ impl ObservabilityCounters {
                 } else {
                     snap.success as f64 / denom as f64
                 };
+                let session_denom = snap.session_reused + snap.session_new;
+                let session_reuse_rate = if session_denom == 0 {
+                    0.0
+                } else {
+                    snap.session_reused as f64 / session_denom as f64
+                };
                 CounterSnapshotRow {
                     channel_id: key.channel_id,
                     provider: key.provider,
@@ -158,6 +189,9 @@ impl ObservabilityCounters {
                     success: snap.success,
                     fail: snap.fail,
                     success_rate: rate,
+                    session_reused: snap.session_reused,
+                    session_new: snap.session_new,
+                    session_reuse_rate,
                 }
             })
             .collect();
@@ -203,6 +237,11 @@ pub fn record_success(channel_id: u64, provider: &str) {
 
 pub fn record_fail(channel_id: u64, provider: &str) {
     global().record_fail(channel_id, provider);
+}
+
+/// #1085: convenience wrapper for `ObservabilityCounters::record_session_entry`.
+pub fn record_session_entry(channel_id: u64, provider: &str, session_id_present: bool) {
+    global().record_session_entry(channel_id, provider, session_id_present);
 }
 
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
@@ -262,6 +301,33 @@ mod tests {
         assert_eq!(codex_row.fail, 1);
         assert!((codex_row.success_rate - 0.0).abs() < f64::EPSILON);
         assert_eq!(claude_row.attempts, 1);
+    }
+
+    #[test]
+    fn session_entry_increments_reuse_or_new_and_reports_rate() {
+        let c = ObservabilityCounters::new();
+        // 3 reuses, 1 fresh start → reuse rate = 0.75
+        c.record_session_entry(7, "claude", true);
+        c.record_session_entry(7, "claude", true);
+        c.record_session_entry(7, "claude", true);
+        c.record_session_entry(7, "claude", false);
+
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].session_reused, 3);
+        assert_eq!(snap[0].session_new, 1);
+        assert!((snap[0].session_reuse_rate - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn session_reuse_rate_is_zero_when_no_entries_recorded() {
+        let c = ObservabilityCounters::new();
+        c.record_attempt(9, "codex");
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].session_reused, 0);
+        assert_eq!(snap[0].session_new, 0);
+        assert!((snap[0].session_reuse_rate - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]

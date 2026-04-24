@@ -695,6 +695,13 @@ pub(in crate::services::discord) async fn start_headless_turn(
         session_id.is_some(),
         prompt_prep_duration_ms
     );
+    // #1085: same session-reuse counter as the foreground path so headless
+    // (background-trigger) turns are reflected in the reuse-rate metric.
+    crate::services::observability::metrics::record_session_entry(
+        channel_id.get(),
+        provider_label,
+        session_id.is_some(),
+    );
 
     {
         let watchdog_token = cancel_token.clone();
@@ -2453,6 +2460,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         memory_backend_label,
         session_id.is_some(),
         prompt_prep_duration_ms
+    );
+    // #1085: track provider-session reuse rate so we can monitor whether the
+    // idle-timeout extension and reset removals are actually translating into
+    // reused sessions (vs. falling back to fresh sessions every turn).
+    crate::services::observability::metrics::record_session_entry(
+        channel_id.get(),
+        provider_label,
+        session_id.is_some(),
     );
     // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
