@@ -812,35 +812,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/kanban-cards/bulk-action",
-            "kanban",
-            "Apply the same action to multiple cards",
-        )
-        .with_params([
-            (
-                "action",
-                body_param("string", true, "Bulk action name")
-                    .with_enum(&["pass", "reset", "cancel", "transition"]),
-            ),
-            (
-                "card_ids",
-                body_param("string[]", true, "Target card ids"),
-            ),
-            (
-                "target_status",
-                body_param(
-                    "string",
-                    false,
-                    "Required when action=transition; target pipeline status",
-                ),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"action": "transition", "card_ids": ["card-1", "card-2"], "target_status": "ready"}}),
-            json!({"action": "transition", "results": [{"id": "card-1", "ok": true}, {"id": "card-2", "ok": true}]}),
-        ),
-        ep(
-            "POST",
             "/api/kanban-cards/assign-issue",
             "kanban",
             "Create or update a card from a GitHub issue",
@@ -991,43 +962,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/re-review",
-            "kanban",
-            "Deprecated alias for /api/kanban-cards/batch-rereview",
-        )
-        .deprecated_alias("/api/kanban-cards/batch-rereview"),
-        ep(
-            "POST",
-            "/api/kanban-cards/batch-transition",
-            "kanban",
-            "Force-transition multiple cards",
-        )
-        .with_params([
-            (
-                "issue_numbers",
-                body_param("number[]", false, "GitHub issue numbers to resolve into cards"),
-            ),
-            (
-                "card_ids",
-                body_param("string[]", false, "Explicit card ids to transition"),
-            ),
-            ("status", body_param("string", true, "Target pipeline status")),
-            (
-                "cancel_dispatches",
-                body_param(
-                    "boolean",
-                    false,
-                    "When transitioning to backlog/ready, also cancel active dispatches",
-                )
-                .with_default(true),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"card_ids": ["card-1", "card-2"], "status": "ready", "cancel_dispatches": true}}),
-            json!({"results": [{"card_id": "card-1", "ok": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}]}),
-        ),
-        ep(
-            "POST",
             "/api/kanban-cards/{id}/reopen",
             "kanban",
             "Reopen a terminal card",
@@ -1080,13 +1014,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "card-1"}, "body": {"status": "ready", "cancel_dispatches": true}}),
             json!({"card": {"id": "card-1", "status": "ready"}, "forced": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}),
         ),
-        ep(
-            "POST",
-            "/api/kanban-cards/{id}/force-transition",
-            "kanban",
-            "Deprecated alias for /api/kanban-cards/{id}/transition",
-        )
-        .deprecated_alias("/api/kanban-cards/{id}/transition"),
         ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card")
             .with_params([
                 ("id", path_param("Kanban card ID")),
@@ -1361,19 +1288,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "GET",
-            "/api/pipeline/cards/{cardId}",
+            "/api/pipeline/cards/{card_id}",
             "pipeline",
             "Get card pipeline state",
         ),
         ep(
             "GET",
-            "/api/pipeline/cards/{cardId}/history",
+            "/api/pipeline/cards/{card_id}/history",
             "pipeline",
             "Get card transition history",
         ),
         ep(
             "GET",
-            "/api/pipeline/cards/{cardId}/transcripts",
+            "/api/pipeline/cards/{card_id}/transcripts",
             "pipeline",
             "List completed turn transcripts linked to card dispatches",
         ),
@@ -1887,25 +1814,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Session webhook",
         ),
         ep(
-            "POST",
-            "/api/hook/session",
-            "dispatched-sessions",
-            "Deprecated alias for /api/dispatched-sessions/webhook",
-        )
-        .deprecated_alias("/api/dispatched-sessions/webhook"),
-        ep(
             "DELETE",
             "/api/dispatched-sessions/webhook",
             "dispatched-sessions",
             "Delete session webhook state",
         ),
-        ep(
-            "DELETE",
-            "/api/hook/session",
-            "dispatched-sessions",
-            "Deprecated alias for /api/dispatched-sessions/webhook",
-        )
-        .deprecated_alias("/api/dispatched-sessions/webhook"),
         ep(
             "GET",
             "/api/dispatched-sessions/claude-session-id",
@@ -2129,7 +2042,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/auto-queue/dispatch",
             "auto-queue",
-            "Declaratively generate and optionally activate grouped auto-queue work",
+            "Deprecated (#1064): use /api/auto-queue/generate + /api/auto-queue/dispatch-next. Remains functional for legacy CLI callers with the groups body shape.",
         )
         .with_params([
             (
@@ -2239,13 +2152,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"repo": "test-repo", "unified_thread": false}}),
             json!({"dispatched": [{"id": "entry-1", "card_id": "card-423", "dispatch_id": "dispatch-1", "status": "dispatched"}], "count": 1, "active_groups": 1, "pending_groups": 1}),
         ),
-        ep(
-            "POST",
-            "/api/auto-queue/activate",
-            "auto-queue",
-            "Deprecated alias for /api/auto-queue/dispatch-next",
-        )
-        .deprecated_alias("/api/auto-queue/dispatch-next"),
         ep(
             "GET",
             "/api/auto-queue/status",

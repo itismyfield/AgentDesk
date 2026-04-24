@@ -750,6 +750,9 @@ export async function getStalledCards(): Promise<KanbanCard[]> {
   return request("/api/kanban-cards/stalled");
 }
 
+// #1064: bulk-action consolidated into per-card POST /kanban-cards/{id}/transition.
+// Server-side pipeline lookup for terminal/initial states is now the caller's
+// responsibility — each action resolves a concrete target_status before iteration.
 export async function bulkKanbanAction(
   action: "pass" | "reset" | "cancel" | "transition",
   card_ids: string[],
@@ -758,14 +761,36 @@ export async function bulkKanbanAction(
   action: string;
   results: Array<{ id: string; ok: boolean; error?: string }>;
 }> {
-  return request("/api/kanban-cards/bulk-action", {
-    method: "POST",
-    body: JSON.stringify({
-      action,
-      card_ids,
-      target_status: targetStatus,
+  let resolvedTarget: string | undefined = targetStatus;
+  if (action === "pass" || action === "cancel") {
+    resolvedTarget = "done";
+  } else if (action === "reset") {
+    resolvedTarget = "backlog";
+  } else if (action === "transition") {
+    if (!resolvedTarget) {
+      throw new Error("transition action requires target_status");
+    }
+  }
+
+  const results = await Promise.all(
+    card_ids.map(async (id) => {
+      try {
+        await request(`/api/kanban-cards/${encodeURIComponent(id)}/transition`, {
+          method: "POST",
+          body: JSON.stringify({ status: resolvedTarget }),
+        });
+        return { id, ok: true };
+      } catch (error) {
+        return {
+          id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     }),
-  });
+  );
+
+  return { action, results };
 }
 
 export async function getKanbanRepoSources(): Promise<KanbanRepoSource[]> {
@@ -1881,7 +1906,7 @@ export async function activateAutoQueue(
   const body: Record<string, unknown> = {};
   if (repo) body.repo = repo;
   if (agentId) body.agent_id = agentId;
-  return request("/api/auto-queue/activate", {
+  return request("/api/auto-queue/dispatch-next", {
     method: "POST",
     body: JSON.stringify(body),
   });

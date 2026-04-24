@@ -153,13 +153,13 @@ pub(super) async fn lookup_pending_dispatch_for_thread(thread_id: u64) -> Result
 pub(super) async fn hook_session(
     body: routes::dispatched_sessions::HookSessionBody,
 ) -> Result<Value, String> {
-    request_body(Method::POST, "/api/hook/session", &body).await
+    request_body(Method::POST, "/api/dispatched-sessions/webhook", &body).await
 }
 
 pub(super) async fn delete_session(session_key: &str) -> Result<Value, String> {
     request_query(
         Method::DELETE,
-        "/api/hook/session",
+        "/api/dispatched-sessions/webhook",
         &routes::dispatched_sessions::DeleteSessionQuery {
             session_key: session_key.to_string(),
             provider: None,

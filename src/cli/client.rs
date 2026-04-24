@@ -1171,7 +1171,7 @@ mod tests {
                 )
                 .route("/api/dispatches/{id}", patch(advance_patch_handler))
                 .route(
-                    "/api/kanban-cards/{id}/force-transition",
+                    "/api/kanban-cards/{id}/transition",
                     post(advance_force_transition_handler),
                 )
                 .with_state(state.clone());

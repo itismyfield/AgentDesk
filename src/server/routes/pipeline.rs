@@ -308,7 +308,7 @@ pub async fn delete_stages(
     }
 }
 
-/// GET /api/pipeline/cards/{cardId} — card pipeline state with history
+/// GET /api/pipeline/cards/{card_id} — card pipeline state with history
 pub async fn get_card_pipeline(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -432,7 +432,7 @@ pub async fn get_card_pipeline(
     )
 }
 
-/// GET /api/pipeline/cards/{cardId}/history
+/// GET /api/pipeline/cards/{card_id}/history
 pub async fn get_card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -471,7 +471,7 @@ pub async fn get_card_history(
     (StatusCode::OK, Json(json!({"history": history})))
 }
 
-/// GET /api/pipeline/cards/{cardId}/transcripts?limit=10
+/// GET /api/pipeline/cards/{card_id}/transcripts?limit=10
 pub async fn get_card_transcripts(
     State(state): State<AppState>,
     Path(card_id): Path<String>,

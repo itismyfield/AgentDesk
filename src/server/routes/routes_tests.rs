@@ -682,7 +682,7 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
                 axum::routing::get(|| async { StatusCode::OK }),
             )
             .route(
-                "/hook/session",
+                "/dispatched-sessions/webhook",
                 axum::routing::post(|| async { StatusCode::CREATED }),
             )
             .route("/send", axum::routing::post(|| async { StatusCode::OK }))
@@ -713,7 +713,7 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7601,6 +7601,13 @@ async fn api_docs_flat_format_omits_removed_legacy_routes() {
         "/api/api-friction/events",
         "/api/api-friction/patterns",
         "/api/api-friction/process",
+        // #1064 removals
+        "/api/re-review",
+        "/api/hook/session",
+        "/api/auto-queue/activate",
+        "/api/kanban-cards/bulk-action",
+        "/api/kanban-cards/batch-transition",
+        "/api/kanban-cards/{id}/force-transition",
     ] {
         assert!(
             endpoints.iter().all(|ep| ep["path"] != path),
@@ -7635,6 +7642,14 @@ async fn removed_legacy_routes_return_not_found() {
         ("GET", "/api-friction/events"),
         ("GET", "/api-friction/patterns"),
         ("POST", "/api-friction/process"),
+        // #1064 removals
+        ("POST", "/re-review"),
+        ("POST", "/hook/session"),
+        ("DELETE", "/hook/session"),
+        ("POST", "/auto-queue/activate"),
+        ("POST", "/kanban-cards/bulk-action"),
+        ("POST", "/kanban-cards/batch-transition"),
+        ("POST", "/kanban-cards/card-x/force-transition"),
     ] {
         let response = app
             .clone()
@@ -7648,10 +7663,17 @@ async fn removed_legacy_routes_return_not_found() {
             .await
             .unwrap();
 
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "{method} {uri} should return 404 after route cleanup"
+        // 404 when the path is fully removed; 405 when the removed endpoint
+        // collided with a remaining `{id}`-style wildcard route that now
+        // rejects the method (e.g. /kanban-cards/bulk-action matching the
+        // /kanban-cards/{id} GET/PATCH/DELETE route).
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "{method} {uri} should return 404/405 after route cleanup, got {}",
+            response.status()
         );
     }
 }
@@ -11724,7 +11746,7 @@ async fn force_transition_succeeds_with_correct_channel() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft3/force-transition")
+                .uri("/kanban-cards/card-ft3/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -11760,7 +11782,7 @@ async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configu
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft4/force-transition")
+                .uri("/kanban-cards/card-ft4/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "wrong-channel")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -11928,7 +11950,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-terminal/force-transition")
+                .uri("/kanban-cards/card-ft-terminal/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -12113,14 +12135,19 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
 }
 
+// #1064: /api/kanban-cards/batch-transition and bulk-action were removed in
+// favour of per-card POST /api/kanban-cards/{id}/transition. The paths now
+// collide with the /kanban-cards/{id} wildcard (GET/PATCH/DELETE), so POST
+// against them returns 405 Method Not Allowed — still unambiguously "not
+// served" from the caller's perspective.
 #[tokio::test]
-async fn batch_transition_returns_per_card_results_and_transitions_targets() {
+async fn removed_batch_transition_route_is_unserved() {
     let db = test_db();
     let engine = test_engine(&db);
     seed_card_with_status(&db, "card-bt-1", "backlog");
     set_pmd_channel(&db, "pmd-chan-123");
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -12128,94 +12155,41 @@ async fn batch_transition_returns_per_card_results_and_transitions_targets() {
                 .uri("/kanban-cards/batch-transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(
-                    r#"{"card_ids":["card-bt-1","missing-card"],"status":"ready"}"#,
-                ))
+                .body(Body::from(r#"{"card_ids":["card-bt-1"],"status":"ready"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let results = json["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["card_id"], "card-bt-1");
-    assert_eq!(results[0]["ok"], true);
-    assert_eq!(results[0]["to"], "ready");
-    assert_eq!(results[1]["card_id"], "missing-card");
-    assert_eq!(results[1]["ok"], false);
-
-    let conn = db.lock().unwrap();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-bt-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "ready");
+    assert!(matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ));
 }
 
 #[tokio::test]
-async fn batch_transition_resolves_issue_numbers_to_cards() {
+async fn removed_bulk_action_route_is_unserved() {
     let db = test_db();
     let engine = test_engine(&db);
-    set_pmd_channel(&db, "pmd-chan-123");
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, github_issue_number, created_at, updated_at
-            ) VALUES (
-                'card-bt-issue', 'Batch Transition Issue', 'backlog', 'medium', 3277, datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    seed_card_with_status(&db, "card-ba-1", "backlog");
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/batch-transition")
+                .uri("/kanban-cards/bulk-action")
                 .header("content-type", "application/json")
-                .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(
-                    r#"{"issue_numbers":[3277,3999],"status":"ready"}"#,
-                ))
+                .body(Body::from(r#"{"action":"pass","card_ids":["card-ba-1"]}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let results = json["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["issue_number"], 3999);
-    assert_eq!(results[0]["ok"], false);
-    assert_eq!(results[1]["card_id"], "card-bt-issue");
-    assert_eq!(results[1]["issue_number"], 3277);
-    assert_eq!(results[1]["ok"], true);
-
-    let conn = db.lock().unwrap();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-bt-issue'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "ready");
+    assert!(matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ));
 }
 
 #[tokio::test]
@@ -12338,7 +12312,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-clean/force-transition")
+                .uri("/kanban-cards/card-ft-clean/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"ready"}"#))
@@ -12761,7 +12735,7 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-clean-pg/force-transition")
+                .uri("/kanban-cards/card-ft-clean-pg/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"ready"}"#))
@@ -16176,7 +16150,7 @@ async fn auto_queue_activate_run_id_does_not_dispatch_restoring_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16263,7 +16237,7 @@ async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16348,7 +16322,7 @@ async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16424,7 +16398,7 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16537,7 +16511,7 @@ async fn auto_queue_activate_walk_respects_requested_hook_skip() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16625,7 +16599,7 @@ async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16741,7 +16715,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16859,7 +16833,7 @@ async fn auto_queue_activate_consult_required_prefers_registry_counterpart_provi
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16929,7 +16903,7 @@ async fn auto_queue_activate_already_applied_skips_entry_and_completes_run() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17065,7 +17039,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17188,7 +17162,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17357,7 +17331,7 @@ async fn auto_queue_activate_dispatch_create_failure_releases_reserved_slot() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17482,7 +17456,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17537,7 +17511,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17681,7 +17655,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17709,7 +17683,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17845,7 +17819,7 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17998,7 +17972,7 @@ async fn auto_queue_activate_allows_same_agent_parallel_across_runs_when_free_sl
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -18102,7 +18076,7 @@ async fn auto_queue_activate_keeps_single_slot_agent_single_dispatched_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -18178,7 +18152,7 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:sess1","status":"working","claude_session_id":"valid-id-123"}"#,
@@ -18208,7 +18182,7 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:sess1","status":"working","claude_session_id":""}"#,
@@ -18301,7 +18275,7 @@ async fn hook_session_persists_raw_provider_session_id_separately() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:gemini-raw","status":"working","provider":"gemini","claude_session_id":"latest","session_id":"aa678e6b-c6d3-4dd2-9197-58580c00cc6c"}"#,
@@ -20630,7 +20604,7 @@ async fn smart_activate_dispatches_multiple_groups() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20825,7 +20799,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20884,7 +20858,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20922,7 +20896,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23314,7 +23288,7 @@ async fn activate_run_id_blocks_phase_gate_paused_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23539,7 +23513,7 @@ async fn activate_run_id_blocks_phase_gate_paused_runs_pg_path() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23662,7 +23636,7 @@ async fn auto_queue_activate_dispatches_pg_only_run_without_sqlite_mirror() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23980,7 +23954,7 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -25241,7 +25215,7 @@ async fn batch_rereview_processes_multiple_issues() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/re-review")
+                .uri("/kanban-cards/batch-rereview")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(
