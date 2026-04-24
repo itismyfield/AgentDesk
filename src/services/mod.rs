@@ -9,6 +9,7 @@ pub mod discord;
 pub mod discord_config_audit;
 pub mod discord_dm_reply_store;
 pub mod dispatches;
+pub mod dispatches_followup;
 pub mod gemini;
 pub mod kanban;
 pub mod mcp_config;

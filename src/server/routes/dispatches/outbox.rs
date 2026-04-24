@@ -1655,60 +1655,18 @@ fn truncate_dispatch_message(message: &str) -> String {
 }
 
 // ── #144: Dispatch Notification Outbox ───────────────────────
-
-/// Queue a dispatch completion followup for async processing.
-///
-/// Replaces `tokio::spawn(handle_completed_dispatch_followups(...))`.
-pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
-    if let Ok(conn) = db.separate_conn() {
-        conn.execute(
-            "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
-            [dispatch_id],
-        )
-        .ok();
-    }
-}
-
-pub(crate) fn queue_dispatch_followup_sync(
-    db: &crate::db::Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-) {
-    if let Some(pool) = pg_pool {
-        let dispatch_id_owned = dispatch_id.to_string();
-        if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                queue_dispatch_followup_pg(&bridge_pool, &dispatch_id_owned).await
-            },
-            |error| error,
-        ) {
-            tracing::warn!(
-                dispatch_id = %dispatch_id,
-                "failed to enqueue postgres followup: {error}"
-            );
-        }
-        return;
-    }
-
-    queue_dispatch_followup(db, dispatch_id);
-}
-
-pub(crate) async fn queue_dispatch_followup_pg(
-    pg_pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        "INSERT INTO dispatch_outbox (dispatch_id, action)
-         VALUES ($1, 'followup')
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(dispatch_id)
-    .execute(pg_pool)
-    .await
-    .map_err(|error| format!("enqueue postgres followup for {dispatch_id}: {error}"))?;
-    Ok(())
-}
+//
+// #1075: The follow-up enqueue helpers (queue_dispatch_followup* family)
+// moved to `crate::services::dispatches_followup` so callers in the service
+// layer stop forming a service→route reverse edge. The worker loop below
+// still lives here because it owns the Discord transport side-effects.
+//
+// Thin re-exports kept for the in-module tests at the bottom of this file
+// (still asserting Postgres `dispatch_outbox` insert semantics end-to-end).
+#[cfg(test)]
+use crate::services::dispatches_followup::{
+    queue_dispatch_followup_pg, queue_dispatch_followup_sync,
+};
 
 pub(crate) async fn requeue_dispatch_notify_pg(
     pg_pool: &PgPool,
