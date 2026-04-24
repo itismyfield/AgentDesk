@@ -101,6 +101,7 @@ pub async fn execute_structured(
                 model_ref,
                 None,
                 None,
+                None,
             ),
             ProviderKind::Codex => codex::execute_command_streaming(
                 &prompt,
