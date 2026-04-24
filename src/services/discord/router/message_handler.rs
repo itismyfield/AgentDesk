@@ -1023,6 +1023,8 @@ pub(in crate::services::discord) async fn start_headless_turn(
             .first()
             .map(|(_, value)| value.parse::<u64>().unwrap_or(0))
     };
+    // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
+    let cache_ttl_minutes = super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
 
     let prompt_owned = prompt.to_string();
     let provider_for_blocking = provider.clone();
@@ -1045,6 +1047,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                         model_for_turn.as_deref(),
                         native_fast_mode_override,
                         compact_percent_for_claude,
+                        cache_ttl_minutes,
                     ),
                     ProviderKind::Codex => codex::execute_command_streaming(
                         &context_prompt,
@@ -2840,6 +2843,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
     };
+    // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
+    let cache_ttl_minutes = super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
 
     // Run the provider in a blocking thread
     let provider_for_blocking = provider.clone();
@@ -2862,6 +2867,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                         model_for_turn.as_deref(),
                         native_fast_mode_override,
                         compact_percent_for_claude,
+                        cache_ttl_minutes,
                     ),
                     ProviderKind::Codex => codex::execute_command_streaming(
                         &context_prompt,

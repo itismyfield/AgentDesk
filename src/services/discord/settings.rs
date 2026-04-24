@@ -54,8 +54,9 @@ use validation::bot_settings_allow_agent;
 pub(crate) use validation::list_registered_channel_bindings;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
-    has_configured_channel_binding, resolve_role_binding, resolve_workspace,
-    validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
+    has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_role_binding,
+    resolve_workspace, validate_bot_channel_routing,
+    validate_bot_channel_routing_with_provider_channel,
 };
 pub(super) use write::save_bot_settings;
 

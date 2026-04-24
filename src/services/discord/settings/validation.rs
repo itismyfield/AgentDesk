@@ -169,6 +169,16 @@ pub(crate) fn resolve_role_binding(
     resolve_role_binding_from_role_map(channel_id, channel_name)
 }
 
+/// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel.
+/// Currently only `agentdesk_config` channels expose this field; other
+/// binding sources fall back to `None` (default 5m).
+pub(crate) fn resolve_cache_ttl_minutes(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<u32> {
+    agentdesk_config::resolve_cache_ttl_minutes(channel_id, channel_name)
+}
+
 pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
     let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
 

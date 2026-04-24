@@ -379,6 +379,25 @@ impl AgentChannel {
             Self::Detailed(config) => config.quality_feedback_injection,
         }
     }
+
+    /// Returns the configured prompt-cache TTL in minutes, but only if it is a
+    /// supported bucket (5 or 60). Anything else maps to `None` so the default
+    /// 5-minute TTL is used.
+    pub fn cache_ttl_minutes(&self) -> Option<u32> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalize_cache_ttl_minutes(config.cache_ttl_minutes),
+        }
+    }
+}
+
+/// Validate the cache TTL minutes config value (#1088).
+/// Only `Some(5)` and `Some(60)` are accepted; other values return `None`.
+pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
+    match value {
+        Some(5) | Some(60) => value,
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -411,6 +430,17 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub quality_feedback_injection: Option<bool>,
+    /// Anthropic prompt-cache TTL bucket (#1088). Only `5` (default) or `60`
+    /// minutes are valid. Any other value is treated as `None` (default 5m).
+    /// When set to `60`, the Claude CLI is invoked with the extended 1h
+    /// cache TTL via the `CLAUDE_CODE_EXTENDED_CACHE_TTL` env var so the
+    /// underlying API call uses `cache_control.ttl = "1h"`.
+    #[serde(
+        default,
+        alias = "cacheTtlMinutes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_ttl_minutes: Option<u32>,
 }
 
 impl AgentChannelConfig {
@@ -1225,13 +1255,13 @@ pub(crate) fn set_test_runtime_root_override(path: Option<std::path::PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
-        DEFAULT_MEMENTO_MCP_SERVER_NAME, DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR,
+        AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, AutomationConfig, BotConfig,
+        Config, DEFAULT_MEMENTO_MCP_SERVER_NAME, DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR,
         DEFAULT_MEMENTO_MCP_URL, DiscordBotAuthConfig, EscalationConfig, EscalationMode,
         EscalationScheduleConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig,
         McpServerAuthConfig, McpServerAuthType, McpServerConfig, MemoryConfig, ReviewConfig,
-        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
-        save_to_path,
+        RuntimeSettingsConfig, load_from_path, normalize_cache_ttl_minutes,
+        resolve_graceful_config_path, runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -1725,6 +1755,86 @@ mod tests {
             None => unsafe { std::env::remove_var(DEFAULT_MEMENTO_MCP_TOKEN_ENV_VAR) },
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -------- #1088 prompt-cache TTL config field --------
+
+    #[test]
+    fn cache_ttl_minutes_normalize_accepts_only_5_and_60() {
+        assert_eq!(normalize_cache_ttl_minutes(None), None);
+        assert_eq!(normalize_cache_ttl_minutes(Some(5)), Some(5));
+        assert_eq!(normalize_cache_ttl_minutes(Some(60)), Some(60));
+        // Reject everything else.
+        for invalid in [0u32, 1, 4, 6, 30, 59, 61, 120, 600] {
+            assert_eq!(
+                normalize_cache_ttl_minutes(Some(invalid)),
+                None,
+                "minutes={invalid} must normalize to None"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_ttl_minutes_round_trips_through_yaml() {
+        // None → omitted entirely (skip_serializing_if).
+        let config_none = AgentChannelConfig {
+            id: Some("123".to_string()),
+            ..AgentChannelConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&config_none).unwrap();
+        assert!(
+            !yaml.contains("cache_ttl_minutes"),
+            "default None must be omitted, got: {yaml}"
+        );
+
+        // 60 round-trips and survives reload.
+        let config_60 = AgentChannelConfig {
+            id: Some("123".to_string()),
+            cache_ttl_minutes: Some(60),
+            ..AgentChannelConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&config_60).unwrap();
+        assert!(
+            yaml.contains("cache_ttl_minutes: 60"),
+            "expected cache_ttl_minutes: 60 in: {yaml}"
+        );
+        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reloaded.cache_ttl_minutes, Some(60));
+        assert_eq!(
+            AgentChannel::Detailed(reloaded).cache_ttl_minutes(),
+            Some(60)
+        );
+
+        // 5 round-trips identically.
+        let config_5 = AgentChannelConfig {
+            id: Some("123".to_string()),
+            cache_ttl_minutes: Some(5),
+            ..AgentChannelConfig::default()
+        };
+        let reloaded: AgentChannelConfig =
+            serde_yaml::from_str(&serde_yaml::to_string(&config_5).unwrap()).unwrap();
+        assert_eq!(reloaded.cache_ttl_minutes, Some(5));
+    }
+
+    #[test]
+    fn cache_ttl_minutes_camel_case_alias_is_accepted() {
+        let yaml = "id: '123'\ncacheTtlMinutes: 60\n";
+        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.cache_ttl_minutes, Some(60));
+    }
+
+    #[test]
+    fn agent_channel_cache_ttl_minutes_filters_invalid_values() {
+        // Detailed with invalid raw value must return None at the accessor level.
+        let invalid = AgentChannel::Detailed(AgentChannelConfig {
+            cache_ttl_minutes: Some(30),
+            ..AgentChannelConfig::default()
+        });
+        assert_eq!(invalid.cache_ttl_minutes(), None);
+
+        // Legacy entries never expose a TTL.
+        let legacy = AgentChannel::Legacy("alpha".to_string());
+        assert_eq!(legacy.cache_ttl_minutes(), None);
     }
 }
 
