@@ -54,8 +54,9 @@ fn context_compression_guidance() -> String {
 fn tool_output_efficiency_guidance() -> &'static str {
     "[Tool Output Efficiency]\n\
      Large tool results persist in context and increase cost for every subsequent turn.\n\
+     - Bash/Read: If output would exceed 10 lines, summarize the result instead of pasting raw output\n\
      - Bash: Use LIMIT clauses for SQL, pipe to head/grep for filtering, avoid tail with large line counts\n\
-     - Read: Use offset/limit to read specific sections, not entire large files\n\
+     - Read: Use offset/limit to read specific sections; do not read entire files when a section is enough\n\
      - Grep: Set head_limit, use narrow glob/type filters, avoid broad patterns that match hundreds of lines\n\
      - Prefer targeted queries over exhaustive dumps"
 }
@@ -934,8 +935,10 @@ mod tests {
         let output = call_build("ctx", "/tmp", 1, "tok", false);
         assert!(output.contains("[Tool Output Efficiency]"));
         assert!(output.contains("Large tool results persist in context"));
+        assert!(output.contains("If output would exceed 10 lines"));
         assert!(output.contains("Use LIMIT clauses for SQL"));
         assert!(output.contains("Use offset/limit to read specific sections"));
+        assert!(output.contains("do not read entire files"));
         assert!(output.contains("Set head_limit"));
     }
 

@@ -23,6 +23,7 @@ const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
+const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 struct CachedMcpSession {
@@ -45,6 +46,14 @@ struct ToolCallResult {
 struct ContextFetchResult {
     external_recall: Option<String>,
     token_usage: TokenUsage,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ModelOutputGuardResult {
+    text: String,
+    truncated: bool,
+    original_bytes: usize,
+    limit_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -696,6 +705,56 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     shortened
 }
 
+fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn guard_mcp_output_for_model(value: String, max_bytes: usize) -> ModelOutputGuardResult {
+    let original_bytes = value.len();
+    if original_bytes <= max_bytes {
+        return ModelOutputGuardResult {
+            text: value,
+            truncated: false,
+            original_bytes,
+            limit_bytes: max_bytes,
+        };
+    }
+
+    if max_bytes == 0 {
+        return ModelOutputGuardResult {
+            text: String::new(),
+            truncated: true,
+            original_bytes,
+            limit_bytes: max_bytes,
+        };
+    }
+
+    let notice = format!(
+        "\n\n[truncated memento MCP output: original_bytes={original_bytes}, limit_bytes={max_bytes}]"
+    );
+    let text = if notice.len() >= max_bytes {
+        truncate_to_byte_boundary(&value, max_bytes).to_string()
+    } else {
+        let keep_bytes = max_bytes - notice.len();
+        format!(
+            "{}{}",
+            truncate_to_byte_boundary(&value, keep_bytes),
+            notice
+        )
+    };
+
+    ModelOutputGuardResult {
+        text,
+        truncated: true,
+        original_bytes,
+        limit_bytes: max_bytes,
+    }
+}
+
 fn summarize_transcript_line(line: &str) -> Option<String> {
     let line = line.trim();
     if line.is_empty() || line == "[Stopped]" || line.starts_with("[System]:") {
@@ -1111,7 +1170,16 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
     if sections.len() == 1 {
         None
     } else {
-        Some(sections.join("\n"))
+        let guarded =
+            guard_mcp_output_for_model(sections.join("\n"), MEMENTO_MODEL_OUTPUT_MAX_BYTES);
+        if guarded.truncated {
+            tracing::warn!(
+                "[memory] truncated memento MCP output before model injection: original_bytes={} limit_bytes={}",
+                guarded.original_bytes,
+                guarded.limit_bytes
+            );
+        }
+        Some(guarded.text)
     }
 }
 
@@ -1385,6 +1453,35 @@ mod tests {
     #[test]
     fn test_format_context_payload_for_external_recall_returns_none_when_empty() {
         assert!(format_context_payload_for_external_recall(&json!({})).is_none());
+    }
+
+    #[test]
+    fn test_mcp_output_guard_preserves_threshold_boundary() {
+        let exact = "x".repeat(MEMENTO_MODEL_OUTPUT_MAX_BYTES);
+        let exact_guarded =
+            guard_mcp_output_for_model(exact.clone(), MEMENTO_MODEL_OUTPUT_MAX_BYTES);
+        assert_eq!(exact_guarded.text, exact);
+        assert!(!exact_guarded.truncated);
+
+        let oversized = format!("{}y", "x".repeat(MEMENTO_MODEL_OUTPUT_MAX_BYTES));
+        let oversized_guarded =
+            guard_mcp_output_for_model(oversized, MEMENTO_MODEL_OUTPUT_MAX_BYTES);
+        assert!(oversized_guarded.truncated);
+        assert!(oversized_guarded.text.len() <= MEMENTO_MODEL_OUTPUT_MAX_BYTES);
+        assert!(
+            oversized_guarded
+                .text
+                .contains("truncated memento MCP output")
+        );
+    }
+
+    #[test]
+    fn test_mcp_output_guard_truncates_on_utf8_boundary() {
+        let guarded = guard_mcp_output_for_model("가나다라마바사".to_string(), 10);
+
+        assert!(guarded.truncated);
+        assert!(guarded.text.len() <= 10);
+        assert!(std::str::from_utf8(guarded.text.as_bytes()).is_ok());
     }
 
     #[tokio::test]

@@ -18,6 +18,12 @@ struct MemoryInjectionPlan<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MementoRecallGateDecision {
+    should_recall: bool,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionResetReason {
     IdleExpired,
     AssistantTurnCap,
@@ -62,11 +68,85 @@ fn build_memory_injection_plan<'a>(
     }
 }
 
-fn should_skip_memento_recall(
+fn memento_recall_gate_decision(
     memory_settings: &settings::ResolvedMemorySettings,
     memento_context_loaded: bool,
-) -> bool {
-    memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
+    user_text: &str,
+) -> MementoRecallGateDecision {
+    if memory_settings.backend != settings::MemoryBackendKind::Memento {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "non_memento_backend",
+        };
+    }
+
+    if !memento_context_loaded {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "session_start_context",
+        };
+    }
+
+    let normalized = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_lowercase();
+    let text = lower.as_str();
+
+    if ["이전에", "저번에", "전에"]
+        .iter()
+        .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "previous_context_signal",
+        };
+    }
+
+    if ["에러", "실패", "오류", "안 됨", "안됨"]
+        .iter()
+        .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "error_context_signal",
+        };
+    }
+
+    if [
+        "설정 변경",
+        "설정 바",
+        "설정 업데이트",
+        "config change",
+        "configuration change",
+        "settings change",
+    ]
+    .iter()
+    .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "setting_change_signal",
+        };
+    }
+
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("/recall")
+        || trimmed.starts_with("/memento")
+        || trimmed.starts_with("/memory-read")
+        || text.contains("[memento:recall]")
+        || text.contains("<memento:recall>")
+        || text.contains("memento_recall")
+        || text.contains("@memento recall")
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            reason: "explicit_recall_signal",
+        };
+    }
+
+    MementoRecallGateDecision {
+        should_recall: false,
+        reason: "no_turn_signal",
+    }
 }
 
 fn should_note_memento_context_loaded(
@@ -493,7 +573,9 @@ pub(in crate::services::discord) async fn start_headless_turn(
         .insert(channel_id, std::time::Instant::now());
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
+    let memento_recall_gate =
+        memento_recall_gate_decision(&memory_settings, memento_context_loaded, prompt);
+    let memory_recall = if !memento_recall_gate.should_recall {
         RecallResponse::default()
     } else {
         memory_backend
@@ -507,6 +589,22 @@ pub(in crate::services::discord) async fn start_headless_turn(
             })
             .await
     };
+    if memory_settings.backend == settings::MemoryBackendKind::Memento {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] [memory] memento recall gate for headless channel {}: decision={} reason={} context_loaded={} input_tokens={} output_tokens={}",
+            channel_id.get(),
+            if memento_recall_gate.should_recall {
+                "inject"
+            } else {
+                "skip"
+            },
+            memento_recall_gate.reason,
+            memento_context_loaded,
+            memory_recall.token_usage.input_tokens,
+            memory_recall.token_usage.output_tokens
+        );
+    }
     if should_note_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
     {
         let mut data = shared.core.lock().await;
@@ -2205,7 +2303,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         .insert(channel_id, std::time::Instant::now());
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
+    let memento_recall_gate =
+        memento_recall_gate_decision(&memory_settings, memento_context_loaded, user_text);
+    let memory_recall = if !memento_recall_gate.should_recall {
         RecallResponse::default()
     } else {
         memory_backend
@@ -2219,6 +2319,22 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
             .await
     };
+    if memory_settings.backend == settings::MemoryBackendKind::Memento {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] [memory] memento recall gate for channel {}: decision={} reason={} context_loaded={} input_tokens={} output_tokens={}",
+            channel_id.get(),
+            if memento_recall_gate.should_recall {
+                "inject"
+            } else {
+                "skip"
+            },
+            memento_recall_gate.reason,
+            memento_context_loaded,
+            memory_recall.token_usage.input_tokens,
+            memory_recall.token_usage.output_tokens
+        );
+    }
     if should_note_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
     {
         let mut data = shared.core.lock().await;
@@ -4481,16 +4597,35 @@ mod tests {
     }
 
     #[test]
-    fn memento_recall_skip_only_triggers_for_loaded_memento_sessions() {
+    fn memento_recall_gate_uses_session_start_and_turn_signals() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..settings::ResolvedMemorySettings::default()
         };
         let file = settings::ResolvedMemorySettings::default();
 
-        assert!(should_skip_memento_recall(&memento, true));
-        assert!(!should_skip_memento_recall(&memento, false));
-        assert!(!should_skip_memento_recall(&file, true));
+        assert_eq!(
+            memento_recall_gate_decision(&memento, false, "평범한 요청").reason,
+            "session_start_context"
+        );
+        assert!(!memento_recall_gate_decision(&memento, true, "평범한 요청").should_recall);
+        assert_eq!(
+            memento_recall_gate_decision(&memento, true, "이전에 하던 거 이어서 해줘").reason,
+            "previous_context_signal"
+        );
+        assert_eq!(
+            memento_recall_gate_decision(&memento, true, "빌드 실패 원인 찾아줘").reason,
+            "error_context_signal"
+        );
+        assert_eq!(
+            memento_recall_gate_decision(&memento, true, "설정 변경 내용 기억나?").reason,
+            "setting_change_signal"
+        );
+        assert_eq!(
+            memento_recall_gate_decision(&memento, true, "/recall deploy note").reason,
+            "explicit_recall_signal"
+        );
+        assert!(memento_recall_gate_decision(&file, true, "평범한 요청").should_recall);
     }
 
     #[test]
@@ -4565,16 +4700,16 @@ mod tests {
 
         session.restore_provider_session(Some("session-1".to_string()));
         session.note_memento_context_loaded();
-        assert!(should_skip_memento_recall(
-            &memento,
-            session.memento_context_loaded
-        ));
+        assert!(
+            !memento_recall_gate_decision(&memento, session.memento_context_loaded, "평범한 요청",)
+                .should_recall
+        );
 
         session.clear_provider_session();
-        assert!(!should_skip_memento_recall(
-            &memento,
-            session.memento_context_loaded
-        ));
+        assert!(
+            memento_recall_gate_decision(&memento, session.memento_context_loaded, "평범한 요청",)
+                .should_recall
+        );
     }
 
     #[test]
@@ -4587,14 +4722,17 @@ mod tests {
 
         session.restore_provider_session(Some("session-1".to_string()));
         let mut memento_context_loaded = session.memento_context_loaded;
-        assert!(!should_skip_memento_recall(
-            &memento,
-            memento_context_loaded
-        ));
+        assert!(
+            memento_recall_gate_decision(&memento, memento_context_loaded, "평범한 요청",)
+                .should_recall
+        );
 
         session.note_memento_context_loaded();
         memento_context_loaded = session.memento_context_loaded;
-        assert!(should_skip_memento_recall(&memento, memento_context_loaded));
+        assert!(
+            !memento_recall_gate_decision(&memento, memento_context_loaded, "평범한 요청")
+                .should_recall
+        );
     }
 
     #[test]
