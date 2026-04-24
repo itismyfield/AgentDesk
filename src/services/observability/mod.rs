@@ -367,7 +367,16 @@ pub struct AgentQualitySummary {
     pub generated_at: String,
     pub agent_id: String,
     pub latest: Option<AgentQualityDailyRecord>,
+    /// Alias for `latest` — DoD-mandated field name (#1102).
+    pub current: Option<AgentQualityDailyRecord>,
     pub daily: Vec<AgentQualityDailyRecord>,
+    /// Last 7 days of daily rows (newest-first), DoD-mandated (#1102).
+    pub trend_7d: Vec<AgentQualityDailyRecord>,
+    /// Last 30 days of daily rows (newest-first), DoD-mandated (#1102).
+    pub trend_30d: Vec<AgentQualityDailyRecord>,
+    /// True when `daily` is synthesized from `agent_quality_event` because
+    /// the daily rollup table was empty — see #1102 fallback path.
+    pub fallback_from_events: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -381,12 +390,64 @@ pub struct AgentQualityRankingEntry {
     pub latest_day: String,
     pub rolling_7d: AgentQualityWindow,
     pub rolling_30d: AgentQualityWindow,
+    /// The chosen metric value for the requested (metric, window) pair
+    /// — populated when the ranking endpoint is called with `metric`/`window`
+    /// query params. `None` when the agent has no available measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRankingMetric {
+    TurnSuccessRate,
+    ReviewPassRate,
+}
+
+impl QualityRankingMetric {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("review_pass_rate") | Some("review") => Self::ReviewPassRate,
+            _ => Self::TurnSuccessRate,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TurnSuccessRate => "turn_success_rate",
+            Self::ReviewPassRate => "review_pass_rate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRankingWindow {
+    Seven,
+    Thirty,
+}
+
+impl QualityRankingWindow {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("30d") | Some("30") => Self::Thirty,
+            _ => Self::Seven,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Seven => "7d",
+            Self::Thirty => "30d",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentQualityRankingResponse {
     pub generated_at: String,
+    pub metric: String,
+    pub window: String,
+    pub min_sample_size: i64,
     pub agents: Vec<AgentQualityRankingEntry>,
 }
 
@@ -1058,12 +1119,58 @@ pub async fn query_agent_quality_summary(
         query_agent_quality_daily_sqlite(&conn, Some(agent_id), days, limit)?
     };
 
+    // #1102 fallback: when the daily rollup is empty (e.g. the rollup job
+    // from #1101 hasn't run yet in this environment), synthesize a mini
+    // rollup directly from `agent_quality_event`.
+    let (daily, fallback_from_events) = if daily.is_empty() {
+        let synthetic = match pg_pool {
+            Some(pool) => synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
+                    Vec::new()
+                }),
+            None => match db.read_conn() {
+                Ok(conn) => synth_agent_quality_daily_from_events_sqlite(&conn, agent_id, 30)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            "[quality] sqlite event-fallback mini-rollup failed: {error}"
+                        );
+                        Vec::new()
+                    }),
+                Err(error) => {
+                    tracing::warn!("[quality] event-fallback sqlite conn failed: {error}");
+                    Vec::new()
+                }
+            },
+        };
+        let fallback = !synthetic.is_empty();
+        (synthetic, fallback)
+    } else {
+        (daily, false)
+    };
+
+    let trend_7d = slice_daily_trend(&daily, 7);
+    let trend_30d = slice_daily_trend(&daily, 30);
+    let latest = daily.first().cloned();
+
     Ok(AgentQualitySummary {
         generated_at: now_kst(),
         agent_id: agent_id.to_string(),
-        latest: daily.first().cloned(),
+        current: latest.clone(),
+        latest,
         daily,
+        trend_7d,
+        trend_30d,
+        fallback_from_events,
     })
+}
+
+fn slice_daily_trend(
+    daily: &[AgentQualityDailyRecord],
+    max_days: usize,
+) -> Vec<AgentQualityDailyRecord> {
+    daily.iter().take(max_days).cloned().collect()
 }
 
 pub async fn query_agent_quality_ranking(
@@ -1071,7 +1178,27 @@ pub async fn query_agent_quality_ranking(
     pg_pool: Option<&PgPool>,
     limit: usize,
 ) -> Result<AgentQualityRankingResponse> {
+    query_agent_quality_ranking_with(
+        db,
+        pg_pool,
+        limit,
+        QualityRankingMetric::TurnSuccessRate,
+        QualityRankingWindow::Seven,
+        QUALITY_SAMPLE_GUARD,
+    )
+    .await
+}
+
+pub async fn query_agent_quality_ranking_with(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    limit: usize,
+    metric: QualityRankingMetric,
+    window: QualityRankingWindow,
+    min_sample_size: i64,
+) -> Result<AgentQualityRankingResponse> {
     let limit = normalized_quality_ranking_limit(limit);
+    let min_sample_size = min_sample_size.max(0);
     let agents = if let Some(pool) = pg_pool {
         match query_agent_quality_ranking_pg(pool, limit).await {
             Ok(records) => records,
@@ -1093,9 +1220,48 @@ pub async fn query_agent_quality_ranking(
         query_agent_quality_ranking_sqlite(&conn, limit)?
     };
 
+    // Filter by sample_size >= min_sample_size (#1102 DoD), then attach
+    // metric_value and re-rank by the requested (metric, window) pair.
+    let mut filtered: Vec<AgentQualityRankingEntry> = agents
+        .into_iter()
+        .filter(|entry| ranking_window_sample_size(entry, window) >= min_sample_size)
+        .map(|mut entry| {
+            entry.metric_value = pick_ranking_metric_value(&entry, metric, window);
+            entry
+        })
+        .collect();
+
+    // Sort by the chosen metric desc, NULLs last; tiebreak on sample size desc,
+    // then agent_id asc for determinism.
+    filtered.sort_by(|a, b| {
+        let av = a.metric_value;
+        let bv = b.metric_value;
+        match (av, bv) {
+            (Some(ax), Some(bx)) => bx
+                .partial_cmp(&ax)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    ranking_window_sample_size(b, window)
+                        .cmp(&ranking_window_sample_size(a, window))
+                })
+                .then_with(|| a.agent_id.cmp(&b.agent_id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.agent_id.cmp(&b.agent_id),
+        }
+    });
+
+    // Re-rank 1..n after filtering/sorting.
+    for (idx, entry) in filtered.iter_mut().enumerate() {
+        entry.rank = (idx + 1) as i64;
+    }
+
     Ok(AgentQualityRankingResponse {
         generated_at: now_kst(),
-        agents,
+        metric: metric.label().to_string(),
+        window: window.label().to_string(),
+        min_sample_size,
+        agents: filtered,
     })
 }
 
@@ -1818,6 +1984,218 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
     Ok(row_count.max(0) as u64)
 }
 
+/// #1102 event-based fallback (postgres): synthesize per-day records from
+/// `agent_quality_event` when the daily rollup table is empty for this
+/// agent. Only counts turn/review success/fail events, rolling windows are
+/// computed in-memory over the returned days.
+async fn synth_agent_quality_daily_from_events_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let days = days.clamp(1, MAX_QUALITY_DAYS);
+    let rows = sqlx::query(
+        "SELECT to_char((created_at AT TIME ZONE 'Asia/Seoul')::date, 'YYYY-MM-DD') AS day_text,
+                MAX(provider) FILTER (WHERE provider IS NOT NULL AND btrim(provider) <> '') AS provider,
+                MAX(channel_id) FILTER (WHERE channel_id IS NOT NULL AND btrim(channel_id) <> '') AS channel_id,
+                COUNT(*) FILTER (WHERE event_type = 'turn_complete')::bigint AS turn_success_count,
+                COUNT(*) FILTER (WHERE event_type = 'turn_error')::bigint AS turn_error_count,
+                COUNT(*) FILTER (WHERE event_type = 'review_pass')::bigint AS review_pass_count,
+                COUNT(*) FILTER (WHERE event_type = 'review_fail')::bigint AS review_fail_count
+         FROM agent_quality_event
+         WHERE agent_id = $1
+           AND created_at >= NOW() - ($2::bigint || ' days')::interval
+         GROUP BY day_text
+         ORDER BY day_text DESC",
+    )
+    .bind(agent_id)
+    .bind(days)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("synth agent quality daily (pg): {error}"))?;
+
+    let buckets: Vec<SynthDailyBucket> = rows
+        .into_iter()
+        .map(|row| {
+            Ok::<_, anyhow::Error>(SynthDailyBucket {
+                day: row
+                    .try_get::<String, _>("day_text")
+                    .map_err(|e| anyhow!("decode synth day: {e}"))?,
+                provider: row.try_get::<Option<String>, _>("provider").ok().flatten(),
+                channel_id: row
+                    .try_get::<Option<String>, _>("channel_id")
+                    .ok()
+                    .flatten(),
+                turn_success: row
+                    .try_get::<i64, _>("turn_success_count")
+                    .unwrap_or(0)
+                    .max(0),
+                turn_error: row
+                    .try_get::<i64, _>("turn_error_count")
+                    .unwrap_or(0)
+                    .max(0),
+                review_pass: row
+                    .try_get::<i64, _>("review_pass_count")
+                    .unwrap_or(0)
+                    .max(0),
+                review_fail: row
+                    .try_get::<i64, _>("review_fail_count")
+                    .unwrap_or(0)
+                    .max(0),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(buckets_to_synth_records(agent_id, buckets))
+}
+
+/// #1102 event-based fallback (sqlite): same as the pg variant but uses
+/// SQLite's date() on a localtime-shifted timestamp.
+fn synth_agent_quality_daily_from_events_sqlite(
+    conn: &Connection,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let days = days.clamp(1, MAX_QUALITY_DAYS);
+    let mut stmt = conn.prepare(
+        "SELECT date(created_at, '+9 hours') AS day_text,
+                MAX(provider) AS provider,
+                MAX(channel_id) AS channel_id,
+                SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END) AS turn_success_count,
+                SUM(CASE WHEN event_type = 'turn_error' THEN 1 ELSE 0 END) AS turn_error_count,
+                SUM(CASE WHEN event_type = 'review_pass' THEN 1 ELSE 0 END) AS review_pass_count,
+                SUM(CASE WHEN event_type = 'review_fail' THEN 1 ELSE 0 END) AS review_fail_count
+         FROM agent_quality_event
+         WHERE agent_id = ?1
+           AND created_at >= datetime('now', ?2)
+         GROUP BY day_text
+         ORDER BY day_text DESC",
+    )?;
+    let interval = format!("-{days} days");
+    let rows = stmt.query_map(libsql_rusqlite::params![agent_id, interval], |row| {
+        Ok(SynthDailyBucket {
+            day: row.get::<_, String>(0)?,
+            provider: row.get::<_, Option<String>>(1)?,
+            channel_id: row.get::<_, Option<String>>(2)?,
+            turn_success: row.get::<_, i64>(3).unwrap_or(0).max(0),
+            turn_error: row.get::<_, i64>(4).unwrap_or(0).max(0),
+            review_pass: row.get::<_, i64>(5).unwrap_or(0).max(0),
+            review_fail: row.get::<_, i64>(6).unwrap_or(0).max(0),
+        })
+    })?;
+    let buckets = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
+    Ok(buckets_to_synth_records(agent_id, buckets))
+}
+
+#[derive(Debug, Clone)]
+struct SynthDailyBucket {
+    day: String,
+    provider: Option<String>,
+    channel_id: Option<String>,
+    turn_success: i64,
+    turn_error: i64,
+    review_pass: i64,
+    review_fail: i64,
+}
+
+fn buckets_to_synth_records(
+    agent_id: &str,
+    buckets: Vec<SynthDailyBucket>,
+) -> Vec<AgentQualityDailyRecord> {
+    // Buckets come in DESC order; compute rolling 7d/30d windows via a
+    // forward sum over ascending index.
+    let now = now_kst();
+    buckets
+        .iter()
+        .enumerate()
+        .map(|(idx, bucket)| {
+            let window = |size: usize| -> (i64, i64, i64, i64) {
+                // idx is position in DESC list → next `size` items are older.
+                let end = (idx + size).min(buckets.len());
+                let slice = &buckets[idx..end];
+                let ts = slice.iter().map(|b| b.turn_success).sum::<i64>();
+                let te = slice.iter().map(|b| b.turn_error).sum::<i64>();
+                let rp = slice.iter().map(|b| b.review_pass).sum::<i64>();
+                let rf = slice.iter().map(|b| b.review_fail).sum::<i64>();
+                (ts, te, rp, rf)
+            };
+            let (ts7, te7, rp7, rf7) = window(7);
+            let (ts30, te30, rp30, rf30) = window(30);
+            let turn_sample = bucket.turn_success + bucket.turn_error;
+            let review_sample = bucket.review_pass + bucket.review_fail;
+            let sample = turn_sample + review_sample;
+            let turn_rate = if turn_sample > 0 {
+                Some(bucket.turn_success as f64 / turn_sample as f64)
+            } else {
+                None
+            };
+            let review_rate = if review_sample > 0 {
+                Some(bucket.review_pass as f64 / review_sample as f64)
+            } else {
+                None
+            };
+            let turn_sample_7d = ts7 + te7;
+            let review_sample_7d = rp7 + rf7;
+            let sample_7d = turn_sample_7d + review_sample_7d;
+            let turn_sample_30d = ts30 + te30;
+            let review_sample_30d = rp30 + rf30;
+            let sample_30d = turn_sample_30d + review_sample_30d;
+            let unavailable_7d = sample_7d < QUALITY_SAMPLE_GUARD;
+            let unavailable_30d = sample_30d < QUALITY_SAMPLE_GUARD;
+            AgentQualityDailyRecord {
+                agent_id: agent_id.to_string(),
+                day: bucket.day.clone(),
+                provider: bucket.provider.clone(),
+                channel_id: bucket.channel_id.clone(),
+                turn_success_count: bucket.turn_success,
+                turn_error_count: bucket.turn_error,
+                review_pass_count: bucket.review_pass,
+                review_fail_count: bucket.review_fail,
+                turn_sample_size: turn_sample,
+                review_sample_size: review_sample,
+                sample_size: sample,
+                turn_success_rate: turn_rate,
+                review_pass_rate: review_rate,
+                rolling_7d: quality_window(
+                    7,
+                    sample_7d,
+                    unavailable_7d,
+                    turn_sample_7d,
+                    if turn_sample_7d > 0 {
+                        Some(ts7 as f64 / turn_sample_7d as f64)
+                    } else {
+                        None
+                    },
+                    review_sample_7d,
+                    if review_sample_7d > 0 {
+                        Some(rp7 as f64 / review_sample_7d as f64)
+                    } else {
+                        None
+                    },
+                ),
+                rolling_30d: quality_window(
+                    30,
+                    sample_30d,
+                    unavailable_30d,
+                    turn_sample_30d,
+                    if turn_sample_30d > 0 {
+                        Some(ts30 as f64 / turn_sample_30d as f64)
+                    } else {
+                        None
+                    },
+                    review_sample_30d,
+                    if review_sample_30d > 0 {
+                        Some(rp30 as f64 / review_sample_30d as f64)
+                    } else {
+                        None
+                    },
+                ),
+                computed_at: now.clone(),
+            }
+        })
+        .collect()
+}
+
 fn measurement_label(unavailable: bool) -> Option<String> {
     unavailable.then(|| "측정 불가".to_string())
 }
@@ -2093,6 +2471,39 @@ fn quality_ranking_entry_from_daily(
         latest_day: record.day,
         rolling_7d: record.rolling_7d,
         rolling_30d: record.rolling_30d,
+        metric_value: None,
+    }
+}
+
+/// Pick the metric value for a ranking entry given the (metric, window)
+/// pair. Returns `None` when the window is measurement-unavailable or the
+/// underlying rate is NULL.
+fn pick_ranking_metric_value(
+    entry: &AgentQualityRankingEntry,
+    metric: QualityRankingMetric,
+    window: QualityRankingWindow,
+) -> Option<f64> {
+    let win = match window {
+        QualityRankingWindow::Seven => &entry.rolling_7d,
+        QualityRankingWindow::Thirty => &entry.rolling_30d,
+    };
+    if win.measurement_unavailable {
+        return None;
+    }
+    match metric {
+        QualityRankingMetric::TurnSuccessRate => win.turn_success_rate,
+        QualityRankingMetric::ReviewPassRate => win.review_pass_rate,
+    }
+}
+
+/// Return the sample size for the requested window on a ranking entry.
+fn ranking_window_sample_size(
+    entry: &AgentQualityRankingEntry,
+    window: QualityRankingWindow,
+) -> i64 {
+    match window {
+        QualityRankingWindow::Seven => entry.rolling_7d.sample_size,
+        QualityRankingWindow::Thirty => entry.rolling_30d.sample_size,
     }
 }
 

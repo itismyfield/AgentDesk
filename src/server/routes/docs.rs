@@ -598,6 +598,66 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "agents",
             "Agent activity timeline",
         ),
+        ep(
+            "GET",
+            "/api/agents/{id}/quality",
+            "agents",
+            "Per-agent quality summary (#1102): current + trend_7d + trend_30d from agent_quality_daily with event-based mini-rollup fallback",
+        )
+        .with_params([
+            (
+                "days",
+                query_param("integer", false, "Lookback window in days for the daily trend")
+                    .with_default(30),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Max daily rows to return").with_default(60),
+            ),
+        ]),
+        ep(
+            "GET",
+            "/api/agents/quality/ranking",
+            "agents",
+            "Cross-agent quality ranking (#1102): sorts by the requested metric×window with sample_size >= min_sample_size",
+        )
+        .with_params([
+            (
+                "limit",
+                query_param("integer", false, "Max agents to return").with_default(50),
+            ),
+            (
+                "metric",
+                ParamDoc {
+                    location: "query",
+                    kind: "string",
+                    required: false,
+                    description: "Ranking metric",
+                    enum_values: None,
+                    default: None,
+                }
+                .with_enum(&["turn_success_rate", "review_pass_rate"])
+                .with_default("turn_success_rate"),
+            ),
+            (
+                "window",
+                ParamDoc {
+                    location: "query",
+                    kind: "string",
+                    required: false,
+                    description: "Rolling window",
+                    enum_values: None,
+                    default: None,
+                }
+                .with_enum(&["7d", "30d"])
+                .with_default("7d"),
+            ),
+            (
+                "min_sample_size",
+                query_param("integer", false, "Exclude agents with window sample_size below this threshold")
+                    .with_default(5),
+            ),
+        ]),
         ep("GET", "/api/sessions", "sessions", "List sessions"),
         ep("GET", "/api/policies", "policies", "List policies"),
         ep(
