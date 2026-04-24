@@ -226,7 +226,7 @@
 | `services::discord::monitoring_status` | `src/services/discord/monitoring_status.rs` | 294 |  |
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 937 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
-| `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1574 | giant-file |
+| `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1577 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4579 | giant-file |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
@@ -236,7 +236,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 14 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1116 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5209 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5347 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1765 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
@@ -272,7 +272,7 @@
 | `services::mcp_config` | `src/services/mcp_config.rs` | 632 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 345 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 114 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2224 | giant-file |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 2321 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 274 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
