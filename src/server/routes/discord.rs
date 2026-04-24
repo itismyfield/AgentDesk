@@ -11,7 +11,8 @@ use crate::db::agents::AgentChannelBindings;
 
 // ── Handlers ───────────────────────────────────────────────────
 
-/// GET /api/discord-bindings
+/// GET /api/discord/bindings
+/// (Legacy alias: /api/discord-bindings — kept for backward-compat, deprecated via #1065.)
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.sqlite_db().lock() {
         Ok(c) => c,

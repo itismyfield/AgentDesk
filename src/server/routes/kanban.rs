@@ -61,8 +61,9 @@ pub struct UpdateCardBody {
     pub title: Option<String>,
     pub status: Option<String>,
     pub priority: Option<String>,
-    pub assigned_agent_id: Option<String>,
-    /// Alias for assigned_agent_id (frontend sends this name)
+    /// Canonical: `assignee_agent_id`.
+    /// Legacy `assigned_agent_id` still accepted via serde alias during migration (#1065).
+    #[serde(default, alias = "assigned_agent_id")]
     pub assignee_agent_id: Option<String>,
     pub repo_id: Option<String>,
     pub github_issue_url: Option<String>,
@@ -549,7 +550,6 @@ pub async fn update_card(
 
     let has_non_status_updates = body.title.is_some()
         || body.priority.is_some()
-        || body.assigned_agent_id.is_some()
         || body.assignee_agent_id.is_some()
         || body.repo_id.is_some()
         || body.github_issue_url.is_some()
@@ -636,7 +636,7 @@ pub async fn update_card(
 
         push_field!("title", body.title);
         push_field!("priority", body.priority);
-        let agent_id = body.assigned_agent_id.or(body.assignee_agent_id);
+        let agent_id = body.assignee_agent_id;
         push_field!("assigned_agent_id", agent_id);
         push_field!("repo_id", body.repo_id);
         push_field!("github_issue_url", body.github_issue_url);
@@ -4735,5 +4735,38 @@ pub async fn force_transition(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("{e}")})),
         ),
+    }
+}
+
+// ── #1065 param standardization tests ────────────────────────────────
+// UpdateCardBody canonical field is `assignee_agent_id` (snake_case).
+// Legacy `assigned_agent_id` still accepted via serde alias during migration.
+#[cfg(test)]
+mod param_standardization_tests {
+    use super::UpdateCardBody;
+
+    #[test]
+    fn param_standardization_update_card_body_accepts_assignee_agent_id() {
+        let payload = r#"{"assignee_agent_id":"ch-td"}"#;
+        let body: UpdateCardBody =
+            serde_json::from_str(payload).expect("canonical assignee_agent_id must parse");
+        assert_eq!(body.assignee_agent_id.as_deref(), Some("ch-td"));
+    }
+
+    #[test]
+    fn param_standardization_update_card_body_accepts_legacy_assigned_agent_id_alias() {
+        let payload = r#"{"assigned_agent_id":"ch-td"}"#;
+        let body: UpdateCardBody = serde_json::from_str(payload)
+            .expect("legacy assigned_agent_id payload must still parse via serde alias");
+        assert_eq!(body.assignee_agent_id.as_deref(), Some("ch-td"));
+    }
+
+    #[test]
+    fn param_standardization_update_card_body_no_duplicate_agent_fields() {
+        // Canonical path is single-field: one struct field with one alias.
+        // This guards against re-introducing a separate `assigned_agent_id` field.
+        let payload = r#"{"assignee_agent_id":"canonical"}"#;
+        let body: UpdateCardBody = serde_json::from_str(payload).expect("must parse");
+        assert_eq!(body.assignee_agent_id.as_deref(), Some("canonical"));
     }
 }

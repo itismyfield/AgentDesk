@@ -1282,8 +1282,9 @@ export interface DiscordBinding {
 }
 
 export async function getDiscordBindings(): Promise<DiscordBinding[]> {
+  // #1065: canonical /api/discord/bindings (legacy /api/discord-bindings still accepted).
   const data = await request<{ bindings: DiscordBinding[] }>(
-    "/api/discord-bindings",
+    "/api/discord/bindings",
   );
   return data.bindings;
 }
@@ -1981,9 +1982,14 @@ export async function reorderAutoQueueEntries(
   orderedIds: string[],
   agentId?: string | null,
 ): Promise<{ ok: boolean }> {
-  return request("/api/auto-queue/reorder", {
+  // #1065: canonical /api/queue/reorder + snake_case body.
+  // Legacy /api/auto-queue/reorder + {orderedIds, agentId} still accepted via aliases.
+  return request("/api/queue/reorder", {
     method: "PATCH",
-    body: JSON.stringify({ orderedIds, agentId: agentId ?? undefined }),
+    body: JSON.stringify({
+      ordered_ids: orderedIds,
+      agent_id: agentId ?? undefined,
+    }),
   });
 }
 

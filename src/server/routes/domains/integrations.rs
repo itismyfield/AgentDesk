@@ -30,7 +30,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 patch(github_dashboard::close_issue),
             )
             .route("/github-closed-today", get(github_dashboard::closed_today))
-            .route("/discord-bindings", get(discord::list_bindings))
+            .route("/discord/bindings", get(discord::list_bindings))
+            .route("/discord-bindings", get(deprecated_discord_bindings))
             .route(
                 "/discord/channels/{id}/messages",
                 get(discord::channel_messages),
@@ -76,4 +77,9 @@ async fn deprecated_create_issue(
 ) -> (StatusCode, Json<Value>) {
     log_deprecated_alias("/api/issues", "/api/github/issues/create");
     github::create_issue(State(state), Json(body)).await
+}
+
+async fn deprecated_discord_bindings(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    log_deprecated_alias("/api/discord-bindings", "/api/discord/bindings");
+    discord::list_bindings(State(state)).await
 }
