@@ -104,7 +104,7 @@
 | `error` | `src/error.rs` | 188 |  |
 | `github` | `src/github/mod.rs` | 833 |  |
 | `github::dod` | `src/github/dod.rs` | 395 |  |
-| `github::sync` | `src/github/sync.rs` | 1244 | giant-file |
+| `github::sync` | `src/github/sync.rs` | 1232 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 339 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1430 | giant-file |
 | `kanban` | `src/kanban.rs` | 3794 | giant-file |
@@ -226,7 +226,7 @@
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1486 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
-| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4207 | giant-file |
+| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4271 | giant-file |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 |  |
 | `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 488 |  |
