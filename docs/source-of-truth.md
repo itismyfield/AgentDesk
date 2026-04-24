@@ -2,14 +2,14 @@
 
 This document answers one question: when the same knowledge appears in repo files, runtime files, provider config, or legacy backups, which file do we edit?
 
-The rules below are derived from the current runtime/layout code in `src/runtime_layout/paths.rs`, `src/services/discord_config_audit.rs`, `src/services/mcp_config.rs`, and the release copy flow in `scripts/promote-release.sh`.
+The rules below are derived from the current runtime/layout code in `src/runtime_layout/paths.rs`, `src/services/discord_config_audit.rs`, `src/services/mcp_config.rs`, and the release copy flow in `scripts/deploy-release.sh`.
 
 ## Rules
 
 - Edit the canonical path only. Replicas and fallback files are read-only unless a migration or restore workflow explicitly says otherwise.
 - Repo-tracked files are edited in this repo and then promoted into `~/.adk/release/`.
 - Operator-managed runtime files under `~/.adk/release/config/` are edited in place. They are not currently git-tracked, so audit uses `agentdesk config audit`, targeted diffs, and structured backups instead of `git log`.
-- Per-agent prompt files are NOT tracked in this repo (operator-private content). They live in the operator's Obsidian vault (`~/ObsidianVault/RemoteVault/adk-config/agents/`) and are pulled into `~/.adk/release/config/agents/` by `scripts/promote-release.sh`.
+- Per-agent prompt files are NOT tracked in this repo (operator-private content). They live in the operator's Obsidian vault (`~/ObsidianVault/RemoteVault/adk-config/agents/`) and are pulled into `~/.adk/release/config/agents/` by `scripts/deploy-release.sh`.
 - Legacy snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archive-only. They belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`, not next to canonical files.
 - Compatibility seams such as `role_map.json`, `bot_settings.json`, the root-level legacy `agentdesk.yaml`, and `_shared.md` aliases are not canonical write targets.
 
@@ -19,7 +19,7 @@ The rules below are derived from the current runtime/layout code in `src/runtime
 | --- | --- | --- | --- | --- |
 | Runtime baseline config | `~/.adk/release/config/agentdesk.yaml` | `~/.adk/release/agentdesk.yaml` is legacy fallback only. `agentdesk.example.yaml` documents shape, not live state. Runtime overrides in `kv_meta['runtime-config']` are a separate live-override surface. | Edit `~/.adk/release/config/agentdesk.yaml`. Do not edit the root fallback. | `./target/debug/agentdesk config audit --dry-run` |
 | Discord bot bindings, agent roster, channel map | `~/.adk/release/config/agentdesk.yaml` (`discord:` and `agents[].channels`) | Legacy `~/.adk/release/config/role_map.json`, legacy `~/.adk/release/config/bot_settings.json`, and DB materialization can exist during migration, but `agentdesk.yaml` wins. | Edit `~/.adk/release/config/agentdesk.yaml` only. | `./target/debug/agentdesk config audit --dry-run` |
-| Per-agent prompt files | Obsidian `~/ObsidianVault/RemoteVault/adk-config/agents/<role>.prompt.md` | Release mirror `~/.adk/release/config/agents/<role>.prompt.md` is populated from Obsidian by `scripts/promote-release.sh`. Repo does not carry these files (private content). | Edit Obsidian prompt file, then redeploy. | Inspect Obsidian git history (vault is synced separately) |
+| Per-agent prompt files | Obsidian `~/ObsidianVault/RemoteVault/adk-config/agents/<role>.prompt.md` | Release mirror `~/.adk/release/config/agents/<role>.prompt.md` is populated from Obsidian by `scripts/deploy-release.sh`. Repo does not carry these files (private content). | Edit Obsidian prompt file, then redeploy. | Inspect Obsidian git history (vault is synced separately) |
 | Shared prompt | Obsidian `~/ObsidianVault/RemoteVault/adk-config/agents/_shared.prompt.md` | Release mirror `~/.adk/release/config/agents/_shared.prompt.md`; symlink aliases `~/.adk/release/config/agents/_shared.md` and `~/.adk/release/config/_shared.md`. | Edit Obsidian `_shared.prompt.md`, then redeploy. Do not edit `_shared.md` aliases. | Inspect Obsidian vault |
 | Policy hooks | Repo `policies/*.js` | Release mirror `~/.adk/release/policies/*.js`. | Edit repo policy file, then redeploy. | `git log -- policies/<name>.js` |
 | Default pipeline | Repo `policies/default-pipeline.yaml` | Release mirror `~/.adk/release/policies/default-pipeline.yaml`; example pipelines under `policies/examples/` are references only. | Edit `policies/default-pipeline.yaml`. | `git log -- policies/default-pipeline.yaml` |
