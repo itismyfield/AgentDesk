@@ -912,6 +912,18 @@ mod tests {
             dir.path().join("timeouts.js"),
         )
         .unwrap();
+        for subdir in ["lib", "timeouts"] {
+            let src = source_dir.join(subdir);
+            let dst = dir.path().join(subdir);
+            fs::create_dir_all(&dst).unwrap();
+            for entry in fs::read_dir(&src).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("js") {
+                    fs::copy(&path, dst.join(path.file_name().unwrap())).unwrap();
+                }
+            }
+        }
         fs::write(
             dir.path().join("zz-timeouts-test-overrides.js"),
             r#"

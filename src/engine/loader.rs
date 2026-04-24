@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rquickjs::{Context, Function, Persistent};
+use rquickjs::{Context, Ctx, Error as JsError, Function, Persistent};
 
 use super::hooks::Hook;
 
@@ -95,6 +95,9 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
     // and a pure-JS registerPolicy that stores the argument there.
     let policy = ctx.with(|ctx| -> Result<LoadedPolicy> {
         let globals = ctx.globals();
+        let policy_root = path.parent().unwrap_or_else(|| Path::new("."));
+        install_policy_module_loader(&ctx, policy_root, policy_root)
+            .map_err(|e| anyhow::anyhow!("failed to install policy module loader: {e}"))?;
 
         // Set up capture holder and registerPolicy in JS
         let _: rquickjs::Value = ctx
@@ -196,6 +199,160 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
     Ok(policy)
 }
 
+fn js_module_error(message: impl Into<String>) -> JsError {
+    JsError::new_from_js_message("policy module", "path", message.into())
+}
+
+fn resolve_policy_module(
+    policy_root: &Path,
+    base_dir: &Path,
+    spec: &str,
+) -> std::result::Result<PathBuf, String> {
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return Err(format!(
+            "only relative policy module paths are supported: {spec}"
+        ));
+    }
+
+    let root = policy_root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize policies root {}: {e}", policy_root.display()))?;
+    let base = base_dir
+        .canonicalize()
+        .map_err(|e| format!("canonicalize module base {}: {e}", base_dir.display()))?;
+    if !base.starts_with(&root) {
+        return Err(format!(
+            "module base {} is outside policies root {}",
+            base.display(),
+            root.display()
+        ));
+    }
+
+    let mut candidate = base.join(spec);
+    if candidate.extension().is_none() {
+        candidate.set_extension("js");
+    }
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|e| format!("resolve module {spec} from {}: {e}", base.display()))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "policy module {} escapes policies root {}",
+            resolved.display(),
+            root.display()
+        ));
+    }
+    if resolved.extension().and_then(|ext| ext.to_str()) != Some("js") {
+        return Err(format!(
+            "policy module must be a .js file: {}",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+fn install_policy_module_loader(
+    ctx: &Ctx<'_>,
+    policy_root: &Path,
+    entry_dir: &Path,
+) -> rquickjs::Result<()> {
+    let root = policy_root.canonicalize().map_err(|e| {
+        js_module_error(format!(
+            "canonicalize policies root {}: {e}",
+            policy_root.display()
+        ))
+    })?;
+    let entry = entry_dir.canonicalize().map_err(|e| {
+        js_module_error(format!(
+            "canonicalize policy entry dir {}: {e}",
+            entry_dir.display()
+        ))
+    })?;
+    let globals = ctx.globals();
+    globals.set("__policyEntryDir", entry.to_string_lossy().to_string())?;
+
+    let resolve_root = root.clone();
+    let resolve_module = Function::new(
+        ctx.clone(),
+        move |spec: String, base_dir: String| -> rquickjs::Result<String> {
+            resolve_policy_module(&resolve_root, Path::new(&base_dir), &spec)
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(js_module_error)
+        },
+    )?;
+    globals.set("__policyResolveModule", resolve_module)?;
+
+    let read_root = root.clone();
+    let read_module = Function::new(
+        ctx.clone(),
+        move |filename: String| -> rquickjs::Result<String> {
+            let path = PathBuf::from(&filename);
+            let resolved = path.canonicalize().map_err(|e| {
+                js_module_error(format!("resolve module file {}: {e}", path.display()))
+            })?;
+            if !resolved.starts_with(&read_root) {
+                return Err(js_module_error(format!(
+                    "policy module {} escapes policies root {}",
+                    resolved.display(),
+                    read_root.display()
+                )));
+            }
+            std::fs::read_to_string(&resolved).map_err(|e| {
+                js_module_error(format!("read policy module {}: {e}", resolved.display()))
+            })
+        },
+    )?;
+    globals.set("__policyReadModule", read_module)?;
+
+    let dirname = Function::new(ctx.clone(), move |filename: String| -> String {
+        Path::new(&filename)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_string_lossy()
+            .to_string()
+    })?;
+    globals.set("__policyDirname", dirname)?;
+
+    ctx.eval::<(), _>(
+        r#"
+        (function() {
+          var moduleCache = Object.create(null);
+
+          function requireFrom(spec, baseDir) {
+            if (typeof spec !== "string") {
+              throw new TypeError("policy require path must be a string");
+            }
+            var filename = __policyResolveModule(spec, baseDir);
+            if (moduleCache[filename]) {
+              return moduleCache[filename].exports;
+            }
+
+            var module = { exports: {} };
+            moduleCache[filename] = module;
+            var dirname = __policyDirname(filename);
+            var source = __policyReadModule(filename);
+            var wrapper = "(function(module, exports, require, __filename, __dirname) {\n" +
+              source +
+              "\n})\n//# sourceURL=" + filename;
+            var compiled = (0, eval)(wrapper);
+            compiled(module, module.exports, function(childSpec) {
+              return requireFrom(childSpec, dirname);
+            }, filename, dirname);
+            return module.exports;
+          }
+
+          globalThis.require = function(spec) {
+            return requireFrom(spec, __policyEntryDir);
+          };
+          globalThis.module = { exports: {} };
+          globalThis.exports = globalThis.module.exports;
+        })();
+        "#,
+    )?;
+
+    Ok(())
+}
+
 // ── Hot reload via notify ────────────────────────────────────────
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -222,7 +379,7 @@ pub fn start_hot_reload(
     })?;
 
     if policies_dir.exists() {
-        watcher.watch(&policies_dir, RecursiveMode::NonRecursive)?;
+        watcher.watch(&policies_dir, RecursiveMode::Recursive)?;
     } else {
         tracing::warn!(
             "Policies dir {} does not exist yet; hot-reload will not work until it is created",

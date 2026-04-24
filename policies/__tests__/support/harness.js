@@ -116,14 +116,18 @@ function createAgentdeskMock(options) {
   const pipeline = settings.pipeline || createPipeline(settings.pipelineConfig);
   const state = {
     registeredPolicies: [],
-    logs: { info: [], warn: [], error: [] },
+    logs: { debug: [], info: [], warn: [], error: [] },
+    queries: [],
     executions: [],
+    execCalls: [],
     statusCalls: [],
     reviewStatusCalls: [],
     reviewStateSyncs: [],
     reviewRecordCalls: [],
     dispatchCreates: [],
+    dispatchMarkFailedCalls: [],
     dispatchMarkCompletedCalls: [],
+    dispatchRetryCountCalls: [],
     messageQueues: [],
     autoQueueStatusUpdates: [],
     autoQueueActivations: [],
@@ -133,6 +137,12 @@ function createAgentdeskMock(options) {
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
     retrospectiveCalls: [],
+    runtimeSignals: [],
+    httpPosts: [],
+    deadlockAlerts: [],
+    escalations: [],
+    manualInterventions: [],
+    flushedEscalations: 0,
     kv: new Map()
   };
 
@@ -158,6 +168,7 @@ function createAgentdeskMock(options) {
     },
     db: {
       query(sql, params) {
+        state.queries.push({ sql, params: params || [] });
         return clone(dbQuery(sql, params || [], state));
       },
       execute(sql, params) {
@@ -166,6 +177,7 @@ function createAgentdeskMock(options) {
       }
     },
     exec(cmd, args, execOptions) {
+      state.execCalls.push({ cmd, args: args || [], options: execOptions || {} });
       return exec(cmd, args || [], execOptions || {}, state);
     },
     config: {
@@ -180,6 +192,12 @@ function createAgentdeskMock(options) {
       },
       setReviewStatus(cardId, reviewStatus, optionsArg) {
         state.reviewStatusCalls.push({ cardId, reviewStatus, options: clone(optionsArg || {}) });
+      },
+      getCard(cardId) {
+        if (typeof settings.getCard === "function") {
+          return clone(settings.getCard(cardId, state));
+        }
+        return clone(cards[cardId] || null);
       }
     },
     reviewState: {
@@ -230,12 +248,32 @@ function createAgentdeskMock(options) {
         state.dispatchCreates.push({ cardId, agentId, dispatchType, title, context: clone(context || null) });
         return `dispatch-${state.dispatchCreates.length}`;
       },
+      markFailed(dispatchId, reason) {
+        state.dispatchMarkFailedCalls.push({ dispatchId, reason });
+        if (typeof settings.markFailed === "function") {
+          return settings.markFailed(dispatchId, reason, state);
+        }
+        return { rows_affected: 1 };
+      },
       markCompleted(dispatchId, result) {
         state.dispatchMarkCompletedCalls.push({ dispatchId, result });
         if (typeof settings.markCompleted === "function") {
           return settings.markCompleted(dispatchId, result, state);
         }
         return { rows_affected: 1 };
+      },
+      setRetryCount(dispatchId, count) {
+        state.dispatchRetryCountCalls.push({ dispatchId, count });
+        if (typeof settings.setRetryCount === "function") {
+          return settings.setRetryCount(dispatchId, count, state);
+        }
+        return { rows_affected: 1 };
+      },
+      hasActiveWork(cardId) {
+        if (typeof settings.dispatchHasActiveWork === "function") {
+          return !!settings.dispatchHasActiveWork(cardId, state);
+        }
+        return false;
       }
     },
     message: {
@@ -244,6 +282,9 @@ function createAgentdeskMock(options) {
       }
     },
     log: {
+      debug(message) {
+        state.logs.debug.push(String(message));
+      },
       info(message) {
         state.logs.info.push(String(message));
       },
@@ -255,11 +296,35 @@ function createAgentdeskMock(options) {
       }
     },
     runtime: {
+      emitSignal(signalName, evidence) {
+        state.runtimeSignals.push({ signalName, evidence: clone(evidence || null) });
+        if (typeof settings.emitSignal === "function") {
+          return clone(settings.emitSignal(signalName, evidence, state));
+        }
+        return { executed: false, note: "mocked" };
+      },
       recordCardRetrospective(cardId, status) {
         state.retrospectiveCalls.push({ cardId, status });
         return null;
       },
       refreshInventoryDocs() {}
+    },
+    http: {
+      post(url, body) {
+        state.httpPosts.push({ url, body: clone(body || null) });
+        if (typeof settings.httpPost === "function") {
+          return clone(settings.httpPost(url, body, state));
+        }
+        return { ok: true };
+      }
+    },
+    inflight: {
+      list() {
+        if (typeof settings.inflightList === "function") {
+          return clone(settings.inflightList(state));
+        }
+        return clone(settings.inflights || []);
+      }
     },
     kv: {
       get(key) {
@@ -347,6 +412,50 @@ function createAgentdeskMock(options) {
   return { agentdesk, state };
 }
 
+function createPolicyRequire(context, entryDir) {
+  const moduleCache = new Map();
+
+  function resolvePolicyModule(spec, baseDir) {
+    if (typeof spec !== "string" || (!spec.startsWith("./") && !spec.startsWith("../"))) {
+      throw new Error(`Only relative policy module paths are supported: ${spec}`);
+    }
+    const withExtension = path.extname(spec) ? spec : `${spec}.js`;
+    const resolved = path.resolve(baseDir, withExtension);
+    const rel = path.relative(REPO_ROOT, resolved);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`Policy module escapes repo root: ${spec}`);
+    }
+    return resolved;
+  }
+
+  function requirePolicyModule(spec, baseDir) {
+    const filename = resolvePolicyModule(spec, baseDir);
+    if (moduleCache.has(filename)) {
+      return moduleCache.get(filename).exports;
+    }
+
+    const moduleRecord = { exports: {} };
+    moduleCache.set(filename, moduleRecord);
+    const dirname = path.dirname(filename);
+    const source = fs.readFileSync(filename, "utf8");
+    const wrapper = vm.runInContext(
+      `(function(module, exports, require, __filename, __dirname) {\n${source}\n})`,
+      context,
+      { filename }
+    );
+    wrapper(
+      moduleRecord,
+      moduleRecord.exports,
+      (childSpec) => requirePolicyModule(childSpec, dirname),
+      filename,
+      dirname
+    );
+    return moduleRecord.exports;
+  }
+
+  return (spec) => requirePolicyModule(spec, entryDir);
+}
+
 function loadPolicy(relativePath, options) {
   const absPath = path.join(REPO_ROOT, relativePath);
   const source = fs.readFileSync(absPath, "utf8");
@@ -366,12 +475,23 @@ function loadPolicy(relativePath, options) {
         return new Date().toISOString();
       },
       LOOP_GUARD_TTL_SEC: 3600,
-      notifyDeadlockManager() {},
+      notifyDeadlockManager(message, sourceName) {
+        state.deadlockAlerts.push({ message, source: sourceName || null });
+        return true;
+      },
       notifyHumanAlert() {
         return true;
       },
-      escalate() {},
-      escalateToManualIntervention() {}
+      escalate(cardId, reason, optionsArg) {
+        state.escalations.push({ cardId, reason, options: clone(optionsArg || null) });
+      },
+      escalateToManualIntervention(cardId, reason, optionsArg) {
+        state.manualInterventions.push({ cardId, reason, options: clone(optionsArg || null) });
+      },
+      flushEscalations() {
+        state.flushedEscalations += 1;
+      },
+      encodeURIComponent
     },
     (options && options.globals) || {}
   );
@@ -394,6 +514,7 @@ function loadPolicy(relativePath, options) {
     isFinite,
     ...globals
   });
+  context.require = createPolicyRequire(context, path.dirname(absPath));
 
   vm.runInContext(source, context, { filename: absPath });
 

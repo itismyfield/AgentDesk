@@ -41,6 +41,9 @@ jobs:
               - 'policies/auto-queue.js'
               - 'policies/kanban-rules.js'
               - 'policies/timeouts.js'
+              - 'policies/timeouts/**'
+              - 'policies/lib/**'
+              - 'policies/__tests__/**'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -97,6 +100,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Policy JS unit tests
+        run: npm run test:policies
 
       - name: cargo check
         run: cargo check --all-targets
