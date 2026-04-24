@@ -38,8 +38,10 @@ pub(super) async fn serve_http(
     crate::services::observability::init_observability(db.clone(), pg_pool.clone());
 
     // #1091 (909-2): dynamic maintenance job scheduler. #1092 (909-3) registers
-    // the first real jobs (storage sweeps) against it. We register before
-    // spawning the scheduler loop so the first tick picks them up.
+    // the storage sweep jobs and #1093 (909-4) adds `storage.db_retention`
+    // against the live postgres pool — all wired through
+    // `jobs::spawn_storage_maintenance_jobs`. We register before spawning the
+    // scheduler loop so the first tick picks them up.
     #[cfg(not(test))]
     {
         crate::services::maintenance::jobs::spawn_storage_maintenance_jobs(pg_pool.clone());

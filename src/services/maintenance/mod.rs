@@ -21,6 +21,8 @@
 //!
 //! 909-3 will register the first real job against this surface.
 
+pub mod jobs;
+
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -28,8 +30,6 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::json;
-
-pub mod jobs;
 
 /// How often the scheduler wakes up to re-check job schedules. Individual jobs
 /// fire on their own `interval`; this tick just bounds scheduling latency.
