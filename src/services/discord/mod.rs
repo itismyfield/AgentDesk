@@ -736,6 +736,177 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None, None)
 }
 
+/// #1073: Test-only helpers exposed for the Discord bot integration test
+/// harness under `src/integration_tests/discord_flow/`.
+///
+/// Kept in one place so the harness can reach the `pub(super)` watcher
+/// primitives without widening visibility on production paths. Private
+/// types (`TmuxWatcherHandle`, `InflightTurnState`) never leak out of this
+/// module; consumers only see opaque newtype wrappers.
+#[cfg(test)]
+pub(crate) mod test_harness_exports {
+    use super::TmuxWatcherHandle;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    /// Opaque wrapper around the crate-private watcher registry (a
+    /// `DashMap<ChannelId, TmuxWatcherHandle>`).
+    pub(crate) struct WatcherRegistry {
+        inner: dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    }
+
+    /// Opaque wrapper around an individual `TmuxWatcherHandle`. Construct
+    /// via [`new_test_watcher_handle`]; hand it to [`try_claim_watcher`] /
+    /// [`claim_or_replace_watcher`] to register it.
+    pub(crate) struct WatcherHandle {
+        inner: TmuxWatcherHandle,
+    }
+
+    pub(crate) struct WatcherHandleInspector {
+        pub(crate) cancel: Arc<AtomicBool>,
+        pub(crate) paused: Arc<AtomicBool>,
+    }
+
+    pub(crate) fn new_watcher_registry() -> WatcherRegistry {
+        WatcherRegistry {
+            inner: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Build a fresh watcher handle plus inspection handles on the
+    /// underlying atomic flags so the harness can observe stale-cancellation
+    /// without importing the private `TmuxWatcherHandle` type.
+    pub(crate) fn new_test_watcher_handle() -> (WatcherHandle, WatcherHandleInspector) {
+        let paused = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let inner = TmuxWatcherHandle {
+            paused: paused.clone(),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: cancel.clone(),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+        };
+        let inspector = WatcherHandleInspector { cancel, paused };
+        (WatcherHandle { inner }, inspector)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_claim_watcher(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+        handle: WatcherHandle,
+    ) -> bool {
+        super::tmux::try_claim_watcher(&watchers.inner, channel_id, handle.inner)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn claim_or_replace_watcher(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+        handle: WatcherHandle,
+        provider: &ProviderKind,
+        source: &str,
+    ) -> bool {
+        super::tmux::claim_or_replace_watcher(
+            &watchers.inner,
+            channel_id,
+            handle.inner,
+            provider,
+            source,
+        )
+    }
+
+    pub(crate) fn watcher_slot_count(watchers: &WatcherRegistry) -> usize {
+        watchers.inner.len()
+    }
+
+    pub(crate) fn watcher_slot_paused(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> Option<bool> {
+        watchers
+            .inner
+            .get(&channel_id)
+            .map(|entry| entry.paused.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub(crate) mod inflight {
+        use super::super::inflight as inflight_mod;
+        use super::super::{InflightRestartMode, InflightTurnState};
+        use crate::services::provider::ProviderKind;
+
+        /// Opaque wrapper around `InflightTurnState` — the struct itself is
+        /// `pub(super)` within `services::discord`.
+        pub(crate) struct State {
+            inner: InflightTurnState,
+        }
+
+        pub(crate) fn new_state(
+            provider: ProviderKind,
+            channel_id: u64,
+            channel_name: Option<String>,
+            tmux_session_name: Option<String>,
+            last_offset: u64,
+        ) -> State {
+            State {
+                inner: InflightTurnState::new(
+                    provider,
+                    channel_id,
+                    channel_name,
+                    12_345,
+                    67_890,
+                    111_213,
+                    "harness turn".to_string(),
+                    Some("harness-session".to_string()),
+                    tmux_session_name,
+                    Some("/tmp/harness-out.jsonl".to_string()),
+                    Some("/tmp/harness-in.fifo".to_string()),
+                    last_offset,
+                ),
+            }
+        }
+
+        pub(crate) fn channel_id(state: &State) -> u64 {
+            state.inner.channel_id
+        }
+
+        pub(crate) fn tmux_session_name(state: &State) -> Option<&str> {
+            state.inner.tmux_session_name.as_deref()
+        }
+
+        pub(crate) fn restart_mode(state: &State) -> Option<InflightRestartMode> {
+            state.inner.restart_mode
+        }
+
+        /// Save via the public helper; respects `AGENTDESK_ROOT_DIR`.
+        pub(crate) fn save(state: &State) -> Result<(), String> {
+            inflight_mod::save_inflight_state(&state.inner)
+        }
+
+        /// Load all saved inflight states for `provider`. Respects
+        /// `AGENTDESK_ROOT_DIR`.
+        pub(crate) fn load_all(provider: &ProviderKind) -> Vec<State> {
+            inflight_mod::load_inflight_states(provider)
+                .into_iter()
+                .map(|inner| State { inner })
+                .collect()
+        }
+
+        /// Simulate the restart path (`#897`): mark every saved inflight state
+        /// for `provider` with the supplied restart mode. Returns the count.
+        pub(crate) fn mark_all_restart(
+            provider: &ProviderKind,
+            mode: InflightRestartMode,
+        ) -> usize {
+            inflight_mod::mark_all_inflight_states_restart_mode(provider, mode)
+        }
+    }
+
+    pub(crate) use super::InflightRestartMode as RestartMode;
+}
+
 #[cfg(test)]
 pub(super) fn make_shared_data_for_tests_with_storage(
     sqlite: Option<crate::db::Db>,
