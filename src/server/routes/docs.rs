@@ -1,7 +1,8 @@
 use axum::{
     Json,
     extract::{Path, Query},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -181,6 +182,103 @@ fn canonical_category(category: &str) -> &'static str {
 
 fn is_canonical_category(category: &str) -> bool {
     CANONICAL_CATEGORIES.contains(&category)
+}
+
+// ---------------------------------------------------------------------------
+// #1063 — 8-group hierarchical docs taxonomy.
+//
+// The hierarchy is:
+//   GET /api/docs                     -> { groups: [{name, description, categories: [names]}] }
+//   GET /api/docs/{group}             -> { group, categories: [{name, description, endpoint_count}] }
+//   GET /api/docs/{group}/{category}  -> { group, category, endpoints: [full endpoint docs] }
+//
+// `CANONICAL_CATEGORIES` (the legacy 7-group contract) is retained so that
+// existing callers of `/api/docs/{category}` (and `api_help`) keep working,
+// but the default root response now reflects the new GROUP_NAMES hierarchy.
+// ---------------------------------------------------------------------------
+
+const GROUP_NAMES: [&str; 8] = [
+    "runtime",
+    "kanban",
+    "agents",
+    "integrations",
+    "automation",
+    "config",
+    "observability",
+    "internal",
+];
+
+/// Maps a fine-grained endpoint category (the value stored on
+/// `EndpointDoc.subcategory` when present, otherwise `EndpointDoc.category`)
+/// to its owning top-level group.
+fn category_to_group(category: &str) -> &'static str {
+    match category {
+        // runtime — turns, sessions, dispatches, server lifecycle, messages
+        "dispatches" | "dispatched-sessions" | "sessions" | "messages" => "runtime",
+        // kanban — cards, pipeline, reviews, pm, repo config
+        "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
+        // agents — agents, agent-setup, agent-quality, roles
+        "agents" => "agents",
+        // integrations — discord, github, meetings, provider, mcp
+        "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
+        // automation — auto-queue, policies, scheduler, cron, maintenance
+        "auto-queue" | "queue" | "cron" | "policies" => "automation",
+        // config — settings, onboarding, knowledge, source-of-truth, skills,
+        // offices, departments
+        "settings" | "onboarding" | "skills" | "offices" | "departments" => "config",
+        // observability — analytics, metrics, events, slo, diagnostics,
+        // monitoring, stats, health, auth
+        "analytics" | "monitoring" | "stats" | "health" | "auth" => "observability",
+        // internal — debug, testing, internal endpoints, docs discovery
+        "internal" | "docs" => "internal",
+        _ => "internal",
+    }
+}
+
+/// Short human-readable description for one of the top-level groups.
+fn group_description(group: &str) -> &'static str {
+    match group {
+        "runtime" => "Turns, sessions, dispatches, message log, and server lifecycle surfaces.",
+        "kanban" => {
+            "Kanban cards, pipeline state, reviews (kanban/reviews), PM decisions, and repo board config."
+        }
+        "agents" => {
+            "Agent registry, turn control, setup wizard, quality telemetry, and role metadata."
+        }
+        "integrations" => {
+            "Discord, GitHub, round-table meetings, and provider/MCP integration entrypoints."
+        }
+        "automation" => {
+            "Auto-queue generation and dispatch, policies, cron, and scheduled maintenance jobs."
+        }
+        "config" => {
+            "Settings, onboarding, skill catalog, knowledge, and source-of-truth config surfaces."
+        }
+        "observability" => {
+            "Analytics, metrics, events, SLO signals, diagnostics, health, and monitoring surfaces."
+        }
+        "internal" => "Internal, debug, testing, and API-docs discovery endpoints.",
+        _ => "Miscellaneous API endpoints.",
+    }
+}
+
+/// Returns the effective fine-grained category for an endpoint (subcategory if
+/// present, otherwise canonical category).
+fn effective_category(endpoint: &EndpointDoc) -> &'static str {
+    endpoint.subcategory.unwrap_or(endpoint.category)
+}
+
+/// For a given top-level group, return the list of distinct fine-grained
+/// categories under it plus their endpoint counts, in a deterministic order.
+fn categories_for_group(endpoints: &[EndpointDoc], group: &str) -> Vec<(&'static str, usize)> {
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for endpoint in endpoints {
+        let category = effective_category(endpoint);
+        if category_to_group(category) == group {
+            *counts.entry(category).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
 }
 
 fn category_description(category: &str) -> &'static str {
@@ -2633,29 +2731,49 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/docs",
             "docs",
-            "List the seven canonical documentation groups or return the legacy flat endpoint list",
+            "List the eight #1063 top-level documentation groups, or return the flat endpoint list with format=flat",
         )
         .with_params([(
             "format",
-            query_param("string", false, "Use format=flat for the legacy endpoint array"),
+            query_param("string", false, "Use format=flat for the full endpoint array"),
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "queue", "count": 15, "description": "Auto-queue generation, activation, ordering, live queue views, and turn control."}]}),
+            json!({"groups": [{"name": "runtime", "description": "Turns, sessions, dispatches, message log, and server lifecycle surfaces.", "categories": ["dispatches", "sessions"]}]}),
         ),
         ep(
             "GET",
-            "/api/docs/{category}",
+            "/api/docs/{group}",
             "docs",
-            "Get detailed docs for one canonical category, including params and examples where available",
+            "List the fine-grained categories inside one of the eight #1063 groups (runtime/kanban/agents/integrations/automation/config/observability/internal). Falls back to legacy flat-category output with X-Deprecated header when a category name is supplied instead.",
         )
         .with_params([(
-            "category",
-            path_param("Canonical docs category name such as queue, kanban, or dispatches"),
+            "group",
+            path_param("Group name such as runtime, kanban, automation, or integrations"),
         )])
         .with_example(
-            json!({"path": {"category": "dispatches"}}),
-            json!({"category": "dispatches", "count": 5, "endpoints": [{"method": "POST", "path": "/api/dispatches", "category": "dispatches", "description": "Create dispatch"}]}),
+            json!({"path": {"group": "kanban"}}),
+            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24}, {"name": "reviews", "endpoint_count": 8}]}),
+        ),
+        ep(
+            "GET",
+            "/api/docs/{group}/{category}",
+            "docs",
+            "Get detailed endpoints for one fine-grained category nested inside a group (e.g. kanban/reviews, automation/auto-queue).",
+        )
+        .with_params([
+            (
+                "group",
+                path_param("Top-level group name such as kanban or automation"),
+            ),
+            (
+                "category",
+                path_param("Category under the group such as reviews or auto-queue"),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"group": "kanban", "category": "reviews"}}),
+            json!({"group": "kanban", "category": "reviews", "count": 8, "endpoints": [{"method": "POST", "path": "/api/reviews/verdict"}]}),
         ),
         ep(
             "POST",
@@ -2733,7 +2851,17 @@ pub async fn api_help() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// GET /api/docs — summary by canonical category, or legacy flat format when `?format=flat`.
+/// GET /api/docs — #1063 hierarchical response.
+///
+/// Default response is the new 8-group hierarchy:
+/// ```json
+/// { "groups": [ { "name": "runtime", "description": "...",
+///                 "categories": ["dispatches", "sessions", ...] }, ... ] }
+/// ```
+///
+/// When `?format=flat` is passed, returns the full flat endpoint list
+/// (preserved for backward-compatible tooling and the endpoint-coverage
+/// contract tests).
 pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Value>) {
     let endpoints = all_endpoints();
     if query
@@ -2744,39 +2872,92 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
         return (StatusCode::OK, Json(json!({ "endpoints": endpoints })));
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "categories": category_summaries(&endpoints),
-        })),
-    )
+    let groups: Vec<Value> = GROUP_NAMES
+        .iter()
+        .map(|group| {
+            let categories: Vec<&'static str> = categories_for_group(&endpoints, group)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            json!({
+                "name": group,
+                "description": group_description(group),
+                "categories": categories,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(json!({ "groups": groups })))
 }
 
-/// GET /api/docs/{category} — detailed endpoints for one canonical category.
-pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Json<Value>) {
+/// Core logic for the single-segment docs route, shared between the HTTP
+/// handler and the in-process CLI helper. Returns `(status, headers, body)`.
+fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Value) {
     let endpoints = all_endpoints();
-    let requested = category.as_str();
-    let canonical = if is_canonical_category(requested) {
-        Some(requested)
+
+    // Primary: treat as group name.
+    if GROUP_NAMES.contains(&segment) {
+        if flat {
+            let matching: Vec<EndpointDoc> = endpoints
+                .into_iter()
+                .filter(|endpoint| category_to_group(effective_category(endpoint)) == segment)
+                .collect();
+            return (
+                StatusCode::OK,
+                HeaderMap::new(),
+                json!({ "endpoints": matching }),
+            );
+        }
+
+        let categories: Vec<Value> = categories_for_group(&endpoints, segment)
+            .into_iter()
+            .map(|(name, count)| {
+                json!({
+                    "name": name,
+                    "description": category_description(name),
+                    "endpoint_count": count,
+                })
+            })
+            .collect();
+        return (
+            StatusCode::OK,
+            HeaderMap::new(),
+            json!({
+                "group": segment,
+                "description": group_description(segment),
+                "categories": categories,
+            }),
+        );
+    }
+
+    // Backward compat: legacy flat category route.
+    let canonical: Option<&'static str> = if is_canonical_category(segment) {
+        // The CANONICAL_CATEGORIES array stores &'static str literals so we can
+        // recover a 'static lifetime by matching against the constant list.
+        CANONICAL_CATEGORIES
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == segment)
     } else {
         endpoints
             .iter()
-            .find(|endpoint| endpoint.subcategory == Some(requested))
+            .find(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
             .map(|endpoint| endpoint.category)
     };
 
     let Some(canonical) = canonical else {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("unknown docs category: {category}") })),
+            HeaderMap::new(),
+            json!({ "error": format!("unknown docs group or category: {segment}") }),
         );
     };
 
-    let legacy_drilldown = requested != canonical;
+    let legacy_drilldown = segment != canonical;
     let matching: Vec<EndpointDoc> = if legacy_drilldown {
         endpoints
             .into_iter()
-            .filter(|endpoint| endpoint.subcategory == Some(requested))
+            .filter(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
             .collect()
     } else {
         endpoints
@@ -2788,19 +2969,109 @@ pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Jso
     if matching.is_empty() {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("unknown docs category: {category}") })),
+            HeaderMap::new(),
+            json!({ "error": format!("unknown docs group or category: {segment}") }),
+        );
+    }
+
+    // Emit deprecation hint pointing at the new /group/category route.
+    let mut headers = HeaderMap::new();
+    let group_for_category = category_to_group(segment);
+    let canonical_path = format!("/api/docs/{group_for_category}/{segment}");
+    if let Ok(value) = HeaderValue::from_str(&canonical_path) {
+        headers.insert("X-Deprecated", value);
+    }
+
+    (
+        StatusCode::OK,
+        headers,
+        json!({
+            "category": segment,
+            "canonical_category": canonical,
+            "description": category_description(segment),
+            "count": matching.len(),
+            "deprecated": true,
+            "canonical_path": canonical_path,
+            "subcategories": subcategory_summaries(&matching, canonical),
+            "endpoints": matching,
+        }),
+    )
+}
+
+/// GET /api/docs/{group_or_category}
+///
+/// Preferred behavior (#1063): `group` is one of the 8 top-level group names,
+/// response is `{ group, categories: [{name, description, endpoint_count}] }`.
+///
+/// Backward-compatible fallback: if the segment matches a legacy category name
+/// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
+/// like `reviews`), returns the old category-detail shape with an
+/// `X-Deprecated` header pointing at the new route. Callers should migrate to
+/// `GET /api/docs/{group}/{category}`.
+pub async fn api_docs_group_or_category(
+    Path(segment): Path<String>,
+    Query(query): Query<ApiDocsQuery>,
+) -> impl IntoResponse {
+    let flat = query
+        .format
+        .as_deref()
+        .is_some_and(|format| format.eq_ignore_ascii_case("flat"));
+    let (status, headers, body) = resolve_docs_segment(&segment, flat);
+    (status, headers, Json(body))
+}
+
+/// Back-compat shim for the in-process CLI `cmd_docs` path. Routes a single
+/// category name through the legacy branch and returns the body with the
+/// resolved status. Headers (including `X-Deprecated`) are dropped because
+/// the CLI prints JSON only.
+pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Json<Value>) {
+    let (status, _headers, body) = resolve_docs_segment(&category, false);
+    (status, Json(body))
+}
+
+/// GET /api/docs/{group}/{category} — endpoints for one fine-grained
+/// category nested under a specific group.
+pub async fn api_docs_group_category(
+    Path((group, category)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    if !GROUP_NAMES.contains(&group.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown docs group: {group}") })),
+        );
+    }
+
+    if category_to_group(&category) != group.as_str() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("category {category} does not belong to group {group}")
+            })),
+        );
+    }
+
+    let endpoints = all_endpoints();
+    let matching: Vec<EndpointDoc> = endpoints
+        .into_iter()
+        .filter(|endpoint| effective_category(endpoint) == category.as_str())
+        .collect();
+
+    if matching.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no endpoints documented for {group}/{category}")
+            })),
         );
     }
 
     (
         StatusCode::OK,
         Json(json!({
-            "category": category.clone(),
-            "canonical_category": canonical,
+            "group": group,
+            "category": category,
             "description": category_description(&category),
             "count": matching.len(),
-            "deprecated": legacy_drilldown,
-            "subcategories": subcategory_summaries(&matching, canonical),
             "endpoints": matching,
         })),
     )

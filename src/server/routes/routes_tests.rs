@@ -5971,7 +5971,7 @@ async fn dispatch_create_review_ignores_client_trusted_review_target_flag_pg() {
 }
 
 #[tokio::test]
-async fn api_docs_returns_category_summaries_by_default() {
+async fn api_docs_returns_group_hierarchy_by_default() {
     let db = test_db();
     let engine = test_engine(&db);
     let app = test_api_router(db, engine, None);
@@ -5986,47 +5986,219 @@ async fn api_docs_returns_category_summaries_by_default() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let categories = json["categories"]
+    let groups = json["groups"]
         .as_array()
-        .expect("docs must return category array");
+        .expect("docs must return group array");
 
-    let names: Vec<&str> = categories
+    let names: Vec<&str> = groups
         .iter()
-        .filter_map(|category| category["name"].as_str())
+        .filter_map(|group| group["name"].as_str())
         .collect();
     assert_eq!(
         names,
         vec![
-            "agents",
+            "runtime",
             "kanban",
-            "dispatches",
-            "queue",
-            "ops",
+            "agents",
             "integrations",
-            "admin"
+            "automation",
+            "config",
+            "observability",
+            "internal",
         ],
-        "docs must expose the #1033 seven-group category contract"
+        "docs must expose the #1063 eight-group hierarchy"
     );
 
-    let dispatches = categories
+    let runtime = groups
         .iter()
-        .find(|category| category["name"] == "dispatches")
-        .expect("dispatches category must be present");
+        .find(|group| group["name"] == "runtime")
+        .expect("runtime group must be present");
+    let runtime_categories = runtime["categories"]
+        .as_array()
+        .expect("runtime group must list categories");
     assert!(
-        dispatches["count"].as_u64().unwrap_or(0) >= 4,
-        "dispatches category count must reflect documented endpoints"
+        runtime_categories
+            .iter()
+            .any(|category| category == "dispatches"),
+        "runtime group must contain the dispatches category: {runtime}"
     );
     assert!(
-        dispatches["description"]
+        runtime["description"]
             .as_str()
             .unwrap_or_default()
-            .contains("Dispatch"),
-        "dispatches category description must be informative: {dispatches}"
+            .to_lowercase()
+            .contains("runtime")
+            || runtime["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("dispatches"),
+        "runtime group description must mention runtime surfaces: {runtime}"
     );
     assert!(
         json.get("endpoints").is_none(),
-        "default docs response must return grouped categories, not flat endpoints"
+        "default docs response must return grouped hierarchy, not flat endpoints"
     );
+    assert!(
+        json.get("categories").is_none(),
+        "default docs response must return groups (not the legacy flat categories field)"
+    );
+}
+
+/// #1063: `GET /api/docs/{group}` lists categories under a group.
+#[tokio::test]
+async fn api_docs_group_kanban_lists_cards_and_reviews() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/kanban")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["group"], "kanban");
+    let categories = json["categories"]
+        .as_array()
+        .expect("group detail must include categories array");
+    let category_names: Vec<&str> = categories
+        .iter()
+        .filter_map(|category| category["name"].as_str())
+        .collect();
+    assert!(
+        category_names.contains(&"kanban"),
+        "kanban group must contain the kanban cards category: {category_names:?}"
+    );
+    assert!(
+        category_names.contains(&"reviews"),
+        "kanban group must contain the reviews category: {category_names:?}"
+    );
+    assert!(
+        category_names.contains(&"pipeline"),
+        "kanban group must contain the pipeline category: {category_names:?}"
+    );
+}
+
+/// #1063: `GET /api/docs/{group}/{category}` returns endpoints for that
+/// category (e.g. `kanban/reviews`).
+#[tokio::test]
+async fn api_docs_group_category_kanban_reviews_returns_endpoints() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/kanban/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["group"], "kanban");
+    assert_eq!(json["category"], "reviews");
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("group/category response must include endpoints array");
+    assert!(
+        endpoints
+            .iter()
+            .any(|ep| ep["path"] == "/api/reviews/verdict"),
+        "kanban/reviews must include the review verdict endpoint"
+    );
+}
+
+/// #1063: unknown group → 404.
+#[tokio::test]
+async fn api_docs_unknown_group_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/not-a-real-group")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// #1063: mismatched group/category → 404.
+#[tokio::test]
+async fn api_docs_group_category_mismatch_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    // `reviews` belongs to the `kanban` group, not `automation`.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/automation/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// #1063 backward compat: `GET /api/docs/{category}` still works for the
+/// legacy category names but responds with `X-Deprecated` header that points
+/// at the new `/group/category` path.
+#[tokio::test]
+async fn api_docs_legacy_category_route_emits_deprecation_header() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let deprecated = response
+        .headers()
+        .get("x-deprecated")
+        .expect("legacy category route must emit X-Deprecated header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(deprecated, "/api/docs/kanban/reviews");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deprecated"], true);
 }
 
 #[tokio::test]
@@ -6190,7 +6362,7 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/kanban")
+                .uri("/docs/kanban/kanban")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6203,6 +6375,7 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["category"], "kanban");
+    assert_eq!(json["group"], "kanban");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -6234,7 +6407,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/agents")
+                .uri("/docs/agents/agents")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6247,6 +6420,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["category"], "agents");
+    assert_eq!(json["group"], "agents");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -7279,7 +7453,7 @@ async fn github_docs_include_issue_creation_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/integrations")
+                .uri("/docs/integrations/github")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7300,7 +7474,8 @@ async fn github_docs_include_issue_creation_endpoint() {
             endpoint["method"] == "POST" && endpoint["path"] == "/api/github/issues/create"
         })
         .expect("integration docs must include POST /api/github/issues/create");
-    assert_eq!(json["category"], "integrations");
+    assert_eq!(json["group"], "integrations");
+    assert_eq!(json["category"], "github");
     assert_eq!(create_issue["params"]["repo"]["required"], true);
     assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
     assert_eq!(create_issue["params"]["agent_id"]["required"], false);
@@ -7377,7 +7552,8 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/auto-queue/entries/{id}",
         "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
         "/api/help",
-        "/api/docs/{category}",
+        "/api/docs/{group}",
+        "/api/docs/{group}/{category}",
         "/api/github/issues/create",
         "/api/stats/memento",
     ] {
@@ -7541,7 +7717,7 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/integrations")
+                .uri("/docs/integrations/discord")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7553,7 +7729,8 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["category"], "integrations");
+    assert_eq!(json["group"], "integrations");
+    assert_eq!(json["category"], "discord");
 
     let endpoints = json["endpoints"]
         .as_array()

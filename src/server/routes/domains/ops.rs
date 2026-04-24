@@ -184,7 +184,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/help", get(docs::api_help))
             .route("/docs", get(docs::api_docs))
-            .route("/docs/{category}", get(docs::api_docs_category)),
+            .route("/docs/{segment}", get(docs::api_docs_group_or_category))
+            .route(
+                "/docs/{group}/{category}",
+                get(docs::api_docs_group_category),
+            ),
         state,
     )
 }
