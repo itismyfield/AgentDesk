@@ -1,3 +1,4 @@
+mod command_policy;
 mod config;
 mod control;
 mod diagnostics;
@@ -11,6 +12,12 @@ mod restart;
 mod session;
 mod skill;
 mod text_commands;
+
+#[allow(unused_imports)]
+pub(in crate::services::discord) use command_policy::{CommandRisk, PolicyDecision};
+pub(in crate::services::discord) use command_policy::{
+    command_risk, evaluate_policy, high_risk_enabled_via_env, risk_tier_summary_for_help,
+};
 
 pub(in crate::services::discord) use super::model_catalog::{
     provider_supports_model_override, validate_model_input,
