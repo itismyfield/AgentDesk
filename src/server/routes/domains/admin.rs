@@ -8,6 +8,8 @@ use super::super::{
     receipt, settings, stats,
 };
 
+// Category: admin and ops
+
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()

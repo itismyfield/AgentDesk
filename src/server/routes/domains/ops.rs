@@ -1,12 +1,18 @@
 use axum::{
-    Router,
+    Json, Router,
+    extract::{Query, State},
+    http::StatusCode,
     routing::{delete, get, patch, post},
 };
+use serde_json::Value;
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, hooks,
-    messages, pipeline, protected_api_domain, queue_api, skills_api, termination_events,
+    log_deprecated_alias, messages, pipeline, protected_api_domain, queue_api, skills_api,
+    termination_events,
 };
+
+// Category: dispatches, queue, and ops
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
@@ -77,8 +83,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 patch(dispatched_sessions::update_dispatched_session),
             )
             .route(
-                "/hook/session",
+                "/dispatched-sessions/webhook",
                 post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
+            )
+            .route(
+                "/hook/session",
+                post(deprecated_hook_session).delete(deprecated_delete_session),
             )
             .route("/hook/reset-status", post(hooks::reset_status))
             .route("/hook/skill-usage", post(hooks::skill_usage))
@@ -116,7 +126,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/cron-jobs", get(cron_api::list_cron_jobs))
             .route("/auto-queue/generate", post(auto_queue::generate))
             .route("/auto-queue/dispatch", post(auto_queue::dispatch))
-            .route("/auto-queue/activate", post(auto_queue::activate))
+            .route("/auto-queue/dispatch-next", post(auto_queue::activate))
+            .route("/auto-queue/activate", post(deprecated_auto_queue_activate))
             .route("/auto-queue/status", get(auto_queue::status))
             .route("/auto-queue/history", get(auto_queue::history))
             .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
@@ -171,4 +182,28 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/docs/{category}", get(docs::api_docs_category)),
         state,
     )
+}
+
+async fn deprecated_hook_session(
+    State(state): State<AppState>,
+    Json(body): Json<dispatched_sessions::HookSessionBody>,
+) -> (StatusCode, Json<Value>) {
+    log_deprecated_alias("/api/hook/session", "/api/dispatched-sessions/webhook");
+    dispatched_sessions::hook_session(State(state), Json(body)).await
+}
+
+async fn deprecated_delete_session(
+    State(state): State<AppState>,
+    Query(params): Query<dispatched_sessions::DeleteSessionQuery>,
+) -> (StatusCode, Json<Value>) {
+    log_deprecated_alias("/api/hook/session", "/api/dispatched-sessions/webhook");
+    dispatched_sessions::delete_session(State(state), Query(params)).await
+}
+
+async fn deprecated_auto_queue_activate(
+    State(state): State<AppState>,
+    Json(body): Json<auto_queue::ActivateBody>,
+) -> (StatusCode, Json<Value>) {
+    log_deprecated_alias("/api/auto-queue/activate", "/api/auto-queue/dispatch-next");
+    auto_queue::activate(State(state), Json(body)).await
 }

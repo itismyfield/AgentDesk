@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+// Category: ops
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ApiDocsQuery {
     pub format: Option<String>,
@@ -48,11 +50,17 @@ struct EndpointDoc {
     pub method: &'static str,
     pub path: &'static str,
     pub category: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<&'static str>,
     pub description: &'static str,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, ParamDoc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<ExampleDoc>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub deprecated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_path: Option<&'static str>,
 }
 
 impl EndpointDoc {
@@ -68,10 +76,24 @@ impl EndpointDoc {
         self.example = Some(ExampleDoc { request, response });
         self
     }
+
+    fn deprecated_alias(mut self, canonical_path: &'static str) -> Self {
+        self.deprecated = true;
+        self.canonical_path = Some(canonical_path);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct CategorySummary {
+    pub name: &'static str,
+    pub count: usize,
+    pub description: &'static str,
+    pub subcategories: Vec<SubcategorySummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SubcategorySummary {
     pub name: &'static str,
     pub count: usize,
     pub description: &'static str,
@@ -83,14 +105,22 @@ fn ep(
     category: &'static str,
     description: &'static str,
 ) -> EndpointDoc {
+    let canonical_category = canonical_category(category);
     EndpointDoc {
         method,
         path,
-        category,
+        category: canonical_category,
+        subcategory: (canonical_category != category).then_some(category),
         description,
         params: BTreeMap::new(),
         example: None,
+        deprecated: false,
+        canonical_path: None,
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn path_param(description: &'static str) -> ParamDoc {
@@ -126,12 +156,49 @@ fn body_param(kind: &'static str, required: bool, description: &'static str) -> 
     }
 }
 
+const CANONICAL_CATEGORIES: [&str; 7] = [
+    "agents",
+    "kanban",
+    "dispatches",
+    "queue",
+    "ops",
+    "integrations",
+    "admin",
+];
+
+fn canonical_category(category: &str) -> &'static str {
+    match category {
+        "agents" => "agents",
+        "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
+        "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
+        "auto-queue" | "cron" | "queue" => "queue",
+        "analytics" | "auth" | "docs" | "health" | "monitoring" | "stats" => "ops",
+        "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
+        "departments" | "offices" | "onboarding" | "policies" | "settings" | "skills" => "admin",
+        _ => "ops",
+    }
+}
+
+fn is_canonical_category(category: &str) -> bool {
+    CANONICAL_CATEGORIES.contains(&category)
+}
+
 fn category_description(category: &str) -> &'static str {
     match category {
+        "agents" => "Agent registry, turn control, setup, and activity timelines.",
+        "kanban" => "Kanban cards, pipeline state, reviews, PM decisions, and repo board config.",
+        "dispatches" => {
+            "Dispatch CRUD, dispatched sessions, runtime sessions, and message records."
+        }
+        "queue" => {
+            "Auto-queue generation, activation, ordering, live queue views, and turn control."
+        }
+        "ops" => "Health, auth, docs, analytics, stats, and monitoring surfaces.",
+        "integrations" => "Discord, GitHub, and round-table meeting integration entrypoints.",
+        "admin" => "Onboarding, settings, policies, skills, offices, and departments.",
         "api-friction" => {
             "Structured API-friction events, repeated-pattern aggregation, and auto issue creation."
         }
-        "agents" => "Agent registry, turn control, session views, and timelines.",
         "analytics" => "Operational analytics, receipts, machine status, and rate-limit views.",
         "auth" => "Current authentication session state.",
         "auto-queue" => {
@@ -140,25 +207,21 @@ fn category_description(category: &str) -> &'static str {
         "cron" => "Registered cron jobs per agent.",
         "departments" => "Department CRUD and ordering.",
         "discord" => "Discord delivery helpers, bindings, message reads, and DM reply hooks.",
-        "dispatches" => "Dispatch CRUD operations.",
         "dispatched-sessions" => "Persisted dispatched-session lifecycle and cleanup helpers.",
         "docs" => "API documentation discovery and category drill-down.",
         "github" => "GitHub repository integration, issue creation, and sync entrypoints.",
         "github-dashboard" => "Dashboard-oriented GitHub read models and issue actions.",
         "health" => "Health and liveness endpoints.",
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
-        "kanban" => {
-            "Kanban cards, review recovery, administrative transitions, and DoD operations."
-        }
         "kanban-repos" => "Kanban repository settings and ownership metadata.",
         "meetings" => "Round-table meeting lifecycle and issue generation.",
         "messages" => "Message log read/write APIs.",
+        "monitoring" => "Channel monitoring status entries and rendered status updates.",
         "offices" => "Office CRUD, ordering, and agent membership.",
         "onboarding" => "Initial setup, provider validation, and prompt generation.",
         "pipeline" => "Pipeline stages, config overrides, graphs, and card history.",
         "pm" => "PM decision workflow for force-only pipeline states.",
         "policies" => "Loaded policy inventory.",
-        "queue" => "Pending dispatch queue views and live turn control.",
         "reviews" => "Review verdict submission, decisions, and tuning aggregation.",
         "sessions" => "Sessions, force-kill, and termination events.",
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
@@ -174,9 +237,29 @@ fn category_summaries(endpoints: &[EndpointDoc]) -> Vec<CategorySummary> {
         *counts.entry(endpoint.category).or_default() += 1;
     }
 
+    CANONICAL_CATEGORIES
+        .into_iter()
+        .map(|name| CategorySummary {
+            name,
+            count: counts.get(name).copied().unwrap_or_default(),
+            description: category_description(name),
+            subcategories: subcategory_summaries(endpoints, name),
+        })
+        .collect()
+}
+
+fn subcategory_summaries(endpoints: &[EndpointDoc], category: &str) -> Vec<SubcategorySummary> {
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for endpoint in endpoints {
+        if endpoint.category == category {
+            let subcategory = endpoint.subcategory.unwrap_or(endpoint.category);
+            *counts.entry(subcategory).or_default() += 1;
+        }
+    }
+
     counts
         .into_iter()
-        .map(|(name, count)| CategorySummary {
+        .map(|(name, count)| SubcategorySummary {
             name,
             count,
             description: category_description(name),
@@ -207,10 +290,17 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "recovery_duration": 0.12
             }),
         ),
-        ep("POST", "/api/send", "discord", "Send a Discord channel message"),
         ep(
             "POST",
-            "/api/send_to_agent",
+            "/api/discord/send",
+            "discord",
+            "Send a Discord channel message",
+        ),
+        ep("POST", "/api/send", "discord", "Deprecated alias for /api/discord/send")
+            .deprecated_alias("/api/discord/send"),
+        ep(
+            "POST",
+            "/api/discord/send-to-agent",
             "discord",
             "Send a Discord message by agent role_id",
         )
@@ -227,7 +317,21 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 .with_enum(&["announce", "notify"]),
             ),
         ]),
-        ep("POST", "/api/senddm", "discord", "Send a Discord direct message"),
+        ep(
+            "POST",
+            "/api/send_to_agent",
+            "discord",
+            "Deprecated alias for /api/discord/send-to-agent",
+        )
+        .deprecated_alias("/api/discord/send-to-agent"),
+        ep(
+            "POST",
+            "/api/discord/send-dm",
+            "discord",
+            "Send a Discord direct message",
+        ),
+        ep("POST", "/api/senddm", "discord", "Deprecated alias for /api/discord/send-dm")
+            .deprecated_alias("/api/discord/send-dm"),
         ep("GET", "/api/agents", "agents", "List all agents"),
         ep("POST", "/api/agents", "agents", "Create an agent"),
         ep("GET", "/api/agents/{id}", "agents", "Get agent by ID"),
@@ -663,7 +767,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/re-review",
+            "/api/kanban-cards/batch-rereview",
             "kanban",
             "Batch rereview by GitHub issue number",
         )
@@ -681,6 +785,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"issues": [423, 426], "reason": "counter-model retry"}}),
             json!({"results": [{"issue": 423, "ok": true, "dispatch_id": "dispatch-review-423"}, {"issue": 426, "ok": false, "error": "card not found for issue #426"}]}),
         ),
+        ep(
+            "POST",
+            "/api/re-review",
+            "kanban",
+            "Deprecated alias for /api/kanban-cards/batch-rereview",
+        )
+        .deprecated_alias("/api/kanban-cards/batch-rereview"),
         ep(
             "POST",
             "/api/kanban-cards/batch-transition",
@@ -744,9 +855,9 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/kanban-cards/{id}/force-transition",
+            "/api/kanban-cards/{id}/transition",
             "kanban",
-            "Force-transition a single card",
+            "Transition a single card with administrative force semantics",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -765,6 +876,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "card-1"}, "body": {"status": "ready", "cancel_dispatches": true}}),
             json!({"card": {"id": "card-1", "status": "ready"}, "forced": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}),
         ),
+        ep(
+            "POST",
+            "/api/kanban-cards/{id}/force-transition",
+            "kanban",
+            "Deprecated alias for /api/kanban-cards/{id}/transition",
+        )
+        .deprecated_alias("/api/kanban-cards/{id}/transition"),
         ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card")
             .with_params([
                 ("id", path_param("Kanban card ID")),
@@ -1120,7 +1238,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/github/repos", "github", "List GitHub repos"),
         ep(
             "POST",
-            "/api/issues",
+            "/api/github/issues/create",
             "github",
             "Create a GitHub issue with server-enforced PMD markdown format",
         )
@@ -1205,7 +1323,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "title": "create-issue 스킬을 ADK API로 승격",
                 "background": "AgentDesk 내부에서 PMD 포맷 이슈를 서버 API로 직접 생성해야 한다.",
                 "content": [
-                    "POST /api/issues 엔드포인트를 추가한다.",
+                    "POST /api/github/issues/create 엔드포인트를 추가한다.",
                     "서버에서 PMD 마크다운 포맷을 강제한다."
                 ],
                 "dod": [
@@ -1224,6 +1342,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "pmd_format_version": 1
             }),
         ),
+        ep(
+            "POST",
+            "/api/issues",
+            "github",
+            "Deprecated alias for /api/github/issues/create",
+        )
+        .deprecated_alias("/api/github/issues/create"),
         ep("POST", "/api/github/repos", "github", "Register GitHub repo"),
         ep(
             "POST",
@@ -1553,16 +1678,30 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/hook/session",
+            "/api/dispatched-sessions/webhook",
             "dispatched-sessions",
             "Session webhook",
+        ),
+        ep(
+            "POST",
+            "/api/hook/session",
+            "dispatched-sessions",
+            "Deprecated alias for /api/dispatched-sessions/webhook",
+        )
+        .deprecated_alias("/api/dispatched-sessions/webhook"),
+        ep(
+            "DELETE",
+            "/api/dispatched-sessions/webhook",
+            "dispatched-sessions",
+            "Delete session webhook state",
         ),
         ep(
             "DELETE",
             "/api/hook/session",
             "dispatched-sessions",
-            "Delete session webhook state",
-        ),
+            "Deprecated alias for /api/dispatched-sessions/webhook",
+        )
+        .deprecated_alias("/api/dispatched-sessions/webhook"),
         ep(
             "GET",
             "/api/dispatched-sessions/claude-session-id",
@@ -1852,7 +1991,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/auto-queue/activate",
+            "/api/auto-queue/dispatch-next",
             "auto-queue",
             "Dispatch the next pending auto-queue entries",
         )
@@ -1896,6 +2035,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"repo": "test-repo", "unified_thread": false}}),
             json!({"dispatched": [{"id": "entry-1", "card_id": "card-423", "dispatch_id": "dispatch-1", "status": "dispatched"}], "count": 1, "active_groups": 1, "pending_groups": 1}),
         ),
+        ep(
+            "POST",
+            "/api/auto-queue/activate",
+            "auto-queue",
+            "Deprecated alias for /api/auto-queue/dispatch-next",
+        )
+        .deprecated_alias("/api/auto-queue/dispatch-next"),
         ep(
             "GET",
             "/api/auto-queue/status",
@@ -2171,7 +2317,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "run-1"}, "body": {"order": [423, 405], "rationale": "dependency-first"}}),
-            json!({"ok": true, "created": 2, "run_id": "run-1", "message": "Queue active. Call POST /api/auto-queue/activate to start dispatching."}),
+            json!({"ok": true, "created": 2, "run_id": "run-1", "message": "Queue active. Call POST /api/auto-queue/dispatch-next to start dispatching."}),
         ),
         ep(
             "GET",
@@ -2209,6 +2355,37 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "queue",
             "Extend live turn timeout",
         ),
+        ep(
+            "POST",
+            "/api/channels/{channel_id}/monitoring",
+            "monitoring",
+            "Create or update a channel monitoring status entry",
+        )
+        .with_params([
+            ("channel_id", path_param("Discord channel ID")),
+            ("key", body_param("string", true, "Stable monitoring entry key")),
+            (
+                "description",
+                body_param("string", true, "Human-readable status description"),
+            ),
+        ]),
+        ep(
+            "GET",
+            "/api/channels/{channel_id}/monitoring",
+            "monitoring",
+            "List channel monitoring status entries",
+        )
+        .with_params([("channel_id", path_param("Discord channel ID"))]),
+        ep(
+            "DELETE",
+            "/api/channels/{channel_id}/monitoring/{key}",
+            "monitoring",
+            "Remove a channel monitoring status entry",
+        )
+        .with_params([
+            ("channel_id", path_param("Discord channel ID")),
+            ("key", path_param("Monitoring entry key")),
+        ]),
         ep("GET", "/api/analytics", "analytics", "Observability counters and structured events")
             .with_params([
                 (
@@ -2303,13 +2480,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 15}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
+            json!({"categories": [{"name": "queue", "count": 15}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "queue", "subcategory": "auto-queue"}]}),
         ),
         ep(
             "GET",
             "/api/docs",
             "docs",
-            "List documentation categories or return the legacy flat endpoint list",
+            "List the seven canonical documentation groups or return the legacy flat endpoint list",
         )
         .with_params([(
             "format",
@@ -2317,17 +2494,17 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 15, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
+            json!({"categories": [{"name": "queue", "count": 15, "description": "Auto-queue generation, activation, ordering, live queue views, and turn control."}]}),
         ),
         ep(
             "GET",
             "/api/docs/{category}",
             "docs",
-            "Get detailed docs for one category, including params and examples where available",
+            "Get detailed docs for one canonical category, including params and examples where available",
         )
         .with_params([(
             "category",
-            path_param("Docs category name such as auto-queue, kanban, or dispatches"),
+            path_param("Canonical docs category name such as queue, kanban, or dispatches"),
         )])
         .with_example(
             json!({"path": {"category": "dispatches"}}),
@@ -2335,22 +2512,43 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/review-verdict",
+            "/api/reviews/verdict",
             "reviews",
             "Submit review verdict",
         ),
         ep(
             "POST",
-            "/api/review-decision",
+            "/api/review-verdict",
+            "reviews",
+            "Deprecated alias for /api/reviews/verdict",
+        )
+        .deprecated_alias("/api/reviews/verdict"),
+        ep(
+            "POST",
+            "/api/reviews/decision",
             "reviews",
             "Submit review-decision action",
         ),
         ep(
             "POST",
-            "/api/review-tuning/aggregate",
+            "/api/review-decision",
+            "reviews",
+            "Deprecated alias for /api/reviews/decision",
+        )
+        .deprecated_alias("/api/reviews/decision"),
+        ep(
+            "POST",
+            "/api/reviews/tuning/aggregate",
             "reviews",
             "Aggregate review-tuning outcomes",
         ),
+        ep(
+            "POST",
+            "/api/review-tuning/aggregate",
+            "reviews",
+            "Deprecated alias for /api/reviews/tuning/aggregate",
+        )
+        .deprecated_alias("/api/reviews/tuning/aggregate"),
         ep(
             "POST",
             "/api/pm-decision",
@@ -2388,7 +2586,7 @@ pub async fn api_help() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// GET /api/docs — summary by category, or legacy flat format when `?format=flat`.
+/// GET /api/docs — summary by canonical category, or legacy flat format when `?format=flat`.
 pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Value>) {
     let endpoints = all_endpoints();
     if query
@@ -2407,13 +2605,38 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
     )
 }
 
-/// GET /api/docs/{category} — detailed endpoints for one category.
+/// GET /api/docs/{category} — detailed endpoints for one canonical category.
 pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Json<Value>) {
     let endpoints = all_endpoints();
-    let matching: Vec<EndpointDoc> = endpoints
-        .into_iter()
-        .filter(|endpoint| endpoint.category == category.as_str())
-        .collect();
+    let requested = category.as_str();
+    let canonical = if is_canonical_category(requested) {
+        Some(requested)
+    } else {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.subcategory == Some(requested))
+            .map(|endpoint| endpoint.category)
+    };
+
+    let Some(canonical) = canonical else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown docs category: {category}") })),
+        );
+    };
+
+    let legacy_drilldown = requested != canonical;
+    let matching: Vec<EndpointDoc> = if legacy_drilldown {
+        endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.subcategory == Some(requested))
+            .collect()
+    } else {
+        endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.category == canonical)
+            .collect()
+    };
 
     if matching.is_empty() {
         return (
@@ -2426,8 +2649,11 @@ pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Jso
         StatusCode::OK,
         Json(json!({
             "category": category.clone(),
+            "canonical_category": canonical,
             "description": category_description(&category),
             "count": matching.len(),
+            "deprecated": legacy_drilldown,
+            "subcategories": subcategory_summaries(&matching, canonical),
             "endpoints": matching,
         })),
     )

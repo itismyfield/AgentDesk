@@ -5990,6 +5990,24 @@ async fn api_docs_returns_category_summaries_by_default() {
         .as_array()
         .expect("docs must return category array");
 
+    let names: Vec<&str> = categories
+        .iter()
+        .filter_map(|category| category["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "agents",
+            "kanban",
+            "dispatches",
+            "queue",
+            "ops",
+            "integrations",
+            "admin"
+        ],
+        "docs must expose the #1033 seven-group category contract"
+    );
+
     let dispatches = categories
         .iter()
         .find(|category| category["name"] == "dispatches")
@@ -6108,7 +6126,7 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/auto-queue")
+                .uri("/docs/queue")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6120,7 +6138,7 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["category"], "auto-queue");
+    assert_eq!(json["category"], "queue");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -6815,7 +6833,7 @@ async fn github_docs_include_issue_creation_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/github")
+                .uri("/docs/integrations")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6832,9 +6850,11 @@ async fn github_docs_include_issue_creation_endpoint() {
         .expect("docs/github must return endpoint array");
     let create_issue = endpoints
         .iter()
-        .find(|endpoint| endpoint["method"] == "POST" && endpoint["path"] == "/api/issues")
-        .expect("github docs must include POST /api/issues");
-    assert_eq!(json["category"], "github");
+        .find(|endpoint| {
+            endpoint["method"] == "POST" && endpoint["path"] == "/api/github/issues/create"
+        })
+        .expect("integration docs must include POST /api/github/issues/create");
+    assert_eq!(json["category"], "integrations");
     assert_eq!(create_issue["params"]["repo"]["required"], true);
     assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
     assert_eq!(create_issue["params"]["agent_id"]["required"], false);
@@ -6849,7 +6869,7 @@ async fn health_docs_describe_server_up_and_fully_recovered() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/health")
+                .uri("/docs/ops")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6863,7 +6883,7 @@ async fn health_docs_describe_server_up_and_fully_recovered() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let endpoints = json["endpoints"]
         .as_array()
-        .expect("docs/health must return endpoint array");
+        .expect("docs/ops must return endpoint array");
     let health = endpoints
         .iter()
         .find(|endpoint| endpoint["method"] == "GET" && endpoint["path"] == "/api/health")
@@ -6905,13 +6925,14 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
 
     for path in [
         "/api/kanban-cards/{id}/reopen",
-        "/api/review-decision",
+        "/api/reviews/decision",
         "/api/auto-queue/dispatch",
+        "/api/auto-queue/dispatch-next",
         "/api/auto-queue/entries/{id}",
         "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
         "/api/help",
         "/api/docs/{category}",
-        "/api/issues",
+        "/api/github/issues/create",
         "/api/stats/memento",
     ] {
         assert!(
@@ -7034,7 +7055,7 @@ async fn api_help_exposes_detailed_endpoint_inventory() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|category| category["name"] == "auto-queue"),
+            .any(|category| category["name"] == "queue"),
         "/help must expose category summaries"
     );
     let dispatch = json["endpoints"]
@@ -7074,7 +7095,7 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/discord")
+                .uri("/docs/integrations")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7086,15 +7107,15 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["category"], "discord");
+    assert_eq!(json["category"], "integrations");
 
     let endpoints = json["endpoints"]
         .as_array()
-        .expect("discord detail must include endpoint array");
+        .expect("integrations detail must include endpoint array");
     let send_to_agent = endpoints
         .iter()
-        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/send_to_agent")
-        .expect("send_to_agent endpoint must be documented");
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/discord/send-to-agent")
+        .expect("canonical send-to-agent endpoint must be documented");
     assert_eq!(send_to_agent["params"]["role_id"]["location"], "body");
     assert_eq!(send_to_agent["params"]["message"]["type"], "string");
     assert_eq!(send_to_agent["params"]["mode"]["type"], "string");
@@ -7109,7 +7130,7 @@ async fn api_docs_category_exposes_skill_prune_and_filter_params() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/skills")
+                .uri("/docs/admin")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7121,11 +7142,11 @@ async fn api_docs_category_exposes_skill_prune_and_filter_params() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["category"], "skills");
+    assert_eq!(json["category"], "admin");
 
     let endpoints = json["endpoints"]
         .as_array()
-        .expect("skills detail must include endpoint array");
+        .expect("admin detail must include endpoint array");
     let catalog = endpoints
         .iter()
         .find(|ep| ep["method"] == "GET" && ep["path"] == "/api/skills/catalog")

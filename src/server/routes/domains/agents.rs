@@ -7,6 +7,8 @@ use super::super::{
     ApiRouter, AppState, agents, agents_crud, agents_setup, cron_api, protected_api_domain,
 };
 
+// Category: agents
+
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()

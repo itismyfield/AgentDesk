@@ -104,6 +104,14 @@ impl AppState {
 
 pub(crate) type ApiRouter = Router<AppState>;
 
+pub(crate) fn log_deprecated_alias(old_path: &'static str, canonical_path: &'static str) {
+    tracing::warn!(
+        old_path,
+        canonical_path,
+        "deprecated API alias called; use canonical path"
+    );
+}
+
 #[cfg(test)]
 impl AppState {
     pub fn test_state(db: Db, engine: PolicyEngine) -> Self {

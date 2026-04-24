@@ -1,17 +1,23 @@
 use axum::{
-    Router,
+    Json, Router,
+    extract::State,
+    http::StatusCode,
     routing::{get, patch, post},
 };
+use serde_json::Value;
 
 use super::super::{
-    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, meetings,
-    protected_api_domain,
+    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, log_deprecated_alias,
+    meetings, protected_api_domain,
 };
+
+// Category: integrations
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
-            .route("/issues", post(github::create_issue))
+            .route("/github/issues/create", post(github::create_issue))
+            .route("/issues", post(deprecated_create_issue))
             .route(
                 "/github/repos",
                 get(github::list_repos).post(github::register_repo),
@@ -62,4 +68,12 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             ),
         state,
     )
+}
+
+async fn deprecated_create_issue(
+    State(state): State<AppState>,
+    Json(body): Json<github::CreateIssueBody>,
+) -> (StatusCode, Json<Value>) {
+    log_deprecated_alias("/api/issues", "/api/github/issues/create");
+    github::create_issue(State(state), Json(body)).await
 }

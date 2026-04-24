@@ -10,6 +10,8 @@ use serde_json::json;
 
 use super::{ApiRouter, AppState, protected_api_domain, state};
 
+// Category: ops
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpsertMonitoringBody {
     key: String,
