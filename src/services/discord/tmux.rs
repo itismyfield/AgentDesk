@@ -44,7 +44,9 @@ pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
-const SUPPRESSED_OUTPUT_LABEL: &str = "_(턴 종료 — 출력 보류됨)_";
+const SUPPRESSED_INTERNAL_LABEL: &str = "(자동으로 처리된 내부 작업이라 여기서 멈췄어요)";
+const SUPPRESSED_RESTART_LABEL: &str =
+    "(서버가 재시작되면서 답변이 중간에 멈췄어요 — 필요하시면 다시 질문해 주세요)";
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 
@@ -196,17 +198,17 @@ fn strip_inprogress_indicators(body: &str) -> String {
     lines.join("\n")
 }
 
-fn rewrite_placeholder_as_terminal_suppressed(text: &str) -> String {
+fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &'static str) -> String {
     let cleaned = strip_inprogress_indicators(text);
     let trimmed = cleaned.trim_end();
-    if trimmed.ends_with(SUPPRESSED_OUTPUT_LABEL) {
+    if trimmed.ends_with(label) {
         return trimmed.to_string();
     }
     if trimmed.is_empty() {
-        return SUPPRESSED_OUTPUT_LABEL.to_string();
+        return label.to_string();
     }
 
-    let suffix = format!("\n\n{SUPPRESSED_OUTPUT_LABEL}");
+    let suffix = format!("\n\n{label}");
     let max_base_len = super::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
     let base = if trimmed.len() > max_base_len {
         truncate_str(trimmed, max_base_len)
@@ -245,7 +247,10 @@ fn orphan_suppressed_placeholder_action(
     }
 
     let body = reconstructed_inflight_placeholder_body(state);
-    SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(&body))
+    SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
+        &body,
+        SUPPRESSED_RESTART_LABEL,
+    ))
 }
 
 fn suppressed_placeholder_action(
@@ -261,6 +266,7 @@ fn suppressed_placeholder_action(
     if placeholder_was_exposed {
         SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
             last_edit_text,
+            SUPPRESSED_INTERNAL_LABEL,
         ))
     } else {
         SuppressedPlaceholderAction::Delete
@@ -4980,8 +4986,9 @@ mod tests {
     use super::{
         DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
         MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, READY_FOR_INPUT_STUCK_REASON,
-        SUPPRESSED_OUTPUT_LABEL, SuppressedPlaceholderAction, TmuxWatcherHandle, WatcherToolState,
-        build_bg_trigger_session_key, claim_or_replace_watcher, dead_session_cleanup_plan,
+        SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
+        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
+        claim_or_replace_watcher, dead_session_cleanup_plan,
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
@@ -5997,12 +6004,14 @@ mod tests {
                 "partial response\n\n⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed",
             ),
             SuppressedPlaceholderAction::Edit(format!(
-                "partial response\n\n{SUPPRESSED_OUTPUT_LABEL}"
+                "partial response\n\n{SUPPRESSED_INTERNAL_LABEL}"
             ))
         );
         assert_eq!(
             suppressed_placeholder_action(true, 0, "status only"),
-            SuppressedPlaceholderAction::Edit(format!("status only\n\n{SUPPRESSED_OUTPUT_LABEL}"))
+            SuppressedPlaceholderAction::Edit(format!(
+                "status only\n\n{SUPPRESSED_INTERNAL_LABEL}"
+            ))
         );
     }
 
@@ -6044,7 +6053,41 @@ mod tests {
 
         assert_eq!(
             action,
-            SuppressedPlaceholderAction::Edit(format!("pending tail\n\n{SUPPRESSED_OUTPUT_LABEL}"))
+            SuppressedPlaceholderAction::Edit(format!(
+                "pending tail\n\n{SUPPRESSED_RESTART_LABEL}"
+            ))
+        );
+    }
+
+    #[test]
+    fn internal_suppress_and_orphan_reconcile_use_distinct_labels() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\nshared tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+
+        assert_eq!(
+            suppressed_placeholder_action(true, state.response_sent_offset, "shared tail"),
+            SuppressedPlaceholderAction::Edit(format!(
+                "shared tail\n\n{SUPPRESSED_INTERNAL_LABEL}"
+            ))
+        );
+        assert_eq!(
+            orphan_suppressed_placeholder_action(&state, false, &tmux_name),
+            SuppressedPlaceholderAction::Edit(format!("shared tail\n\n{SUPPRESSED_RESTART_LABEL}"))
         );
     }
 
