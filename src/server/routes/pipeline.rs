@@ -51,6 +51,41 @@ async fn reject_if_readonly(
 
 // ── Query / Body types ─────────────────────────────────────────
 
+/// #1082 — accepted `on_failure` policy values.
+/// Kept in sync with `crate::pipeline::OnFailurePolicy`.
+pub const STAGE_ON_FAILURE_VALUES: &[&str] =
+    &["escalate", "retry-with-backoff", "fallback-stage", "fail"];
+
+/// #1082 — accepted `backoff` policy values.
+pub const STAGE_BACKOFF_VALUES: &[&str] = &["exponential", "linear", "none"];
+
+/// Validate a stage's `on_failure` string. Returns `Err(value)` with the
+/// offending value when unknown, `Ok(())` otherwise (including None/empty).
+pub fn validate_on_failure(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_ON_FAILURE_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "on_failure='{}' is invalid; expected one of {:?}",
+            v, STAGE_ON_FAILURE_VALUES
+        )),
+    }
+}
+
+/// Validate a stage's `backoff` string.
+pub fn validate_backoff(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_BACKOFF_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "backoff='{}' is invalid; expected one of {:?}",
+            v, STAGE_BACKOFF_VALUES
+        )),
+    }
+}
+
 // ── Dashboard v2 types (/pipeline/...) ────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +117,9 @@ pub struct PutStageItem {
     pub on_failure: Option<String>,
     pub on_failure_target: Option<String>,
     pub max_retries: Option<i64>,
+    /// #1082 backoff policy. One of STAGE_BACKOFF_VALUES. Not persisted to DB
+    /// in this iteration; accepted for forward-compat in the API payload.
+    pub backoff: Option<String>,
     pub skip_condition: Option<String>,
     pub parallel_with: Option<String>,
 }
@@ -143,6 +181,42 @@ pub async fn put_stages(
     // #1097: reject when pipeline_stages is file-canonical.
     if let Some(resp) = reject_if_readonly(&state, "pipeline_stages").await {
         return resp;
+    }
+
+    // #1082: validate retry/backoff/on_failure before any DB writes.
+    for stage in &body.stages {
+        if let Err(msg) = validate_on_failure(stage.on_failure.as_deref()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("stage '{}': {msg}", stage.stage_name),
+                    "stage": stage.stage_name,
+                })),
+            );
+        }
+        if let Err(msg) = validate_backoff(stage.backoff.as_deref()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("stage '{}': {msg}", stage.stage_name),
+                    "stage": stage.stage_name,
+                })),
+            );
+        }
+        if let Some(mr) = stage.max_retries {
+            if mr < 0 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "stage '{}': max_retries={mr} must be >= 0",
+                            stage.stage_name
+                        ),
+                        "stage": stage.stage_name,
+                    })),
+                );
+            }
+        }
     }
 
     let stages = if let Some(pool) = state.pg_pool_ref() {
@@ -1571,6 +1645,7 @@ mod tests {
                 on_failure: None,
                 on_failure_target: None,
                 max_retries: None,
+                backoff: None,
                 skip_condition: None,
                 parallel_with: None,
             }],
@@ -1596,5 +1671,27 @@ mod tests {
         .await;
         assert_eq!(status2, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(json2["table"], "pipeline_stages");
+    }
+
+    // ── #1082 validator tests ──────────────────────────────────
+
+    #[test]
+    fn validate_on_failure_accepts_enum_and_rejects_others() {
+        assert!(validate_on_failure(None).is_ok());
+        assert!(validate_on_failure(Some("")).is_ok());
+        for v in STAGE_ON_FAILURE_VALUES {
+            assert!(validate_on_failure(Some(v)).is_ok(), "expected {} ok", v);
+        }
+        let err = validate_on_failure(Some("bogus")).unwrap_err();
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn validate_backoff_accepts_enum_and_rejects_others() {
+        assert!(validate_backoff(None).is_ok());
+        for v in STAGE_BACKOFF_VALUES {
+            assert!(validate_backoff(Some(v)).is_ok(), "expected {} ok", v);
+        }
+        assert!(validate_backoff(Some("cubic")).is_err());
     }
 }

@@ -125,6 +125,9 @@ phase_gate:
   dispatch_to: self
   dispatch_type: phase-gate
   pass_verdict: phase_gate_passed
+  # #1082: `checks` now references names registered via policies/phase_gate.js.
+  # YAML lists the gate names only; their implementations live in the JS
+  # registry (`agentdesk.registerPhaseGate(name, fn)`).
   checks:
     - merge_verified
     - issue_closed
@@ -150,24 +153,40 @@ clocks:
 # Evaluated by timeouts.js on each onTick cycle.
 
 timeouts:
+  # #1082: max_retries >= 1, backoff: exponential (1m→5m→15m),
+  # on_exhaust_policy: escalate | notify | fail.  Legacy `on_exhaust` (string
+  # state id) remains accepted for backward-compat when `on_exhaust_policy`
+  # is not set.
+
   requested:
     duration: 45m
     clock: requested_at
     max_retries: 10
-    on_exhaust: requested
+    backoff: exponential
+    on_exhaust: requested           # legacy (state to re-enter)
+    on_exhaust_policy: escalate     # #1082 typed policy
 
   in_progress:
     duration: 2h
     clock: started_at
+    max_retries: 1
+    backoff: exponential
     on_exhaust: in_progress
+    on_exhaust_policy: escalate
 
   review:
     duration: 30m
     clock: review_entered_at
+    max_retries: 1
+    backoff: exponential
     on_exhaust: review
+    on_exhaust_policy: escalate
 
   awaiting_dod:
     duration: 15m
     clock: awaiting_dod_at
     condition: review_status = 'awaiting_dod'
+    max_retries: 1
+    backoff: exponential
     on_exhaust: review
+    on_exhaust_policy: escalate
