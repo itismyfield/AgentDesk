@@ -44,7 +44,7 @@ pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
-const SUPPRESSED_OUTPUT_LABEL: &str = "_(보류된 출력)_";
+const SUPPRESSED_OUTPUT_LABEL: &str = "_(턴 종료 — 출력 보류됨)_";
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 
@@ -171,10 +171,36 @@ enum SuppressedPlaceholderAction {
     Edit(String),
 }
 
-fn append_suppressed_output_label(text: &str) -> String {
-    let trimmed = text.trim_end();
+fn is_spinner_prefix_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '⠏' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇'
+    )
+}
+
+fn is_inprogress_indicator_line(line: &str) -> bool {
+    line.trim_start()
+        .chars()
+        .next()
+        .is_some_and(is_spinner_prefix_char)
+}
+
+fn strip_inprogress_indicators(body: &str) -> String {
+    let mut lines: Vec<&str> = body
+        .lines()
+        .filter(|line| !is_inprogress_indicator_line(line))
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn rewrite_placeholder_as_terminal_suppressed(text: &str) -> String {
+    let cleaned = strip_inprogress_indicators(text);
+    let trimmed = cleaned.trim_end();
     if trimmed.ends_with(SUPPRESSED_OUTPUT_LABEL) {
-        return text.to_string();
+        return trimmed.to_string();
     }
     if trimmed.is_empty() {
         return SUPPRESSED_OUTPUT_LABEL.to_string();
@@ -190,6 +216,38 @@ fn append_suppressed_output_label(text: &str) -> String {
     format!("{base}{suffix}")
 }
 
+fn reconstructed_inflight_placeholder_body(state: &super::inflight::InflightTurnState) -> String {
+    let current_portion = state
+        .full_response
+        .get(state.response_sent_offset..)
+        .unwrap_or("");
+    let status_block = super::formatting::build_placeholder_status_block(
+        "⠼",
+        state.prev_tool_status.as_deref(),
+        state.current_tool_line.as_deref(),
+        &state.full_response,
+    );
+    build_streaming_placeholder_text(current_portion, &status_block)
+}
+
+fn orphan_suppressed_placeholder_action(
+    state: &super::inflight::InflightTurnState,
+    has_active_turn: bool,
+    tmux_session_name: &str,
+) -> SuppressedPlaceholderAction {
+    if has_active_turn
+        || state.rebind_origin
+        || state.response_sent_offset == 0
+        || state.current_msg_id == 0
+        || state.tmux_session_name.as_deref() != Some(tmux_session_name)
+    {
+        return SuppressedPlaceholderAction::None;
+    }
+
+    let body = reconstructed_inflight_placeholder_body(state);
+    SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(&body))
+}
+
 fn suppressed_placeholder_action(
     has_placeholder: bool,
     response_sent_offset: usize,
@@ -201,7 +259,9 @@ fn suppressed_placeholder_action(
 
     let placeholder_was_exposed = response_sent_offset > 0 || !last_edit_text.trim().is_empty();
     if placeholder_was_exposed {
-        SuppressedPlaceholderAction::Edit(append_suppressed_output_label(last_edit_text))
+        SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
+            last_edit_text,
+        ))
     } else {
         SuppressedPlaceholderAction::Delete
     }
@@ -1695,6 +1755,47 @@ pub(super) fn session_belongs_to_current_runtime(
         .filter(|value| !value.is_empty())
         .map(|value| value == current_owner_marker)
         .unwrap_or(false)
+}
+
+async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    let has_active_turn = shared.mailbox(channel_id).has_active_turn().await;
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return;
+    };
+    let SuppressedPlaceholderAction::Edit(content) =
+        orphan_suppressed_placeholder_action(&state, has_active_turn, tmux_session_name)
+    else {
+        return;
+    };
+
+    let msg_id = MessageId::new(state.current_msg_id);
+    rate_limit_wait(shared, channel_id).await;
+    if let Err(error) = channel_id
+        .edit_message(http, msg_id, serenity::EditMessage::new().content(&content))
+        .await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ orphan suppressed placeholder reconcile failed for channel {} msg {}: {}",
+            channel_id.get(),
+            msg_id.get(),
+            error
+        );
+        return;
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ✓ reconciled orphan suppressed placeholder for channel {} msg {}",
+        channel_id.get(),
+        msg_id.get()
+    );
 }
 
 /// Background watcher that continuously tails a tmux output file.
@@ -4609,6 +4710,15 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             continue;
         }
 
+        reconcile_orphan_suppressed_placeholder_for_restored_watcher(
+            http,
+            shared,
+            &provider,
+            pw.channel_id,
+            &pw.session_name,
+        )
+        .await;
+
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
@@ -4876,11 +4986,12 @@ mod tests {
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
         load_restored_provider_session_id, notify_path_offset_advance_decision,
-        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
-        refresh_session_heartbeat_from_tmux_output,
+        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, refresh_session_heartbeat_from_tmux_output,
         rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
-        suppressed_placeholder_action, terminal_relay_decision, tmux_death_is_normal_completion,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
+        tmux_death_is_normal_completion, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -5858,9 +5969,33 @@ mod tests {
     }
 
     #[test]
+    fn strip_inprogress_indicators_removes_spinner_tool_preview_lines() {
+        let input = concat!(
+            "작업 요약\n",
+            "  ⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed\n",
+            "중요한 결과\n",
+            "⠋ ⚙ Bash: cargo check\n",
+            "\n"
+        );
+
+        assert_eq!(strip_inprogress_indicators(input), "작업 요약\n중요한 결과");
+    }
+
+    #[test]
+    fn strip_inprogress_indicators_leaves_plain_text_unchanged() {
+        let input = "작업 요약\n⚙ spinner 없이 시작한 일반 텍스트\n중요한 결과";
+
+        assert_eq!(strip_inprogress_indicators(input), input);
+    }
+
+    #[test]
     fn suppressed_placeholder_preserves_exposed_live_edit() {
         assert_eq!(
-            suppressed_placeholder_action(true, 32, "partial response"),
+            suppressed_placeholder_action(
+                true,
+                32,
+                "partial response\n\n⠼ ⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed",
+            ),
             SuppressedPlaceholderAction::Edit(format!(
                 "partial response\n\n{SUPPRESSED_OUTPUT_LABEL}"
             ))
@@ -5879,6 +6014,62 @@ mod tests {
         );
         assert_eq!(
             suppressed_placeholder_action(false, 99, "already visible"),
+            SuppressedPlaceholderAction::None
+        );
+    }
+
+    #[test]
+    fn orphan_suppressed_placeholder_reconcile_rewrites_terminal_marker() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\npending tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+        state.current_tool_line =
+            Some("⚙ TodoWrite: Todo: 1 pending, 0 in progress, 5 completed".to_string());
+
+        let action = orphan_suppressed_placeholder_action(&state, false, &tmux_name);
+
+        assert_eq!(
+            action,
+            SuppressedPlaceholderAction::Edit(format!("pending tail\n\n{SUPPRESSED_OUTPUT_LABEL}"))
+        );
+    }
+
+    #[test]
+    fn orphan_suppressed_placeholder_reconcile_skips_active_turns() {
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("adk-cdx-t42");
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("adk-cdx-t42".to_string()),
+            7,
+            9,
+            11,
+            "background task".to_string(),
+            Some("session-1".to_string()),
+            Some(tmux_name.clone()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            128,
+        );
+        state.full_response = "already delivered\npending tail".to_string();
+        state.response_sent_offset = "already delivered\n".len();
+
+        assert_eq!(
+            orphan_suppressed_placeholder_action(&state, true, &tmux_name),
             SuppressedPlaceholderAction::None
         );
     }
