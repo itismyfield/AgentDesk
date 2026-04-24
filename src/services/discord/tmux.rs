@@ -47,6 +47,9 @@ const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input witho
 const SUPPRESSED_INTERNAL_LABEL: &str = "(자동으로 처리된 내부 작업이라 여기서 멈췄어요)";
 const SUPPRESSED_RESTART_LABEL: &str =
     "(서버가 재시작되면서 답변이 중간에 멈췄어요 — 필요하시면 다시 질문해 주세요)";
+const MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS: usize = 3;
+const MISSING_INFLIGHT_REATTACH_GRACE_DELAY: tokio::time::Duration =
+    tokio::time::Duration::from_millis(200);
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 
@@ -1782,6 +1785,28 @@ fn missing_inflight_fallback_plan(
         warn: inflight_missing,
         trigger_reattach: inflight_missing && !dispatch_resolved && terminal_output_committed,
     }
+}
+
+async fn wait_for_reacquired_turn_bridge_inflight_state(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    attempts: usize,
+    delay: tokio::time::Duration,
+) -> bool {
+    for attempt in 0..=attempts {
+        if super::inflight::load_inflight_state(provider, channel_id.get()).is_some_and(|state| {
+            !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_session_name)
+        }) {
+            return true;
+        }
+
+        if attempt < attempts {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    false
 }
 
 fn trigger_missing_inflight_reattach(
@@ -4063,13 +4088,29 @@ pub(super) async fn tmux_output_watcher_with_restore(
             relay_ok || relay_suppressed,
         );
         if missing_inflight_plan.trigger_reattach {
-            trigger_missing_inflight_reattach(
-                &http,
-                &shared,
+            if wait_for_reacquired_turn_bridge_inflight_state(
                 &provider_kind,
                 channel_id,
                 &tmux_session_name,
-            );
+                MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS,
+                MISSING_INFLIGHT_REATTACH_GRACE_DELAY,
+            )
+            .await
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — turn bridge reacquired inflight state during grace window",
+                    channel_id.get()
+                );
+            } else {
+                trigger_missing_inflight_reattach(
+                    &http,
+                    &shared,
+                    &provider_kind,
+                    channel_id,
+                    &tmux_session_name,
+                );
+            }
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
@@ -5422,8 +5463,9 @@ mod tests {
         refresh_session_heartbeat_from_tmux_output, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
-        tmux_death_is_normal_completion, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state, watcher_stream_seed,
+        tmux_death_is_normal_completion, wait_for_reacquired_turn_bridge_inflight_state,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        watcher_stream_seed,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -5433,6 +5475,7 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
 
     fn test_watcher_handle() -> TmuxWatcherHandle {
         TmuxWatcherHandle {
@@ -5596,6 +5639,91 @@ mod tests {
         let uncommitted = missing_inflight_fallback_plan(true, false, false);
         assert!(uncommitted.warn);
         assert!(!uncommitted.trigger_reattach);
+    }
+
+    #[tokio::test]
+    async fn missing_inflight_reattach_grace_preserves_same_offset_bridge_placeholder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir()?;
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(987_1044_001);
+        let channel_name = "adk-cdx-issue-1044";
+        let tmux_name = provider.build_tmux_session_name(channel_name);
+        let turn_offset = 44_096_u64;
+
+        let terminal_success_plan = missing_inflight_fallback_plan(true, false, true);
+        assert!(terminal_success_plan.trigger_reattach);
+        assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_none());
+
+        let writer_provider = provider.clone();
+        let writer_tmux_name = tmux_name.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut state = InflightTurnState::new(
+                writer_provider,
+                channel.get(),
+                Some(channel_name.to_string()),
+                7,
+                9,
+                11,
+                "next turn at same offset".to_string(),
+                Some("session-1044".to_string()),
+                Some(writer_tmux_name),
+                Some("/tmp/issue-1044.jsonl".to_string()),
+                Some("/tmp/issue-1044.fifo".to_string()),
+                turn_offset,
+            );
+            state.turn_start_offset = Some(turn_offset);
+            state.full_response = "already visible bridge placeholder body".to_string();
+            state.response_sent_offset = state.full_response.len();
+            let _ = super::super::inflight::save_inflight_state(&state);
+        });
+
+        let bridge_reacquired = wait_for_reacquired_turn_bridge_inflight_state(
+            &provider,
+            channel,
+            &tmux_name,
+            3,
+            Duration::from_millis(50),
+        )
+        .await;
+        let _ = writer.await;
+
+        assert!(
+            bridge_reacquired,
+            "next turn should reacquire inflight during the missing-inflight reattach grace window"
+        );
+        let next_turn_state = super::super::inflight::load_inflight_state(&provider, channel.get())
+            .ok_or_else(|| std::io::Error::other("expected next turn inflight state"))?;
+        assert!(watcher_should_yield_to_inflight_state(
+            Some(&next_turn_state),
+            &tmux_name,
+            turn_offset,
+            turn_offset + 128,
+        ));
+
+        let placeholder_body = "already visible bridge placeholder body";
+        let final_placeholder_body = if bridge_reacquired {
+            placeholder_body.to_string()
+        } else {
+            match suppressed_placeholder_action(true, placeholder_body.len(), placeholder_body) {
+                SuppressedPlaceholderAction::Edit(content) => content,
+                _ => String::new(),
+            }
+        };
+
+        assert_eq!(final_placeholder_body, placeholder_body);
+        assert!(!final_placeholder_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!final_placeholder_body.contains(SUPPRESSED_RESTART_LABEL));
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        Ok(())
     }
 
     #[test]
