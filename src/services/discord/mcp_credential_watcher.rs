@@ -446,11 +446,20 @@ pub(super) fn spawn_watcher(
                 changes.push(change);
             }
 
-            tracing::info!("MCP credential change detected — notifying active Claude sessions");
-            let notification =
-                build_notification_from_changes(&changes, &mut snapshots, notify_message)
-                    .unwrap_or_else(|| notify_message.to_string());
-            broadcast_credential_change(&shared, &dedupe, dedupe_window, &notification).await;
+            match build_notification_from_changes(&changes, &mut snapshots, notify_message) {
+                Some(notification) => {
+                    tracing::info!(
+                        "MCP credential change detected — notifying active Claude sessions"
+                    );
+                    broadcast_credential_change(&shared, &dedupe, dedupe_window, &notification)
+                        .await;
+                }
+                None => {
+                    tracing::debug!(
+                        "MCP credential file touched but no mcpServers/credentials change — skipping broadcast"
+                    );
+                }
+            }
         }
     });
 }
@@ -503,7 +512,7 @@ async fn broadcast_credential_change(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, ModifyKind};
+    use notify::event::ModifyKind;
     use poise::serenity_prelude::ChannelId;
     use std::path::PathBuf;
     use std::time::{Duration, Instant, SystemTime};
@@ -575,5 +584,62 @@ mod tests {
         assert!(dedupe.try_record_at(ChannelId::new(2), window, t0));
         // First channel still inside its own window.
         assert!(!dedupe.try_record_at(ChannelId::new(1), window, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn build_notification_returns_none_when_mcp_servers_diff_empty() {
+        // Simulate .claude.json being modified without any mcpServers change
+        // (e.g. Claude CLI writing history / cwd tracking fields).
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join(".claude.json");
+        let v1 = r#"{"mcpServers":{"memento":{"command":"memento"}},"history":[{"cwd":"/a"}]}"#;
+        let v2 = r#"{"mcpServers":{"memento":{"command":"memento"}},"history":[{"cwd":"/a"},{"cwd":"/b"}]}"#;
+        std::fs::write(&path, v1).expect("write v1");
+
+        let mut snapshots: HashMap<PathBuf, Option<FileSnapshot>> = HashMap::new();
+        snapshots.insert(path.clone(), snapshot_file(&path).unwrap_or(None));
+
+        std::fs::write(&path, v2).expect("write v2");
+        let changes = vec![CredentialChange {
+            path: path.clone(),
+            kind: notify::EventKind::Modify(ModifyKind::Any),
+            timestamp: SystemTime::now(),
+        }];
+
+        let out = build_notification_from_changes(&changes, &mut snapshots, "FALLBACK");
+        assert!(
+            out.is_none(),
+            "non-MCP field changes must not produce a notification, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn build_notification_returns_some_when_mcp_servers_actually_changes() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join(".claude.json");
+        let v1 = r#"{"mcpServers":{"memento":{"command":"memento"}}}"#;
+        let v2 = r#"{"mcpServers":{"memento":{"command":"memento"},"brave":{"command":"brave"}}}"#;
+        std::fs::write(&path, v1).expect("write v1");
+
+        let mut snapshots: HashMap<PathBuf, Option<FileSnapshot>> = HashMap::new();
+        snapshots.insert(path.clone(), snapshot_file(&path).unwrap_or(None));
+
+        std::fs::write(&path, v2).expect("write v2");
+        let changes = vec![CredentialChange {
+            path: path.clone(),
+            kind: notify::EventKind::Modify(ModifyKind::Any),
+            timestamp: SystemTime::now(),
+        }];
+
+        let out = build_notification_from_changes(&changes, &mut snapshots, "FALLBACK");
+        let msg = out.expect("mcpServers diff should produce a notification");
+        assert!(
+            msg.contains("brave"),
+            "message should name the added server, got: {msg}"
+        );
+        assert!(
+            msg.starts_with("FALLBACK"),
+            "message should include the fallback prefix, got: {msg}"
+        );
     }
 }
