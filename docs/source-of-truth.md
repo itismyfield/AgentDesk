@@ -36,8 +36,66 @@ The runtime and operator paths in this index were verified on 2026-04-24 with `l
 | Shared agent knowledge | `~/.adk/release/config/memories/shared-agent-knowledge/shared_knowledge.md` | Provider prompts and context builders consume it; it is not mirrored back into repo history. | Edit the runtime file or the managed memory workflow that owns it. Do not store turn history here. | `sed -n '1,80p' ~/.adk/release/config/memories/shared-agent-knowledge/shared_knowledge.md` |
 | Shared agent memory (SAM) | `~/.adk/release/config/memories/shared-agent-memory/<agent>.json` | Runtime readers and memory sync tooling consume these JSON files. | Prefer tool-driven updates; manual edits are repair-only. | `ls ~/.adk/release/config/memories/shared-agent-memory/<agent>.json` |
 | Long-term memory (LTM) | `~/.adk/release/config/memories/long-term/<agent>/` | Historical Obsidian long-term paths are legacy inputs; current managed path is under `config/memories/long-term/`. | Edit through the memory workflow or the canonical runtime files under this tree. | `find ~/.adk/release/config/memories/long-term/<agent> -maxdepth 2 -type f | sort` |
-| MCP server declarations | `~/.adk/release/config/agentdesk.yaml` (`mcp_servers:`) | Codex mirror: `~/.codex/config.toml` via `sync_codex_mcp_servers()`. Claude consumer: `~/.claude/.mcp.json`. Provider config is a consumer surface, not the source. | Edit `~/.adk/release/config/agentdesk.yaml`, then restart or resync. Do not hand-edit provider mirrors unless repairing a broken sync. | `rg -n "mcp|mcp_servers" ~/.adk/release/config/agentdesk.yaml ~/.codex/config.toml ~/.claude/.mcp.json` |
+| MCP server declarations | `~/.adk/release/config/agentdesk.yaml` (`mcp_servers:`) | Codex mirror: `~/.codex/config.toml` via `sync_codex_mcp_servers()`. Claude consumer: `~/.claude/.mcp.json`. Provider config is a consumer surface, not the source. | Edit `~/.adk/release/config/agentdesk.yaml`, then restart or resync. Do not hand-edit provider mirrors unless repairing a broken sync. | `rg -n "mcp\|mcp_servers" ~/.adk/release/config/agentdesk.yaml ~/.codex/config.toml ~/.claude/.mcp.json` |
+| Skill manifest | Repo `skills/manifest.json` | Release mirror `~/.adk/release/skills/manifest.json`. Defines which `skills/<name>/` packages are exposed and to which providers (claude/codex). Per-skill content lives in Obsidian `~/ObsidianVault/RemoteVault/99_Skills/<name>/` and is fanned out by the `skill-sync` skill. | Edit `skills/manifest.json` for provider/global toggles; edit per-skill body in the Obsidian source then resync; redeploy AgentDesk to refresh release mirror. | `cat /tmp/campaign-r4-1095.CRYEHU/skills/manifest.json` (repo) and `ls ~/.adk/release/skills/` |
+| Per-skill packages | Obsidian `~/ObsidianVault/RemoteVault/99_Skills/<skill>/SKILL.md` | Provider mirrors include `~/.claude/skills/<skill>/`, `~/.codex/skills/<skill>/`, and the AgentDesk release mirror `~/.adk/release/skills/<skill>/` for skills exposed via `manifest.json`. The `skill-sync` skill manages the symlink/fanout. | Edit Obsidian source then run `skill-sync`. Do not hand-edit the provider mirrors. | `ls ~/ObsidianVault/RemoteVault/99_Skills/<skill>/` and `readlink ~/.claude/skills/<skill>` |
+| Workspace CLAUDE.md per agent | `~/.adk/release/config/workspace-claude-md/<agent>.md` | Operator-managed file copied/symlinked into each agent's workspace as the agent-facing `CLAUDE.md`. Not git-tracked in this repo. | Edit the runtime file in place; it propagates on next workspace bootstrap. Do not hand-edit per-workspace `CLAUDE.md` copies. | `ls ~/.adk/release/config/workspace-claude-md/` |
+| Workspace MEMORY.md per agent | `~/.adk/release/config/workspace-memory-md/<agent>.md` | Per-agent memory anchor consumed by the `memory-merge` workflow alongside SAM/SAK/LTM tiers. Workspace copies are derived; agent-managed memory entries live in `config/memories/` and the Obsidian Long-Term tree. | Edit the runtime file or use the `memory-write` / `memory-merge` skills. Avoid editing derived per-workspace copies. | `ls ~/.adk/release/config/workspace-memory-md/` |
+| LaunchAgent operator env overlay | `~/.adk/release/config/launchd.env` | Loaded by the LaunchAgent generator (`agentdesk emit-launchd-plist`) and by `scripts/install.sh` / `scripts/deploy-release.sh`. Do not duplicate values into the plist directly. | Edit the runtime file. Reload via `launchctl bootout`/`bootstrap` or the deploy script. | `cat ~/.adk/release/config/launchd.env` |
+| Memento workspace memory | Memento MCP-managed store on disk (operator-private; binding documented separately under issue 910-6) | Permanent vs workspace scope policy and the canonical write paths are out of scope for this index until 910-6 lands. Until then, treat Memento data as authoritative for what its tools return and do not mirror its content into the repo. | Use the Memento tool surface (`remember`, `amend`, `forget`, `memory_consolidate`). Avoid file-level edits to its store. | `mcp__memento__memory_stats` and `mcp__memento__context` |
 | Archived config snapshots | `~/.adk/release/config/.backups/YYYY-MM-DD/` | None. This is the only allowed home for `*.pre-*`, `*.bak`, and `*.migrated` snapshots. | Never edit in place. Restore or diff explicitly if needed. | `find ~/.adk/release/config/.backups -maxdepth 2 -type f | sort` |
+
+## Per-Vector Detail
+
+The matrix above is the operational lookup. The per-vector notes below capture intent, common mistakes, and the smallest relevant invariant for each knowledge surface.
+
+### Runtime baseline config (`config/agentdesk.yaml`)
+
+The release-managed `agentdesk.yaml` is the entry point for almost every other vector — Discord bindings, agent roster, MCP server list, database routing, and pipeline selection all resolve through it. The repo carries `config/agentdesk.example.yaml` purely as a shape reference; it is not a write target. The legacy root-level `~/.adk/release/agentdesk.yaml` is a backwards-compat fallback for older binaries and must not be edited. Pitfall: editing the example file or the root fallback silently no-ops because the runtime resolves to `config/agentdesk.yaml` first; always re-run `agentdesk config audit --dry-run` after a change to confirm the live file reflects the intended state.
+
+### Per-agent prompt files (`agents/<role>.prompt.md`)
+
+Per-agent prompts are operator-private content and are deliberately excluded from this repo. The canonical files live in the Obsidian vault under `~/ObsidianVault/RemoteVault/adk-config/agents/`, and `scripts/deploy-release.sh` mirrors them into `~/.adk/release/config/agents/`. Pitfall: editing the release mirror directly survives until the next deploy and is then overwritten — always edit the Obsidian source. The flat `<role>.prompt.md` layout is current; the older `config/agents/<role>/IDENTITY.md` shape referenced in legacy docs is not in use and is not a valid edit target.
+
+### Shared agent rules (`agents/_shared.prompt.md`)
+
+Shared prompt instructions are appended to every per-agent prompt at composition time. Two compatibility symlinks (`config/agents/_shared.md` and `config/_shared.md`) point back at the canonical Obsidian-sourced file via the release mirror; never replace these aliases with copied text or edit the alias path. Pitfall: a missing alias is a deploy-time symptom — recreate the link from the canonical mirror, do not introduce a second canonical file.
+
+### Policies (`policies/*.js`) and default pipeline (`policies/default-pipeline.yaml`)
+
+Policy hooks are repo-tracked JS files in `policies/` plus the YAML pipeline manifest that wires them together. Both promote into `~/.adk/release/policies/` via the deploy script. Pitfall: examples under `policies/examples/` are reference snippets, not active configuration. Renaming a policy without updating `default-pipeline.yaml` will silently drop it from the active pipeline; verify with `git log -- policies/default-pipeline.yaml` after edits.
+
+### CLAUDE.md hierarchy
+
+Three distinct CLAUDE.md surfaces coexist and must not be conflated. The Claude home guidance under `~/.claude/CLAUDE.md` is a symlink into the Obsidian vault and is the global Claude Code instruction set. The repo-level `CLAUDE.md` carries AgentDesk-specific repo rules and delegates operational mappings to this document. Each downstream workspace (e.g. `~/CookingHeart/CLAUDE.md`) carries its own contract for that codebase. Pitfall: do not copy content between the three — they have different audiences and different update cadences.
+
+### MCP server declarations
+
+MCP servers are declared once in `agentdesk.yaml` under `mcp_servers:` and fanned out by `sync_codex_mcp_servers()` into `~/.codex/config.toml`. Claude Code reads `~/.claude/.mcp.json`, which is also a derived consumer surface. Pitfall: hand-editing either provider mirror diverges them from the source and the next sync silently overwrites the change; always edit `agentdesk.yaml` and re-run the sync (or restart the daemon).
+
+### Skills
+
+Skills are two-layered. The repo carries a tiny `skills/` tree containing `manifest.json` plus the canonical AgentDesk-only skills (`memory-merge`, `memory-read`, `memory-write`); these promote into `~/.adk/release/skills/`. The full skill catalog lives in Obsidian under `~/ObsidianVault/RemoteVault/99_Skills/<skill>/SKILL.md` and is fanned out to `~/.claude/skills/` and `~/.codex/skills/` by the `skill-sync` skill. Pitfall: per-provider skill directories can also appear under the AgentDesk release tree for skills exposed via `manifest.json`; do not edit those mirrors directly.
+
+### Memory tiers (SAM / SAK / LTM / workspace)
+
+Shared agent knowledge (SAK) is a single `shared_knowledge.md`, shared agent memory (SAM) is per-agent JSON, and long-term memory (LTM) is a per-agent directory tree under `config/memories/long-term/<agent>/`. Workspace MEMORY anchors live separately under `config/workspace-memory-md/<agent>.md`. Pitfall: SAK and SAM are runtime-managed — manual edits should be repair-only, with content normally written through the `memory-write` / `memory-merge` skills. A second LTM tree exists in the Obsidian vault as legacy input; do not reintroduce it as canonical.
+
+### LaunchAgent (`com.agentdesk.release.plist` + `launchd.env`)
+
+The plist is generated, not hand-written; structural changes belong in the generator (`src/cli/init.rs`). Operator overrides go into `~/.adk/release/config/launchd.env`, which the generator and deploy scripts source. Pitfall: editing the plist directly drifts it from the generator and is reverted on the next `agentdesk emit-launchd-plist`. Use the env overlay for everything operator-tunable.
+
+### Workspace CLAUDE.md / MEMORY.md per agent
+
+Per-agent workspace anchors at `config/workspace-claude-md/<agent>.md` and `config/workspace-memory-md/<agent>.md` are operator-managed runtime files (not repo-tracked). They are propagated into each agent's working directory at workspace bootstrap. Pitfall: edits made directly inside an agent worktree are lost on re-bootstrap — edit the runtime file under `~/.adk/release/config/`.
+
+### Memento workspace memory
+
+Memento data is stored under the operator-private MCP server and accessed through the `mcp__memento__*` tool surface. The permanent-vs-workspace scope contract and canonical write paths are still under design; issue 910-6 will own that documentation. Until then, the Memento tool responses are themselves the authoritative source — do not mirror Memento content into repo files or treat any file dump as canonical.
+
+### Archived config snapshots
+
+Backups and migration residues (`*.pre-*`, `*.bak`, `*.migrated`, plus the one-shot `config.backup-v1/` directory) are archive material only. The single allowed home is `~/.adk/release/config/.backups/YYYY-MM-DD/`. Pitfall: leaving snapshot files next to canonical config makes audit tooling noisier and risks accidental restore; move them with `scripts/archive-config-backups.sh` when config cleanup is in scope.
 
 ## Notes
 
@@ -45,6 +103,7 @@ The runtime and operator paths in this index were verified on 2026-04-24 with `l
 - The settings precedence contract for YAML vs `kv_meta` runtime overrides lives in [docs/adr-settings-precedence.md](adr-settings-precedence.md).
 - If `agentdesk.yaml` and a legacy file disagree, follow the current code rule: `agentdesk.yaml` wins and legacy files are migration inputs or stale snapshots.
 - Current verified prompt files are flat `<role>.prompt.md` files. Do not document or edit `config/agents/<role>/IDENTITY.md` as canonical until those files actually exist and a dedicated migration changes the prompt layout.
+- Memento scope (permanent vs workspace) and its file-level layout are intentionally underspecified here; issue 910-6 will replace the placeholder row above with concrete paths.
 
 ## Symlink Rules
 
