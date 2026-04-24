@@ -372,6 +372,13 @@ impl AgentChannel {
             Self::Detailed(config) => config.peer_agents,
         }
     }
+
+    pub fn quality_feedback_injection(&self) -> Option<bool> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => config.quality_feedback_injection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -398,6 +405,12 @@ pub struct AgentChannelConfig {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_agents: Option<bool>,
+    #[serde(
+        default,
+        alias = "qualityFeedbackInjection",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub quality_feedback_injection: Option<bool>,
 }
 
 impl AgentChannelConfig {

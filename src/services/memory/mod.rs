@@ -270,6 +270,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
             memory: ResolvedMemorySettings {
                 backend: MemoryBackendKind::Memento,
                 ..ResolvedMemorySettings::default()
@@ -296,6 +297,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
             memory: ResolvedMemorySettings::default(),
         };
         assert_eq!(resolve_memory_role_id(Some(&binding)), "codex");

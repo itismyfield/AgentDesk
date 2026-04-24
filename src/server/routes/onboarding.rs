@@ -4078,6 +4078,7 @@ mod tests {
                         model: None,
                         reasoning_effort: None,
                         peer_agents: None,
+                        quality_feedback_injection: None,
                     },
                 )),
                 ..crate::config::AgentChannels::default()

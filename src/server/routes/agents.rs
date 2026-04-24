@@ -27,6 +27,17 @@ pub struct TranscriptQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AgentQualityQuery {
+    pub days: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentQualityRankingQuery {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StartAgentTurnBody {
     pub prompt: String,
     #[serde(default)]
@@ -48,6 +59,49 @@ pub struct StartAgentTurnBody {
 const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
 const TURN_CAPTURE_TAIL_LINES: usize = 60;
 const TURN_OUTPUT_MAX_CHARS: usize = 4000;
+
+/// GET /api/agents/{id}/quality
+pub async fn agent_quality(
+    Path(id): Path<String>,
+    Query(query): Query<AgentQualityQuery>,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match crate::services::observability::query_agent_quality_summary(
+        &state.db,
+        state.pg_pool_ref(),
+        &id,
+        query.days.unwrap_or(30),
+        query.limit.unwrap_or(60),
+    )
+    .await
+    {
+        Ok(summary) => (StatusCode::OK, Json(json!(summary))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query agent quality summary: {error}")})),
+        ),
+    }
+}
+
+/// GET /api/agents/quality/ranking
+pub async fn agents_quality_ranking(
+    Query(query): Query<AgentQualityRankingQuery>,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match crate::services::observability::query_agent_quality_ranking(
+        &state.db,
+        state.pg_pool_ref(),
+        query.limit.unwrap_or(50),
+    )
+    .await
+    {
+        Ok(ranking) => (StatusCode::OK, Json(json!(ranking))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query agent quality ranking: {error}")})),
+        ),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct AgentTurnSession {

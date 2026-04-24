@@ -124,6 +124,8 @@ pub(crate) struct RoleBinding {
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,
+    /// Whether hourly agent quality feedback may be injected into the system prompt.
+    pub quality_feedback_injection_enabled: bool,
     pub memory: ResolvedMemorySettings,
 }
 
@@ -2071,6 +2073,7 @@ agents:
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
         let spark_binding = super::RoleBinding {
@@ -2080,6 +2083,7 @@ agents:
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
 
@@ -2292,6 +2296,7 @@ channels:
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
             memory: Default::default(),
         };
 

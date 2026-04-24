@@ -58,7 +58,10 @@ impl MaintenanceJobRegistry {
     }
 
     fn static_registry() -> Self {
-        Self::new(vec![Arc::new(NoopHeartbeatJob)])
+        Self::new(vec![
+            Arc::new(NoopHeartbeatJob),
+            Arc::new(AgentQualityRollupJob),
+        ])
     }
 
     fn jobs(&self) -> &[Arc<dyn MaintenanceJob>] {
@@ -81,6 +84,31 @@ impl MaintenanceJob for NoopHeartbeatJob {
         Box::pin(async move {
             let _ = pool;
             tracing::info!(job = self.name(), "maintenance noop heartbeat fired");
+            Ok(())
+        })
+    }
+}
+
+struct AgentQualityRollupJob;
+
+impl MaintenanceJob for AgentQualityRollupJob {
+    fn name(&self) -> &'static str {
+        "agent_quality_rollup"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(0))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let report = crate::services::observability::run_agent_quality_rollup_pg(pool).await?;
+            tracing::info!(
+                job = self.name(),
+                upserted_rows = report.upserted_rows,
+                alert_count = report.alert_count,
+                "agent quality rollup completed"
+            );
             Ok(())
         })
     }
@@ -627,6 +655,118 @@ mod tests {
         }
     }
 
+    struct TestPostgresDb {
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+        cleanup_armed: bool,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Result<Self, String> {
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_maintenance_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "maintenance tests",
+            )
+            .await?;
+            Ok(Self {
+                admin_url,
+                database_name,
+                database_url,
+                cleanup_armed: true,
+            })
+        }
+
+        async fn connect_and_migrate(&self) -> Result<PgPool, String> {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "maintenance tests",
+            )
+            .await
+        }
+
+        async fn drop(mut self) -> Result<(), String> {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "maintenance tests",
+            )
+            .await?;
+            self.cleanup_armed = false;
+            Ok(())
+        }
+    }
+
+    impl Drop for TestPostgresDb {
+        fn drop(&mut self) {
+            if !self.cleanup_armed {
+                return;
+            }
+            let admin_url = self.admin_url.clone();
+            let database_name = self.database_name.clone();
+            std::thread::spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                let _ = runtime.block_on(crate::db::postgres::drop_test_database(
+                    &admin_url,
+                    &database_name,
+                    "maintenance tests cleanup",
+                ));
+            });
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn scheduler_loop_starts_fires_one_tick_and_logs_outcome() -> Result<(), String> {
         let buffer = Arc::new(Mutex::new(Vec::new()));
@@ -696,6 +836,65 @@ mod tests {
             ));
         }
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_quality_rollup_job_runs_one_tick() -> Result<(), String> {
+        let pg_db = TestPostgresDb::create().await?;
+        let pg_pool = pg_db.connect_and_migrate().await?;
+        for event_type in [
+            "turn_complete",
+            "turn_complete",
+            "turn_complete",
+            "turn_error",
+            "review_pass",
+            "review_fail",
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_quality_event (
+                    agent_id,
+                    provider,
+                    channel_id,
+                    event_type,
+                    payload,
+                    created_at
+                 ) VALUES ($1, 'codex', '42', $2::agent_quality_event_type, '{}'::jsonb, NOW())",
+            )
+            .bind("agent-rollup")
+            .bind(event_type)
+            .execute(&pg_pool)
+            .await
+            .map_err(|error| format!("insert quality event: {error}"))?;
+        }
+
+        let registry = MaintenanceJobRegistry::new(vec![Arc::new(AgentQualityRollupJob)]);
+        let store: Arc<dyn MaintenanceJobStore> = Arc::new(InMemoryMaintenanceJobStore::default());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_scheduler_loop_for_test(
+                pg_pool.clone(),
+                registry,
+                store,
+                Duration::from_millis(1),
+                1,
+            ),
+        )
+        .await
+        .map_err(|_| "agent quality rollup job timed out".to_string())?;
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_quality_daily WHERE agent_id = 'agent-rollup'",
+        )
+        .fetch_one(&pg_pool)
+        .await
+        .map_err(|error| format!("count quality daily rows: {error}"))?;
+        if count < 1 {
+            return Err("agent quality rollup did not write daily rows".to_string());
+        }
+
+        pg_pool.close().await;
+        pg_db.drop().await?;
         Ok(())
     }
 }
