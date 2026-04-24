@@ -143,7 +143,12 @@ pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
-const SESSION_MAX_IDLE: Duration = Duration::from_secs(60 * 60); // 1 hour
+// #1085 (908-3): extended from 1h → 4h. Working agents idle between dispatch
+// turns and the prior 60-min cap forced the next user/dispatch turn to start a
+// fresh provider session, defeating cache reuse. 4h covers typical "go for
+// lunch / sync meeting" gaps while still bounding zombie growth via the
+// cleanup interval reaper at `mod.rs:2093`.
+const SESSION_MAX_IDLE: Duration = Duration::from_secs(4 * 60 * 60); // 4 hours
 const SESSION_MAX_ASSISTANT_TURNS: usize = 100;
 const SESSION_RECOVERY_CONTEXT_MESSAGES: usize = 10;
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
