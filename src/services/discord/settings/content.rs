@@ -119,6 +119,33 @@ pub(super) fn extract_first_heading(content: &str) -> Option<String> {
 }
 
 pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
+    load_shared_prompt_for_profile("full")
+}
+
+/// Profile-aware loader for the shared agent rules.
+///
+/// `_shared.prompt.md` may be partitioned with HTML-comment markers so that
+/// review/headless dispatches strip out heavy "full" sections at load time:
+///
+/// ```text
+/// <!-- profile: all -->          # always included (omit marker for same effect)
+/// ...
+/// <!-- /profile -->
+/// <!-- profile: full -->         # only when profile == "full"
+/// ...
+/// <!-- /profile -->
+/// <!-- profile: review-lite -->  # only when profile == "review-lite"
+/// ...
+/// <!-- /profile -->
+/// <!-- profile: headless -->     # only when profile == "headless"
+/// ...
+/// <!-- /profile -->
+/// ```
+///
+/// Files without any markers behave exactly like before (whole content kept).
+pub(in crate::services::discord) fn load_shared_prompt_for_profile(
+    profile: &str,
+) -> Option<String> {
     let path_str = agentdesk_config::load_shared_prompt_path()
         .or_else(|| {
             if org_schema::org_schema_exists() {
@@ -130,12 +157,126 @@ pub(in crate::services::discord) fn load_shared_prompt() -> Option<String> {
         .or_else(load_shared_prompt_path_from_role_map)?;
 
     let raw = fs::read_to_string(Path::new(&path_str)).ok()?;
+    let filtered = strip_non_matching_profile_sections(&raw, profile);
     const MAX_CHARS: usize = 6_000;
-    if raw.chars().count() <= MAX_CHARS {
-        return Some(raw);
+    if filtered.chars().count() <= MAX_CHARS {
+        return Some(filtered);
     }
-    let truncated: String = raw.chars().take(MAX_CHARS).collect();
+    let truncated: String = filtered.chars().take(MAX_CHARS).collect();
     Some(truncated)
+}
+
+/// Strip `<!-- profile: X -->` ... `<!-- /profile -->` blocks whose `X` does not
+/// match `profile` (case-insensitive). Blocks tagged `all`, untagged content, and
+/// matching blocks are preserved. Marker lines themselves are removed for clean
+/// output. Unbalanced markers degrade gracefully — the whole section is kept.
+fn strip_non_matching_profile_sections(raw: &str, profile: &str) -> String {
+    let target = profile.trim().to_ascii_lowercase();
+    let mut out = String::with_capacity(raw.len());
+    let mut current_profile: Option<String> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("<!-- profile:")
+            .and_then(|s| s.strip_suffix("-->"))
+        {
+            current_profile = Some(rest.trim().to_ascii_lowercase());
+            continue;
+        }
+        if trimmed == "<!-- /profile -->" {
+            current_profile = None;
+            continue;
+        }
+        let keep = match current_profile.as_deref() {
+            None => true,
+            Some("all") => true,
+            Some(p) => p == target,
+        };
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    // Collapse 3+ consecutive blank lines that profile stripping may produce.
+    let mut compact = String::with_capacity(out.len());
+    let mut blank_run = 0usize;
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                compact.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            compact.push_str(line);
+            compact.push('\n');
+        }
+    }
+    compact.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::strip_non_matching_profile_sections;
+
+    const SAMPLE: &str = "head\n\
+        <!-- profile: all -->\n\
+        always\n\
+        <!-- /profile -->\n\
+        <!-- profile: full -->\n\
+        only-full\n\
+        <!-- /profile -->\n\
+        <!-- profile: review-lite -->\n\
+        only-review\n\
+        <!-- /profile -->\n\
+        <!-- profile: headless -->\n\
+        only-headless\n\
+        <!-- /profile -->\n\
+        tail\n";
+
+    #[test]
+    fn full_profile_keeps_full_section() {
+        let out = strip_non_matching_profile_sections(SAMPLE, "full");
+        assert!(out.contains("only-full"));
+        assert!(!out.contains("only-review"));
+        assert!(!out.contains("only-headless"));
+        assert!(out.contains("always"));
+        assert!(out.contains("tail"));
+    }
+
+    #[test]
+    fn review_lite_profile_strips_full_section() {
+        let out = strip_non_matching_profile_sections(SAMPLE, "review-lite");
+        assert!(!out.contains("only-full"));
+        assert!(out.contains("only-review"));
+        assert!(!out.contains("only-headless"));
+        assert!(out.contains("always"));
+    }
+
+    #[test]
+    fn headless_profile_strips_full_and_review() {
+        let out = strip_non_matching_profile_sections(SAMPLE, "headless");
+        assert!(!out.contains("only-full"));
+        assert!(!out.contains("only-review"));
+        assert!(out.contains("only-headless"));
+        assert!(out.contains("always"));
+    }
+
+    #[test]
+    fn unmarked_content_is_preserved_for_any_profile() {
+        let raw = "## Code Principles\n- DRY\n";
+        let out = strip_non_matching_profile_sections(raw, "review-lite");
+        assert!(out.contains("DRY"));
+    }
+
+    #[test]
+    fn marker_lines_are_stripped_from_output() {
+        let out = strip_non_matching_profile_sections(SAMPLE, "full");
+        assert!(!out.contains("<!-- profile:"));
+        assert!(!out.contains("<!-- /profile -->"));
+    }
 }
 
 pub(in crate::services::discord) fn load_review_tuning_guidance() -> Option<String> {
