@@ -274,12 +274,15 @@ fi
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
-if ! setup_sccache_env; then
-    echo "✗ sccache not found in PATH"
-    echo "  Install it first (for example: brew install sccache)"
-    exit 1
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+if setup_sccache_env; then
+    export RUSTC_WRAPPER=sccache
+    echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
+else
+    echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
+    echo "  Install it first for faster release builds (for example: brew install sccache)"
+    export RUSTC_WRAPPER=""
 fi
-echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
 
 # Build the release binary from the current workspace by default so promotion
 # always ships code compiled from the current HEAD. When a validated external
