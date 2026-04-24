@@ -231,7 +231,24 @@ fn maybe_refresh_active_turn_activity_heartbeat(
     adk_session_name: Option<&str>,
     last_heartbeat_at: &mut Option<std::time::Instant>,
 ) {
-    let now = std::time::Instant::now();
+    maybe_refresh_active_turn_activity_heartbeat_at(
+        shared,
+        provider,
+        inflight_state,
+        adk_session_name,
+        last_heartbeat_at,
+        std::time::Instant::now(),
+    );
+}
+
+fn maybe_refresh_active_turn_activity_heartbeat_at(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    inflight_state: &InflightTurnState,
+    adk_session_name: Option<&str>,
+    last_heartbeat_at: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) {
     if last_heartbeat_at.is_some_and(|last| {
         now.duration_since(last) < super::tmux::WATCHER_ACTIVITY_HEARTBEAT_INTERVAL
     }) {

@@ -241,6 +241,99 @@ async fn active_turn_output_offset_refreshes_session_heartbeat_before_done() {
 }
 
 #[test]
+fn active_turn_activity_heartbeat_refreshes_once_per_interval_window() {
+    let db = crate::db::test_db();
+    let shared = make_shared_data_for_tests_with_storage(Some(db.clone()), None);
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168022);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        &provider,
+        &tmux_name,
+    );
+    let thread_channel_id = channel_id.get().to_string();
+
+    let conn = db.lock().expect("test db lock");
+    conn.execute(
+        "INSERT INTO sessions
+         (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+         VALUES (?1, ?2, 'working', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+        [
+            session_key.as_str(),
+            provider.as_str(),
+            thread_channel_id.as_str(),
+        ],
+    )
+    .expect("insert session row");
+    conn.execute(
+        "CREATE TABLE heartbeat_audit (
+             id INTEGER PRIMARY KEY,
+             session_key TEXT NOT NULL,
+             last_heartbeat TEXT
+         )",
+        [],
+    )
+    .expect("create heartbeat audit table");
+    conn.execute(
+        "CREATE TRIGGER heartbeat_audit_after_update
+         AFTER UPDATE OF last_heartbeat ON sessions
+         BEGIN
+             INSERT INTO heartbeat_audit (session_key, last_heartbeat)
+             VALUES (new.session_key, new.last_heartbeat);
+         END",
+        [],
+    )
+    .expect("create heartbeat audit trigger");
+    drop(conn);
+
+    let mut inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        343742347365974026,
+        1487795113240559788,
+        1487799916758827138,
+        "ping".to_string(),
+        None,
+        Some(tmux_name),
+        Some("/tmp/agentdesk-test-output.jsonl".to_string()),
+        Some("/tmp/agentdesk-test-input.fifo".to_string()),
+        0,
+    );
+    inflight_state.session_key = Some(session_key.clone());
+
+    let mut last_heartbeat_at = None;
+    let start = Instant::now();
+    for tick in 0..=24 {
+        inflight_state.last_offset = tick;
+        super::maybe_refresh_active_turn_activity_heartbeat_at(
+            shared.as_ref(),
+            &provider,
+            &inflight_state,
+            Some(channel_name.as_str()),
+            &mut last_heartbeat_at,
+            start + Duration::from_secs(tick * 5),
+        );
+    }
+
+    let refresh_count: i64 = db
+        .lock()
+        .expect("test db lock")
+        .query_row(
+            "SELECT COUNT(*) FROM heartbeat_audit WHERE session_key = ?1",
+            [session_key.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count heartbeat refreshes");
+    assert_eq!(
+        refresh_count, 5,
+        "continuous output over two minutes should refresh at t=0,30,60,90,120s"
+    );
+}
+
+#[test]
 fn skill_tool_use_extracts_skill_id_only_from_skill_tool() {
     assert_eq!(
         extract_skill_id_from_tool_use("Skill", r#"{"skill":" /memory-write "}"#),
