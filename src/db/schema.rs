@@ -107,6 +107,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     ensure_session_transcripts_schema(conn)?;
     ensure_turns_schema(conn)?;
     ensure_observability_schema(conn)?;
+    ensure_slo_schema(conn)?;
     run_migration_once(
         conn,
         SESSION_AGENT_ID_BACKFILL_META_KEY,
@@ -2026,6 +2027,35 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_review_pass_7d
             ON agent_quality_daily (review_pass_rate_7d DESC)
             WHERE measurement_unavailable_7d = 0;",
+    )?;
+    Ok(())
+}
+
+// #1072 turn-lifecycle SLO storage (Epic #905 Phase 1).
+fn ensure_slo_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS slo_aggregates (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_start_ms  INTEGER NOT NULL,
+            window_end_ms    INTEGER NOT NULL,
+            metric           TEXT NOT NULL,
+            value            REAL NOT NULL,
+            sample_size      INTEGER NOT NULL DEFAULT 0,
+            threshold        REAL,
+            breached         INTEGER NOT NULL DEFAULT 0,
+            created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_slo_aggregates_metric_window
+            ON slo_aggregates (metric, window_end_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_slo_aggregates_created_at
+            ON slo_aggregates (created_at DESC);
+        CREATE TABLE IF NOT EXISTS slo_alert_cooldowns (
+            metric         TEXT NOT NULL,
+            channel_id     TEXT NOT NULL,
+            alerted_at_ms  INTEGER NOT NULL,
+            last_value     REAL NOT NULL,
+            PRIMARY KEY (metric, channel_id)
+        );",
     )?;
     Ok(())
 }

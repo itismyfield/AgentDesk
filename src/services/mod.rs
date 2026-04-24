@@ -30,6 +30,7 @@ pub mod retrospectives;
 pub mod service_error;
 pub mod session_backend;
 pub mod settings;
+pub mod slo;
 pub mod termination_audit;
 pub mod tmux_common;
 pub mod tmux_diagnostics;

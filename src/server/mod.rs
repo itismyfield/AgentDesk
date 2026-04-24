@@ -384,6 +384,13 @@ async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
                     tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
                 }
             }
+            // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
+            // compute + persist + alert on threshold breach.
+            let slo_pool = pg_pool.as_deref().or_else(|| engine.pg_pool());
+            let slo_db = engine.legacy_db();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let _ = crate::services::slo::run_aggregation_tick(slo_db, slo_pool, now_ms).await;
+
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick", "legacy").await;
         }
