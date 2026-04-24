@@ -26,6 +26,41 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryPhase {
+    Pending,
+    WatcherReattach,
+    InflightRestore,
+    Done,
+}
+
+#[allow(dead_code)]
+impl RecoveryPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::WatcherReattach => "watcher_reattach",
+            Self::InflightRestore => "inflight_restore",
+            Self::Done => "done",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "watcher_reattach" => Some(Self::WatcherReattach),
+            "inflight_restore" => Some(Self::InflightRestore),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+
+    pub fn from_optional_str(value: Option<&str>) -> Option<Self> {
+        value.and_then(Self::from_str)
+    }
+}
+
 /// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 fn tmux_session_alive_with_retry(name: &str) -> bool {
@@ -2790,6 +2825,35 @@ mod tests {
     use std::ffi::OsString;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn recovery_phase_round_trips_through_str() {
+        let variants = [
+            RecoveryPhase::Pending,
+            RecoveryPhase::WatcherReattach,
+            RecoveryPhase::InflightRestore,
+            RecoveryPhase::Done,
+        ];
+
+        for phase in variants {
+            assert_eq!(RecoveryPhase::from_str(phase.as_str()), Some(phase));
+        }
+        assert_eq!(
+            format!("{:?}", RecoveryPhase::InflightRestore),
+            "InflightRestore"
+        );
+    }
+
+    #[test]
+    fn recovery_phase_from_optional_str_handles_none() {
+        assert_eq!(RecoveryPhase::from_optional_str(None), None);
+    }
+
+    #[test]
+    fn recovery_phase_from_str_rejects_unknown_value() {
+        assert_eq!(RecoveryPhase::from_str("unknown"), None);
+        assert_eq!(RecoveryPhase::from_str(""), None);
+    }
 
     #[derive(Default)]
     struct MockRecoveryDiscordState {
