@@ -67,7 +67,7 @@ Policy hooks are repo-tracked JS files in `policies/` plus the YAML pipeline man
 
 ### CLAUDE.md hierarchy
 
-Three distinct CLAUDE.md surfaces coexist and must not be conflated. The Claude home guidance under `~/.claude/CLAUDE.md` is a symlink into the Obsidian vault and is the global Claude Code instruction set. The repo-level `CLAUDE.md` carries AgentDesk-specific repo rules and delegates operational mappings to this document. Each downstream workspace (e.g. `~/CookingHeart/CLAUDE.md`) carries its own contract for that codebase. Pitfall: do not copy content between the three — they have different audiences and different update cadences.
+Three distinct CLAUDE.md surfaces coexist and must not be conflated. The Claude home guidance under `~/.claude/CLAUDE.md` is a symlink into the Obsidian vault and is the global Claude Code instruction set. The repo-level `CLAUDE.md` carries AgentDesk-specific repo rules and delegates operational mappings to this document. Each downstream workspace (e.g. `~/CookingHeart/CLAUDE.md`) carries its own contract for that codebase. A fourth layer — per-agent `workspace-claude-md/<agent>.md` under `~/.adk/release/config/` — is bootstrapped into each agent's cwd as the workspace-local `CLAUDE.md`. Full load order, priority, and dedup rules are documented in [`docs/claude-md-load-order.md`](claude-md-load-order.md). Pitfall: do not copy content between layers — they have different audiences and different update cadences.
 
 ### MCP server declarations
 
@@ -114,4 +114,4 @@ Backups and migration residues (`*.pre-*`, `*.bak`, `*.migrated`, plus the one-s
 ## Deprecated References
 
 - `docs/architecture.md` is retained for historical architecture context and is marked deprecated. Its migration-era `role_map.json` references and old policy filenames such as `review-policy.js`, `timeout-policy.js`, and `reward-policy.js` are not canonical write targets.
-- `~/.adk/release/config/bot_settings.json.migrated` was still present beside canonical config during the 2026-04-24 audit. Treat it as DEPRECATED archive material and move it with `scripts/archive-config-backups.sh` only when config cleanup is explicitly in scope; `agentdesk.yaml` remains canonical.
+- `~/.adk/release/config/bot_settings.json.migrated` was archived into `~/.adk/release/config/.backups/2026-04-24/` by `scripts/archive-config-backups.sh` on 2026-04-24 (#1098). The canonical surface is `agentdesk.yaml`; do not reintroduce legacy snapshot files beside canonical config.
