@@ -68,6 +68,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/analytics", get(analytics::analytics))
             .route("/analytics/invariants", get(analytics::invariants))
             .route("/analytics/observability", get(analytics::observability))
+            .route("/analytics/policy-hooks", get(analytics::policy_hooks))
             .route("/quality/events", get(analytics::quality_events))
             .route("/streaks", get(analytics::streaks))
             .route("/achievements", get(analytics::achievements))

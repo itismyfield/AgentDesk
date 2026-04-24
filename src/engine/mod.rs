@@ -827,12 +827,12 @@ impl PolicyEngine {
             .lock()
             .map_err(|e| anyhow::anyhow!("policy store lock poisoned: {e}"))?;
 
-        let hook_fns: Vec<(String, Persistent<Function<'static>>)> = policies
+        let hook_fns: Vec<(String, String, Persistent<Function<'static>>)> = policies
             .iter()
             .filter_map(|p| {
                 p.dynamic_hooks
                     .get(hook_name)
-                    .map(|f| (p.name.clone(), f.clone()))
+                    .map(|f| (p.name.clone(), p.policy_version.clone(), f.clone()))
             })
             .collect();
         drop(policies);
@@ -841,13 +841,13 @@ impl PolicyEngine {
             return Ok(());
         }
 
-        let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = hook_fns.iter().map(|(n, _, _)| n.as_str()).collect();
         tracing::info!(policy_count = hook_fns.len(), policies = ?names, "firing dynamic hook");
 
         inner.context.with(|ctx| -> Result<()> {
             let js_payload = json_to_js(&ctx, &payload)?;
 
-            for (policy_name, persistent_fn) in &hook_fns {
+            for (policy_name, policy_version, persistent_fn) in &hook_fns {
                 let func = match persistent_fn.clone().restore(&ctx) {
                     Ok(f) => f,
                     Err(e) => {
@@ -858,9 +858,12 @@ impl PolicyEngine {
                     }
                 };
 
+                let effects_before = Self::count_pending_effects(&ctx);
                 let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
                 let elapsed = policy_start.elapsed();
+                let effects_after = Self::count_pending_effects(&ctx);
+                let effects_count = effects_after.saturating_sub(effects_before);
                 if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
                     tracing::warn!(
                         policy_name,
@@ -876,7 +879,9 @@ impl PolicyEngine {
                         "policy hook completed"
                     );
                 }
+                let exec_result_str: &str;
                 if let Err(ref e) = result {
+                    exec_result_str = "err";
                     let exception_detail = ctx.catch().into_exception()
                         .map(|ex| {
                             let msg = ex.message().unwrap_or_default();
@@ -889,11 +894,63 @@ impl PolicyEngine {
                         error = %exception_detail,
                         "dynamic hook execution failed"
                     );
+                } else {
+                    exec_result_str = "ok";
                 }
+
+                Self::record_policy_hook_event(
+                    policy_name,
+                    hook_name,
+                    policy_version,
+                    elapsed,
+                    exec_result_str,
+                    effects_count,
+                );
             }
 
             Ok(())
         })
+    }
+
+    /// Sample effect accumulators on the JS side (pending intents + pending
+    /// card transitions). Used by the hook observability wrapper to compute an
+    /// `effects_count` delta per policy invocation (#1080).
+    fn count_pending_effects(ctx: &rquickjs::Ctx<'_>) -> u64 {
+        let code = r#"
+            (function() {
+                var a = (typeof agentdesk !== "undefined" && agentdesk.__pendingIntents) ? agentdesk.__pendingIntents.length : 0;
+                var b = (typeof agentdesk !== "undefined" && agentdesk.kanban && agentdesk.kanban.__pendingTransitions) ? agentdesk.kanban.__pendingTransitions.length : 0;
+                return a + b;
+            })();
+        "#;
+        let result: rquickjs::Result<i64> = ctx.eval(code);
+        result.map(|v| v.max(0) as u64).unwrap_or(0)
+    }
+
+    /// Emit a structured `policy_hook_executed` event into the observability
+    /// ring buffer (#1080).
+    fn record_policy_hook_event(
+        policy_name: &str,
+        hook_name: &str,
+        policy_version: &str,
+        elapsed: std::time::Duration,
+        result: &str,
+        effects_count: u64,
+    ) {
+        let payload = serde_json::json!({
+            "policy_name": policy_name,
+            "hook_name": hook_name,
+            "policy_version": policy_version,
+            "duration_ms": elapsed.as_millis() as u64,
+            "result": result,
+            "effects_count": effects_count,
+        });
+        crate::services::observability::events::record_simple(
+            "policy_hook_executed",
+            None,
+            None,
+            payload,
+        );
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -912,12 +969,12 @@ impl PolicyEngine {
             .lock()
             .map_err(|e| anyhow::anyhow!("policy store lock poisoned: {e}"))?;
 
-        let hook_fns: Vec<(String, Persistent<Function<'static>>)> = policies
+        let hook_fns: Vec<(String, String, Persistent<Function<'static>>)> = policies
             .iter()
             .filter_map(|p| {
-                p.hooks
-                    .get(&hook)
-                    .map(|f: &Persistent<Function<'static>>| (p.name.clone(), f.clone()))
+                p.hooks.get(&hook).map(|f: &Persistent<Function<'static>>| {
+                    (p.name.clone(), p.policy_version.clone(), f.clone())
+                })
             })
             .collect();
         drop(policies);
@@ -926,7 +983,7 @@ impl PolicyEngine {
             return Ok(());
         }
 
-        let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = hook_fns.iter().map(|(n, _, _)| n.as_str()).collect();
         tracing::info!(
             policy_count = hook_fns.len(),
             policies = ?names,
@@ -934,12 +991,14 @@ impl PolicyEngine {
             "firing hook"
         );
 
+        let hook_name_str = hook.to_string();
+
         // Execute each hook function in the QuickJS context
         inner.context.with(|ctx| -> Result<()> {
             // Convert serde_json::Value to a JS value
             let js_payload = json_to_js(&ctx, &payload)?;
 
-            for (policy_name, persistent_fn) in &hook_fns {
+            for (policy_name, policy_version, persistent_fn) in &hook_fns {
                 let func = match persistent_fn.clone().restore(&ctx) {
                     Ok(f) => f,
                     Err(e) => {
@@ -952,9 +1011,12 @@ impl PolicyEngine {
                     }
                 };
 
+                let effects_before = Self::count_pending_effects(&ctx);
                 let policy_start = std::time::Instant::now();
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
                 let elapsed = policy_start.elapsed();
+                let effects_after = Self::count_pending_effects(&ctx);
+                let effects_count = effects_after.saturating_sub(effects_before);
                 if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
                     tracing::warn!(
                         policy_name,
@@ -970,7 +1032,9 @@ impl PolicyEngine {
                         "policy hook completed"
                     );
                 }
+                let exec_result_str: &str;
                 if let Err(ref e) = result {
+                    exec_result_str = "err";
                     let exception_detail = ctx
                         .catch()
                         .into_exception()
@@ -986,7 +1050,18 @@ impl PolicyEngine {
                         error = %exception_detail,
                         "hook execution failed"
                     );
+                } else {
+                    exec_result_str = "ok";
                 }
+
+                Self::record_policy_hook_event(
+                    policy_name,
+                    &hook_name_str,
+                    policy_version,
+                    elapsed,
+                    exec_result_str,
+                    effects_count,
+                );
             }
 
             Ok(())
@@ -2063,5 +2138,226 @@ mod tests {
         // pipeline (200) must come before merge-automation (201).
         let names: Vec<&str> = policies.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["pipeline", "merge-automation"]);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // #1080 policy hook observability tests
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn policy_hook_observability_records_duration_and_ok_result() {
+        crate::services::observability::events::reset_for_tests();
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("obs-ok-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "obs-ok-policy",
+                priority: 1,
+                onTick: function(payload) {
+                    // Do nothing — just complete successfully.
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let events: Vec<_> = crate::services::observability::events::recent(100)
+            .into_iter()
+            .filter(|e| e.event_type == "policy_hook_executed")
+            .collect();
+        assert!(
+            !events.is_empty(),
+            "at least one policy_hook_executed event should be recorded"
+        );
+        let ev = events
+            .iter()
+            .find(|e| {
+                e.payload.get("policy_name").and_then(|v| v.as_str()) == Some("obs-ok-policy")
+            })
+            .expect("event for obs-ok-policy missing");
+        assert_eq!(
+            ev.payload.get("hook_name").and_then(|v| v.as_str()),
+            Some("onTick")
+        );
+        assert_eq!(
+            ev.payload.get("result").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+        assert!(
+            ev.payload
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .is_some(),
+            "duration_ms must be present and numeric"
+        );
+        let version = ev
+            .payload
+            .get("policy_version")
+            .and_then(|v| v.as_str())
+            .expect("policy_version must be present");
+        assert_eq!(
+            version.len(),
+            12,
+            "policy_version is the 12-char hash prefix"
+        );
+    }
+
+    #[test]
+    fn policy_hook_observability_marks_err_on_exception() {
+        crate::services::observability::events::reset_for_tests();
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("obs-err-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "obs-err-policy",
+                priority: 1,
+                onTick: function(payload) {
+                    throw new Error("intentional failure for observability test");
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let ev = crate::services::observability::events::recent(100)
+            .into_iter()
+            .find(|e| {
+                e.event_type == "policy_hook_executed"
+                    && e.payload.get("policy_name").and_then(|v| v.as_str())
+                        == Some("obs-err-policy")
+            })
+            .expect("obs-err-policy event must be recorded even when hook throws");
+        assert_eq!(
+            ev.payload.get("result").and_then(|v| v.as_str()),
+            Some("err"),
+            "result should be 'err' when the hook function throws"
+        );
+    }
+
+    #[test]
+    fn policy_hook_observability_counts_effects() {
+        crate::services::observability::events::reset_for_tests();
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("obs-effects-policy.js");
+        // The card must exist so the intent can validate. We use a dynamic
+        // hook + agentdesk.queueIntent to synthesize effects via the
+        // `__pendingIntents` queue the counter inspects.
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "obs-effects-policy",
+                priority: 1,
+                onTick: function(payload) {
+                    // Push two fake intents onto the pending queue directly so
+                    // the observability effects counter sees them. We cannot
+                    // rely on real intents here because they need DB state.
+                    if (!agentdesk.__pendingIntents) { agentdesk.__pendingIntents = []; }
+                    agentdesk.__pendingIntents.push({ kind: "test", n: 1 });
+                    agentdesk.__pendingIntents.push({ kind: "test", n: 2 });
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let ev = crate::services::observability::events::recent(100)
+            .into_iter()
+            .find(|e| {
+                e.event_type == "policy_hook_executed"
+                    && e.payload.get("policy_name").and_then(|v| v.as_str())
+                        == Some("obs-effects-policy")
+            })
+            .expect("obs-effects-policy event must be recorded");
+        assert_eq!(
+            ev.payload.get("effects_count").and_then(|v| v.as_u64()),
+            Some(2),
+            "effects_count should equal the number of intents queued"
+        );
+    }
+
+    #[test]
+    fn policy_hook_observability_policy_version_stable_across_invocations() {
+        crate::services::observability::events::reset_for_tests();
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("obs-version-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "obs-version-policy",
+                priority: 1,
+                onTick: function(payload) {}
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let versions: std::collections::HashSet<String> =
+            crate::services::observability::events::recent(500)
+                .into_iter()
+                .filter(|e| {
+                    e.event_type == "policy_hook_executed"
+                        && e.payload.get("policy_name").and_then(|v| v.as_str())
+                            == Some("obs-version-policy")
+                })
+                .filter_map(|e| {
+                    e.payload
+                        .get("policy_version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "policy_version must be stable across invocations without hot-reload"
+        );
     }
 }
