@@ -617,24 +617,12 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
         let entry_id: String = row
             .try_get("id")
             .map_err(|error| format!("read pending auto-queue entry id: {error}"))?;
-        sqlx::query(
-            "UPDATE auto_queue_entries
-             SET status = 'skipped',
-                 dispatch_id = NULL,
-                 dispatched_at = NULL,
-                 completed_at = NOW()
-             WHERE id = $1 AND status = 'pending'",
-        )
-        .bind(&entry_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| format!("skip pending auto-queue entry {entry_id}: {error}"))?;
-        record_auto_queue_transition_on_pg(
+        crate::db::auto_queue::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_PENDING,
             crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
             "card_terminal_pending_cleanup",
+            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
         )
         .await?;
     }

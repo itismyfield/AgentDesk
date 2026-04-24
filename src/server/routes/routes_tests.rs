@@ -7932,12 +7932,14 @@ async fn github_repos_pg_sync_closes_card_and_cleans_live_state() {
     assert_eq!(entry_status, "skipped");
     assert!(entry_dispatch_id.is_none());
 
-    let run_status: String = sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
-        .bind("run-pg-sync")
-        .fetch_one(&pg_pool)
-        .await
-        .unwrap();
+    let (run_status, run_completed_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, completed_at FROM auto_queue_runs WHERE id = $1")
+            .bind("run-pg-sync")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
     assert_eq!(run_status, "completed");
+    assert!(run_completed_at.is_some());
 
     let (review_state, pending_dispatch_id): (String, Option<String>) = sqlx::query_as(
         "SELECT state, pending_dispatch_id
