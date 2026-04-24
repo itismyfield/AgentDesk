@@ -1032,7 +1032,7 @@ async fn health_api_standalone_mode_reports_status_field() {
 }
 
 #[tokio::test]
-async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
+async fn health_wait_script_passes_when_server_is_up_before_full_recovery_pg() {
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -1091,7 +1091,7 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
 }
 
 #[tokio::test]
-async fn health_wait_script_rejects_unhealthy_server_up_response() {
+async fn health_wait_script_rejects_unhealthy_server_up_response_pg() {
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -5238,7 +5238,7 @@ async fn dispatch_create_and_get() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provider_channels() {
+async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provider_channels_pg() {
     let _env_lock = env_lock();
     let (base_url, state, server_handle) = spawn_mock_dispatch_delivery_server().await;
     let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
@@ -5563,7 +5563,7 @@ async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
 }
 
 #[tokio::test]
-async fn dispatch_create_with_skip_outbox_omits_notify_row() {
+async fn dispatch_create_with_skip_outbox_omits_notify_row_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -5658,7 +5658,7 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
 /// fields are stripped before `build_review_context` runs, and the
 /// validation/refresh chain resolves the real target from the card's history.
 #[tokio::test]
-async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context() {
+async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -5824,7 +5824,7 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
 /// the card — the injected values must be dropped and never resurrected
 /// from the context payload.
 #[tokio::test]
-async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
+async fn dispatch_create_review_ignores_client_trusted_review_target_flag_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -7587,7 +7587,7 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         .unwrap();
     let dry_run_json: serde_json::Value = serde_json::from_slice(&dry_run_body).unwrap();
     assert_eq!(dry_run_json["dry_run"], true);
-    assert_eq!(dry_run_json["deleted_from_skills"], 0);
+    assert_eq!(dry_run_json["soft_deleted_from_skills"], 0);
     assert!(
         dry_run_json["stale_skill_ids"]
             .as_array()
@@ -7626,19 +7626,22 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         .await
         .unwrap();
     let prune_json: serde_json::Value = serde_json::from_slice(&prune_body).unwrap();
-    assert_eq!(prune_json["deleted_from_skills"], 1);
+    assert_eq!(prune_json["soft_deleted_from_skills"], 1);
     assert_eq!(prune_json["skill_usage_policy"], "preserved");
 
     {
         let conn = db.lock().unwrap();
-        let stale_count: i64 = conn
+        let stale_live_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill'",
+                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill' AND deleted_at IS NULL",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stale_count, 0, "prune must delete stale skill metadata");
+        assert_eq!(
+            stale_live_count, 0,
+            "prune must soft-delete stale skill metadata"
+        );
 
         let usage_count: i64 = conn
             .query_row(
@@ -8364,7 +8367,7 @@ async fn github_repos_pg_sync_triages_open_issue() {
 }
 
 #[tokio::test]
-async fn cron_jobs_include_github_issue_card_sync_job() {
+async fn cron_jobs_include_github_issue_card_sync_job_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
     let db = test_db();
