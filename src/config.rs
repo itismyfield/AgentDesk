@@ -48,7 +48,7 @@ pub struct McpConfig {
     /// (`~/.claude.json`, `~/.claude/.mcp.json`, `~/.claude/.credentials.json`,
     /// honoring `$CLAUDE_CONFIG_DIR` if set) and posts a notification to all
     /// active Claude sessions when they change so the operator can run
-    /// `/mcp-reload` to pick up newly-authenticated MCP servers.
+    /// `/restart` to pick up newly-authenticated MCP servers.
     #[serde(default = "default_true")]
     pub watch_credentials: bool,
     /// Per-channel cooldown between credential-change notifications, in seconds.

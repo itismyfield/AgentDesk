@@ -667,6 +667,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_receipt(),
         commands::cmd_help(),
         commands::cmd_meeting(),
+        commands::cmd_restart(),
         commands::cmd_mcp_reload(),
     ]);
 
@@ -837,7 +838,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 // #799: MCP credential watcher (Claude only).
                 // Watches ~/.claude/.credentials.json and ~/.claude/mcp.json and posts
                 // a one-line notification to all active Claude sessions when one of
-                // them changes, so the operator can run /mcp-reload to pick up
+                // them changes, so the operator can run /restart to pick up
                 // newly-authenticated MCP servers without losing context.
                 if matches!(provider_for_setup, ProviderKind::Claude) {
                     let mcp_cfg = crate::config::load_graceful().mcp;
@@ -848,7 +849,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         super::mcp_credential_watcher::spawn_watcher(
                             shared_for_tmux.clone(),
                             dedupe_window,
-                            "🔔 MCP credential 변화 감지됨. 새 MCP 적용하려면 `/mcp-reload`.",
+                            "🔔 MCP credential 변화 감지됨. 새 MCP 적용하려면 `/restart`.",
                         );
                     } else {
                         tracing::info!(
