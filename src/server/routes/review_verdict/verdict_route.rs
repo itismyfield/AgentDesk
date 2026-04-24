@@ -551,8 +551,11 @@ pub async fn submit_verdict(
         .await;
 
         if let Some(pool) = state.pg_pool_ref() {
-            if let Err(error) =
-                super::super::dispatches::queue_dispatch_followup_pg(pool, &body.dispatch_id).await
+            if let Err(error) = crate::services::dispatches_followup::queue_dispatch_followup_pg(
+                pool,
+                &body.dispatch_id,
+            )
+            .await
             {
                 tracing::warn!(
                     dispatch_id = %body.dispatch_id,
@@ -560,7 +563,10 @@ pub async fn submit_verdict(
                 );
             }
         } else {
-            super::super::dispatches::queue_dispatch_followup(legacy_db(&state), &body.dispatch_id);
+            crate::services::dispatches_followup::queue_dispatch_followup(
+                legacy_db(&state),
+                &body.dispatch_id,
+            );
         }
     }
 
