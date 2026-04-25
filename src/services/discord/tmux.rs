@@ -39,7 +39,9 @@ use super::tmux_overload_retry::{
 use super::tmux_restart_handoff::{
     resolve_dispatched_thread_dispatch_from_db, resume_aborted_restart_turn,
 };
-use super::{SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, rate_limit_wait};
+use super::{
+    SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
+};
 const READY_FOR_INPUT_IDLE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(30);
@@ -2657,9 +2659,6 @@ impl WatcherClaimOutcome {
     }
 }
 
-static WATCHER_CLAIM_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
 fn find_watcher_by_tmux_session(
     watchers: &TmuxWatcherRegistry,
     tmux_session_name: &str,
@@ -2677,11 +2676,11 @@ pub(super) fn try_claim_watcher(
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
 ) -> bool {
-    let _guard = WATCHER_CLAIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
     if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
         if existing.1 {
-            watchers.remove_tmux_session(&requested_tmux);
+            watchers.remove_tmux_session_locked(&guard, &requested_tmux);
         } else {
             record_watcher_invariant(
                 true,
@@ -2702,7 +2701,7 @@ pub(super) fn try_claim_watcher(
     let claimed = if watchers.contains_key(&channel_id) {
         false
     } else {
-        watchers.insert(channel_id, handle);
+        watchers.insert_locked(&guard, channel_id, handle);
         true
     };
     let slot_present = watchers.contains_key(&channel_id);
@@ -2768,7 +2767,7 @@ fn claim_watcher(
     source: &str,
     force_replace_live_same_tmux: bool,
 ) -> WatcherClaimOutcome {
-    let _guard = WATCHER_CLAIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
     let mut removed_stale_same_tmux = false;
     let mut removed_live_same_tmux = false;
@@ -2777,7 +2776,9 @@ fn claim_watcher(
         find_watcher_by_tmux_session(watchers, &requested_tmux)
     {
         if existing_cancelled || force_replace_live_same_tmux {
-            if let Some((_, existing_handle)) = watchers.remove_tmux_session(&requested_tmux) {
+            if let Some((_, existing_handle)) =
+                watchers.remove_tmux_session_locked(&guard, &requested_tmux)
+            {
                 existing_handle
                     .cancel
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2847,7 +2848,7 @@ fn claim_watcher(
             channel_id
         );
         drop(entry);
-        watchers.insert(channel_id, handle);
+        watchers.insert_locked(&guard, channel_id, handle);
         crate::services::observability::emit_watcher_replaced(
             provider.as_str(),
             channel_id.get(),
@@ -2862,7 +2863,7 @@ fn claim_watcher(
             )
         }
     } else {
-        watchers.insert(channel_id, handle);
+        watchers.insert_locked(&guard, channel_id, handle);
         if removed_live_same_tmux {
             WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedLiveSameSession, channel_id)
         } else if removed_stale_same_tmux {
@@ -6773,6 +6774,7 @@ mod tests {
         );
         assert!(watchers.contains_key(&channel_a));
         assert!(!watchers.contains_key(&channel_b));
+        watchers.assert_invariants_for_tests();
     }
 
     #[test]
@@ -6831,6 +6833,7 @@ mod tests {
         );
         assert!(!incoming_paused.load(Ordering::Relaxed));
         assert!(!incoming_turn_delivered.load(Ordering::Relaxed));
+        watchers.assert_invariants_for_tests();
     }
 
     #[test]
@@ -6871,6 +6874,7 @@ mod tests {
             new_tmux
         );
         assert_eq!(watchers.len(), 1);
+        watchers.assert_invariants_for_tests();
     }
 
     #[test]
@@ -6899,6 +6903,130 @@ mod tests {
         assert!(!watchers.contains_key(&channel_a));
         assert!(watchers.contains_key(&channel_b));
         assert!(!incoming_cancel.load(Ordering::Relaxed));
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
+    fn stale_owner_remove_after_replacement_does_not_delete_new_tmux_owner() {
+        let watchers = TmuxWatcherRegistry::new();
+        let old_owner = ChannelId::new(1485506232256168140);
+        let new_owner = ChannelId::new(1485506232256168141);
+        let tmux_name = "AgentDesk-codex-adk-cdx-remove-after-claim";
+
+        let initial = test_watcher_handle(tmux_name);
+        initial.cancel.store(true, Ordering::Relaxed);
+        assert!(super::try_claim_watcher(&watchers, old_owner, initial));
+
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            new_owner,
+            test_watcher_handle(tmux_name),
+            &ProviderKind::Codex,
+            "unit-test-remove-after-claim",
+        );
+        assert_eq!(outcome.action(), WatcherClaimAction::SpawnReplacedStale);
+        assert_eq!(outcome.owner_channel_id(), new_owner);
+
+        assert!(
+            watchers.remove(&old_owner).is_none(),
+            "old owner cleanup must not remove the newly claimed tmux watcher"
+        );
+        assert!(!watchers.contains_key(&old_owner));
+        assert!(watchers.contains_key(&new_owner));
+        assert_eq!(
+            watchers.owner_channel_for_tmux_session(tmux_name),
+            Some(new_owner)
+        );
+        assert_eq!(watchers.len(), 1);
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
+    fn stale_owner_remove_interleaving_with_same_tmux_claim_preserves_registry() {
+        let watchers = Arc::new(TmuxWatcherRegistry::new());
+        let old_owner = ChannelId::new(1485506232256168142);
+        let new_owner = ChannelId::new(1485506232256168143);
+        let tmux_name = "AgentDesk-codex-adk-cdx-remove-claim-interleave";
+
+        let initial = test_watcher_handle(tmux_name);
+        initial.cancel.store(true, Ordering::Relaxed);
+        assert!(super::try_claim_watcher(&watchers, old_owner, initial));
+        watchers.assert_invariants_for_tests();
+
+        let channel_index_removed = Arc::new(std::sync::Barrier::new(2));
+        let release_remove = Arc::new(std::sync::Barrier::new(2));
+
+        let remove_join = {
+            let watchers = watchers.clone();
+            let channel_index_removed = channel_index_removed.clone();
+            let release_remove = release_remove.clone();
+            std::thread::spawn(move || {
+                watchers.remove_after_channel_index_drop_for_tests(
+                    &old_owner,
+                    &channel_index_removed,
+                    &release_remove,
+                )
+            })
+        };
+
+        channel_index_removed.wait();
+        assert!(
+            !watchers.contains_key(&old_owner),
+            "test hook must pause after the old channel index is dropped"
+        );
+
+        let (claim_started_tx, claim_started_rx) = std::sync::mpsc::channel();
+        let claim_join = {
+            let watchers = watchers.clone();
+            std::thread::spawn(move || {
+                claim_started_tx
+                    .send(())
+                    .expect("claim start signal should send");
+                claim_or_reuse_watcher(
+                    &watchers,
+                    new_owner,
+                    test_watcher_handle(tmux_name),
+                    &ProviderKind::Codex,
+                    "unit-test-remove-claim-interleave",
+                )
+            })
+        };
+        claim_started_rx
+            .recv()
+            .expect("claim thread should reach the claim call");
+        for _ in 0..100 {
+            if claim_join.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            !claim_join.is_finished(),
+            "same-tmux claim must wait while old-owner remove holds the registry mutation lock"
+        );
+        assert!(
+            !watchers.contains_key(&new_owner),
+            "new owner cannot be installed until the old-owner remove releases the lock"
+        );
+
+        release_remove.wait();
+        let removed = remove_join.join().expect("remove thread should not panic");
+        assert!(
+            removed.is_some(),
+            "old-owner remove should remove the stale watcher"
+        );
+        let outcome = claim_join.join().expect("claim thread should not panic");
+        assert_eq!(outcome.action(), WatcherClaimAction::SpawnFresh);
+        assert_eq!(outcome.owner_channel_id(), new_owner);
+
+        assert!(!watchers.contains_key(&old_owner));
+        assert!(watchers.contains_key(&new_owner));
+        assert_eq!(
+            watchers.owner_channel_for_tmux_session(tmux_name),
+            Some(new_owner)
+        );
+        assert_eq!(watchers.len(), 1);
+        watchers.assert_invariants_for_tests();
     }
 
     #[test]

@@ -471,6 +471,17 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
+pub(super) type TmuxWatcherRegistryGuard = std::sync::MutexGuard<'static, ()>;
+
+static TMUX_WATCHER_REGISTRY_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+pub(super) fn lock_tmux_watcher_registry() -> TmuxWatcherRegistryGuard {
+    TMUX_WATCHER_REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Registry for active tmux output watchers.
 ///
 /// Ownership is keyed by tmux session name so duplicate attaches for the same
@@ -521,6 +532,16 @@ impl TmuxWatcherRegistry {
         channel_id: ChannelId,
         handle: TmuxWatcherHandle,
     ) -> Option<TmuxWatcherHandle> {
+        let guard = lock_tmux_watcher_registry();
+        self.insert_locked(&guard, channel_id, handle)
+    }
+
+    pub(super) fn insert_locked(
+        &self,
+        _guard: &TmuxWatcherRegistryGuard,
+        channel_id: ChannelId,
+        handle: TmuxWatcherHandle,
+    ) -> Option<TmuxWatcherHandle> {
         if let Some((_, old_tmux_session_name)) = self.tmux_session_by_channel.remove(&channel_id) {
             self.owner_channel_by_tmux_session
                 .remove(&old_tmux_session_name);
@@ -543,6 +564,15 @@ impl TmuxWatcherRegistry {
     }
 
     pub(super) fn remove(&self, channel_id: &ChannelId) -> Option<(ChannelId, TmuxWatcherHandle)> {
+        let guard = lock_tmux_watcher_registry();
+        self.remove_locked(&guard, channel_id)
+    }
+
+    pub(super) fn remove_locked(
+        &self,
+        _guard: &TmuxWatcherRegistryGuard,
+        channel_id: &ChannelId,
+    ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let (_, tmux_session_name) = self.tmux_session_by_channel.remove(channel_id)?;
         self.owner_channel_by_tmux_session
             .remove(&tmux_session_name);
@@ -551,8 +581,9 @@ impl TmuxWatcherRegistry {
             .map(|(_, handle)| (*channel_id, handle))
     }
 
-    pub(super) fn remove_tmux_session(
+    pub(super) fn remove_tmux_session_locked(
         &self,
+        _guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
         let (_, owner_channel_id) = self
@@ -594,6 +625,87 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session
             .get(tmux_session_name)
             .map(|entry| entry.cancel.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_invariants_for_tests(&self) {
+        let _guard = lock_tmux_watcher_registry();
+        assert_eq!(
+            self.by_tmux_session.len(),
+            self.owner_channel_by_tmux_session.len(),
+            "tmux watcher registry must have one owner per tmux watcher"
+        );
+        assert_eq!(
+            self.by_tmux_session.len(),
+            self.tmux_session_by_channel.len(),
+            "tmux watcher registry must have one channel alias per tmux watcher"
+        );
+
+        for entry in self.tmux_session_by_channel.iter() {
+            let channel_id = *entry.key();
+            let tmux_session_name = entry.value().clone();
+            assert!(
+                self.by_tmux_session.contains_key(&tmux_session_name),
+                "channel index points to missing tmux watcher"
+            );
+            assert_eq!(
+                self.owner_channel_for_tmux_session(&tmux_session_name),
+                Some(channel_id),
+                "channel index and owner index disagree"
+            );
+        }
+
+        for entry in self.owner_channel_by_tmux_session.iter() {
+            let tmux_session_name = entry.key().clone();
+            let owner_channel_id = *entry.value();
+            assert!(
+                self.by_tmux_session.contains_key(&tmux_session_name),
+                "owner index points to missing tmux watcher"
+            );
+            assert_eq!(
+                self.tmux_session_by_channel
+                    .get(&owner_channel_id)
+                    .map(|value| value.clone()),
+                Some(tmux_session_name),
+                "owner index and channel index disagree"
+            );
+        }
+
+        for entry in self.by_tmux_session.iter() {
+            let tmux_session_name = entry.key().clone();
+            let owner_channel_id = self
+                .owner_channel_for_tmux_session(&tmux_session_name)
+                .expect("tmux watcher must have an owner channel");
+            assert_eq!(
+                self.tmux_session_by_channel
+                    .get(&owner_channel_id)
+                    .map(|value| value.clone()),
+                Some(tmux_session_name),
+                "tmux watcher and channel index disagree"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_after_channel_index_drop_for_tests(
+        &self,
+        channel_id: &ChannelId,
+        channel_index_removed: &std::sync::Barrier,
+        release: &std::sync::Barrier,
+    ) -> Option<(ChannelId, TmuxWatcherHandle)> {
+        let _guard = lock_tmux_watcher_registry();
+        let Some((_, tmux_session_name)) = self.tmux_session_by_channel.remove(channel_id) else {
+            channel_index_removed.wait();
+            release.wait();
+            return None;
+        };
+        channel_index_removed.wait();
+        release.wait();
+        self.owner_channel_by_tmux_session
+            .remove(&tmux_session_name);
+        self.by_tmux_session
+            .remove(&tmux_session_name)
+            .map(|(_, handle)| (*channel_id, handle))
     }
 }
 
