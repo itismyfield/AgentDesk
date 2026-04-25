@@ -2414,16 +2414,40 @@ async fn wait_for_reacquired_turn_bridge_inflight_state(
     false
 }
 
+/// #1136: outcome of an explicit watcher re-attach attempt that the runtime
+/// fires when the legacy "inflight missing → DB dispatch fallback" path would
+/// have silently dropped the watcher. Returned by
+/// [`trigger_missing_inflight_reattach`] so the caller can record the result
+/// in logs / counters and surface it to operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MissingInflightReattachOutcome {
+    /// A fresh watcher task was spawned for `channel_id`. `replaced_existing`
+    /// is `true` if a stale handle was kicked out before the new one took
+    /// over. Tagged with `rebind_origin = true` on the inflight state so that
+    /// the new attach does NOT itself trigger another DB-fallback reattach.
+    Spawned { replaced_existing: bool },
+    /// The tmux pane is not live — re-attach was skipped. Operators should
+    /// investigate whether the session needs to be respawned manually.
+    SessionDead,
+    /// Another path raced ahead and created an inflight state for the channel
+    /// before we could persist ours. The competing inflight wins and we leave
+    /// it untouched.
+    InflightAlreadyExists,
+    /// Persisting the synthetic inflight state failed. Watcher remains
+    /// unattached; this is the "재부착 실패 — 추가 진단 필요" branch.
+    SaveFailed,
+}
+
 fn trigger_missing_inflight_reattach(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-) {
+) -> MissingInflightReattachOutcome {
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] ⚠ watcher: DB dispatch fallback unresolved for channel {} — triggering explicit reattach to {}",
+        "  [{ts}] ⚠ watcher: DB dispatch fallback unresolved for channel {} — 재부착 시도 중 (tmux={})",
         channel_id.get(),
         tmux_session_name
     );
@@ -2431,11 +2455,11 @@ fn trigger_missing_inflight_reattach(
     if !tmux_session_has_live_pane(tmux_session_name) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ⚠ watcher: explicit reattach skipped for channel {} — tmux session is not live ({})",
+            "  [{ts}] ⚠ watcher: 재부착 실패 — 추가 진단 필요 for channel {} — tmux session is not live ({})",
             channel_id.get(),
             tmux_session_name
         );
-        return;
+        return MissingInflightReattachOutcome::SessionDead;
     }
 
     let (output_path, input_fifo_path) = super::turn_bridge::tmux_runtime_paths(tmux_session_name);
@@ -2466,20 +2490,20 @@ fn trigger_missing_inflight_reattach(
         Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] ⚠ watcher: explicit reattach skipped for channel {} — inflight state already exists",
+                "  [{ts}] ⚠ watcher: 재부착 실패 — 추가 진단 필요 for channel {} — inflight state already exists",
                 channel_id.get()
             );
-            return;
+            return MissingInflightReattachOutcome::InflightAlreadyExists;
         }
         Err(super::inflight::CreateNewInflightError::Internal(error)) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::error!(
-                "  [{ts}] ❌ watcher: explicit reattach failed for channel {} / {} after DB fallback miss: {}",
+                "  [{ts}] ❌ watcher: 재부착 실패 — 추가 진단 필요 for channel {} / {} after DB fallback miss: {}",
                 channel_id.get(),
                 tmux_session_name,
                 error
             );
-            return;
+            return MissingInflightReattachOutcome::SaveFailed;
         }
     }
 
@@ -2559,6 +2583,9 @@ fn trigger_missing_inflight_reattach(
         initial_offset,
         !fresh
     );
+    MissingInflightReattachOutcome::Spawned {
+        replaced_existing: !fresh,
+    }
 }
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
@@ -4991,13 +5018,57 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     channel_id.get()
                 );
             } else {
-                trigger_missing_inflight_reattach(
+                // #1136: this is the silent-drop path. The legacy code merely
+                // warned and walked away when the DB-side dispatch_id resolve
+                // failed; we now (a) bump a counter so operators can see the
+                // failure rate in `/api/analytics/observability`, and
+                // (b) explicitly trigger a watcher re-attach. The synthetic
+                // inflight state is tagged `rebind_origin = true` (see
+                // `trigger_missing_inflight_reattach`), so the next watcher
+                // generation will NOT itself re-enter this fallback path —
+                // that's the loop-prevention guard.
+                crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
+                    channel_id.get(),
+                    provider_kind.as_str(),
+                );
+                let outcome = trigger_missing_inflight_reattach(
                     &http,
                     &shared,
                     &provider_kind,
                     channel_id,
                     &tmux_session_name,
                 );
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                match outcome {
+                    MissingInflightReattachOutcome::Spawned { replaced_existing } => {
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher: 재부착 성공 for channel {} (tmux={}, replaced={})",
+                            channel_id.get(),
+                            tmux_session_name,
+                            replaced_existing
+                        );
+                    }
+                    MissingInflightReattachOutcome::SessionDead => {
+                        tracing::warn!(
+                            "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — session not live)",
+                            channel_id.get(),
+                            tmux_session_name
+                        );
+                    }
+                    MissingInflightReattachOutcome::InflightAlreadyExists => {
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher: 재부착 생략 for channel {} — concurrent inflight already present",
+                            channel_id.get()
+                        );
+                    }
+                    MissingInflightReattachOutcome::SaveFailed => {
+                        tracing::error!(
+                            "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — inflight save failed)",
+                            channel_id.get(),
+                            tmux_session_name
+                        );
+                    }
+                }
             }
         } else if missing_inflight_plan.suppressed_by_recent_stop {
             if let Some(stop) = recent_turn_stop_for_channel(channel_id) {
@@ -6347,11 +6418,12 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
-        MONITOR_AUTO_TURN_PREAMBLE_HINT, MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision,
-        PlaceholderSuppressContext, PlaceholderSuppressDecision, PlaceholderSuppressOrigin,
-        READY_FOR_INPUT_STUCK_REASON, SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL,
-        SuppressedPlaceholderAction, TmuxWatcherHandle, WatcherToolState,
-        build_bg_trigger_session_key, claim_or_replace_watcher, clear_recent_turn_stops_for_tests,
+        MONITOR_AUTO_TURN_PREAMBLE_HINT, MONITOR_AUTO_TURN_REASON_CODE,
+        MissingInflightReattachOutcome, OffsetAdvanceDecision, PlaceholderSuppressContext,
+        PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
+        SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
+        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
+        claim_or_replace_watcher, clear_recent_turn_stops_for_tests,
         clear_recent_watcher_reattach_offsets_for_tests, consume_monitor_auto_turn_preamble_once,
         dead_session_cleanup_plan, decide_placeholder_suppression,
         enqueue_background_trigger_response_to_notify_outbox,
@@ -6367,9 +6439,9 @@ mod tests {
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
-        tmux_death_is_normal_completion, wait_for_reacquired_turn_bridge_inflight_state,
-        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
-        watcher_stream_seed,
+        tmux_death_is_normal_completion, trigger_missing_inflight_reattach,
+        wait_for_reacquired_turn_bridge_inflight_state, watcher_ready_for_input_turn_completed,
+        watcher_should_yield_to_inflight_state, watcher_stream_seed,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -6669,6 +6741,86 @@ mod tests {
         assert!(stopped.warn);
         assert!(!stopped.trigger_reattach);
         assert!(stopped.suppressed_by_recent_stop);
+    }
+
+    #[test]
+    fn db_fallback_resolve_failed_counter_increments_when_reattach_fires() {
+        // #1136: when the watcher hits the "inflight missing → DB dispatch
+        // fallback" path AND the DB-side resolve fails, the runtime must
+        // bump the `watcher_db_fallback_resolve_failed` counter and trigger
+        // an explicit re-attach (instead of silently dropping the watcher).
+        // This test exercises the counter wiring directly so any future
+        // refactor that drops the increment fails loudly.
+        crate::services::observability::metrics::reset_for_tests();
+
+        let plan = missing_inflight_fallback_plan(true, false, true, false);
+        assert!(
+            plan.trigger_reattach,
+            "DB fallback resolve failure on a committed terminal output should request reattach"
+        );
+
+        let channel_id = ChannelId::new(987_1136_001);
+        let provider = ProviderKind::Codex;
+        crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
+            channel_id.get(),
+            provider.as_str(),
+        );
+        crate::services::observability::metrics::record_watcher_db_fallback_resolve_failed(
+            channel_id.get(),
+            provider.as_str(),
+        );
+
+        let snapshot = crate::services::observability::metrics::snapshot();
+        let row = snapshot
+            .iter()
+            .find(|row| row.channel_id == channel_id.get() && row.provider == provider.as_str())
+            .expect("counter row should exist after recording");
+        assert_eq!(
+            row.watcher_db_fallback_resolve_failed, 2,
+            "each silent-drop avoidance increments the counter exactly once"
+        );
+
+        crate::services::observability::metrics::reset_for_tests();
+    }
+
+    #[tokio::test]
+    async fn explicit_reattach_returns_session_dead_when_tmux_pane_missing() {
+        // #1136: trigger_missing_inflight_reattach must surface its outcome
+        // so the caller can log / count success-vs-failure. With no live
+        // tmux pane to reattach to, the outcome is `SessionDead` — that is
+        // the explicit "재부착 실패 — 추가 진단 필요" branch.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = super::super::make_shared_data_for_tests();
+        let http = Arc::new(poise::serenity_prelude::Http::new("Bot test-token"));
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(987_1136_002);
+        // Pick a tmux name that is guaranteed not to exist.
+        let tmux_name = format!(
+            "AgentDesk-codex-test-1136-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        let outcome =
+            trigger_missing_inflight_reattach(&http, &shared, &provider, channel, &tmux_name);
+        assert_eq!(outcome, MissingInflightReattachOutcome::SessionDead);
+
+        // The synthetic inflight state must NOT have been persisted when the
+        // pane is dead — that's the loop-prevention guard at work.
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+            "no inflight state should leak when reattach is skipped"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
     #[test]

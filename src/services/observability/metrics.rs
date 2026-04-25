@@ -48,6 +48,11 @@ pub struct AtomicCounters {
     pub session_reused: AtomicU64,
     /// #1085: turn entered with `session_id.is_none()` — provider session created fresh.
     pub session_new: AtomicU64,
+    /// #1136: watcher hit the "inflight missing → DB dispatch fallback" path AND
+    /// the DB fallback failed to resolve a `dispatch_id`. Each increment marks
+    /// one occurrence where the legacy code would have silently dropped the
+    /// watcher; the runtime now answers each one with an explicit re-attach.
+    pub watcher_db_fallback_resolve_failed: AtomicU64,
 }
 
 impl AtomicCounters {
@@ -60,6 +65,9 @@ impl AtomicCounters {
             fail: self.fail.load(Ordering::Relaxed),
             session_reused: self.session_reused.load(Ordering::Relaxed),
             session_new: self.session_new.load(Ordering::Relaxed),
+            watcher_db_fallback_resolve_failed: self
+                .watcher_db_fallback_resolve_failed
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -73,6 +81,8 @@ pub struct AtomicCountersSnapshot {
     pub fail: u64,
     pub session_reused: u64,
     pub session_new: u64,
+    /// #1136: see [`AtomicCounters::watcher_db_fallback_resolve_failed`].
+    pub watcher_db_fallback_resolve_failed: u64,
 }
 
 /// One row emitted by `ObservabilityCounters::snapshot()`.
@@ -92,6 +102,9 @@ pub struct CounterSnapshotRow {
     pub session_new: u64,
     /// #1085: ratio `session_reused / (session_reused + session_new)`; 0.0 when both zero.
     pub session_reuse_rate: f64,
+    /// #1136: cumulative count of watcher DB-dispatch-fallback resolve failures
+    /// for which an explicit re-attach was triggered (formerly a silent drop).
+    pub watcher_db_fallback_resolve_failed: u64,
 }
 
 /// In-process registry of `(channel_id, provider) -> AtomicCounters`.
@@ -149,6 +162,17 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// #1136: increment the watcher DB-fallback resolve-failure counter for
+    /// `(channel_id, provider)`. Called whenever the watcher detects that the
+    /// `inflight` state is missing AND the DB-side `dispatch_id` resolve also
+    /// failed, in which case the runtime triggers an explicit re-attach
+    /// instead of the legacy silent-drop behavior.
+    pub fn record_watcher_db_fallback_resolve_failed(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .watcher_db_fallback_resolve_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// #1085: record whether the turn entered with an existing provider session.
     /// `session_id_present == true` increments `session_reused`, else `session_new`.
     pub fn record_session_entry(&self, channel_id: u64, provider: &str, session_id_present: bool) {
@@ -192,6 +216,7 @@ impl ObservabilityCounters {
                     session_reused: snap.session_reused,
                     session_new: snap.session_new,
                     session_reuse_rate,
+                    watcher_db_fallback_resolve_failed: snap.watcher_db_fallback_resolve_failed,
                 }
             })
             .collect();
@@ -237,6 +262,11 @@ pub fn record_success(channel_id: u64, provider: &str) {
 
 pub fn record_fail(channel_id: u64, provider: &str) {
     global().record_fail(channel_id, provider);
+}
+
+/// #1136: convenience wrapper for `ObservabilityCounters::record_watcher_db_fallback_resolve_failed`.
+pub fn record_watcher_db_fallback_resolve_failed(channel_id: u64, provider: &str) {
+    global().record_watcher_db_fallback_resolve_failed(channel_id, provider);
 }
 
 /// #1085: convenience wrapper for `ObservabilityCounters::record_session_entry`.
@@ -328,6 +358,23 @@ mod tests {
         assert_eq!(snap[0].session_reused, 0);
         assert_eq!(snap[0].session_new, 0);
         assert!((snap[0].session_reuse_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn watcher_db_fallback_resolve_failed_counter_increments_per_call() {
+        let c = ObservabilityCounters::new();
+        c.record_watcher_db_fallback_resolve_failed(42, "codex");
+        c.record_watcher_db_fallback_resolve_failed(42, "codex");
+        c.record_watcher_db_fallback_resolve_failed(42, "codex");
+
+        let snap = c.snapshot();
+        assert_eq!(snap.len(), 1, "expected a single (channel, provider) row");
+        assert_eq!(
+            snap[0].watcher_db_fallback_resolve_failed, 3,
+            "counter should reflect three explicit-reattach triggers"
+        );
+        assert_eq!(snap[0].channel_id, 42);
+        assert_eq!(snap[0].provider, "codex");
     }
 
     #[test]
