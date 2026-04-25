@@ -1001,6 +1001,23 @@ Any other message is sent to {p}.
                 return Ok(true);
             }
 
+            // Issue #1128: guard against unbounded recursive scans before
+            // they reach the platform shell. The detector blocks
+            // `grep -r/-R` without exclude flags, `find /Users` without a
+            // name filter, and recursive scans of the workspace root.
+            let guard_decision = crate::services::shell_guard::inspect_command(cmd_str);
+            if let Some(block_msg) =
+                crate::services::shell_guard::format_block_message(&guard_decision)
+            {
+                tracing::warn!(
+                    "[shell_guard] blocked !shell command from {}: {:?}",
+                    msg.author.name,
+                    cmd_str
+                );
+                send_long_message_raw(&ctx.http, channel_id, &block_msg, &data.shared).await?;
+                return Ok(true);
+            }
+
             let working_dir = {
                 let d = data.shared.core.lock().await;
                 d.sessions
@@ -1017,24 +1034,30 @@ Any other message is sent to {p}.
             let working_dir_clone = working_dir.clone();
 
             let result = tokio::task::spawn_blocking(move || {
-                let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
+                let mut builder =
+                    crate::services::platform::shell::shell_command_builder(&cmd_owned);
+                builder
                     .current_dir(&working_dir_clone)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn();
-                match child {
-                    Ok(child) => child.wait_with_output(),
-                    Err(e) => Err(e),
+                    .stderr(std::process::Stdio::piped());
+                crate::services::process::configure_child_process_group(&mut builder);
+                match builder.spawn() {
+                    Ok(child) => crate::services::shell_guard::wait_with_no_output_timeout(
+                        child,
+                        crate::services::shell_guard::DEFAULT_NO_OUTPUT_TIMEOUT,
+                        crate::services::shell_guard::DEFAULT_TOTAL_TIMEOUT,
+                    ),
+                    Err(e) => Err(format!("spawn failed: {}", e)),
                 }
             })
             .await;
 
             let response = match result {
-                Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let exit_code = output.status.code().unwrap_or(-1);
+                Ok(Ok(outcome)) => {
+                    let stdout = String::from_utf8_lossy(&outcome.stdout);
+                    let stderr = String::from_utf8_lossy(&outcome.stderr);
+                    let exit_code = outcome.exit_code;
                     let mut parts = Vec::new();
                     if !stdout.is_empty() {
                         parts.push(format!("```\n{}\n```", stdout.trim_end()));
@@ -1042,7 +1065,14 @@ Any other message is sent to {p}.
                     if !stderr.is_empty() {
                         parts.push(format!("stderr:\n```\n{}\n```", stderr.trim_end()));
                     }
-                    if parts.is_empty() {
+                    if let Some(cause) = outcome.timed_out {
+                        parts.push(format!(
+                            "killed by shell guard ({}). Issue #1128: split the command, \
+                             scope the path, or add `--exclude-dir`/`-name` filters before \
+                             retrying.",
+                            cause.as_str()
+                        ));
+                    } else if parts.is_empty() {
                         parts.push(format!("(exit code: {})", exit_code));
                     } else if exit_code != 0 {
                         parts.push(format!("(exit code: {})", exit_code));

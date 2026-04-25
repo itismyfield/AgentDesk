@@ -339,6 +339,7 @@ src/
 │   ├── service_error.rs
 │   ├── session_backend.rs
 │   ├── settings.rs
+│   ├── shell_guard.rs
 │   ├── termination_audit.rs
 │   ├── tmux_common.rs
 │   ├── tmux_diagnostics.rs
