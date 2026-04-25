@@ -6089,7 +6089,7 @@ pub async fn generate(
     )
 }
 
-/// POST /api/auto-queue/activate
+/// POST /api/auto-queue/dispatch-next (formerly /api/auto-queue/activate, removed in #1064)
 /// Dispatches the next pending entry in the active run.
 pub async fn activate(
     State(state): State<AppState>,
@@ -11149,7 +11149,7 @@ async fn submit_order_with_pg(
             "ok": true,
             "created": created,
             "run_id": run_id,
-            "message": "Queue active. Call POST /api/auto-queue/activate to start dispatching.",
+            "message": "Queue active. Call POST /api/auto-queue/dispatch-next to start dispatching.",
         })),
     )
 }
@@ -11304,7 +11304,7 @@ pub async fn submit_order(
         .ok();
     }
 
-    // Queue created and activated — dispatch is a separate step via POST /api/auto-queue/activate
+    // Queue created and activated — dispatch is a separate step via POST /api/auto-queue/dispatch-next
     // This allows the caller to review/adjust the order before dispatching begins.
     drop(conn);
 
@@ -11314,7 +11314,7 @@ pub async fn submit_order(
             "ok": true,
             "created": created,
             "run_id": run_id,
-            "message": "Queue active. Call POST /api/auto-queue/activate to start dispatching.",
+            "message": "Queue active. Call POST /api/auto-queue/dispatch-next to start dispatching.",
         })),
     )
 }

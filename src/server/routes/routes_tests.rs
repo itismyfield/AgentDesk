@@ -26618,3 +26618,127 @@ async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
     pg_pool.close().await;
     pg_db.drop().await;
 }
+
+/// #1069 / 904-7 — callsite migration smoke test.
+///
+/// Scans the dashboard frontend, policies (JS), shell scripts, skills (Markdown),
+/// and the example config for references to API paths that were renamed in
+/// #1064 / #1065. Server-side route handler files and auto-generated docs are
+/// excluded — they legitimately reference the old paths as deprecated aliases
+/// or history. The test fails when a new callsite re-introduces a legacy path.
+#[test]
+fn callsites_migrated_off_legacy_api_paths_1069() {
+    use std::path::Path;
+
+    // Banned substrings — these are the paths fully removed in #1064/#1065.
+    // /api/hook/session is not banned: the parameterized DELETE
+    // (`/api/hook/session/{sessionKey}`) and auth.rs prefix bypass legitimately
+    // keep the prefix alive. Callsites should still hit
+    // /api/dispatched-sessions/webhook for the unparameterized POST/DELETE.
+    let banned: &[&str] = &[
+        "/api/re-review",
+        "/api/auto-queue/activate",
+        "/api/discord-bindings",
+    ];
+
+    // Roots that frontend / policy / script / skill / config callsites live in.
+    let roots = [
+        "dashboard/src",
+        "policies",
+        "scripts",
+        "skills",
+        "agentdesk.example.yaml",
+        "FEATURES.md",
+        "README.md",
+        "CLAUDE.md",
+    ];
+
+    fn walk(p: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if p.is_file() {
+            out.push(p.to_path_buf());
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(p) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(
+                name,
+                "node_modules" | "dist" | "build" | ".git" | "generated" | "target"
+            ) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for r in roots {
+        walk(&repo_root.join(r), &mut files);
+    }
+
+    let mut hits: Vec<String> = Vec::new();
+    for file in &files {
+        let ext = file
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            ext.as_str(),
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "json" | "yaml" | "yml" | "sh" | "md"
+        ) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let path_str = file.to_string_lossy();
+        for needle in banned {
+            if !content.contains(needle) {
+                continue;
+            }
+            for line in content.lines() {
+                if !line.contains(needle) {
+                    continue;
+                }
+                let trimmed = line.trim_start();
+                // Allow comment / doc lines that explicitly call out the
+                // historical migration. A live callsite (fetch URL string,
+                // bash curl, etc.) will not match these markers.
+                let is_comment_like = trimmed.starts_with("//")
+                    || trimmed.starts_with("#")
+                    || trimmed.starts_with("*")
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with("|") // markdown table row
+                    || trimmed.starts_with(">"); // markdown blockquote
+                let mentions_history = trimmed.contains("#1064")
+                    || trimmed.contains("#1065")
+                    || trimmed.contains("#1069")
+                    || trimmed.contains("removed")
+                    || trimmed.contains("legacy")
+                    || trimmed.contains("formerly")
+                    || trimmed.contains("deprecated")
+                    || trimmed.contains("→")
+                    || trimmed.contains("->");
+                if is_comment_like && mentions_history {
+                    continue;
+                }
+                hits.push(format!("{path_str}: {trimmed}"));
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "#1069 callsite audit: legacy API paths still referenced outside server route handlers / generated docs:\n  {}",
+        hits.join("\n  ")
+    );
+}

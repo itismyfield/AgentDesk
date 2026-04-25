@@ -58,7 +58,7 @@ end note
 ' 2. ACTIVATION (Run promotion + first dispatches)
 ' ============================================================
 
-:POST /api/auto-queue/activate
+:POST /api/auto-queue/dispatch-next
 (or auto-activate from /dispatch);
 
 if (Run status?) then (generated/pending)
