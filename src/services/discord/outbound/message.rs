@@ -19,6 +19,35 @@ use serde::{Deserialize, Serialize};
 
 use super::policy::DiscordOutboundPolicy;
 
+/// Caller-provided semantic identity for outbound idempotency.
+///
+/// `correlation_id` groups related outbound attempts (for example, all
+/// notifications for one dispatch), while `semantic_event_id` identifies the
+/// exact event within that group. Future durable dedup stores should key on
+/// both values plus target/operation metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundDeliveryId {
+    pub(crate) correlation_id: String,
+    pub(crate) semantic_event_id: String,
+}
+
+impl OutboundDeliveryId {
+    pub(crate) fn new(
+        correlation_id: impl Into<String>,
+        semantic_event_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            correlation_id: correlation_id.into(),
+            semantic_event_id: semantic_event_id.into(),
+        }
+    }
+
+    /// Composite dedup key derived from `(correlation_id, semantic_event_id)`.
+    pub(crate) fn dedup_key(&self) -> String {
+        format!("{}::{}", self.correlation_id, self.semantic_event_id)
+    }
+}
+
 /// Where an outbound delivery should land.
 ///
 /// Encoded as a sum type so callers can never accidentally request a thread
@@ -69,11 +98,7 @@ impl OutboundTarget {
 /// without nullable columns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiscordOutboundMessage {
-    /// Caller-supplied grouping key (e.g. `dispatch:42`, `review:7`).
-    pub(crate) correlation_id: String,
-    /// Specific event within the correlation group (e.g.
-    /// `dispatch:42:sent`, `review:7:pass`).
-    pub(crate) semantic_event_id: String,
+    pub(crate) idempotency: OutboundDeliveryId,
     /// Raw message body; length policy is applied by the deliver impl.
     pub(crate) content: String,
     pub(crate) target: OutboundTarget,
@@ -91,8 +116,7 @@ impl DiscordOutboundMessage {
         policy: DiscordOutboundPolicy,
     ) -> Self {
         Self {
-            correlation_id: correlation_id.into(),
-            semantic_event_id: semantic_event_id.into(),
+            idempotency: OutboundDeliveryId::new(correlation_id, semantic_event_id),
             content: content.into(),
             target,
             policy,
@@ -101,7 +125,7 @@ impl DiscordOutboundMessage {
 
     /// Composite dedup key derived from `(correlation_id, semantic_event_id)`.
     pub(crate) fn dedup_key(&self) -> String {
-        format!("{}::{}", self.correlation_id, self.semantic_event_id)
+        self.idempotency.dedup_key()
     }
 }
 
@@ -147,10 +171,18 @@ mod tests {
             OutboundTarget::Channel(ChannelId::new(1)),
             sample_policy(),
         );
-        assert_eq!(msg.correlation_id, "dispatch:7");
-        assert_eq!(msg.semantic_event_id, "dispatch:7:sent");
+        assert_eq!(msg.idempotency.correlation_id, "dispatch:7");
+        assert_eq!(msg.idempotency.semantic_event_id, "dispatch:7:sent");
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.dedup_key(), "dispatch:7::dispatch:7:sent");
+    }
+
+    #[test]
+    fn delivery_id_exposes_correlation_and_semantic_event_keys() {
+        let id = OutboundDeliveryId::new("dispatch:42", "dispatch:42:posted");
+        assert_eq!(id.correlation_id, "dispatch:42");
+        assert_eq!(id.semantic_event_id, "dispatch:42:posted");
+        assert_eq!(id.dedup_key(), "dispatch:42::dispatch:42:posted");
     }
 
     #[test]
