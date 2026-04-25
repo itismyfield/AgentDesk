@@ -211,6 +211,12 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
 │   │   │   └── text_commands.rs
+│   │   ├── outbound/
+│   │   │   ├── legacy.rs
+│   │   │   ├── message.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── policy.rs
+│   │   │   └── result.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
@@ -259,7 +265,6 @@ src/
 │   │   ├── monitoring_status.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
-│   │   ├── outbound.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
