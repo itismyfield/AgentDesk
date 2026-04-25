@@ -110,5 +110,38 @@ automation:
   strategy_mode: "direct-first"
   allowed_authors: "itismyfield,octocat"
 
+# Onboarding wizard / project-agentfactory rules — externalize what was once
+# hardcoded inside the Discord factory prompt. (#1110, Epic #912 Phase P6)
+#
+# - guild_id: optional override. When omitted, onboarding tooling reuses
+#   `discord.guild_id` above.
+# - default_categories: operator-named labels → Discord category (channel)
+#   IDs. The wizard / factory agent picks from these labels rather than
+#   hardcoded numeric IDs.
+# - provider_suffix_map: channel-name suffix → CLI provider id. Mirrors the
+#   dashboard `setupWizardHelpers.ts::PROVIDER_SUFFIX_MAP`. Leave empty to
+#   fall back to the built-in default.
+# - provider_options: providers offered by the wizard's picker (empty =
+#   all built-in providers).
+# - default_provider: provider used when nothing else hints (empty = registry
+#   default, currently `claude`).
+onboarding:
+  guild_id: "1469870512812462284"
+  default_categories:
+    dev: "1474956560391340242"
+    cookingheart: "1474045427740311582"
+    yunhone: "1475110978277478470"
+    notify: "1469870513471094878"
+    content: "1474938030115655722"
+  provider_suffix_map:
+    "-cc": claude
+    "-cdx": codex
+    "-gem": gemini
+    "-qw": qwen
+  provider_options:
+    - claude
+    - codex
+  default_provider: claude
+
 # Dashboard edits still write runtime overrides into kv_meta.
 # On restart, YAML values above are treated as the canonical startup baseline.
