@@ -8,13 +8,29 @@ use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use poise::serenity_prelude::ChannelId;
 
 #[derive(Clone)]
 pub struct QueueService {
     db: Db,
     pg_pool: Option<PgPool>,
+}
+
+#[derive(Debug)]
+struct CancelTurnSessionInfo {
+    session_key: String,
+    dispatch_id: Option<String>,
+    provider_name: Option<String>,
+    agent_id: Option<String>,
+    requested_provider: Option<String>,
+    match_rank: i64,
+}
+
+#[derive(Debug)]
+struct CancelTurnChannelTarget {
+    agent_id: String,
+    requested_provider: Option<String>,
 }
 
 impl QueueService {
@@ -280,83 +296,62 @@ impl QueueService {
         health_registry: Option<&Arc<HealthRegistry>>,
         channel_id: &str,
     ) -> ServiceResult<Value> {
-        let session_info = if let Some(pool) = self.pg_pool.as_ref() {
-            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-                "SELECT session_key, active_dispatch_id, provider
-                 FROM sessions
-                 WHERE status = 'working'
-                   AND (
-                     session_key LIKE '%' || $1 || '%'
-                     OR agent_id IN (
-                       SELECT id FROM agents
-                       WHERE discord_channel_id = $1
-                          OR discord_channel_alt = $1
-                          OR discord_channel_cc = $1
-                          OR discord_channel_cdx = $1
-                     )
-                   )
-                 ORDER BY last_heartbeat DESC
-                 LIMIT 1",
-            )
-            .bind(channel_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                ServiceError::internal(format!("load postgres active turn: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.query_active_session_pg")
-                    .with_context("channel_id", channel_id)
-            })?
-        } else {
-            let conn = self.db.lock().map_err(|error| {
-                ServiceError::internal(format!("{error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.lock")
-                    .with_context("channel_id", channel_id)
-            })?;
-            conn.query_row(
-                "SELECT session_key, active_dispatch_id, provider FROM sessions \
-                 WHERE status = 'working' \
-                 AND (session_key LIKE '%' || ?1 || '%' OR agent_id IN \
-                      (SELECT id FROM agents WHERE
-                          discord_channel_id = ?1 OR discord_channel_alt = ?1 OR
-                          discord_channel_cc = ?1 OR discord_channel_cdx = ?1)) \
-                 ORDER BY last_heartbeat DESC LIMIT 1",
-                [channel_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| {
-                ServiceError::internal(format!("load active turn: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.query_active_session")
-                    .with_context("channel_id", channel_id)
-            })?
-        };
+        let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
+        let session_info = self.load_cancel_turn_session(channel_id).await?;
 
-        let Some((session_key, dispatch_id, provider_name)) = session_info else {
+        let (session_key, dispatch_id, provider_name, agent_id, requested_provider, match_rank) =
+            if let Some(session_info) = session_info {
+                (
+                    Some(session_info.session_key),
+                    session_info.dispatch_id,
+                    session_info.provider_name,
+                    session_info.agent_id,
+                    session_info.requested_provider,
+                    Some(session_info.match_rank),
+                )
+            } else if let Some(channel_target) = channel_target {
+                (
+                    None,
+                    None,
+                    channel_target.requested_provider.clone(),
+                    Some(channel_target.agent_id),
+                    channel_target.requested_provider,
+                    None,
+                )
+            } else {
+                return Err(
+                    ServiceError::not_found("no active turn found for this channel")
+                        .with_code(ErrorCode::Queue)
+                        .with_context("channel_id", channel_id),
+                );
+            };
+
+        let provider_kind = provider_name.as_deref().and_then(ProviderKind::from_str);
+        let parsed_channel_id = channel_id.parse::<u64>().ok().map(ChannelId::new);
+        if session_key.is_none()
+            && (provider_kind.is_none() || parsed_channel_id.is_none() || health_registry.is_none())
+        {
             return Err(
                 ServiceError::not_found("no active turn found for this channel")
                     .with_code(ErrorCode::Queue)
                     .with_context("channel_id", channel_id),
             );
-        };
+        }
 
-        let tmux_name = session_key.split(':').last().unwrap_or(&session_key);
-        let lifecycle = stop_turn_preserving_queue(
+        let tmux_name = session_key
+            .as_deref()
+            .and_then(|session_key| session_key.split(':').next_back())
+            .unwrap_or_default()
+            .to_string();
+        let lifecycle = force_kill_turn(
             health_registry.map(Arc::as_ref),
             &TurnLifecycleTarget {
-                provider: provider_name.as_deref().and_then(ProviderKind::from_str),
-                channel_id: channel_id.parse::<u64>().ok().map(ChannelId::new),
-                tmux_name: tmux_name.to_string(),
+                provider: provider_kind,
+                channel_id: parsed_channel_id,
+                tmux_name: tmux_name.clone(),
             },
             "queue-api cancel_turn",
+            "queue_api_cancel_turn",
         )
         .await;
 
@@ -388,48 +383,59 @@ impl QueueService {
             }
         }
 
-        if let Some(pool) = self.pg_pool.as_ref() {
-            if let Err(error) = sqlx::query(
-                "UPDATE sessions
-                 SET status = 'disconnected',
-                     active_dispatch_id = NULL,
-                     claude_session_id = NULL
-                 WHERE session_key = $1",
-            )
-            .bind(&session_key)
-            .execute(pool)
-            .await
-            {
-                tracing::warn!(
-                    session_key,
-                    "failed to mark postgres session disconnected during cancel_turn: {error}"
-                );
-            }
-        } else if let Ok(conn) = self.db.lock() {
-            if let Err(error) = conn.execute(
-                "UPDATE sessions
-                 SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
-                 WHERE session_key = ?1",
-                [&session_key],
-            ) {
-                tracing::warn!(
-                    session_key,
-                    "failed to mark sqlite session disconnected during cancel_turn: {error}"
-                );
+        if let Some(session_key) = session_key.as_deref() {
+            if let Some(pool) = self.pg_pool.as_ref() {
+                if let Err(error) = sqlx::query(
+                    "UPDATE sessions
+                     SET status = 'disconnected',
+                         active_dispatch_id = NULL,
+                         claude_session_id = NULL
+                     WHERE session_key = $1",
+                )
+                .bind(session_key)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(
+                        session_key,
+                        "failed to mark postgres session disconnected during cancel_turn: {error}"
+                    );
+                }
+            } else if let Ok(conn) = self.db.lock() {
+                if let Err(error) = conn.execute(
+                    "UPDATE sessions
+                     SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+                     WHERE session_key = ?1",
+                    [session_key],
+                ) {
+                    tracing::warn!(
+                        session_key,
+                        "failed to mark sqlite session disconnected during cancel_turn: {error}"
+                    );
+                }
             }
         }
 
+        let exact_channel_match = match_rank.is_none_or(|rank| rank <= 2);
         tracing::info!(
-            "[queue-api] Cancelled turn: session={}, tmux={}, killed={}, dispatch={:?}, lifecycle={}",
+            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}",
+            channel_id,
             session_key,
             tmux_name,
             lifecycle.tmux_killed,
             dispatch_id,
             lifecycle.lifecycle_path,
+            agent_id,
+            requested_provider,
+            exact_channel_match,
         );
 
         Ok(json!({
             "ok": true,
+            "channel_id": channel_id,
+            "agent_id": agent_id,
+            "requested_provider": requested_provider,
+            "exact_channel_match": exact_channel_match,
             "session_key": session_key,
             "tmux_session": tmux_name,
             "tmux_killed": lifecycle.tmux_killed,
@@ -439,5 +445,236 @@ impl QueueService {
             "inflight_cleared": lifecycle.inflight_cleared,
             "dispatch_cancelled": dispatch_id,
         }))
+    }
+
+    async fn resolve_cancel_turn_channel_target(
+        &self,
+        channel_id: &str,
+    ) -> ServiceResult<Option<CancelTurnChannelTarget>> {
+        if let Some(pool) = self.pg_pool.as_ref() {
+            return sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT id,
+                        CASE
+                          WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
+                          WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
+                          ELSE NULL
+                        END AS requested_provider
+                 FROM agents
+                 WHERE discord_channel_id = $1
+                    OR discord_channel_alt = $1
+                    OR discord_channel_cc = $1
+                    OR discord_channel_cdx = $1
+                 LIMIT 1",
+            )
+            .bind(channel_id)
+            .fetch_optional(pool)
+            .await
+            .map(|row| {
+                row.map(|(agent_id, requested_provider)| CancelTurnChannelTarget {
+                    agent_id,
+                    requested_provider,
+                })
+            })
+            .map_err(|error| {
+                ServiceError::internal(format!("load postgres cancel channel target: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.query_channel_target_pg")
+                    .with_context("channel_id", channel_id)
+            });
+        }
+
+        let conn = self.db.lock().map_err(|error| {
+            ServiceError::internal(format!("{error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("cancel_turn.lock_channel_target")
+                .with_context("channel_id", channel_id)
+        })?;
+        conn.query_row(
+            "SELECT id,
+                    CASE
+                      WHEN discord_channel_cc = ?1 OR discord_channel_id = ?1 THEN 'claude'
+                      WHEN discord_channel_cdx = ?1 OR discord_channel_alt = ?1 THEN 'codex'
+                      ELSE NULL
+                    END AS requested_provider
+             FROM agents
+             WHERE discord_channel_id = ?1
+                OR discord_channel_alt = ?1
+                OR discord_channel_cc = ?1
+                OR discord_channel_cdx = ?1
+             LIMIT 1",
+            [channel_id],
+            |row| {
+                Ok(CancelTurnChannelTarget {
+                    agent_id: row.get(0)?,
+                    requested_provider: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            ServiceError::internal(format!("load cancel channel target: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("cancel_turn.query_channel_target")
+                .with_context("channel_id", channel_id)
+        })
+    }
+
+    async fn load_cancel_turn_session(
+        &self,
+        channel_id: &str,
+    ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
+        if let Some(pool) = self.pg_pool.as_ref() {
+            return sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    i64,
+                ),
+            >(
+                "WITH channel_agent AS (
+                   SELECT id AS agent_id,
+                          CASE
+                            WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
+                            WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
+                            ELSE NULL
+                          END AS requested_provider
+                   FROM agents
+                   WHERE discord_channel_id = $1
+                      OR discord_channel_alt = $1
+                      OR discord_channel_cc = $1
+                      OR discord_channel_cdx = $1
+                   LIMIT 1
+                 )
+                 SELECT s.session_key,
+                        s.active_dispatch_id,
+                        s.provider,
+                        s.agent_id,
+                        ca.requested_provider,
+                        CASE
+                          WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
+                          WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
+                          WHEN ca.requested_provider IS NOT NULL
+                               AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
+                          ELSE 3
+                        END::BIGINT AS match_rank
+                 FROM sessions s
+                 LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
+                 WHERE s.status = 'working'
+                   AND (
+                     COALESCE(s.thread_channel_id, '') = $1
+                     OR s.session_key LIKE '%' || $1 || '%'
+                     OR (
+                       ca.agent_id IS NOT NULL
+                       AND (
+                         ca.requested_provider IS NULL
+                         OR COALESCE(s.provider, '') = ca.requested_provider
+                       )
+                     )
+                   )
+                 ORDER BY match_rank ASC, s.last_heartbeat DESC
+                 LIMIT 1",
+            )
+            .bind(channel_id)
+            .fetch_optional(pool)
+            .await
+            .map(|row| {
+                row.map(
+                    |(
+                        session_key,
+                        dispatch_id,
+                        provider_name,
+                        agent_id,
+                        requested_provider,
+                        match_rank,
+                    )| CancelTurnSessionInfo {
+                        session_key,
+                        dispatch_id,
+                        provider_name,
+                        agent_id,
+                        requested_provider,
+                        match_rank,
+                    },
+                )
+            })
+            .map_err(|error| {
+                ServiceError::internal(format!("load postgres active turn: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.query_active_session_pg")
+                    .with_context("channel_id", channel_id)
+            });
+        } else {
+            let conn = self.db.lock().map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.lock")
+                    .with_context("channel_id", channel_id)
+            })?;
+            conn.query_row(
+                "WITH channel_agent AS (
+                   SELECT id AS agent_id,
+                          CASE
+                            WHEN discord_channel_cc = ?1 OR discord_channel_id = ?1 THEN 'claude'
+                            WHEN discord_channel_cdx = ?1 OR discord_channel_alt = ?1 THEN 'codex'
+                            ELSE NULL
+                          END AS requested_provider
+                   FROM agents
+                   WHERE discord_channel_id = ?1
+                      OR discord_channel_alt = ?1
+                      OR discord_channel_cc = ?1
+                      OR discord_channel_cdx = ?1
+                   LIMIT 1
+                 )
+                 SELECT s.session_key,
+                        s.active_dispatch_id,
+                        s.provider,
+                        s.agent_id,
+                        ca.requested_provider,
+                        CASE
+                          WHEN COALESCE(s.thread_channel_id, '') = ?1 THEN 0
+                          WHEN s.session_key LIKE '%' || ?1 || '%' THEN 1
+                          WHEN ca.requested_provider IS NOT NULL
+                               AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
+                          ELSE 3
+                        END AS match_rank
+                 FROM sessions s
+                 LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
+                 WHERE s.status = 'working'
+                   AND (
+                     COALESCE(s.thread_channel_id, '') = ?1
+                     OR s.session_key LIKE '%' || ?1 || '%'
+                     OR (
+                       ca.agent_id IS NOT NULL
+                       AND (
+                         ca.requested_provider IS NULL
+                         OR COALESCE(s.provider, '') = ca.requested_provider
+                       )
+                     )
+                   )
+                 ORDER BY match_rank ASC, s.last_heartbeat DESC
+                 LIMIT 1",
+                [channel_id],
+                |row| {
+                    Ok(CancelTurnSessionInfo {
+                        session_key: row.get(0)?,
+                        dispatch_id: row.get(1)?,
+                        provider_name: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        requested_provider: row.get(4)?,
+                        match_rank: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| {
+                ServiceError::internal(format!("load active turn: {error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.query_active_session")
+                    .with_context("channel_id", channel_id)
+            })
+        }
     }
 }

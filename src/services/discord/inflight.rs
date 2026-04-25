@@ -500,7 +500,7 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
     atomic_write(&path, &json)
 }
 
-pub(super) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) {
+pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) {
     let Some(root) = inflight_runtime_root() else {
         return;
     };

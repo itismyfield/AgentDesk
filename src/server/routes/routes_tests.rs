@@ -2119,12 +2119,13 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["tmux_session"], tmux_name);
-    assert_eq!(json["tmux_killed"], false);
+    assert_eq!(json["tmux_killed"], true);
     assert_eq!(json["lifecycle_path"], "direct-fallback");
     assert_eq!(json["dispatch_cancelled"], "dispatch-turn-cancel");
+    assert_eq!(json["exact_channel_match"], true);
     assert!(
-        tmux_still_alive,
-        "tmux session should remain after /turns/{{channel_id}}/cancel"
+        !tmux_still_alive,
+        "tmux session should be killed after /turns/{{channel_id}}/cancel"
     );
 
     let conn = db.lock().unwrap();
@@ -2210,6 +2211,8 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["queue_preserved"], true);
+    assert_eq!(json["inflight_cleared"], true);
+    assert_eq!(json["exact_channel_match"], true);
     assert!(json["dispatch_cancelled"].is_null());
 
     let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
@@ -2217,13 +2220,10 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
     assert!(harness.has_dispatch_role_override(channel_num));
+    assert!(!harness.has_watcher(channel_num));
     assert!(
-        harness.has_watcher(channel_num),
-        "cancel with tmux_killed=false must keep watcher attached"
-    );
-    assert!(
-        !watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
-        "cancel with tmux_killed=false must not signal watcher cancellation"
+        watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "cancel must signal watcher cancellation"
     );
 
     let conn = db.lock().unwrap();
@@ -2235,6 +2235,90 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
         )
         .unwrap();
     assert_eq!(session_status, "disconnected");
+}
+
+#[tokio::test]
+async fn cancel_turn_targets_requested_provider_for_paired_agent() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let cc_channel_id = "1479671298497183835";
+    let cdx_channel_id = "1479671301387059200";
+    let cc_session_key = "mac-mini:AgentDesk-claude-adk-cc";
+    let cdx_session_key = "mac-mini:AgentDesk-codex-adk-cdx";
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx, created_at, updated_at
+             )
+             VALUES (
+                'project-agentdesk', 'AgentDesk', 'codex', ?1, ?2, ?1, ?2,
+                datetime('now'), datetime('now')
+             )",
+            [cc_channel_id, cdx_channel_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'project-agentdesk', 'claude', 'working', datetime('now', '-1 minute'), datetime('now'))",
+            [cc_session_key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'project-agentdesk', 'codex', 'working', datetime('now'), datetime('now'))",
+            [cdx_session_key],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/turns/{cc_channel_id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body_text}");
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["channel_id"], cc_channel_id);
+    assert_eq!(json["agent_id"], "project-agentdesk");
+    assert_eq!(json["requested_provider"], "claude");
+    assert_eq!(json["exact_channel_match"], true);
+    assert_eq!(json["session_key"], cc_session_key);
+    assert_eq!(json["tmux_session"], "AgentDesk-claude-adk-cc");
+
+    let conn = db.lock().unwrap();
+    let cc_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [cc_session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let cdx_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [cdx_session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cc_status, "disconnected");
+    assert_eq!(cdx_status, "working");
 }
 
 #[tokio::test]

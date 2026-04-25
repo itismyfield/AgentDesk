@@ -96,9 +96,8 @@ use formatting::{
     send_long_message_raw, truncate_str,
 };
 use handoff::{clear_handoff, load_handoffs, update_handoff_state};
-use inflight::{
-    InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
-};
+pub(crate) use inflight::clear_inflight_state;
+use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
 use prompt_builder::build_system_prompt;
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;

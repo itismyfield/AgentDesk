@@ -149,11 +149,17 @@ async fn stop_turn_with_policy(
         false
     };
 
-    let inflight_cleared = cleanup_policy.should_clear_inflight()
-        && target
-            .provider
-            .as_ref()
-            .is_some_and(|provider| clear_inflight_by_tmux_name(provider, &target.tmux_name));
+    let inflight_cleared = if cleanup_policy.should_clear_inflight() {
+        target.provider.as_ref().is_some_and(|provider| {
+            clear_inflight_by_tmux_name(provider, &target.tmux_name)
+                || target.channel_id.is_some_and(|channel_id| {
+                    clear_inflight_by_channel(provider, channel_id);
+                    true
+                })
+        })
+    } else {
+        false
+    };
 
     TurnLifecycleStopResult {
         lifecycle_path,
@@ -174,6 +180,10 @@ async fn stop_turn_with_policy(
 /// existing call sites in this module continue to read naturally.
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
     crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
+}
+
+fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) {
+    crate::services::discord::clear_inflight_state(provider, channel_id.get())
 }
 
 #[cfg(test)]
