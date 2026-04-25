@@ -211,6 +211,7 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
         build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
         filter_codex_tool_logs, normalize_allowed_tools, preserve_previous_tool_status,
     };
@@ -841,6 +842,106 @@ mod tests {
         );
         assert!(placeholder.len() <= super::THINKING_STATUS_MAX_BYTES + 16);
         assert!(placeholder.ends_with('…'));
+    }
+
+    #[test]
+    fn test_build_monitor_handoff_placeholder_active_with_tool() {
+        let text = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            Some("⚙ Bash: cargo build"),
+            None,
+        );
+        let expected = concat!(
+            "🔄 **백그라운드 처리 중**\n",
+            "> **도구**: ⚙ Bash: cargo build · **사유**: 비동기 dispatch\n",
+            "> **시작**: <t:1700000000:R>\n",
+            "완료 시 이 채널로 결과 이어서 보냅니다.",
+        );
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn test_build_monitor_handoff_placeholder_active_with_command_field() {
+        let text = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::ExplicitCall,
+            1_700_000_000,
+            Some("Bash"),
+            Some("cargo test --package agentdesk -- --nocapture"),
+        );
+        assert!(text.starts_with("🔄 **백그라운드 처리 중**\n"));
+        assert!(text.contains("**도구**: Bash · **사유**: 명시 호출"));
+        assert!(text.contains("**명령**: `cargo test --package agentdesk -- --nocapture`"));
+        assert!(text.contains("<t:1700000000:R>"));
+    }
+
+    #[test]
+    fn test_build_monitor_handoff_placeholder_terminal_states() {
+        let completed = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Completed,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            None,
+            None,
+        );
+        assert!(completed.starts_with("✅ **백그라운드 완료**\n"));
+        assert!(completed.contains("**도구**: —"));
+        assert!(completed.contains("결과가 위에 도착했습니다."));
+
+        let failed = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Failed {
+                reason: "exit code 137",
+            },
+            MonitorHandoffReason::InlineTimeout,
+            1_700_000_000,
+            None,
+            None,
+        );
+        assert!(failed.starts_with("❌ **백그라운드 실패**: exit code 137\n"));
+        assert!(failed.contains("**사유**: 인라인 타임아웃"));
+
+        let timed_out = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::TimedOut,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            None,
+            None,
+        );
+        assert!(timed_out.starts_with("⏱ **백그라운드 타임아웃**\n"));
+
+        let aborted = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Aborted,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            None,
+            None,
+        );
+        assert!(aborted.starts_with("⚠ **백그라운드 중단** (모니터 연결 끊김)\n"));
+    }
+
+    #[test]
+    fn test_build_monitor_handoff_placeholder_truncates_long_tool_and_command() {
+        let long_tool = "⚙ Read: ".to_string() + &"x".repeat(500);
+        let long_command = "y".repeat(500);
+        let text = build_monitor_handoff_placeholder(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            Some(&long_tool),
+            Some(&long_command),
+        );
+        // Each truncated field should fit in MONITOR_HANDOFF_*_MAX_BYTES + ellipsis,
+        // which is 80 + len("…") = 83 bytes. Verify indirectly by checking the
+        // ellipsis is present and the overall message is well below Discord's
+        // 2000-char limit.
+        assert!(text.contains('…'));
+        assert!(
+            text.len() < 500,
+            "expected truncated output, got {} bytes",
+            text.len()
+        );
     }
 }
 
@@ -1834,6 +1935,132 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
     }
     // Everything else: show the raw tool line, truncated more aggressively.
     truncate_for_status_bytes(tool_line, TOOL_STATUS_MAX_BYTES)
+}
+
+/// Reason label shown in the monitor handoff placeholder. Mirrors the issue
+/// #1114 spec: 비동기 dispatch (tmux watcher), 인라인 타임아웃 (timeout
+/// before stream end), 명시 호출 (explicit `/monitor`-style invocation).
+/// `InlineTimeout` and `ExplicitCall` are exposed for downstream wiring
+/// (#1113 lifecycle, #1115 sweeper) and are exercised via tests today.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(super) enum MonitorHandoffReason {
+    AsyncDispatch,
+    InlineTimeout,
+    ExplicitCall,
+}
+
+impl MonitorHandoffReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AsyncDispatch => "비동기 dispatch",
+            Self::InlineTimeout => "인라인 타임아웃",
+            Self::ExplicitCall => "명시 호출",
+        }
+    }
+}
+
+/// Lifecycle status of a monitor handoff placeholder. Drives the leading
+/// emoji/title pair shown to the user. Terminal variants (Completed / Failed
+/// / TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper,
+/// watcher terminal updates) and are exercised via tests today.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(super) enum MonitorHandoffStatus<'a> {
+    Active,
+    Completed,
+    Failed { reason: &'a str },
+    TimedOut,
+    Aborted,
+}
+
+const MONITOR_HANDOFF_TOOL_MAX_BYTES: usize = 80;
+const MONITOR_HANDOFF_COMMAND_MAX_BYTES: usize = 80;
+
+fn monitor_handoff_header(status: MonitorHandoffStatus<'_>) -> String {
+    match status {
+        MonitorHandoffStatus::Active => "🔄 **백그라운드 처리 중**".to_string(),
+        MonitorHandoffStatus::Completed => "✅ **백그라운드 완료**".to_string(),
+        MonitorHandoffStatus::Failed { reason } => {
+            let trimmed = reason.trim();
+            if trimmed.is_empty() {
+                "❌ **백그라운드 실패**".to_string()
+            } else {
+                let truncated =
+                    truncate_for_status_bytes(trimmed, MONITOR_HANDOFF_COMMAND_MAX_BYTES);
+                format!("❌ **백그라운드 실패**: {truncated}")
+            }
+        }
+        MonitorHandoffStatus::TimedOut => "⏱ **백그라운드 타임아웃**".to_string(),
+        MonitorHandoffStatus::Aborted => "⚠ **백그라운드 중단** (모니터 연결 끊김)".to_string(),
+    }
+}
+
+fn monitor_handoff_footer(status: MonitorHandoffStatus<'_>) -> &'static str {
+    match status {
+        MonitorHandoffStatus::Active => "완료 시 이 채널로 결과 이어서 보냅니다.",
+        MonitorHandoffStatus::Completed => "결과가 위에 도착했습니다.",
+        MonitorHandoffStatus::Failed { .. } => "자세한 사유는 다음 응답을 확인해 주세요.",
+        MonitorHandoffStatus::TimedOut => "타임아웃 임계를 넘어 종료되었습니다.",
+        MonitorHandoffStatus::Aborted => "브릿지 또는 세션이 종료되었습니다.",
+    }
+}
+
+/// Build the placeholder content shown when a turn hands off to the tmux
+/// watcher (or another async monitor) for completion. Layout uses Discord
+/// markdown rather than a real `CreateEmbed` — Discord's PATCH semantics
+/// preserve existing embeds across `EditMessage::content(...)` updates, so
+/// using a true embed would require coordinated `.embeds(vec![])` clears at
+/// every downstream edit/replace path. Markdown content satisfies the same
+/// information-density goal while keeping watcher edit/replace paths
+/// agnostic. The `<t:UNIX:R>` tag renders as a Discord-native relative
+/// timestamp on the client, so we don't need server-side periodic refresh.
+pub(super) fn build_monitor_handoff_placeholder(
+    status: MonitorHandoffStatus<'_>,
+    reason: MonitorHandoffReason,
+    started_at_unix: i64,
+    tool_summary: Option<&str>,
+    command_summary: Option<&str>,
+) -> String {
+    let header = monitor_handoff_header(status);
+    let footer = monitor_handoff_footer(status);
+
+    let tool_field = tool_summary
+        .map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                "—".to_string()
+            } else {
+                truncate_for_status_bytes(trimmed, MONITOR_HANDOFF_TOOL_MAX_BYTES)
+            }
+        })
+        .unwrap_or_else(|| "—".to_string());
+
+    let command_line = command_summary.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(truncate_for_status_bytes(
+                trimmed,
+                MONITOR_HANDOFF_COMMAND_MAX_BYTES,
+            ))
+        }
+    });
+
+    let mut lines = Vec::with_capacity(5);
+    lines.push(header);
+    lines.push(format!(
+        "> **도구**: {tool_field} · **사유**: {reason}",
+        reason = reason.label()
+    ));
+    if let Some(command) = command_line {
+        lines.push(format!("> **명령**: `{command}`"));
+    }
+    lines.push(format!("> **시작**: <t:{started_at_unix}:R>"));
+    lines.push(footer.to_string());
+
+    lines.join("\n")
 }
 
 /// Build the spinner/status block shown in Discord placeholders.
