@@ -6,10 +6,10 @@
 //! future transport implementation can execute without re-encoding policy
 //! branches at every callsite.
 
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{ChannelId, UserId};
 use serde::{Deserialize, Serialize};
 
-use super::message::{DiscordOutboundMessage, OutboundTarget};
+use super::message::{DiscordOutboundMessage, OutboundDedupKey, OutboundTarget};
 use super::policy::{FallbackPolicy, LengthStrategy};
 use super::result::FallbackUsed;
 
@@ -66,14 +66,24 @@ pub(crate) enum LengthPolicyDecision {
     Compact {
         char_count: usize,
         compact_char_limit: usize,
+        summary_available: bool,
         fallback_used: FallbackUsed,
     },
     FileAttachment {
         char_count: usize,
         filename: String,
         content_type: String,
+        supplied_attachment: bool,
         fallback_used: FallbackUsed,
     },
+}
+
+/// Resolved primary delivery surface before transport-specific setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PrimaryDeliveryTarget {
+    Channel(ChannelId),
+    DmUser(UserId),
 }
 
 /// Target fallback plan to apply if primary delivery fails because a thread
@@ -91,8 +101,8 @@ pub(crate) enum ThreadFallbackDecision {
 /// Complete pure policy decision for the current outbound envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DiscordOutboundPolicyDecision {
-    pub(crate) dedup_key: String,
-    pub(crate) primary_channel: ChannelId,
+    pub(crate) dedup_key: OutboundDedupKey,
+    pub(crate) primary_target: PrimaryDeliveryTarget,
     pub(crate) length: LengthPolicyDecision,
     pub(crate) thread_fallback: ThreadFallbackDecision,
 }
@@ -107,23 +117,22 @@ pub(crate) fn decide_policy_with_limits(
 ) -> DiscordOutboundPolicyDecision {
     DiscordOutboundPolicyDecision {
         dedup_key: message.dedup_key(),
-        primary_channel: message.target.delivery_channel(),
-        length: decide_length(&message.content, message.policy.length_strategy, limits),
+        primary_target: decide_primary_target(message.target),
+        length: decide_length(message, limits),
         thread_fallback: decide_thread_fallback(message.target, message.policy.fallback),
     }
 }
 
 fn decide_length(
-    content: &str,
-    strategy: LengthStrategy,
+    message: &DiscordOutboundMessage,
     limits: OutboundPolicyLimits,
 ) -> LengthPolicyDecision {
-    let char_count = content.chars().count();
+    let char_count = message.content.chars().count();
     if char_count <= limits.inline_char_limit {
         return LengthPolicyDecision::Inline { char_count };
     }
 
-    match strategy {
+    match message.policy.length_strategy {
         LengthStrategy::Split => {
             let chunk_limit = limits.split_chunk_char_limit.max(1);
             LengthPolicyDecision::Split {
@@ -136,14 +145,31 @@ fn decide_length(
         LengthStrategy::Compact => LengthPolicyDecision::Compact {
             char_count,
             compact_char_limit: limits.compact_char_limit.max(1),
+            summary_available: message.summary.is_some(),
             fallback_used: FallbackUsed::LengthCompacted,
         },
-        LengthStrategy::FileAttachment => LengthPolicyDecision::FileAttachment {
-            char_count,
-            filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
-            content_type: TEXT_ATTACHMENT_CONTENT_TYPE.to_string(),
-            fallback_used: FallbackUsed::FileAttachment,
-        },
+        LengthStrategy::FileAttachment => {
+            let attachment = message.attachments.first();
+            LengthPolicyDecision::FileAttachment {
+                char_count,
+                filename: attachment
+                    .map(|value| value.filename.clone())
+                    .unwrap_or_else(|| DEFAULT_TEXT_ATTACHMENT_NAME.to_string()),
+                content_type: attachment
+                    .map(|value| value.content_type.clone())
+                    .unwrap_or_else(|| TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
+                supplied_attachment: attachment.is_some(),
+                fallback_used: FallbackUsed::FileAttachment,
+            }
+        }
+    }
+}
+
+fn decide_primary_target(target: OutboundTarget) -> PrimaryDeliveryTarget {
+    match target {
+        OutboundTarget::Channel(channel) => PrimaryDeliveryTarget::Channel(channel),
+        OutboundTarget::Thread { thread, .. } => PrimaryDeliveryTarget::Channel(thread),
+        OutboundTarget::DmUser(user) => PrimaryDeliveryTarget::DmUser(user),
     }
 }
 
@@ -165,7 +191,9 @@ fn decide_thread_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::outbound::message::DiscordOutboundMessage;
+    use crate::services::discord::outbound::message::{
+        DiscordOutboundMessage, OutboundOperationKey, OutboundTargetKey,
+    };
     use crate::services::discord::outbound::policy::{
         DiscordOutboundPolicy, FallbackPolicy, LengthStrategy,
     };
@@ -204,7 +232,17 @@ mod tests {
                 fallback_used: FallbackUsed::LengthSplit,
             }
         );
-        assert_eq!(decision.dedup_key, "dispatch:1164::dispatch:1164:posted");
+        assert_eq!(
+            decision.dedup_key,
+            OutboundDedupKey {
+                correlation_id: "dispatch:1164".into(),
+                semantic_event_id: "dispatch:1164:posted".into(),
+                target: OutboundTargetKey::Channel {
+                    channel: ChannelId::new(10),
+                },
+                operation: OutboundOperationKey::Send,
+            }
+        );
     }
 
     #[test]
@@ -218,10 +256,32 @@ mod tests {
             LengthPolicyDecision::Compact {
                 char_count: 11,
                 compact_char_limit: 5,
+                summary_available: false,
                 fallback_used: FallbackUsed::LengthCompacted,
             }
         );
-        assert_eq!(decision.primary_channel, ChannelId::new(10));
+        assert_eq!(
+            decision.primary_target,
+            PrimaryDeliveryTarget::Channel(ChannelId::new(10))
+        );
+    }
+
+    #[test]
+    fn compact_policy_decision_records_summary_availability() {
+        let msg = message_with_policy(policy(LengthStrategy::Compact, FallbackPolicy::None))
+            .with_summary("summary");
+
+        let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(5));
+
+        assert_eq!(
+            decision.length,
+            LengthPolicyDecision::Compact {
+                char_count: 11,
+                compact_char_limit: 5,
+                summary_available: true,
+                fallback_used: FallbackUsed::LengthCompacted,
+            }
+        );
     }
 
     #[test]
@@ -236,6 +296,26 @@ mod tests {
                 char_count: 11,
                 filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
                 content_type: TEXT_ATTACHMENT_CONTENT_TYPE.to_string(),
+                supplied_attachment: false,
+                fallback_used: FallbackUsed::FileAttachment,
+            }
+        );
+    }
+
+    #[test]
+    fn file_attachment_policy_decision_uses_supplied_attachment_input() {
+        let msg = message_with_policy(policy(LengthStrategy::FileAttachment, FallbackPolicy::None))
+            .with_attachment("report.md", "text/markdown", "payload");
+
+        let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(5));
+
+        assert_eq!(
+            decision.length,
+            LengthPolicyDecision::FileAttachment {
+                char_count: 11,
+                filename: "report.md".into(),
+                content_type: "text/markdown".into(),
+                supplied_attachment: true,
                 fallback_used: FallbackUsed::FileAttachment,
             }
         );
@@ -268,7 +348,10 @@ mod tests {
 
         let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(20));
 
-        assert_eq!(decision.primary_channel, ChannelId::new(101));
+        assert_eq!(
+            decision.primary_target,
+            PrimaryDeliveryTarget::Channel(ChannelId::new(101))
+        );
         assert_eq!(
             decision.thread_fallback,
             ThreadFallbackDecision::RetryParent {
@@ -287,6 +370,25 @@ mod tests {
 
         let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(20));
 
+        assert_eq!(decision.thread_fallback, ThreadFallbackDecision::None);
+    }
+
+    #[test]
+    fn dm_target_policy_decision_keeps_user_target() {
+        let msg = DiscordOutboundMessage::new(
+            "dm:7",
+            "dm:7:notice",
+            "short",
+            OutboundTarget::DmUser(UserId::new(7)),
+            policy(LengthStrategy::Split, FallbackPolicy::None),
+        );
+
+        let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(20));
+
+        assert_eq!(
+            decision.primary_target,
+            PrimaryDeliveryTarget::DmUser(UserId::new(7))
+        );
         assert_eq!(decision.thread_fallback, ThreadFallbackDecision::None);
     }
 }
