@@ -27,6 +27,7 @@ DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
+STAGED_BINARY=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -173,6 +174,9 @@ ${summary}"
 
 _cleanup_on_exit() {
     local status=$?
+    if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
+        rm -f "$STAGED_BINARY" 2>/dev/null || true
+    fi
     _finalize_detached_helper "$status"
 }
 
@@ -213,6 +217,7 @@ export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
+export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
@@ -380,6 +385,15 @@ if [ "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" != "1" ] && [ -z "${AGENTDESK_DEPLO
     fi
 fi
 
+# Copy and sign the binary before stopping release. This keeps a missing
+# certificate or failed codesign from taking down a healthy dcserver.
+echo "▸ Staging signed binary from $SOURCE_BINARY..."
+STAGED_BINARY="$(_staged_deploy_binary_path)"
+cp "$SOURCE_BINARY" "$STAGED_BINARY"
+chmod +x "$STAGED_BINARY"
+xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
+sign_binary_with_fallback "$STAGED_BINARY"
+
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
@@ -405,18 +419,12 @@ else
     sleep 2
 fi
 
-# Copy binary from the release build output — atomic: sign in tmp, then mv
-# to replace the inode. In-place codesign can corrupt the OS signing cache
-# if it fails mid-write, causing SIGKILL on subsequent launches even though
-# the binary is valid.
-echo "▸ Copying binary from $SOURCE_BINARY..."
-STAGED_BINARY="$(_staged_deploy_binary_path)"
+# Promote the already signed staged binary atomically. In-place codesign can
+# corrupt the OS signing cache if it fails mid-write.
+echo "▸ Promoting staged binary..."
 chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-cp "$SOURCE_BINARY" "$STAGED_BINARY"
-chmod +x "$STAGED_BINARY"
-xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
-sign_binary_with_fallback "$STAGED_BINARY"
 mv -f "$STAGED_BINARY" "$ADK_REL/bin/agentdesk"
+STAGED_BINARY=""
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_REL/bin/agentdesk"
 
