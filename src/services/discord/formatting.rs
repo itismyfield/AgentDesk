@@ -2142,9 +2142,8 @@ pub(super) async fn replace_long_message_raw(
 
 /// Split a message into chunks that fit within Discord's 2000 char limit.
 /// Handles code block boundaries correctly. Used by stream/slash-command/recovery
-/// paths where overflow is delivered as additional inline messages. The
-/// agent-to-agent `/api/send` path uses [`build_long_message_attachment`]
-/// instead so recipient bots receive a single self-contained message + `.txt`.
+/// paths where overflow is delivered as additional inline messages. The manual
+/// `/api/send` route uses the shared outbound API length policy instead.
 ///
 /// Emits structured `tracing::debug!` logs at `target: "discord::chunker"` for
 /// every chunk produced (chunk_index, byte_len, boundary_kind, in_code_block).

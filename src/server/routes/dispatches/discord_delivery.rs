@@ -311,6 +311,7 @@ pub(crate) trait DispatchTransport: Send + Sync {
     fn send_review_followup(
         &self,
         db: Option<crate::db::Db>,
+        review_dispatch_id: String,
         card_id: String,
         channel_id_num: u64,
         message: String,
@@ -399,6 +400,7 @@ impl DispatchTransport for HttpDispatchTransport {
     fn send_review_followup(
         &self,
         db: Option<crate::db::Db>,
+        review_dispatch_id: String,
         card_id: String,
         channel_id_num: u64,
         message: String,
@@ -413,6 +415,7 @@ impl DispatchTransport for HttpDispatchTransport {
             send_review_result_message_via_http(
                 db.as_ref(),
                 transport.pg_pool.as_ref(),
+                &review_dispatch_id,
                 &card_id,
                 channel_id_num,
                 &message,
@@ -3572,6 +3575,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
     transport
         .send_review_followup(
             db.cloned(),
+            review_dispatch_id.to_string(),
             card_id.to_string(),
             channel_id_num,
             message,
@@ -3652,6 +3656,7 @@ fn create_review_decision_followup_dispatch_sqlite_test(
 async fn send_review_result_message_via_http(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
+    review_dispatch_id: &str,
     card_id: &str,
     channel_id_num: u64,
     message: &str,
@@ -3680,20 +3685,19 @@ async fn send_review_result_message_via_http(
 
     let outbound_client =
         HttpOutboundClient::new(client, token.to_string(), discord_api_base.to_string());
-    // Correlation ids are attached for observability + future DB-backed dedup;
-    // an ephemeral per-call deduper is used here so process-local state does
-    // not silently swallow legitimate repeated notifications. Follow-up slices
-    // will wire a shared DB-backed store keyed on these correlation ids.
-    let dedup = crate::services::discord::outbound::OutboundDeduper::new();
-    let semantic_event_id = match kind {
-        ReviewFollowupKind::Pass => format!("review:{card_id}:pass"),
-        ReviewFollowupKind::Unknown => format!("review:{card_id}:unknown"),
+    let dedup = review_followup_deduper();
+    let event_kind = match kind {
+        ReviewFollowupKind::Pass => "pass",
+        ReviewFollowupKind::Unknown => "unknown",
     };
     let outbound_msg = DiscordOutboundMessage::new(target_channel.clone(), message)
-        .with_correlation(format!("review:{card_id}"), semantic_event_id);
+        .with_correlation(
+            format!("review:{card_id}"),
+            format!("review:{review_dispatch_id}:{event_kind}:{discord_api_base}"),
+        );
     let policy = DiscordOutboundPolicy::review_notification(None);
 
-    match deliver_outbound(&outbound_client, &dedup, outbound_msg, policy).await {
+    match deliver_outbound(&outbound_client, dedup, outbound_msg, policy).await {
         DeliveryResult::Success { .. } | DeliveryResult::Fallback { .. } => Ok(()),
         DeliveryResult::Skipped { .. } => {
             // Duplicate suppression is a success for the caller.
@@ -3708,6 +3712,11 @@ async fn send_review_result_message_via_http(
             )),
         },
     }
+}
+
+fn review_followup_deduper() -> &'static crate::services::discord::outbound::OutboundDeduper {
+    static DEDUPER: OnceLock<crate::services::discord::outbound::OutboundDeduper> = OnceLock::new();
+    DEDUPER.get_or_init(crate::services::discord::outbound::OutboundDeduper::new)
 }
 
 #[cfg(test)]
@@ -5308,6 +5317,67 @@ mod tests {
                 "POST /channels/thread-primary/messages",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn review_notification_dedupes_same_dispatch_event() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        insert_review_followup_fixture(&db);
+
+        for _ in 0..2 {
+            send_review_result_message_via_http(
+                Some(&db),
+                None,
+                "review-1166-dedup",
+                "card-review",
+                123,
+                "✅ [리뷰 통과] Review Card — done으로 이동",
+                ReviewFollowupKind::Pass,
+                "announce-token",
+                &base_url,
+            )
+            .await
+            .unwrap();
+        }
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        let post_count = state
+            .calls
+            .iter()
+            .filter(|call| call.as_str() == "POST /channels/thread-primary/messages")
+            .count();
+        assert_eq!(post_count, 1, "duplicate review event must not post twice");
+    }
+
+    #[tokio::test]
+    async fn review_notification_truncates_over_2000_chars() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        insert_review_followup_fixture(&db);
+        let message = format!("{}{}", "✅ [리뷰 통과] ", "A".repeat(2_100));
+
+        send_review_result_message_via_http(
+            Some(&db),
+            None,
+            "review-1166-overflow",
+            "card-review",
+            123,
+            &message,
+            ReviewFollowupKind::Pass,
+            "announce-token",
+            &base_url,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(state.posted_messages.len(), 1);
+        let posted = &state.posted_messages[0].1;
+        assert!(posted.chars().count() <= 2_000);
+        assert!(posted.contains("[… truncated]"));
     }
 
     #[tokio::test]

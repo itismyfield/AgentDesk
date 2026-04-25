@@ -2068,6 +2068,7 @@ mod tests {
         async fn send_review_followup(
             &self,
             _db: Option<crate::db::Db>,
+            _review_dispatch_id: String,
             _card_id: String,
             _channel_id_num: u64,
             _message: String,
