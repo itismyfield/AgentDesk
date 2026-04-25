@@ -10,6 +10,7 @@ struct AgentChannelUpdate {
     model: Option<String>,
     reasoning_effort: Option<String>,
     peer_agents: Option<bool>,
+    dispatch_profile: Option<String>,
 }
 
 pub(super) fn merge_role_map_into_agentdesk_yaml(root: &Path) -> Result<(), String> {
@@ -231,6 +232,7 @@ fn merge_role_map_channel_id_entry(
         model: json_string_field_from_map(obj, &["model"]),
         reasoning_effort: json_string_field_from_map(obj, &["reasoningEffort", "reasoning_effort"]),
         peer_agents: json_bool_field_from_map(obj, &["peerAgents", "peer_agents"]),
+        dispatch_profile: json_string_field_from_map(obj, &["dispatchProfile", "dispatch_profile"]),
     };
 
     let agent = &mut config.agents[agent_index];
@@ -275,6 +277,7 @@ fn merge_role_map_channel_name_entry(
         model: json_string_field_from_map(obj, &["model"]),
         reasoning_effort: json_string_field_from_map(obj, &["reasoningEffort", "reasoning_effort"]),
         peer_agents: json_bool_field_from_map(obj, &["peerAgents", "peer_agents"]),
+        dispatch_profile: json_string_field_from_map(obj, &["dispatchProfile", "dispatch_profile"]),
     };
 
     let agent = &mut config.agents[agent_index];
@@ -390,6 +393,18 @@ fn apply_channel_update(
     }
     if config.peer_agents.is_none() {
         config.peer_agents = update.peer_agents;
+    }
+    let update_dispatch_profile =
+        crate::config::normalize_dispatch_profile(update.dispatch_profile);
+    if config
+        .dispatch_profile
+        .as_deref()
+        .is_some_and(|value| !crate::config::is_valid_dispatch_profile(value))
+    {
+        config.dispatch_profile = None;
+    }
+    if config.dispatch_profile.is_none() {
+        config.dispatch_profile = update_dispatch_profile;
     }
     if let Some(extra_aliases) = extra_aliases {
         for alias in extra_aliases {

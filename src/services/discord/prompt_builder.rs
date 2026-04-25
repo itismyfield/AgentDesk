@@ -1,7 +1,6 @@
 use super::settings::{
     MemoryBackendKind, ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance,
-    load_role_prompt, load_shared_prompt, load_shared_prompt_for_profile,
-    render_peer_agent_guidance,
+    load_role_prompt, load_shared_prompt_for_profile, render_peer_agent_guidance,
 };
 use super::*;
 use crate::services::memory::{
@@ -563,11 +562,15 @@ fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
 }
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
+/// `Lite` is an opt-in channel profile for low-frequency general channels.
 /// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispatchProfile {
     /// Full system prompt — all sections included (implementation, normal turns)
     Full,
+    /// Lightweight general-channel prompt. Keeps the base Discord/tooling
+    /// context but skips shared prompt files, role prompts, and heavy memory.
+    Lite,
     /// Minimal prompt for review/review-decision dispatches.
     /// Includes: base context, shared agent rules, role binding.
     /// Excludes: skills, peer agent directory, long-term memory.
@@ -580,6 +583,13 @@ impl DispatchProfile {
         match dispatch_type {
             Some("review") | Some("review-decision") => Self::ReviewLite,
             _ => Self::Full,
+        }
+    }
+
+    pub fn for_turn(dispatch_type: Option<&str>, channel_profile: Option<Self>) -> Self {
+        match Self::from_dispatch_type(dispatch_type) {
+            Self::ReviewLite => Self::ReviewLite,
+            Self::Full | Self::Lite => channel_profile.unwrap_or(Self::Full),
         }
     }
 }
@@ -796,6 +806,13 @@ pub(super) fn build_system_prompt(
                     system_prompt_owned.push_str(&guidance);
                 }
             }
+        } else if profile == DispatchProfile::Lite {
+            system_prompt_owned.push_str(
+                "\n\n[Lite Channel Rules]\n\
+                 - 한국어로 간결하게 소통한다\n\
+                 - 현재 요청에 필요한 범위만 확인하고 불필요한 파일 탐색을 피한다\n\
+                 - 큰 변경이나 장시간 작업이 필요하면 먼저 범위와 다음 행동을 짧게 확인한다",
+            );
         } else if let Some(shared_prompt) = load_shared_prompt_for_profile("full") {
             // Full profile: inject the `full` + `all` sections of the shared agent prompt.
             // Profile-gated blocks (`review-lite`, `headless`) are stripped at load time.
@@ -808,40 +825,44 @@ pub(super) fn build_system_prompt(
             );
         }
 
-        match load_role_prompt(binding) {
-            Some(role_prompt) => {
-                system_prompt_owned.push_str(
-                    "\n\n[Channel Role Binding]\n\
-                     The following role definition is authoritative for this Discord channel.\n\
-                     You MUST answer as this role, stay within its scope, and follow its response contract.\n\
-                     Do NOT override it with a generic assistant persona or by inferring a different role from repository files,\n\
-                     unless the user explicitly asks you to audit or compare role definitions.\n\n",
-                );
-                system_prompt_owned.push_str(&role_prompt);
-                tracing::warn!(
-                    "  [role-map] Applied role '{}' for channel {}",
-                    binding.role_id,
-                    channel_id.get()
-                );
-            }
-            None => {
-                tracing::warn!(
-                    "  [role-map] Failed to load prompt file '{}' for role '{}' (channel {})",
-                    binding.prompt_file,
-                    binding.role_id,
-                    channel_id.get()
-                );
+        if profile != DispatchProfile::Lite {
+            match load_role_prompt(binding) {
+                Some(role_prompt) => {
+                    system_prompt_owned.push_str(
+                        "\n\n[Channel Role Binding]\n\
+                         The following role definition is authoritative for this Discord channel.\n\
+                         You MUST answer as this role, stay within its scope, and follow its response contract.\n\
+                         Do NOT override it with a generic assistant persona or by inferring a different role from repository files,\n\
+                         unless the user explicitly asks you to audit or compare role definitions.\n\n",
+                    );
+                    system_prompt_owned.push_str(&role_prompt);
+                    tracing::warn!(
+                        "  [role-map] Applied role '{}' for channel {}",
+                        binding.role_id,
+                        channel_id.get()
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        "  [role-map] Failed to load prompt file '{}' for role '{}' (channel {})",
+                        binding.prompt_file,
+                        binding.role_id,
+                        channel_id.get()
+                    );
+                }
             }
         }
 
         // SAK before LTM: placed here for cache prefix stability — SAK and
         // everything above it rarely changes, maximising Anthropic prefix cache hits.
-        if let Some(sak) = shared_knowledge {
-            system_prompt_owned.push_str("\n\n");
-            system_prompt_owned.push_str(sak);
+        if profile != DispatchProfile::Lite {
+            if let Some(sak) = shared_knowledge {
+                system_prompt_owned.push_str("\n\n");
+                system_prompt_owned.push_str(sak);
+            }
         }
 
-        // ReviewLite: skip long-term memory and peer agents to save tokens
+        // ReviewLite/Lite: skip long-term memory and peer agents to save tokens
         if profile == DispatchProfile::Full {
             if let Some(catalog) = longterm_catalog {
                 system_prompt_owned.push_str(
@@ -858,10 +879,12 @@ pub(super) fn build_system_prompt(
                 }
             }
         }
-    } else if let Some(sak) = shared_knowledge {
-        // No role binding — still inject SAK (no LTM/peer agents to worry about)
-        system_prompt_owned.push_str("\n\n");
-        system_prompt_owned.push_str(sak);
+    } else if profile != DispatchProfile::Lite {
+        if let Some(sak) = shared_knowledge {
+            // No role binding — still inject SAK (no LTM/peer agents to worry about)
+            system_prompt_owned.push_str("\n\n");
+            system_prompt_owned.push_str(sak);
+        }
     }
 
     if let Some(memory_guidance) = proactive_memory_guidance(
@@ -898,10 +921,11 @@ pub(super) fn build_system_prompt(
         system_prompt_owned.push_str(&current_task_section);
     }
 
-    if profile == DispatchProfile::ReviewLite {
+    if profile != DispatchProfile::Full {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] 📉 ReviewLite prompt: {} chars (channel {})",
+            "  [{ts}] 📉 {:?} prompt: {} chars (channel {})",
+            profile,
             system_prompt_owned.len(),
             channel_id.get()
         );
@@ -1102,6 +1126,26 @@ mod tests {
     }
 
     #[test]
+    fn test_dispatch_profile_for_turn_respects_channel_lite_except_reviews() {
+        assert_eq!(
+            DispatchProfile::for_turn(None, Some(DispatchProfile::Lite)),
+            DispatchProfile::Lite
+        );
+        assert_eq!(
+            DispatchProfile::for_turn(Some("implementation"), Some(DispatchProfile::Lite)),
+            DispatchProfile::Lite
+        );
+        assert_eq!(
+            DispatchProfile::for_turn(Some("review"), Some(DispatchProfile::Lite)),
+            DispatchProfile::ReviewLite
+        );
+        assert_eq!(
+            DispatchProfile::for_turn(None, Some(DispatchProfile::Full)),
+            DispatchProfile::Full
+        );
+    }
+
+    #[test]
     fn test_empty_skills_notice_omits_skills_for_full_profile() {
         let prompt = build_system_prompt(
             "ctx",
@@ -1170,6 +1214,49 @@ mod tests {
 
         assert!(prompt.contains("[Tool Output Efficiency]"));
         assert!(prompt.contains("Prefer targeted queries over exhaustive dumps"));
+    }
+
+    #[test]
+    fn test_lite_profile_uses_abbreviated_rules_and_omits_role_prompt() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "test-agent".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: true,
+            quality_feedback_injection_enabled: true,
+            memory: Default::default(),
+        };
+        let prompt = build_system_prompt(
+            "ctx",
+            &[],
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            Some(&binding),
+            false,
+            DispatchProfile::Lite,
+            None,
+            None,
+            Some("[Shared Agent Knowledge]\nlarge shared block"),
+            Some("- facts.md"),
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            }),
+            true,
+        );
+
+        assert!(prompt.contains("[Lite Channel Rules]"));
+        assert!(!prompt.contains("[Shared Agent Rules]"));
+        assert!(!prompt.contains("[Channel Role Binding]"));
+        assert!(!prompt.contains("[Shared Agent Knowledge]"));
+        assert!(!prompt.contains("[Long-term Memory]"));
+        assert!(!prompt.contains("[Proactive Memory Guidance]"));
+        assert!(!prompt.contains("[ADK API Usage]"));
     }
 
     #[test]

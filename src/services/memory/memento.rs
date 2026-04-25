@@ -538,12 +538,25 @@ fn build_recall_dedup_key(
     workspace: &str,
     agent_id: &str,
     session_id: &str,
+    dispatch_profile: DispatchProfile,
+    mode: RecallMode,
     user_text: &str,
 ) -> String {
+    let profile = match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::Lite => "lite",
+        DispatchProfile::ReviewLite => "review_lite",
+    };
+    let mode = match mode {
+        RecallMode::Full => "full",
+        RecallMode::IdentityOnly => "identity_only",
+    };
     [
         workspace.trim(),
         agent_id.trim(),
         session_id.trim(),
+        profile,
+        mode,
         user_text.trim(),
     ]
     .join("\u{1f}")
@@ -1256,6 +1269,8 @@ impl MemoryBackend for MementoBackend {
                 &workspace,
                 &agent_id,
                 &request.session_id,
+                request.dispatch_profile,
+                request.mode,
                 &normalize_whitespace(&request.user_text),
             );
             note_memento_tool_request("recall");
@@ -1480,6 +1495,37 @@ mod tests {
             }
         });
         (format!("http://{}", addr), handle)
+    }
+
+    #[test]
+    fn recall_dedup_key_separates_dispatch_profile_and_mode() {
+        let full = build_recall_dedup_key(
+            "agentdesk",
+            "project-agentdesk",
+            "session-1",
+            DispatchProfile::Full,
+            RecallMode::Full,
+            "same prompt",
+        );
+        let lite = build_recall_dedup_key(
+            "agentdesk",
+            "project-agentdesk",
+            "session-1",
+            DispatchProfile::Lite,
+            RecallMode::IdentityOnly,
+            "same prompt",
+        );
+        let lite_full = build_recall_dedup_key(
+            "agentdesk",
+            "project-agentdesk",
+            "session-1",
+            DispatchProfile::Lite,
+            RecallMode::Full,
+            "same prompt",
+        );
+
+        assert_ne!(full, lite);
+        assert_ne!(lite, lite_full);
     }
 
     fn memento_settings() -> ResolvedMemorySettings {

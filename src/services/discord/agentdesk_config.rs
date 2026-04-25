@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use poise::serenity_prelude::ChannelId;
 
+use super::DispatchProfile;
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::settings::{
     PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
@@ -141,6 +142,7 @@ fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel
         reasoning_effort: None,
         peer_agents: None,
         quality_feedback_injection: None,
+        dispatch_profile: None,
         cache_ttl_minutes: None,
     }))
 }
@@ -517,6 +519,19 @@ pub(crate) fn resolve_cache_ttl_minutes(
     let config = load_agentdesk_config()?;
     let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
     channel.cache_ttl_minutes()
+}
+
+pub(crate) fn resolve_dispatch_profile(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<DispatchProfile> {
+    let config = load_agentdesk_config()?;
+    let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
+    match channel.dispatch_profile().as_deref() {
+        Some("lite") => Some(DispatchProfile::Lite),
+        Some("full") => Some(DispatchProfile::Full),
+        _ => None,
+    }
 }
 
 pub(super) fn resolve_workspace(
@@ -908,6 +923,33 @@ agents:
             let workspace = resolve_workspace(ChannelId::new(1479671301387059200), Some("adk-cdx"))
                 .expect("workspace");
             assert!(workspace.ends_with("/workspaces/agentdesk"));
+        });
+    }
+
+    #[test]
+    fn resolve_dispatch_profile_reads_detailed_channel_config() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: codex
+    channels:
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+        dispatch_profile: lite
+"#,
+            );
+
+            assert_eq!(
+                resolve_dispatch_profile(ChannelId::new(1479671301387059200), Some("adk-cdx")),
+                Some(DispatchProfile::Lite)
+            );
         });
     }
 
