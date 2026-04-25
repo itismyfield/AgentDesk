@@ -902,9 +902,17 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 "💭 Thinking...".to_string()
                             };
+                            // #1113 implicit-terminate: a Thinking event after an
+                            // unfinished ToolUse means the agent moved on without
+                            // emitting a ToolResult. Promote the orphaned tool to
+                            // its terminal (⚠) form before stashing in prev so the
+                            // user does not see a stale ⚙ indicator.
+                            let prev_for_preserve = current_tool_line
+                                .as_deref()
+                                .map(super::formatting::finalize_in_progress_tool_status);
                             super::formatting::preserve_previous_tool_status(
                                 &mut prev_tool_status,
-                                current_tool_line.as_deref(),
+                                prev_for_preserve.as_deref(),
                                 Some(display.as_str()),
                             );
                             current_tool_line = Some(display);
@@ -957,9 +965,20 @@ pub(super) fn spawn_turn_bridge(
                                 truncate_str(&summary, 120).to_string()
                             };
                             let display = format!("⚙ {}: {}", name, display_summary);
+                            // #1113 implicit-terminate: a new ToolUse arriving
+                            // before the prior ToolResult means the previous
+                            // tool is orphaned (parser miss, parallel-tool
+                            // collapse, or genuine hang upstream). Promote the
+                            // stale ⚙ marker to its terminal ⚠ form before
+                            // stashing in prev_tool_status so the placeholder
+                            // never claims a tool is still running once the
+                            // agent has moved on.
+                            let prev_for_preserve = current_tool_line
+                                .as_deref()
+                                .map(super::formatting::finalize_in_progress_tool_status);
                             super::formatting::preserve_previous_tool_status(
                                 &mut prev_tool_status,
-                                current_tool_line.as_deref(),
+                                prev_for_preserve.as_deref(),
                                 Some(display.as_str()),
                             );
                             current_tool_line = Some(display);
@@ -1459,6 +1478,29 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await;
                 last_adk_heartbeat = std::time::Instant::now();
+            }
+        }
+
+        // #1113 stream-end finalization: the main turn loop has exited, which
+        // means we won't receive any more StreamMessage events for this turn.
+        // If `current_tool_line` still carries the running ⚙ marker, the
+        // ToolResult never landed (process exit, parser error, transport
+        // disconnect, or tmux handoff to a watcher that owns the rest of the
+        // delivery). Promote it to its terminal ⚠ form and stash in
+        // prev_tool_status so any follow-on placeholder edit (handoff embed,
+        // recovery notice, terminal response) reflects the orphaned state.
+        if let Some(running) = current_tool_line.as_deref() {
+            if running.starts_with("⚙") {
+                let finalized = super::formatting::finalize_in_progress_tool_status(running);
+                super::formatting::preserve_previous_tool_status(
+                    &mut prev_tool_status,
+                    Some(finalized.as_str()),
+                    None,
+                );
+                current_tool_line = Some(finalized);
+                inflight_state.current_tool_line = current_tool_line.clone();
+                inflight_state.prev_tool_status = prev_tool_status.clone();
+                let _ = save_inflight_state(&inflight_state);
             }
         }
 

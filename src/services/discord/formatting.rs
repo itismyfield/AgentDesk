@@ -212,7 +212,8 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 mod tests {
     use super::{
         build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
-        filter_codex_tool_logs, normalize_allowed_tools, preserve_previous_tool_status,
+        filter_codex_tool_logs, finalize_in_progress_tool_status, normalize_allowed_tools,
+        preserve_previous_tool_status,
     };
 
     #[test]
@@ -841,6 +842,66 @@ mod tests {
         );
         assert!(placeholder.len() <= super::THINKING_STATUS_MAX_BYTES + 16);
         assert!(placeholder.ends_with('…'));
+    }
+
+    #[test]
+    fn test_finalize_in_progress_tool_status_converts_running_marker() {
+        assert_eq!(
+            finalize_in_progress_tool_status("⚙ Bash: cargo build"),
+            "⚠ Bash: cargo build"
+        );
+    }
+
+    #[test]
+    fn test_finalize_in_progress_tool_status_converts_running_marker_no_space() {
+        // Defensive: callers should produce "⚙ X" but tolerate "⚙X" too.
+        assert_eq!(finalize_in_progress_tool_status("⚙Bash"), "⚠Bash");
+    }
+
+    #[test]
+    fn test_finalize_in_progress_tool_status_passes_through_terminal_lines() {
+        for line in &[
+            "✓ Bash: cargo build",
+            "✗ Read: missing.rs",
+            "⚠ Bash: cargo build",
+            "⏱ Bash: long_running",
+            "💭 Thinking about the next step",
+            "",
+        ] {
+            assert_eq!(
+                finalize_in_progress_tool_status(line),
+                *line,
+                "expected pass-through for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_implicit_terminate_promotes_orphan_tool_to_prev_status() {
+        // Simulate the ToolUse → ToolUse transition where the first tool's
+        // ToolResult never arrived. Callers in turn_bridge::run apply
+        // `finalize_in_progress_tool_status` to current_tool_line before
+        // calling preserve_previous_tool_status, which is what this test
+        // exercises end-to-end at the helper level.
+        let mut prev = None;
+        let stale_running = "⚙ Bash: cargo build";
+        let next = "⚙ Read: src/main.rs";
+        let promoted = finalize_in_progress_tool_status(stale_running);
+        preserve_previous_tool_status(&mut prev, Some(promoted.as_str()), Some(next));
+        assert_eq!(prev.as_deref(), Some("⚠ Bash: cargo build"));
+    }
+
+    #[test]
+    fn test_normal_completion_keeps_terminal_marker_in_prev_status() {
+        // Sanity check that the implicit-terminate transform is a no-op when
+        // ToolResult already promoted the marker to ✓ before the next
+        // ToolUse arrives.
+        let mut prev = None;
+        let normal_completed = "✓ Bash: cargo build";
+        let next = "⚙ Read: src/main.rs";
+        let promoted = finalize_in_progress_tool_status(normal_completed);
+        preserve_previous_tool_status(&mut prev, Some(promoted.as_str()), Some(next));
+        assert_eq!(prev.as_deref(), Some("✓ Bash: cargo build"));
     }
 }
 
@@ -1797,6 +1858,29 @@ fn tool_status_identity(line: &str) -> (&str, &str) {
 
 /// Preserve the last distinct tool/thinking status in inflight state so the
 /// bridge can retain prior context across stream transitions and retries.
+/// Convert a still-running (`⚙`) tool status line into a terminal `⚠` form.
+///
+/// #1113 implicit-terminate rule: when a tool's `ToolResult` event never
+/// arrives (parser error, process exit, hang, or simply because the agent
+/// already moved on to the next `ToolUse` / `Thinking` event), the trailing
+/// `⚙` marker is no longer accurate — the tool is not running anymore, just
+/// orphaned. Convert the marker to `⚠` so the placeholder/transcript reflects
+/// "terminated without an explicit result" rather than presenting a stale
+/// in-progress indicator.
+///
+/// Lines that already carry a terminal marker (`✓`, `✗`, `⚠`, `⏱`, `💭`,
+/// etc.) are returned unchanged so this can be applied unconditionally on
+/// transition boundaries without risk of double-rewriting.
+pub(super) fn finalize_in_progress_tool_status(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("⚙ ") {
+        format!("⚠ {rest}")
+    } else if let Some(rest) = line.strip_prefix("⚙") {
+        format!("⚠{rest}")
+    } else {
+        line.to_string()
+    }
+}
+
 pub(super) fn preserve_previous_tool_status(
     prev_tool_status: &mut Option<String>,
     current_tool_line: Option<&str>,
