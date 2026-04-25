@@ -394,8 +394,17 @@ fn apply_channel_update(
     if config.peer_agents.is_none() {
         config.peer_agents = update.peer_agents;
     }
+    let update_dispatch_profile =
+        crate::config::normalize_dispatch_profile(update.dispatch_profile);
+    if config
+        .dispatch_profile
+        .as_deref()
+        .is_some_and(|value| !crate::config::is_valid_dispatch_profile(value))
+    {
+        config.dispatch_profile = None;
+    }
     if config.dispatch_profile.is_none() {
-        config.dispatch_profile = update.dispatch_profile;
+        config.dispatch_profile = update_dispatch_profile;
     }
     if let Some(extra_aliases) = extra_aliases {
         for alias in extra_aliases {

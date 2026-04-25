@@ -1030,6 +1030,63 @@ agents:
     }
 
     #[test]
+    fn role_map_merge_repairs_invalid_dispatch_profile() {
+        let mut config: crate::config::Config = serde_yaml::from_str(
+            r#"
+server:
+  port: 9001
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "1479671301387059200"
+        dispatch_profile: lte
+"#,
+        )
+        .unwrap();
+        let role_map = serde_json::json!({
+            "byChannelId": {
+                "1479671301387059200": {
+                    "roleId": "project-agentdesk",
+                    "provider": "codex",
+                    "dispatchProfile": "lite"
+                }
+            }
+        });
+
+        assert!(preview_role_map_merge(&mut config, &role_map));
+        let channel = config.agents[0].channels.codex.as_ref().unwrap();
+        assert_eq!(channel.dispatch_profile().as_deref(), Some("lite"));
+    }
+
+    #[test]
+    fn role_map_merge_drops_invalid_dispatch_profile_update() {
+        let mut config: crate::config::Config = serde_yaml::from_str(
+            r#"
+server:
+  port: 9001
+agents: []
+"#,
+        )
+        .unwrap();
+        let role_map = serde_json::json!({
+            "byChannelId": {
+                "1479671301387059200": {
+                    "roleId": "project-agentdesk",
+                    "provider": "codex",
+                    "dispatchProfile": "lte"
+                }
+            }
+        });
+
+        assert!(preview_role_map_merge(&mut config, &role_map));
+        let channel = config.agents[0].channels.codex.as_ref().unwrap();
+        assert_eq!(channel.dispatch_profile(), None);
+    }
+
+    #[test]
     fn sync_managed_skills_deploys_relative_links() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();

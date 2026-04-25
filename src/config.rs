@@ -417,6 +417,10 @@ pub fn normalize_dispatch_profile(value: Option<String>) -> Option<String> {
     }
 }
 
+pub fn is_valid_dispatch_profile(value: &str) -> bool {
+    normalize_dispatch_profile(Some(value.to_string())).is_some()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentChannelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1416,8 +1420,9 @@ mod tests {
         DEFAULT_MEMENTO_MCP_URL, DiscordBotAuthConfig, DiscordConfig, EscalationConfig,
         EscalationMode, EscalationScheduleConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig,
         McpServerAuthConfig, McpServerAuthType, McpServerConfig, MemoryConfig, OnboardingConfig,
-        ReviewConfig, RuntimeSettingsConfig, load_from_path, normalize_cache_ttl_minutes,
-        normalize_dispatch_profile, resolve_graceful_config_path, runtime_root, save_to_path,
+        ReviewConfig, RuntimeSettingsConfig, is_valid_dispatch_profile, load_from_path,
+        normalize_cache_ttl_minutes, normalize_dispatch_profile, resolve_graceful_config_path,
+        runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -2090,6 +2095,9 @@ mod tests {
             Some("full")
         );
         assert_eq!(normalize_dispatch_profile(Some("review".to_string())), None);
+        assert!(is_valid_dispatch_profile("lite"));
+        assert!(is_valid_dispatch_profile(" default "));
+        assert!(!is_valid_dispatch_profile("lte"));
     }
 
     #[test]
