@@ -331,6 +331,18 @@ pub(in crate::services::discord) async fn handle_text_command(
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "!stop",
                     );
+                    // #1117 cancel_active_token only kills the tracked child PID
+                    // (which can be `None` for already-detached/restarted runs)
+                    // and flips the cooperative `cancelled` flag. To actually
+                    // halt Codex/Qwen TUIs (stdin null — ESC bytes ignored),
+                    // also send the provider-specific abort key + SIGINT
+                    // fallback through `interrupt_provider_cli_turn`.
+                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                        &data.provider,
+                        &token,
+                        "!stop",
+                    )
+                    .await;
                     super::super::commands::notify_turn_stop(
                         &ctx.http,
                         &data.shared,
@@ -1077,6 +1089,13 @@ Any other message is sent to {p}.
                                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                                 "!cc stop",
                             );
+                            // #1117 see !stop branch above for rationale.
+                            super::super::turn_bridge::interrupt_provider_cli_turn(
+                                &data.provider,
+                                &token,
+                                "!cc stop",
+                            )
+                            .await;
                             super::super::commands::notify_turn_stop(
                                 &ctx.http,
                                 &data.shared,

@@ -156,6 +156,15 @@ pub(in crate::services::discord) async fn cmd_cc(
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "/cc stop",
                     );
+                    // #1117 see text_commands.rs (!stop) for rationale. Safe
+                    // to await here — `ctx.say("Stopping...")` already
+                    // satisfied the slash interaction deadline above.
+                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                        &ctx.data().provider,
+                        &token,
+                        "/cc stop",
+                    )
+                    .await;
                     super::control::notify_turn_stop(
                         &ctx.serenity_context().http,
                         &ctx.data().shared,

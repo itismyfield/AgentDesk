@@ -359,6 +359,17 @@ async fn handle_reaction_remove(
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "reaction remove ⏳",
                     );
+                    // #1117 cancel_active_token only flips the cooperative flag
+                    // and kills the tracked child PID (often `None` for a
+                    // restarted/handoff run). To halt Codex/Qwen TUIs (stdin
+                    // null — ESC bytes ignored), also send the provider-
+                    // specific abort key + SIGINT fallback.
+                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                        &data.provider,
+                        &token,
+                        "reaction remove ⏳",
+                    )
+                    .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 🛑 TURN-STOP: cancelled active turn for message {} in channel {} via reaction removal",

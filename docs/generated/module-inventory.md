@@ -226,8 +226,8 @@
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 333 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
-| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 367 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1205 | giant-file |
+| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 376 |  |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1224 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 541 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 1870 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
@@ -258,7 +258,7 @@
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 860 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 14 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
-| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1206 | giant-file |
+| `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1217 | giant-file |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5368 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1765 | giant-file |
