@@ -52,6 +52,152 @@ enum SessionResetReason {
     AssistantTurnCap,
 }
 
+const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
+
+fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
+    let trimmed = raw.trim();
+    let normalized = trimmed
+        .strip_prefix("channel:")
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_start_matches("<#")
+        .trim_end_matches('>');
+    normalized
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .map(serenity::ChannelId::new)
+}
+
+fn configured_watchdog_alert_channel_id() -> Option<serenity::ChannelId> {
+    for key in [
+        "deadlock_manager_channel_id",
+        "kanban_human_alert_channel_id",
+    ] {
+        if let Ok(Some(value)) = crate::services::discord::internal_api::get_kv_value(key)
+            && let Some(channel_id) = parse_watchdog_alert_channel_id(&value)
+        {
+            return Some(channel_id);
+        }
+    }
+
+    crate::config::load().ok().and_then(|config| {
+        config
+            .kanban
+            .deadlock_manager_channel_id
+            .as_deref()
+            .and_then(parse_watchdog_alert_channel_id)
+            .or_else(|| {
+                config
+                    .kanban
+                    .human_alert_channel_id
+                    .as_deref()
+                    .and_then(parse_watchdog_alert_channel_id)
+            })
+    })
+}
+
+fn should_send_watchdog_deadlock_prealert(
+    now_ms: i64,
+    deadline_ms: i64,
+    last_notified_deadline_ms: Option<i64>,
+) -> bool {
+    now_ms < deadline_ms
+        && now_ms >= deadline_ms - WATCHDOG_DEADLOCK_PREALERT_MS
+        && last_notified_deadline_ms != Some(deadline_ms)
+}
+
+fn build_watchdog_deadlock_prealert_message(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    now_ms: i64,
+    deadline_ms: i64,
+    turn_started_ms: i64,
+    max_deadline_ms: i64,
+    inflight: Option<&InflightTurnState>,
+) -> String {
+    let remaining_min = ((deadline_ms - now_ms).max(0) + 59_999) / 60_000;
+    let elapsed_min = ((now_ms - turn_started_ms).max(0) + 59_999) / 60_000;
+    let max_remaining_min = ((max_deadline_ms - now_ms).max(0) + 59_999) / 60_000;
+    let session_key = inflight
+        .and_then(|state| state.session_key.as_deref())
+        .unwrap_or("?");
+    let dispatch_id = inflight
+        .and_then(|state| state.dispatch_id.as_deref())
+        .unwrap_or("?");
+    let tmux = inflight
+        .and_then(|state| state.tmux_session_name.as_deref())
+        .unwrap_or("?");
+    let updated_at = inflight
+        .map(|state| state.updated_at.as_str())
+        .unwrap_or("?");
+
+    let provider = provider.as_str();
+
+    format!(
+        "⚠️ [Watchdog pre-timeout]\n\
+channel_id: {channel_id}\n\
+provider: {provider}\n\
+remaining: {remaining_min}분\n\
+elapsed: {elapsed_min}분\n\
+max_remaining: {max_remaining_min}분\n\
+session_key: {session_key}\n\
+dispatch_id: {dispatch_id}\n\
+tmux: {tmux}\n\
+inflight_updated_at: {updated_at}\n\
+정상 진행이면 `POST /api/turns/{channel_id}/extend-timeout`로 연장하세요."
+    )
+}
+
+async fn maybe_send_watchdog_deadlock_prealert(
+    http: &Arc<serenity::Http>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    now_ms: i64,
+    deadline_ms: i64,
+    turn_started_ms: i64,
+    max_deadline_ms: i64,
+) -> bool {
+    let Some(alert_channel_id) = configured_watchdog_alert_channel_id() else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⏰ WATCHDOG: no deadlock/human alert channel configured for pre-timeout alert"
+        );
+        return false;
+    };
+    let inflight = super::super::inflight::load_inflight_state(provider, channel_id.get());
+    let message = build_watchdog_deadlock_prealert_message(
+        provider,
+        channel_id,
+        now_ms,
+        deadline_ms,
+        turn_started_ms,
+        max_deadline_ms,
+        inflight.as_ref(),
+    );
+    match alert_channel_id.say(http, message).await {
+        Ok(_) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏰ WATCHDOG: sent pre-timeout alert for channel {} to {}",
+                channel_id,
+                alert_channel_id
+            );
+            true
+        }
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⏰ WATCHDOG: failed pre-timeout alert for channel {} to {}: {}",
+                channel_id,
+                alert_channel_id,
+                error
+            );
+            false
+        }
+    }
+}
+
 fn attach_paused_turn_watcher(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
@@ -869,8 +1015,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
     {
         let watchdog_token = cancel_token.clone();
         let watchdog_shared = shared.clone();
+        let watchdog_http = ctx.http.clone();
         let timeout = super::super::turn_watchdog_timeout();
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
         let max_deadline_ms = now_ms + 3 * 3600 * 1000;
         watchdog_token
@@ -884,6 +1032,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
         let watchdog_provider = provider.clone();
         tokio::spawn(async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
@@ -904,6 +1053,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                     watchdog_token
                         .watchdog_deadline_ms
                         .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
                 }
                 {
                     let current_dl = watchdog_token
@@ -933,6 +1083,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                                         watchdog_token
                                             .watchdog_deadline_ms
                                             .store(new_dl, std::sync::atomic::Ordering::Relaxed);
+                                        last_deadlock_prealert_deadline_ms = None;
                                     }
                                 }
                             }
@@ -940,6 +1091,52 @@ pub(in crate::services::discord) async fn start_headless_turn(
                     }
                 }
 
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp_millis();
+                if should_send_watchdog_deadlock_prealert(
+                    now,
+                    current_deadline,
+                    last_deadlock_prealert_deadline_ms,
+                ) {
+                    let is_current_token =
+                        super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
+                            .await
+                            .is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(&watchdog_token, &current)
+                            });
+                    if !is_current_token {
+                        super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
+                            .await;
+                        return;
+                    }
+                    if maybe_send_watchdog_deadlock_prealert(
+                        &watchdog_http,
+                        &watchdog_provider,
+                        channel_id,
+                        now,
+                        current_deadline,
+                        turn_started_ms,
+                        max_deadline_ms,
+                    )
+                    .await
+                    {
+                        last_deadlock_prealert_deadline_ms = Some(current_deadline);
+                    }
+                }
+                if let Some(new_deadline) =
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
+                {
+                    let max_dl = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let clamped = std::cmp::min(new_deadline, max_dl);
+                    watchdog_token
+                        .watchdog_deadline_ms
+                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
                 let current_deadline = watchdog_token
                     .watchdog_deadline_ms
                     .load(std::sync::atomic::Ordering::Relaxed);
@@ -2673,6 +2870,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
         // Set initial deadline and max ceiling (initial + 3h)
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
         let max_deadline_ms = now_ms + 3 * 3600 * 1000; // 3 hours absolute cap
         watchdog_token
@@ -2686,6 +2884,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         let watchdog_provider = provider.clone();
         tokio::spawn(async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
@@ -2710,6 +2909,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     watchdog_token
                         .watchdog_deadline_ms
                         .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     let remaining_min =
                         (clamped - chrono::Utc::now().timestamp_millis()) / 1000 / 60;
@@ -2751,6 +2951,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                         watchdog_token
                                             .watchdog_deadline_ms
                                             .store(new_dl, std::sync::atomic::Ordering::Relaxed);
+                                        last_deadlock_prealert_deadline_ms = None;
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         let remaining_min = (new_dl - now_ms_check) / 1000 / 60;
                                         tracing::info!(
@@ -2768,7 +2969,53 @@ pub(in crate::services::discord) async fn handle_text_message(
                     .watchdog_deadline_ms
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let now = chrono::Utc::now().timestamp_millis();
+                if should_send_watchdog_deadlock_prealert(
+                    now,
+                    current_deadline,
+                    last_deadlock_prealert_deadline_ms,
+                ) {
+                    let is_current_token =
+                        super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
+                            .await
+                            .is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(&watchdog_token, &current)
+                            });
+                    if !is_current_token {
+                        super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
+                            .await;
+                        return;
+                    }
+                    if maybe_send_watchdog_deadlock_prealert(
+                        &watchdog_http,
+                        &watchdog_provider,
+                        channel_id,
+                        now,
+                        current_deadline,
+                        turn_started_ms,
+                        max_deadline_ms,
+                    )
+                    .await
+                    {
+                        last_deadlock_prealert_deadline_ms = Some(current_deadline);
+                    }
+                }
 
+                if let Some(new_deadline) =
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
+                {
+                    let max_dl = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let clamped = std::cmp::min(new_deadline, max_dl);
+                    watchdog_token
+                        .watchdog_deadline_ms
+                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp_millis();
                 if now < current_deadline {
                     continue; // Not yet — deadline may have been extended
                 }
@@ -5635,6 +5882,63 @@ mod tests {
 
         let roster = shared.channel_roster(channel_id, UserId::new(999), "Fallback");
         assert_eq!(roster, vec![UserRecord::new(UserId::new(101), "Alice")]);
+    }
+
+    #[test]
+    fn watchdog_prealert_helpers_parse_and_dedupe_deadline() {
+        assert_eq!(
+            parse_watchdog_alert_channel_id("channel:<#12345>"),
+            Some(ChannelId::new(12345))
+        );
+        assert_eq!(
+            parse_watchdog_alert_channel_id("67890"),
+            Some(ChannelId::new(67890))
+        );
+        assert_eq!(parse_watchdog_alert_channel_id("deadlock-manager"), None);
+
+        let deadline = 1_000_000;
+        assert!(!should_send_watchdog_deadlock_prealert(
+            deadline - WATCHDOG_DEADLOCK_PREALERT_MS - 1,
+            deadline,
+            None
+        ));
+        assert!(should_send_watchdog_deadlock_prealert(
+            deadline - WATCHDOG_DEADLOCK_PREALERT_MS,
+            deadline,
+            None
+        ));
+        assert!(!should_send_watchdog_deadlock_prealert(
+            deadline - 1,
+            deadline,
+            Some(deadline)
+        ));
+        assert!(!should_send_watchdog_deadlock_prealert(
+            deadline, deadline, None
+        ));
+    }
+
+    #[test]
+    fn watchdog_prealert_message_contains_extension_contract() {
+        let now = 60 * 60 * 1000;
+        let deadline = now + 4 * 60 * 1000;
+        let started = 0;
+        let max_deadline = started + 3 * 60 * 60 * 1000;
+
+        let message = build_watchdog_deadlock_prealert_message(
+            &ProviderKind::Codex,
+            ChannelId::new(42),
+            now,
+            deadline,
+            started,
+            max_deadline,
+            None,
+        );
+
+        assert!(message.contains("[Watchdog pre-timeout]"));
+        assert!(message.contains("channel_id: 42"));
+        assert!(message.contains("provider: codex"));
+        assert!(message.contains("remaining: 4분"));
+        assert!(message.contains("POST /api/turns/42/extend-timeout"));
     }
 
     #[test]
