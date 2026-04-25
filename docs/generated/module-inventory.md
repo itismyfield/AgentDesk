@@ -52,8 +52,8 @@
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 149 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 215 |  |
-| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4246 | giant-file |
-| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 139 |  |
+| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4247 | giant-file |
+| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 147 |  |
 | `cli::init` | `src/cli/init.rs` | 1597 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 321 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
@@ -161,7 +161,7 @@
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 3535 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
-| `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 67 |  |
+| `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 69 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 88 |  |
 | `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 51 |  |
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 85 |  |
@@ -172,7 +172,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2345 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 676 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 932 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 933 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 202 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4772 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 453 |  |
