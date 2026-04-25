@@ -113,21 +113,6 @@ fn memento_recall_gate_decision(
         };
     }
 
-    if dispatch_profile == DispatchProfile::Lite {
-        if !memento_context_loaded {
-            return MementoRecallGateDecision {
-                should_recall: true,
-                mode: RecallMode::IdentityOnly,
-                reason: "lite_identity_only",
-            };
-        }
-        return MementoRecallGateDecision {
-            should_recall: false,
-            mode: RecallMode::Full,
-            reason: "lite_no_turn_signal",
-        };
-    }
-
     let normalized = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_lowercase();
     let text = lower.as_str();
@@ -198,14 +183,22 @@ fn memento_recall_gate_decision(
         return MementoRecallGateDecision {
             should_recall: true,
             mode: RecallMode::IdentityOnly,
-            reason: "identity_only_session_start",
+            reason: if dispatch_profile == DispatchProfile::Lite {
+                "lite_identity_only"
+            } else {
+                "identity_only_session_start"
+            },
         };
     }
 
     MementoRecallGateDecision {
         should_recall: false,
         mode: RecallMode::Full,
-        reason: "no_turn_signal",
+        reason: if dispatch_profile == DispatchProfile::Lite {
+            "lite_no_turn_signal"
+        } else {
+            "no_turn_signal"
+        },
     }
 }
 
@@ -4880,30 +4873,50 @@ mod tests {
     }
 
     #[test]
-    fn memento_recall_gate_keeps_lite_profile_identity_only() {
+    fn memento_recall_gate_keeps_lite_profile_lightweight_without_trigger() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..settings::ResolvedMemorySettings::default()
         };
 
-        let first = memento_recall_gate_decision(
-            &memento,
-            false,
-            "이전에 하던 거 이어서 해줘",
-            DispatchProfile::Lite,
-        );
+        let first =
+            memento_recall_gate_decision(&memento, false, "평범한 요청", DispatchProfile::Lite);
         assert!(first.should_recall);
         assert_eq!(first.reason, "lite_identity_only");
         assert_eq!(first.mode, RecallMode::IdentityOnly);
 
-        let next = memento_recall_gate_decision(
+        let next =
+            memento_recall_gate_decision(&memento, true, "평범한 요청", DispatchProfile::Lite);
+        assert!(!next.should_recall);
+        assert_eq!(next.reason, "lite_no_turn_signal");
+    }
+
+    #[test]
+    fn memento_recall_gate_lite_profile_keeps_explicit_full_recall_triggers() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+
+        let prev = memento_recall_gate_decision(
+            &memento,
+            true,
+            "이전에 하던 거 이어서 해줘",
+            DispatchProfile::Lite,
+        );
+        assert!(prev.should_recall);
+        assert_eq!(prev.reason, "previous_context_signal");
+        assert_eq!(prev.mode, RecallMode::Full);
+
+        let explicit = memento_recall_gate_decision(
             &memento,
             true,
             "/recall deploy note",
             DispatchProfile::Lite,
         );
-        assert!(!next.should_recall);
-        assert_eq!(next.reason, "lite_no_turn_signal");
+        assert!(explicit.should_recall);
+        assert_eq!(explicit.reason, "explicit_recall_signal");
+        assert_eq!(explicit.mode, RecallMode::Full);
     }
 
     #[test]
