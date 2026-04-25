@@ -29,8 +29,14 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
-/// #964: per-channel watcher + relay state surfaced via
+/// #964 / #1133: per-channel watcher + relay state surfaced via
 /// `GET /api/channels/:id/watcher-state`.
+///
+/// #1133 enriched the read-only response with operational diagnostics:
+/// inflight timing/IDs (PII-free), `tmux_session_alive` (PID check),
+/// `has_pending_queue`, and `mailbox_active_user_msg_id`. All new fields
+/// are scalar (no message text, no user IDs, no transcripts) so the
+/// response remains safe for non-privileged operator dashboards.
 #[derive(Clone, Debug, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
@@ -39,6 +45,38 @@ pub struct WatcherStateSnapshot {
     pub last_relay_offset: u64,
     pub inflight_state_present: bool,
     pub last_relay_ts_ms: i64,
+    /// #1133: Persisted `started_at` from the inflight JSON
+    /// (`YYYY-MM-DD HH:MM:SS` localtime). `None` when no inflight is on disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inflight_started_at: Option<String>,
+    /// #1133: Persisted `updated_at` from the inflight JSON. Updated on each
+    /// streaming chunk; large skew vs wall clock indicates a stuck turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inflight_updated_at: Option<String>,
+    /// #1133: Discord message ID that originated the inflight turn. `None`
+    /// when no inflight is on disk; `Some(0)` is filtered to `None` because
+    /// rebind-origin inflights use placeholder IDs that do not identify a
+    /// real user-authored message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inflight_user_msg_id: Option<u64>,
+    /// #1133: Currently streaming Discord message ID for the inflight turn.
+    /// Same zero-filtering as `inflight_user_msg_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inflight_current_msg_id: Option<u64>,
+    /// #1133: `true` when `tmux::has_session` confirms the tmux session in
+    /// `tmux_session` is alive, `false` when the session is gone, `None`
+    /// when no `tmux_session` was known to probe. Backed by a
+    /// `tmux has-session` shell-out so the check reflects real PID liveness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_session_alive: Option<bool>,
+    /// #1133: `true` when the per-channel mailbox has at least one queued
+    /// intervention waiting for the active turn to finish.
+    pub has_pending_queue: bool,
+    /// #1133: Discord message ID currently held by the mailbox as the
+    /// active-turn anchor (`active_user_message_id`). `None` when the
+    /// mailbox is idle (no active turn).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mailbox_active_user_msg_id: Option<u64>,
 }
 
 impl HealthStatus {
@@ -207,13 +245,21 @@ impl HealthRegistry {
         }
     }
 
-    /// #964: Snapshot per-channel watcher/relay state for observability.
+    /// #964 / #1133: Snapshot per-channel watcher/relay state for
+    /// observability.
     ///
     /// Scans every registered provider and returns the first entry that
-    /// knows about this `channel_id`. When no watcher and no relay-coord
-    /// entry exist, returns `None` so the handler can emit 404. Reads are
-    /// non-blocking atomics + DashMap lookups; no mutex held across await
-    /// after this future completes.
+    /// knows about this `channel_id`. When no watcher, no relay-coord, no
+    /// inflight state, and no mailbox active-turn / queue entry exist,
+    /// returns `None` so the handler can emit 404. #1133 widens the
+    /// "knows about" criteria to include the mailbox so that a channel
+    /// with a queued intervention (but no live tmux yet) still surfaces.
+    ///
+    /// All new #1133 fields are derived from the same in-memory snapshot
+    /// or a single inflight-JSON read (no extra IO per provider). The
+    /// `tmux_session_alive` probe shells out to `tmux has-session`; the
+    /// call is wrapped in `spawn_blocking` so it never stalls the axum
+    /// runtime even if tmux is wedged.
     pub async fn snapshot_watcher_state(&self, channel_id: u64) -> Option<WatcherStateSnapshot> {
         let channel = ChannelId::new(channel_id);
         let providers = self.providers.lock().await;
@@ -221,10 +267,15 @@ impl HealthRegistry {
             let shared = entry.shared.clone();
             let attached = shared.tmux_watchers.contains_key(&channel);
             let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
-            let inflight_state_present = ProviderKind::from_str(&entry.name)
-                .map(|pk| super::inflight::load_inflight_state(&pk, channel_id).is_some())
-                .unwrap_or(false);
-            if !attached && !has_relay_coord && !inflight_state_present {
+            let inflight = ProviderKind::from_str(&entry.name)
+                .and_then(|pk| super::inflight::load_inflight_state(&pk, channel_id));
+            let inflight_state_present = inflight.is_some();
+            let mailbox_snapshot = super::mailbox_snapshot(&shared, channel).await;
+            let mailbox_active_user_msg_id =
+                mailbox_snapshot.active_user_message_id.map(|id| id.get());
+            let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
+            let mailbox_engaged = mailbox_active_user_msg_id.is_some() || has_pending_queue;
+            if !attached && !has_relay_coord && !inflight_state_present && !mailbox_engaged {
                 continue;
             }
             let (last_relay_offset, last_relay_ts_ms) = shared
@@ -241,10 +292,31 @@ impl HealthRegistry {
                     )
                 })
                 .unwrap_or((0, 0));
-            let tmux_session = ProviderKind::from_str(&entry.name).and_then(|pk| {
-                super::inflight::load_inflight_state(&pk, channel_id)
-                    .and_then(|state| state.tmux_session_name)
-            });
+            let tmux_session = inflight
+                .as_ref()
+                .and_then(|state| state.tmux_session_name.clone());
+            let inflight_started_at = inflight.as_ref().map(|state| state.started_at.clone());
+            let inflight_updated_at = inflight.as_ref().map(|state| state.updated_at.clone());
+            let inflight_user_msg_id = inflight
+                .as_ref()
+                .map(|state| state.user_msg_id)
+                .filter(|id| *id != 0);
+            let inflight_current_msg_id = inflight
+                .as_ref()
+                .map(|state| state.current_msg_id)
+                .filter(|id| *id != 0);
+            let tmux_session_alive = match tmux_session.as_ref() {
+                Some(name) => {
+                    let probe_target = name.clone();
+                    let alive = tokio::task::spawn_blocking(move || {
+                        crate::services::platform::tmux::has_session(&probe_target)
+                    })
+                    .await
+                    .unwrap_or(false);
+                    Some(alive)
+                }
+                None => None,
+            };
             return Some(WatcherStateSnapshot {
                 provider: entry.name.clone(),
                 attached,
@@ -252,6 +324,13 @@ impl HealthRegistry {
                 last_relay_offset,
                 inflight_state_present,
                 last_relay_ts_ms,
+                inflight_started_at,
+                inflight_updated_at,
+                inflight_user_msg_id,
+                inflight_current_msg_id,
+                tmux_session_alive,
+                has_pending_queue,
+                mailbox_active_user_msg_id,
             });
         }
         None
@@ -2554,10 +2633,12 @@ mod tests {
     }
 
     // #964: `snapshot_watcher_state` powers `GET /api/channels/:id/watcher-state`.
-    // The endpoint MUST return the six expected fields, and `attached` MUST
-    // reflect the DashMap entry (not just the relay-coord). When no watcher is
-    // installed and no inflight state exists for the channel, the snapshot
-    // returns None so the handler can emit 404.
+    // #1133 enriched the response with inflight timing/IDs, tmux liveness,
+    // mailbox queue depth, and active-turn anchor. The endpoint MUST always
+    // return the stable core fields, and `attached` MUST reflect the
+    // DashMap entry (not just the relay-coord). When no watcher, no
+    // inflight, and no mailbox engagement exist for the channel, the
+    // snapshot returns None so the handler can emit 404.
     #[tokio::test]
     async fn snapshot_watcher_state_returns_attached_shape_for_seeded_watcher() {
         let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
@@ -2588,23 +2669,51 @@ mod tests {
         assert!(snapshot.attached);
         assert_eq!(snapshot.last_relay_offset, 2048);
         assert_eq!(snapshot.last_relay_ts_ms, 1_700_000_000_000);
-        // No inflight JSON written to disk → field is false.
+        // No inflight JSON written to disk → field is false and #1133 inflight
+        // diagnostics are absent.
         assert!(!snapshot.inflight_state_present);
+        assert!(snapshot.inflight_started_at.is_none());
+        assert!(snapshot.inflight_updated_at.is_none());
+        assert!(snapshot.inflight_user_msg_id.is_none());
+        assert!(snapshot.inflight_current_msg_id.is_none());
+        // tmux_session unknown → liveness probe is skipped, not asserted false.
+        assert!(snapshot.tmux_session.is_none());
+        assert!(snapshot.tmux_session_alive.is_none());
+        // Idle mailbox: no active turn, no queued interventions.
+        assert!(!snapshot.has_pending_queue);
+        assert!(snapshot.mailbox_active_user_msg_id.is_none());
 
-        // Serialization shape matches the HTTP response contract.
+        // Serialization shape matches the HTTP response contract. Fields
+        // marked `skip_serializing_if = "Option::is_none"` are intentionally
+        // omitted when absent — assert only the stable required keys.
         let serialized = serde_json::to_value(&snapshot).expect("serialize watcher snapshot");
         let obj = serialized.as_object().expect("snapshot is a JSON object");
         for field in [
             "provider",
             "attached",
-            "tmux_session",
             "last_relay_offset",
             "inflight_state_present",
             "last_relay_ts_ms",
+            "has_pending_queue",
         ] {
             assert!(
                 obj.contains_key(field),
                 "snapshot must expose `{field}` in HTTP response",
+            );
+        }
+        // Optional fields must be absent (skip_serializing_if = Option::is_none)
+        // when their underlying source is missing — keeps the JSON tight.
+        for absent in [
+            "inflight_started_at",
+            "inflight_updated_at",
+            "inflight_user_msg_id",
+            "inflight_current_msg_id",
+            "tmux_session_alive",
+            "mailbox_active_user_msg_id",
+        ] {
+            assert!(
+                !obj.contains_key(absent),
+                "snapshot must omit `{absent}` when no underlying state is present",
             );
         }
     }
@@ -2613,7 +2722,7 @@ mod tests {
     async fn snapshot_watcher_state_returns_none_for_unknown_channel() {
         let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
         let registry = harness.registry();
-        // No seed: neither watcher, relay-coord, nor inflight state exists.
+        // No seed: neither watcher, relay-coord, inflight, nor mailbox entry.
         assert!(
             registry
                 .snapshot_watcher_state(999_999_999_999_999_999)
@@ -2621,6 +2730,120 @@ mod tests {
                 .is_none(),
             "unknown channel must return None so the HTTP handler can emit 404",
         );
+    }
+
+    /// #1133: when the mailbox holds an active turn (no watcher attached,
+    /// no inflight on disk, no relay-coord), the snapshot must still
+    /// surface so operators can see the queue/active-turn state during
+    /// pre-watcher windows. The active-turn message ID and queue flag must
+    /// reflect the mailbox.
+    #[tokio::test]
+    async fn snapshot_watcher_state_surfaces_mailbox_active_turn_without_watcher() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 511_222_333_444_555_666;
+        harness
+            .seed_channel_session(channel_id, "watcher-state-mailbox", Some("session-mb"))
+            .await;
+        // Active turn with user_message_id=8675309, plus one queued msg.
+        harness.seed_active_turn(channel_id, 42, 8_675_309).await;
+        harness
+            .seed_queue(channel_id, &[(7777, "queued intervention")])
+            .await;
+
+        let registry = harness.registry();
+        let snapshot = registry
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("mailbox engagement alone must keep the channel visible");
+
+        assert_eq!(snapshot.provider, "codex");
+        assert!(!snapshot.attached);
+        assert!(!snapshot.inflight_state_present);
+        assert!(snapshot.has_pending_queue);
+        assert_eq!(snapshot.mailbox_active_user_msg_id, Some(8_675_309));
+
+        let serialized = serde_json::to_value(&snapshot).expect("serialize watcher snapshot");
+        let obj = serialized.as_object().expect("snapshot is a JSON object");
+        assert_eq!(
+            obj.get("mailbox_active_user_msg_id"),
+            Some(&serde_json::json!(8_675_309)),
+        );
+        assert_eq!(obj.get("has_pending_queue"), Some(&serde_json::json!(true)));
+    }
+
+    /// #1133: when an inflight JSON is present on disk, the snapshot must
+    /// surface its `started_at`, `updated_at`, `user_msg_id`, and
+    /// `current_msg_id` (PII-free scalars). Rebind-origin inflights with
+    /// zero-valued IDs MUST be filtered out — they do not represent a real
+    /// user-authored turn so exposing them would mislead operators.
+    #[tokio::test]
+    async fn snapshot_watcher_state_includes_inflight_diagnostics_when_persisted() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 600_111_222_333_444_555;
+
+        let mut inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watcher-state-inflight".to_string()),
+            /* request_owner_user_id */ 24,
+            /* user_msg_id */ 9_001,
+            /* current_msg_id */ 9_002,
+            /* user_text */ String::new(),
+            /* session_id */ Some("session-inflight-1133".to_string()),
+            /* tmux_session_name */
+            Some("nonexistent-session-1133-test".to_string()),
+            /* output_path */ None,
+            /* input_fifo_path */ None,
+            /* last_offset */ 0,
+        );
+        // Pin `started_at` so the assertion is deterministic. `updated_at`
+        // is rewritten to `now()` by `save_inflight_state` on every write
+        // (see `save_inflight_state_in_root`), so we only check it is
+        // surfaced as a non-empty `Some(_)` rather than asserting an exact
+        // string.
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let registry = harness.registry();
+        let snapshot = registry
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("inflight on disk must surface a snapshot");
+
+        assert!(snapshot.inflight_state_present);
+        assert_eq!(
+            snapshot.inflight_started_at.as_deref(),
+            Some("2026-04-25 03:00:00")
+        );
+        let updated_at = snapshot
+            .inflight_updated_at
+            .as_deref()
+            .expect("updated_at must be surfaced when inflight is on disk");
+        assert!(
+            !updated_at.is_empty(),
+            "updated_at must be a non-empty timestamp string"
+        );
+        assert_eq!(snapshot.inflight_user_msg_id, Some(9_001));
+        assert_eq!(snapshot.inflight_current_msg_id, Some(9_002));
+        assert_eq!(
+            snapshot.tmux_session.as_deref(),
+            Some("nonexistent-session-1133-test")
+        );
+        // Session was never created, so tmux::has_session returns false. The
+        // field is Some(false), not None, because we DID know a session name
+        // to probe.
+        assert_eq!(snapshot.tmux_session_alive, Some(false));
     }
 
     #[tokio::test]

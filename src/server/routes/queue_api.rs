@@ -225,15 +225,25 @@ pub async fn cancel_turn(
 
 // ── GET /api/channels/:id/watcher-state ─────────────────────────
 
-/// #964: snapshot the tmux-watcher lifecycle state for a channel.
+/// #964 / #1133: snapshot the tmux-watcher lifecycle state for a channel.
 ///
-/// Returns `{ provider, attached, tmux_session, last_relay_offset,
-/// inflight_state_present, last_relay_ts_ms }` on success. Used by
-/// operators to diagnose "watcher detached silently while tmux still
-/// producing output" incidents.
+/// Core fields (#964): `{ provider, attached, tmux_session,
+/// last_relay_offset, inflight_state_present, last_relay_ts_ms,
+/// has_pending_queue }`.
 ///
-/// 404 is returned when neither watcher nor inflight state is known
-/// for the channel across all registered providers.
+/// #1133 enriched read-only diagnostics (omitted when their source is
+/// absent): `inflight_started_at`, `inflight_updated_at`,
+/// `inflight_user_msg_id`, `inflight_current_msg_id`,
+/// `tmux_session_alive` (PID check via `tmux has-session`), and
+/// `mailbox_active_user_msg_id`. All fields are PII-free scalars so
+/// the response is safe for non-privileged operator dashboards.
+///
+/// Used by operators to diagnose "watcher detached silently while tmux
+/// still producing output" incidents and pre-watcher mailbox queueing.
+///
+/// 404 is returned when no watcher, no inflight state, and no mailbox
+/// engagement (active turn or queued intervention) is known for the
+/// channel across all registered providers.
 pub async fn get_watcher_state(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
