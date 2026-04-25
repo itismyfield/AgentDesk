@@ -219,7 +219,7 @@
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 817 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1037 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 147 |  |
-| `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 75 |  |
+| `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 126 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
