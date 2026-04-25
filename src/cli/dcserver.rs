@@ -1201,6 +1201,15 @@ pub fn handle_dcserver(token: Option<String>) {
         let launch_configs = services::discord::load_discord_bot_launch_configs();
         let onboarding_mode =
             should_run_http_only_onboarding(token.as_deref(), launch_configs.len());
+        let startup_provider_count = if token.is_some() {
+            1
+        } else {
+            launch_configs.len()
+        };
+        let startup_reconcile_remaining =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(startup_provider_count));
+        let startup_doctor_started =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if onboarding_mode
             && ad_config
                 .server
@@ -1368,6 +1377,8 @@ pub fn handle_dcserver(token: Option<String>) {
                         global_active,
                         global_finalizing,
                         shutdown_remaining,
+                        startup_reconcile_remaining,
+                        startup_doctor_started,
                         health_registry,
                         api_port,
                         sqlite: discord_db,
@@ -1436,6 +1447,8 @@ pub fn handle_dcserver(token: Option<String>) {
                     let ga = global_active.clone();
                     let gf = global_finalizing.clone();
                     let sr = shutdown_remaining.clone();
+                    let startup_remaining = startup_reconcile_remaining.clone();
+                    let startup_started = startup_doctor_started.clone();
                     let hr = health_registry.clone();
                     let port = api_port;
                     let db_clone = discord_db.clone();
@@ -1449,6 +1462,8 @@ pub fn handle_dcserver(token: Option<String>) {
                                 global_active: ga,
                                 global_finalizing: gf,
                                 shutdown_remaining: sr,
+                                startup_reconcile_remaining: startup_remaining,
+                                startup_doctor_started: startup_started,
                                 health_registry: hr,
                                 api_port: port,
                                 sqlite: db_clone,

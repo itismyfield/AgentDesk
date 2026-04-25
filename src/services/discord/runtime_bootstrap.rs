@@ -5,6 +5,8 @@ pub(crate) struct RunBotContext {
     pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) startup_reconcile_remaining: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) health_registry: Arc<health::HealthRegistry>,
     pub(crate) api_port: u16,
     pub(crate) sqlite: Option<crate::db::Db>,
@@ -428,12 +430,94 @@ fn should_skip_agent_runtime_launch(token: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StartupDoctorBarrier {
+    Waiting(usize),
+    Released,
+    AlreadyReleased,
+}
+
+fn startup_doctor_barrier_arrive(
+    remaining: &std::sync::atomic::AtomicUsize,
+    started: &std::sync::atomic::AtomicBool,
+) -> StartupDoctorBarrier {
+    let mut current = remaining.load(Ordering::Acquire);
+    loop {
+        if current == 0 {
+            return StartupDoctorBarrier::AlreadyReleased;
+        }
+        let next = current - 1;
+        match remaining.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) if next > 0 => return StartupDoctorBarrier::Waiting(next),
+            Ok(_) => {
+                return match started.compare_exchange(
+                    false,
+                    true,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => StartupDoctorBarrier::Released,
+                    Err(_) => StartupDoctorBarrier::AlreadyReleased,
+                };
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+async fn run_startup_diagnostic_after_reconcile_barrier(
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    health_registry: Arc<health::HealthRegistry>,
+) {
+    match startup_doctor_barrier_arrive(&remaining, &started) {
+        StartupDoctorBarrier::Waiting(waiting) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏳ startup_doctor waiting for {waiting} provider reconcile(s)"
+            );
+            return;
+        }
+        StartupDoctorBarrier::AlreadyReleased => return,
+        StartupDoctorBarrier::Released => {}
+    }
+
+    if health_registry.registered_provider_count().await == 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!("  [{ts}] ⏭ startup_doctor skipped — no provider runtimes registered");
+        return;
+    }
+
+    let startup_doctor =
+        tokio::task::spawn_blocking(crate::cli::doctor::startup::run_startup_diagnostic_once).await;
+    match startup_doctor {
+        Ok(Ok(Some(path))) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] ✓ startup_doctor wrote {}", path.display());
+        }
+        Ok(Ok(None)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] ✓ startup_doctor already recorded for this boot");
+        }
+        Ok(Err(error)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
+        }
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
+        }
+    }
+}
+
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
     let RunBotContext {
         global_active,
         global_finalizing,
         shutdown_remaining,
+        startup_reconcile_remaining,
+        startup_doctor_started,
         health_registry,
         api_port,
         sqlite,
@@ -442,6 +526,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     } = context;
 
     if let Some(bot_name) = should_skip_agent_runtime_launch(token) {
+        run_startup_diagnostic_after_reconcile_barrier(
+            startup_reconcile_remaining,
+            startup_doctor_started,
+            health_registry,
+        )
+        .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] ⏭ BOT-LAUNCH: skipping utility bot '{}' in run_bot() — not mapped to any agent channel",
@@ -463,6 +553,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 Some(lease)
             }
             Ok(None) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining,
+                    startup_doctor_started,
+                    health_registry,
+                )
+                .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
@@ -472,6 +568,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 return;
             }
             Err(error) => {
+                run_startup_diagnostic_after_reconcile_barrier(
+                    startup_reconcile_remaining,
+                    startup_doctor_started,
+                    health_registry,
+                )
+                .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — failed to acquire singleton lease: {}",
@@ -514,6 +616,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let provider_for_shutdown = provider.clone();
     let provider_for_error = provider.clone();
     let provider_for_framework = provider.clone();
+    let startup_reconcile_remaining_for_client_start = startup_reconcile_remaining.clone();
+    let startup_doctor_started_for_client_start = startup_doctor_started.clone();
+    let health_registry_for_client_start = health_registry.clone();
 
     let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_model_overrides
@@ -870,6 +975,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 let token_for_kickoff = token_owned.clone();
                 let shared_for_restart_reports = shared_for_tmux.clone();
                 let provider_for_restore = provider_for_setup.clone();
+                let startup_reconcile_remaining_for_restore =
+                    startup_reconcile_remaining.clone();
+                let startup_doctor_started_for_restore = startup_doctor_started.clone();
+                let health_registry_for_startup_doctor = health_registry_for_setup.clone();
                 tokio::spawn(async move {
                     let is_utility_bot = {
                         let s = shared_for_tmux2.settings.read().await;
@@ -1064,6 +1173,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             token_for_kickoff.clone(),
                         );
                     }
+
+                    run_startup_diagnostic_after_reconcile_barrier(
+                        startup_reconcile_remaining_for_restore,
+                        startup_doctor_started_for_restore,
+                        health_registry_for_startup_doctor,
+                    )
+                    .await;
 
                     // NOW flush restart reports (recovery is done, safe to delete them)
                     flush_restart_reports(
@@ -1362,6 +1478,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     if let Err(e) = client.start().await {
         tracing::warn!("  ✗ {} bot error: {e}", provider_for_error.display_name());
+        run_startup_diagnostic_after_reconcile_barrier(
+            startup_reconcile_remaining_for_client_start,
+            startup_doctor_started_for_client_start,
+            health_registry_for_client_start,
+        )
+        .await;
     }
 
     if let Some(handle) = gateway_lease_task {
@@ -1458,6 +1580,59 @@ mod tests {
             restored_fast_mode_reset_channels(&settings),
             vec![ChannelId::new(123), ChannelId::new(456)]
         );
+    }
+
+    #[test]
+    fn startup_doctor_barrier_releases_only_after_last_provider() {
+        let remaining = std::sync::atomic::AtomicUsize::new(2);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Waiting(1)
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 1);
+        assert!(!started.load(Ordering::Acquire));
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        assert!(started.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn startup_doctor_barrier_is_idempotent_after_release() {
+        let remaining = std::sync::atomic::AtomicUsize::new(1);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::AlreadyReleased
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn startup_doctor_barrier_releases_when_failed_startup_arrives_last() {
+        let remaining = std::sync::atomic::AtomicUsize::new(2);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Waiting(1)
+        );
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        assert!(started.load(Ordering::Acquire));
     }
 
     struct PgTestDatabase {

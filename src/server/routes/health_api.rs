@@ -5,10 +5,14 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use sqlx::PgPool;
+use poise::serenity_prelude::ChannelId;
+use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row};
 use std::net::SocketAddr;
 
+use crate::db::Db;
 use crate::services::discord::health;
+use crate::services::provider::ProviderKind;
 
 use super::AppState;
 
@@ -19,6 +23,21 @@ struct DispatchOutboxStats {
     retrying: i64,
     permanent_failures: i64,
     oldest_pending_age: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChannelSessionState {
+    agent_id: Option<String>,
+    provider: Option<String>,
+    status: Option<String>,
+    active_dispatch_id: Option<String>,
+    thread_channel_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StaleMailboxRepairRequest {
+    channel_id: u64,
+    expected_has_cancel_token: Option<bool>,
 }
 
 fn discord_control_endpoints_allowed(
@@ -42,10 +61,10 @@ fn discord_control_endpoints_allowed(
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
 }
 
-/// GET /api/health — combined DB + Discord provider health.
-/// When HealthRegistry is present, returns Discord provider status.
-/// Always includes DB status and dashboard availability.
-pub async fn health_handler(State(state): State<AppState>) -> Response {
+/// Build combined DB + Discord provider health.
+/// Public callers receive only a redacted safe summary; authenticated/local
+/// detail callers receive provider/config/outbox diagnostics.
+async fn health_response(state: &AppState, detailed: bool) -> Response {
     let server_up = probe_server_up(state.sqlite_db(), state.pg_pool_ref()).await;
 
     // Check if dashboard dist is available
@@ -82,10 +101,17 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     .and_then(|report| serde_json::to_value(report).ok());
 
     if let Some(ref registry) = state.health_registry {
-        let discord_snapshot = health::build_health_snapshot(registry).await;
+        let discord_snapshot = if detailed {
+            health::build_health_snapshot(registry).await
+        } else {
+            health::build_public_health_snapshot(registry).await
+        };
         let mut status = discord_snapshot.status();
         let mut json =
             serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
+        if detailed {
+            enrich_mailbox_session_state(&mut json, state).await;
+        }
         let mut degraded_reasons = json["degraded_reasons"]
             .as_array()
             .cloned()
@@ -136,6 +162,11 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
+        let json = if detailed {
+            json
+        } else {
+            public_health_json(json)
+        };
         (http_status, Json(json)).into_response()
     } else {
         // Standalone mode — no Discord providers
@@ -168,8 +199,421 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         if let Some(report) = pipeline_override_report {
             json["pipeline_overrides"] = report;
         }
+        let json = if detailed {
+            json
+        } else {
+            public_health_json(json)
+        };
         (status, Json(json)).into_response()
     }
+}
+
+fn public_health_json(json: serde_json::Value) -> serde_json::Value {
+    let status = json
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("unknown"));
+    let version = json
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(env!("CARGO_PKG_VERSION")));
+    let db = json
+        .get("db")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(false));
+    let dashboard = json
+        .get("dashboard")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(false));
+    let degraded = status.as_str().is_some_and(|status| status != "healthy");
+    serde_json::json!({
+        "ok": !degraded,
+        "status": status,
+        "version": version,
+        "db": db,
+        "dashboard": dashboard,
+        "degraded": degraded,
+    })
+}
+
+fn stale_mailbox_repair_applied(
+    removed_token: bool,
+    inflight_cleared: bool,
+    session_disconnected_count: usize,
+) -> bool {
+    removed_token || inflight_cleared || session_disconnected_count > 0
+}
+
+async fn load_channel_session_state(
+    sqlite: &Db,
+    pg_pool: Option<&PgPool>,
+    channel_id: u64,
+) -> Option<ChannelSessionState> {
+    let channel_id = channel_id.to_string();
+    if let Some(pool) = pg_pool {
+        let row = sqlx::query(
+            "SELECT agent_id, provider, status, active_dispatch_id, thread_channel_id
+               FROM sessions
+              WHERE thread_channel_id = $1
+              ORDER BY last_heartbeat DESC NULLS LAST, id DESC
+              LIMIT 1",
+        )
+        .bind(&channel_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+        return Some(ChannelSessionState {
+            agent_id: row.try_get("agent_id").ok(),
+            provider: row.try_get("provider").ok(),
+            status: row.try_get("status").ok(),
+            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
+            thread_channel_id: row.try_get("thread_channel_id").ok(),
+        });
+    }
+
+    let conn = sqlite.read_conn().ok()?;
+    conn.query_row(
+        "SELECT agent_id, provider, status, active_dispatch_id, thread_channel_id
+           FROM sessions
+          WHERE thread_channel_id = ?1
+          ORDER BY COALESCE(last_heartbeat, '') DESC, id DESC
+          LIMIT 1",
+        [&channel_id],
+        |row| {
+            Ok(ChannelSessionState {
+                agent_id: row.get(0)?,
+                provider: row.get(1)?,
+                status: row.get(2)?,
+                active_dispatch_id: row.get(3)?,
+                thread_channel_id: row.get(4)?,
+            })
+        },
+    )
+    .ok()
+}
+
+async fn mark_channel_sessions_disconnected(
+    sqlite: &Db,
+    pg_pool: Option<&PgPool>,
+    channel_id: u64,
+) -> Result<usize, String> {
+    let channel_id = channel_id.to_string();
+    if let Some(pool) = pg_pool {
+        return sqlx::query(
+            "UPDATE sessions
+                SET status = 'disconnected',
+                    active_dispatch_id = NULL
+              WHERE thread_channel_id = $1
+                AND status = 'working'
+                AND (active_dispatch_id IS NULL OR active_dispatch_id = '')",
+        )
+        .bind(&channel_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected() as usize)
+        .map_err(|error| format!("mark postgres sessions disconnected: {error}"));
+    }
+
+    let conn = sqlite
+        .lock()
+        .map_err(|error| format!("open sqlite write connection: {error}"))?;
+    conn.execute(
+        "UPDATE sessions
+            SET status = 'disconnected',
+                active_dispatch_id = NULL
+          WHERE thread_channel_id = ?1
+            AND status = 'working'
+            AND (active_dispatch_id IS NULL OR active_dispatch_id = '')",
+        [&channel_id],
+    )
+    .map(|rows| rows as usize)
+    .map_err(|error| format!("mark sqlite sessions disconnected: {error}"))
+}
+
+async fn enrich_mailbox_session_state(json: &mut serde_json::Value, state: &AppState) {
+    let Some(mailboxes) = json
+        .get_mut("mailboxes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for mailbox in mailboxes {
+        let Some(channel_id) = mailbox
+            .get("channel_id")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            continue;
+        };
+        if let Some(session) =
+            load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), channel_id).await
+        {
+            let active_dispatch_present = session
+                .active_dispatch_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty());
+            mailbox["session_record_present"] = serde_json::json!(true);
+            mailbox["session_agent_id"] = serde_json::json!(session.agent_id);
+            mailbox["session_provider"] = serde_json::json!(session.provider);
+            mailbox["session_status"] = serde_json::json!(session.status);
+            mailbox["session_active_dispatch_id"] = serde_json::json!(session.active_dispatch_id);
+            mailbox["session_thread_channel_id"] = serde_json::json!(session.thread_channel_id);
+            if active_dispatch_present {
+                mailbox["active_dispatch_present"] = serde_json::json!(true);
+            }
+        } else {
+            mailbox["session_record_present"] = serde_json::json!(false);
+            mailbox["session_status"] = serde_json::Value::Null;
+            mailbox["session_active_dispatch_id"] = serde_json::Value::Null;
+        }
+    }
+}
+
+/// GET /api/health — public safe health summary.
+pub async fn health_handler(State(state): State<AppState>) -> Response {
+    health_response(&state, false).await
+}
+
+/// GET /api/health/detail — authenticated or local detailed health.
+pub async fn health_detail_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+    health_response(&state, true).await
+}
+
+/// POST /api/doctor/stale-mailbox/repair — protected/local stale mailbox cleanup.
+pub async fn stale_mailbox_repair_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
+    let body_str = String::from_utf8_lossy(&body);
+    let request = match serde_json::from_str::<StaleMailboxRepairRequest>(&body_str) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"ok": false, "error": format!("invalid request: {error}")}),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let channel_id = ChannelId::new(request.channel_id);
+    let Some(handle) =
+        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel_id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "applied": false,
+                "skipped": true,
+                "fix_safety": "safe_local_repair",
+                "safety_gate": "mailbox_not_found",
+                "skipped_reason": "no mailbox handle exists for channel",
+                "post_repair_mailbox": null,
+                "post_repair_watcher_inflight": null
+            })),
+        )
+            .into_response();
+    };
+
+    let before = handle.snapshot().await;
+    if request.expected_has_cancel_token.is_some()
+        && request.expected_has_cancel_token != Some(before.cancel_token.is_some())
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "ok": false,
+                "applied": false,
+                "skipped": true,
+                "fix_safety": "safe_local_repair",
+                "safety_gate": "expected_evidence_mismatch",
+                "skipped_reason": "mailbox evidence changed before repair",
+                "post_repair_mailbox": {
+                    "channel_id": request.channel_id,
+                    "has_cancel_token": before.cancel_token.is_some(),
+                    "queue_depth": before.intervention_queue.len(),
+                    "recovery_started": before.recovery_started_at.is_some()
+                },
+                "post_repair_watcher_inflight": null
+            })),
+        )
+            .into_response();
+    }
+    if !before.intervention_queue.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "ok": false,
+                "applied": false,
+                "skipped": true,
+                "fix_safety": "safe_local_repair",
+                "safety_gate": "queue_not_empty",
+                "skipped_reason": "live queue evidence exists",
+                "post_repair_mailbox": {
+                    "channel_id": request.channel_id,
+                    "has_cancel_token": before.cancel_token.is_some(),
+                    "queue_depth": before.intervention_queue.len(),
+                    "recovery_started": before.recovery_started_at.is_some()
+                },
+                "post_repair_watcher_inflight": null
+            })),
+        )
+            .into_response();
+    }
+
+    let before_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
+        registry.snapshot_watcher_state(request.channel_id).await
+    } else {
+        None
+    };
+    let before_session_state =
+        load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), request.channel_id)
+            .await;
+    if before_session_state
+        .as_ref()
+        .and_then(|session| session.active_dispatch_id.as_deref())
+        .is_some_and(|dispatch_id| !dispatch_id.trim().is_empty())
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "ok": false,
+                "applied": false,
+                "skipped": true,
+                "fix_safety": "explicit_restart_required",
+                "safety_gate": "active_dispatch_present",
+                "skipped_reason": "session record still has active dispatch evidence",
+                "pre_repair_session": before_session_state,
+                "post_repair_mailbox": {
+                    "channel_id": request.channel_id,
+                    "has_cancel_token": before.cancel_token.is_some(),
+                    "queue_depth": before.intervention_queue.len(),
+                    "recovery_started": before.recovery_started_at.is_some()
+                },
+                "post_repair_watcher_inflight": before_watcher_inflight
+            })),
+        )
+            .into_response();
+    }
+    let tmux_present = before_watcher_inflight
+        .as_ref()
+        .and_then(|snapshot| snapshot.tmux_session.as_deref())
+        .is_some_and(crate::services::platform::tmux::has_session);
+    if tmux_present {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "ok": false,
+                "applied": false,
+                "skipped": true,
+                "fix_safety": "explicit_restart_required",
+                "safety_gate": "tmux_present",
+                "skipped_reason": "live tmux evidence exists",
+                "post_repair_mailbox": {
+                    "channel_id": request.channel_id,
+                    "has_cancel_token": before.cancel_token.is_some(),
+                    "queue_depth": before.intervention_queue.len(),
+                    "recovery_started": before.recovery_started_at.is_some()
+                },
+                "post_repair_watcher_inflight": before_watcher_inflight
+            })),
+        )
+            .into_response();
+    }
+
+    let repair = handle.hard_stop().await;
+    let session_disconnect_result = mark_channel_sessions_disconnected(
+        state.sqlite_db(),
+        state.pg_pool_ref(),
+        request.channel_id,
+    )
+    .await;
+    let (session_disconnected_count, session_disconnect_error) = match session_disconnect_result {
+        Ok(count) => (count, None),
+        Err(error) => (0, Some(error)),
+    };
+    let mut inflight_cleared = false;
+    if let Some(snapshot) = before_watcher_inflight.as_ref()
+        && snapshot.inflight_state_present
+        && !snapshot.attached
+        && let Some(provider) = ProviderKind::from_str(&snapshot.provider)
+    {
+        crate::services::discord::clear_inflight_state_for_channel(&provider, request.channel_id);
+        inflight_cleared = true;
+    }
+    let after = handle.snapshot().await;
+    let after_watcher_inflight = if let Some(registry) = state.health_registry.as_ref() {
+        registry.snapshot_watcher_state(request.channel_id).await
+    } else {
+        None
+    };
+    let after_session_state =
+        load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), request.channel_id)
+            .await;
+    let residual_inflight = after_watcher_inflight
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.inflight_state_present || snapshot.attached);
+    let residual_working_session = after_session_state
+        .as_ref()
+        .and_then(|session| session.status.as_deref())
+        == Some("working");
+    let status =
+        if residual_inflight || residual_working_session || session_disconnect_error.is_some() {
+            "partial_repair"
+        } else {
+            "applied"
+        };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": status == "applied",
+            "status": status,
+            "applied": stale_mailbox_repair_applied(
+                repair.removed_token.is_some(),
+                inflight_cleared,
+                session_disconnected_count
+            ),
+            "skipped": false,
+            "fix_safety": "safe_local_repair",
+            "safety_gate": "no_live_work_evidence",
+            "inflight_cleared": inflight_cleared,
+            "session_disconnected_count": session_disconnected_count,
+            "session_disconnect_error": session_disconnect_error,
+            "pre_repair_session": before_session_state,
+            "post_repair_session": after_session_state,
+            "delivery_completed": false,
+            "post_repair_mailbox": {
+                "channel_id": request.channel_id,
+                "has_cancel_token": after.cancel_token.is_some(),
+                "queue_depth": after.intervention_queue.len(),
+                "recovery_started": after.recovery_started_at.is_some()
+            },
+            "post_repair_watcher_inflight": after_watcher_inflight
+        })),
+    )
+        .into_response()
 }
 
 /// POST /api/send — agent-to-agent native routing.
@@ -318,7 +762,10 @@ pub async fn senddm_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::discord_control_endpoints_allowed;
+    use super::{
+        discord_control_endpoints_allowed, public_health_json, stale_mailbox_repair_applied,
+    };
+    use serde_json::json;
 
     #[test]
     fn discord_control_endpoints_allow_loopback_peer_without_auth_token() {
@@ -347,6 +794,38 @@ mod tests {
             Some("10.0.0.5:8791".parse().unwrap())
         ));
         assert!(!discord_control_endpoints_allowed(&config, None));
+    }
+
+    #[test]
+    fn public_health_json_redacts_provider_and_mailbox_details() {
+        let public = public_health_json(json!({
+            "status": "degraded",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": false,
+            "providers": [{"name": "codex", "connected": true}],
+            "mailboxes": [{"channel_id": 123, "has_cancel_token": true}],
+            "config_audit": {"warnings": ["secret-ish path"]},
+            "degraded_reasons": ["provider:codex:pending_queue_depth:2"]
+        }));
+
+        assert_eq!(public["status"], "degraded");
+        assert_eq!(public["version"], "0.1.2");
+        assert_eq!(public["db"], true);
+        assert_eq!(public["dashboard"], false);
+        assert_eq!(public["degraded"], true);
+        assert!(public.get("providers").is_none());
+        assert!(public.get("mailboxes").is_none());
+        assert!(public.get("config_audit").is_none());
+        assert!(public.get("degraded_reasons").is_none());
+    }
+
+    #[test]
+    fn stale_mailbox_repair_applied_includes_session_only_disconnect() {
+        assert!(stale_mailbox_repair_applied(false, false, 1));
+        assert!(stale_mailbox_repair_applied(true, false, 0));
+        assert!(stale_mailbox_repair_applied(false, true, 0));
+        assert!(!stale_mailbox_repair_applied(false, false, 0));
     }
 }
 

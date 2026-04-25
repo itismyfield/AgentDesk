@@ -25,7 +25,7 @@ Windows and Linux run natively today, but they use the manual/runtime-first path
 1. Download the matching release artifact (`agentdesk-linux-<arch>.tar.gz` or `agentdesk-windows-<arch>.zip`) or build from source with `cargo build --release`.
 2. Run `agentdesk --init` (`agentdesk.exe --init` on Windows) to create the runtime under `~/.adk/release` or `%USERPROFILE%\.adk\release`.
 3. Start `agentdesk dcserver` directly, or register the generated service path with `systemd --user` on Linux or `nssm` / `sc.exe` on Windows.
-4. Verify the host runtime with `agentdesk doctor` and use `agentdesk doctor --fix` for service/runtime repairs.
+4. Verify the host runtime with `agentdesk doctor`. Mutating repairs require explicit flags such as `agentdesk doctor --fix --allow-restart` or `agentdesk doctor --fix --repair-sqlite-cache`.
 
 When tmux is unavailable, provider turns automatically fall back to `ProcessBackend` instead of tmux sessions. That path still posts ADK session heartbeats every 30 seconds, but live child processes cannot be reattached after a `dcserver` restart. After restart, AgentDesk starts a fresh backend process on the next turn and only restores provider-native session IDs when the underlying CLI supports resume.
 
@@ -456,7 +456,9 @@ agentdesk dcserver                               # Start Discord control plane
 agentdesk init                                   # Interactive setup wizard
 agentdesk reconfigure                            # Re-run setup (preserves data)
 agentdesk restart-dcserver                        # Graceful restart with crash context
-agentdesk doctor                                 # System diagnostics
+agentdesk doctor [--json] [--profile quick|deep|security]
+agentdesk doctor --fix --allow-restart           # Explicit service restart repair
+agentdesk doctor --fix --repair-sqlite-cache     # Explicit legacy SQLite cache repair
 
 # Discord messaging
 agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
@@ -495,7 +497,8 @@ agentdesk config set '<JSON>'                    # Set runtime config
 agentdesk config audit [--dry-run]               # Reconcile yaml/DB drift
 agentdesk agents                                 # List agents
 agentdesk terminations                           # Session termination events
-agentdesk api GET /api/health                    # Direct API call
+agentdesk api GET /api/health                    # Public safe health summary
+agentdesk api GET /api/health/detail             # Authenticated/local detailed health
 
 # Process wrappers (internal)
 agentdesk tmux-wrapper                           # Claude session wrapper
@@ -520,7 +523,8 @@ AgentDesk exposes 150+ REST API endpoints. Key groups:
 | `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
 | `/api/github` | Repo sync, dashboard views, issue actions | GitHub integration |
 | `/api/discord` | Channel messages, bindings, DM reply hooks | Discord access layer |
-| `/api/health` | Health check + detailed metrics | Service status |
+| `/api/health` | Public safe health summary | Service status |
+| `/api/health/detail` | Authenticated/local detailed diagnostics | Provider/runtime diagnostics |
 | `/api/onboarding` | Status, validate, complete | Setup wizard backend |
 | `/api/docs` | Endpoint discovery + category drill-down | Self-documenting API |
 

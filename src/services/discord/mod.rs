@@ -330,6 +330,10 @@ pub(super) async fn clear_watchdog_deadline_override(channel_id: u64) {
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
     inflight::clear_inflight_by_tmux_name(provider, tmux_name)
 }
+
+pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) {
+    inflight::clear_inflight_state(provider, channel_id);
+}
 /// Check if a deferred restart has been requested and no active or finalizing turns remain
 /// **across all providers**.
 ///

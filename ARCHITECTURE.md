@@ -22,9 +22,11 @@ This block is generated from the filesystem and is checked in CI for drift.
 src/
 ├── cli/
 │   ├── doctor/
-│   │   ├── checks.rs
-│   │   ├── fix.rs
-│   │   └── types.rs
+│   │   ├── contract.rs
+│   │   ├── health.rs
+│   │   ├── mailbox.rs
+│   │   ├── orchestrator.rs
+│   │   └── startup.rs
 │   ├── migrate/
 │   │   ├── apply.rs
 │   │   ├── plan.rs

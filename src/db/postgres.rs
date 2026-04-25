@@ -215,6 +215,68 @@ pub async fn health_check(pool: &PgPool) -> Result<(), String> {
         .map_err(|error| format!("postgres health check failed: {error}"))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedMigrationInfo {
+    pub version: i64,
+    pub description: String,
+    pub success: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationStatus {
+    pub applied: Vec<AppliedMigrationInfo>,
+    pub resolved_versions: Vec<i64>,
+    pub missing_from_resolved: Vec<i64>,
+    pub pending_versions: Vec<i64>,
+}
+
+pub async fn query_applied_migrations(pool: &PgPool) -> Result<Vec<AppliedMigrationInfo>, String> {
+    let rows = sqlx::query(
+        "SELECT version, description, success
+         FROM _sqlx_migrations
+         ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("query _sqlx_migrations: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| AppliedMigrationInfo {
+            version: row.get::<i64, _>("version"),
+            description: row.get::<String, _>("description"),
+            success: row.get::<bool, _>("success"),
+        })
+        .collect())
+}
+
+pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, String> {
+    let applied = query_applied_migrations(pool).await?;
+    let resolved_versions = POSTGRES_MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .collect::<Vec<_>>();
+    let resolved_set = resolved_versions.iter().copied().collect::<BTreeSet<_>>();
+    let applied_set = applied
+        .iter()
+        .filter(|migration| migration.success)
+        .map(|migration| migration.version)
+        .collect::<BTreeSet<_>>();
+    let missing_from_resolved = applied_set
+        .difference(&resolved_set)
+        .copied()
+        .collect::<Vec<_>>();
+    let pending_versions = resolved_set
+        .difference(&applied_set)
+        .copied()
+        .collect::<Vec<_>>();
+    Ok(MigrationStatus {
+        applied,
+        resolved_versions,
+        missing_from_resolved,
+        pending_versions,
+    })
+}
+
 async fn apply_kv_seed_actions(pool: &PgPool, actions: &[KvSeedAction]) -> Result<(), String> {
     for action in actions {
         match action {

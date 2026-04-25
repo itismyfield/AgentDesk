@@ -7,8 +7,8 @@ use axum::{
 use serde_json::Value;
 
 use super::super::{
-    ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, hooks,
-    log_deprecated_alias, maintenance, messages, pipeline, protected_api_domain, queue_api,
+    ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, health_api,
+    hooks, log_deprecated_alias, maintenance, messages, pipeline, protected_api_domain, queue_api,
     skills_api, termination_events,
 };
 
@@ -20,6 +20,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/dispatches",
                 get(dispatches::list_dispatches).post(dispatches::create_dispatch),
+            )
+            .route("/health/detail", get(health_api::health_detail_handler))
+            .route(
+                "/doctor/stale-mailbox/repair",
+                post(health_api::stale_mailbox_repair_handler),
             )
             .route(
                 "/dispatches/{id}",

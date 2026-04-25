@@ -773,6 +773,54 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
 }
 
 #[tokio::test]
+async fn health_detail_and_stale_mailbox_repair_require_bearer_when_auth_enabled() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.host = "0.0.0.0".to_string();
+    config.server.auth_token = Some("secret-token".to_string());
+    let app = test_api_router_with_config(db, engine, config, None);
+
+    let mut detail_request = Request::builder()
+        .uri("/health/detail")
+        .body(Body::empty())
+        .unwrap();
+    detail_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(
+            "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let detail_response = app.clone().oneshot(detail_request).await.unwrap();
+    assert_eq!(detail_response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut repair_request = Request::builder()
+        .method("POST")
+        .uri("/doctor/stale-mailbox/repair")
+        .body(Body::from("{}"))
+        .unwrap();
+    repair_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(
+            "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let repair_response = app.clone().oneshot(repair_request).await.unwrap();
+    assert_eq!(repair_response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut authorized_detail_request = Request::builder()
+        .uri("/health/detail")
+        .header("authorization", "Bearer secret-token")
+        .body(Body::empty())
+        .unwrap();
+    authorized_detail_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(
+            "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let authorized_detail_response = app.oneshot(authorized_detail_request).await.unwrap();
+    assert_eq!(authorized_detail_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn discord_control_endpoints_require_auth_token_on_non_loopback_host() {
     let db = test_db();
     let engine = test_engine(&db);
