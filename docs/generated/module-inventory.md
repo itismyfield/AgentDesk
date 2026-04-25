@@ -252,7 +252,7 @@
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 938 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 39 |  |
-| `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 445 |  |
+| `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 474 |  |
 | `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 687 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 629 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 155 |  |

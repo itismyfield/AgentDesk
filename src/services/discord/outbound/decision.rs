@@ -12,7 +12,8 @@ use poise::serenity_prelude::{ChannelId, UserId};
 use serde::{Deserialize, Serialize};
 
 use super::message::{
-    DiscordOutboundMessage, OutboundAttachmentSource, OutboundDedupKey, OutboundTarget,
+    DiscordOutboundMessage, OutboundAttachmentSource, OutboundDedupKey, OutboundOperation,
+    OutboundTarget,
 };
 use super::policy::{FallbackPolicy, LengthStrategy};
 use super::result::FallbackUsed;
@@ -137,7 +138,11 @@ pub(crate) fn decide_policy_with_limits(
         dedup_key: message.dedup_key(),
         primary_target: decide_primary_target(message.target),
         length: decide_length(message, limits),
-        thread_fallback: decide_thread_fallback(message.target, message.policy.fallback),
+        thread_fallback: decide_thread_fallback(
+            message.target,
+            message.operation,
+            message.policy.fallback,
+        ),
     }
 }
 
@@ -167,32 +172,27 @@ fn decide_length(
             fallback_used: FallbackUsed::LengthCompacted,
         },
         LengthStrategy::FileAttachment => {
-            let attachments = if message.attachments.is_empty() {
-                vec![AttachmentPolicyDecision {
-                    filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
-                    content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
-                    source: AttachmentSourceDecision::GeneratedTextBody { char_count },
-                }]
-            } else {
-                message
-                    .attachments
-                    .iter()
-                    .map(|attachment| AttachmentPolicyDecision {
-                        filename: attachment.filename.clone(),
-                        content_type: attachment.content_type.clone(),
-                        source: match &attachment.source {
-                            OutboundAttachmentSource::Bytes { data } => {
-                                AttachmentSourceDecision::InlineBytes {
-                                    byte_len: data.len(),
-                                }
+            let mut attachments = vec![AttachmentPolicyDecision {
+                filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
+                content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
+                source: AttachmentSourceDecision::GeneratedTextBody { char_count },
+            }];
+            attachments.extend(message.attachments.iter().map(|attachment| {
+                AttachmentPolicyDecision {
+                    filename: attachment.filename.clone(),
+                    content_type: attachment.content_type.clone(),
+                    source: match &attachment.source {
+                        OutboundAttachmentSource::Bytes { data } => {
+                            AttachmentSourceDecision::InlineBytes {
+                                byte_len: data.len(),
                             }
-                            OutboundAttachmentSource::Path { path } => {
-                                AttachmentSourceDecision::Path { path: path.clone() }
-                            }
-                        },
-                    })
-                    .collect()
-            };
+                        }
+                        OutboundAttachmentSource::Path { path } => {
+                            AttachmentSourceDecision::Path { path: path.clone() }
+                        }
+                    },
+                }
+            }));
             LengthPolicyDecision::FileAttachment {
                 char_count,
                 attachments,
@@ -212,15 +212,18 @@ fn decide_primary_target(target: OutboundTarget) -> PrimaryDeliveryTarget {
 
 fn decide_thread_fallback(
     target: OutboundTarget,
+    operation: OutboundOperation,
     fallback: FallbackPolicy,
 ) -> ThreadFallbackDecision {
-    match (target, fallback) {
-        (OutboundTarget::Thread { parent, thread }, FallbackPolicy::ThreadOrChannel) => {
-            ThreadFallbackDecision::RetryParent {
-                parent,
-                failed_thread: thread,
-            }
-        }
+    match (target, operation, fallback) {
+        (
+            OutboundTarget::Thread { parent, thread },
+            OutboundOperation::Send,
+            FallbackPolicy::ThreadOrChannel,
+        ) => ThreadFallbackDecision::RetryParent {
+            parent,
+            failed_thread: thread,
+        },
         _ => ThreadFallbackDecision::None,
     }
 }
@@ -342,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn file_attachment_policy_decision_preserves_supplied_attachment_sources() {
+    fn file_attachment_policy_decision_preserves_body_and_supplied_attachment_sources() {
         let msg = message_with_policy(policy(LengthStrategy::FileAttachment, FallbackPolicy::None))
             .with_bytes_attachment("report.md", Some("text/markdown"), b"payload".to_vec())
             .with_path_attachment("trace.log", Some("text/plain"), "/tmp/trace.log");
@@ -354,6 +357,11 @@ mod tests {
             LengthPolicyDecision::FileAttachment {
                 char_count: 11,
                 attachments: vec![
+                    AttachmentPolicyDecision {
+                        filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
+                        content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
+                        source: AttachmentSourceDecision::GeneratedTextBody { char_count: 11 },
+                    },
                     AttachmentPolicyDecision {
                         filename: "report.md".into(),
                         content_type: Some("text/markdown".into()),
@@ -370,6 +378,27 @@ mod tests {
                 fallback_used: FallbackUsed::FileAttachment,
             }
         );
+    }
+
+    #[test]
+    fn thread_fallback_policy_decision_does_not_reroute_edits() {
+        let msg = DiscordOutboundMessage::new(
+            "dispatch:1164",
+            "dispatch:1164:thread-edit",
+            "short",
+            OutboundTarget::Thread {
+                parent: ChannelId::new(100),
+                thread: ChannelId::new(101),
+            },
+            policy(LengthStrategy::Split, FallbackPolicy::ThreadOrChannel),
+        )
+        .with_operation(OutboundOperation::Edit {
+            message_id: poise::serenity_prelude::MessageId::new(777),
+        });
+
+        let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(20));
+
+        assert_eq!(decision.thread_fallback, ThreadFallbackDecision::None);
     }
 
     #[test]
