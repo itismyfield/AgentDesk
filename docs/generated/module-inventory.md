@@ -51,7 +51,7 @@
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 182 |  |
-| `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 215 |  |
+| `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4362 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 147 |  |
 | `cli::init` | `src/cli/init.rs` | 1597 | giant-file |
@@ -172,7 +172,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2345 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 676 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 935 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 939 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 202 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4772 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 453 |  |
@@ -237,7 +237,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2632 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 3304 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 3334 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 462 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1016 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
