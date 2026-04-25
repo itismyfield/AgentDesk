@@ -831,7 +831,10 @@ Any other message is sent to {p}.
                 } else {
                     "Public access is disabled. Only the owner and authorized users can talk to this bot."
                 };
-                let _ = msg.reply(&ctx.http, message).await;
+                // Issue #1005: include the high-risk policy reminder on status
+                // queries so operators always see what stays owner-only.
+                let combined = format!("{message}\n\n{}", super::build_allowall_policy_note());
+                let _ = msg.reply(&ctx.http, combined).await;
                 return Ok(true);
             }
 
@@ -860,7 +863,9 @@ Any other message is sent to {p}.
                 }
             };
 
-            let _ = msg.reply(&ctx.http, response).await;
+            // Issue #1005: pin the policy reminder to the toggle response too.
+            let combined = format!("{response}\n\n{}", super::build_allowall_policy_note());
+            let _ = msg.reply(&ctx.http, combined).await;
             tracing::info!("  [{ts}] ▶ {response}");
             return Ok(true);
         }

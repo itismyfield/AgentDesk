@@ -11,6 +11,9 @@ pub(in crate::services::discord) async fn cmd_help(ctx: Context<'_>) -> Result<(
         }
         _ => "\n`/model` — Open the model picker for this channel",
     };
+    // Issue #1005: surface command risk tiers + the high-risk opt-in state so
+    // operators can see at a glance which commands are owner-only or disabled.
+    let risk_block = super::risk_tier_summary_for_help(super::high_risk_enabled_via_env());
     let help = format!(
         "\
 **AgentDesk Discord Bot**
@@ -61,8 +64,10 @@ AI can read, edit, and run commands in your session.
 `/allowall <true|false>` — Allow everyone or restrict to authorized users
 `/adduser @user` — Allow a user to use the bot
 `/removeuser @user` — Remove a user's access
-`/help` — Show this help",
-        provider_name, provider_name, provider_name, model_section
+`/help` — Show this help
+
+{}",
+        provider_name, provider_name, provider_name, model_section, risk_block
     );
 
     ctx.say(help).await?;

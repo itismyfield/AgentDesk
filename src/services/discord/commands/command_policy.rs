@@ -341,4 +341,90 @@ mod tests {
         assert!(!matcher(""));
         assert!(!matcher("maybe"));
     }
+
+    /// Full DoD matrix: every risk tier × owner ∈ {true,false} × high_risk
+    /// ∈ {true,false}. The shape of `evaluate_policy` is:
+    ///
+    /// - Low-risk tiers always Allow.
+    /// - High-risk tiers: non-owner → DenyNotOwner, owner → Allow unless the
+    ///   tier requires explicit enable and it is off.
+    ///
+    /// This gives us a single test that asserts the full grid, which is what
+    /// the issue checklist requires.
+    #[test]
+    fn full_tier_owner_enable_matrix_matches_specification() {
+        let tiers = [
+            CommandRisk::ReadOnly,
+            CommandRisk::Mutating,
+            CommandRisk::RuntimeControl,
+            CommandRisk::ShellOrToolGrant,
+            CommandRisk::CredentialSystem,
+        ];
+        for &tier in &tiers {
+            for is_owner in [false, true] {
+                for high_risk_enabled in [false, true] {
+                    let got = evaluate_policy(tier, is_owner, high_risk_enabled);
+                    let want = if !tier.is_high_risk() {
+                        // Low-risk tiers never gated regardless of inputs.
+                        PolicyDecision::Allow
+                    } else if !is_owner {
+                        // High-risk + non-owner is always denied. This is the
+                        // canonical `allow_all_users=true` scenario.
+                        PolicyDecision::DenyNotOwner
+                    } else if tier.requires_explicit_enable() && !high_risk_enabled {
+                        // Owner + opt-in tier without env flag → DenyNotEnabled.
+                        PolicyDecision::DenyNotEnabled
+                    } else {
+                        PolicyDecision::Allow
+                    };
+                    assert_eq!(
+                        got, want,
+                        "tier={tier:?} owner={is_owner} enabled={high_risk_enabled}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// `allow_all_users=true` must NOT change the policy outcome. This test
+    /// is intentionally redundant with the matrix above; it pins the property
+    /// in case `evaluate_policy` ever grows an `allow_all_users` parameter.
+    #[test]
+    fn allow_all_users_flag_does_not_unlock_high_risk() {
+        // Simulate the production flow: allow_all_users only gates `check_auth`,
+        // not the policy. Once a non-owner reaches evaluate_policy, the high-risk
+        // tiers must still deny.
+        for &tier in &[
+            CommandRisk::RuntimeControl,
+            CommandRisk::ShellOrToolGrant,
+            CommandRisk::CredentialSystem,
+        ] {
+            assert_eq!(
+                evaluate_policy(
+                    tier, /*is_owner=*/ false, /*high_risk_enabled=*/ true
+                ),
+                PolicyDecision::DenyNotOwner,
+                "tier={tier:?} must deny non-owner even when high-risk is enabled",
+            );
+            assert_eq!(
+                evaluate_policy(
+                    tier, /*is_owner=*/ false, /*high_risk_enabled=*/ false
+                ),
+                PolicyDecision::DenyNotOwner,
+                "tier={tier:?} must deny non-owner when high-risk is disabled",
+            );
+        }
+    }
+
+    #[test]
+    fn label_strings_are_stable() {
+        // The labels feed help/dashboard surfaces and external docs reference
+        // them; pin the wording so renames break the test instead of silently
+        // changing user-visible output.
+        assert_eq!(CommandRisk::ReadOnly.label(), "read-only");
+        assert_eq!(CommandRisk::Mutating.label(), "mutating");
+        assert_eq!(CommandRisk::RuntimeControl.label(), "runtime-control");
+        assert_eq!(CommandRisk::ShellOrToolGrant.label(), "shell/tool-grant");
+        assert_eq!(CommandRisk::CredentialSystem.label(), "credential/system");
+    }
 }
