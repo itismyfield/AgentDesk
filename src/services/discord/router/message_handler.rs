@@ -1125,6 +1125,21 @@ pub(in crate::services::discord) async fn start_headless_turn(
                         last_deadlock_prealert_deadline_ms = Some(current_deadline);
                     }
                 }
+                if let Some(new_deadline) =
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
+                {
+                    let max_dl = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let clamped = std::cmp::min(new_deadline, max_dl);
+                    watchdog_token
+                        .watchdog_deadline_ms
+                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let now = chrono::Utc::now().timestamp_millis();
                 if now < current_deadline {
                     continue;
@@ -2985,6 +3000,21 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                 }
 
+                if let Some(new_deadline) =
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
+                {
+                    let max_dl = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let clamped = std::cmp::min(new_deadline, max_dl);
+                    watchdog_token
+                        .watchdog_deadline_ms
+                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let now = chrono::Utc::now().timestamp_millis();
                 if now < current_deadline {
                     continue; // Not yet — deadline may have been extended
