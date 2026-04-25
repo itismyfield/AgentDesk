@@ -27,7 +27,11 @@ pub fn record_tmux_exit_reason(tmux_session_name: &str, reason: &str) {
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         reason.trim()
     );
-    let _ = std::fs::write(tmux_exit_reason_path(tmux_session_name), stamped);
+    let path = tmux_exit_reason_path(tmux_session_name);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, stamped);
 }
 
 pub fn record_normal_tmux_exit_reason(tmux_session_name: &str) {
@@ -233,6 +237,7 @@ mod tests {
 
     #[test]
     fn test_tmux_exit_reason_round_trip() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
         let session = unique_test_session_name();
         clear_tmux_exit_reason(&session);
         record_tmux_exit_reason(&session, "explicit cleanup: /stop");
@@ -255,6 +260,7 @@ mod tests {
 
     #[test]
     fn test_record_normal_tmux_exit_reason_round_trip() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
         let session = unique_test_session_name();
         clear_tmux_exit_reason(&session);
         record_normal_tmux_exit_reason(&session);

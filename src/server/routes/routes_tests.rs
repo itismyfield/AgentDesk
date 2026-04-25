@@ -952,10 +952,15 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
-    let url = format!("http://{addr}/api/health");
+    let url = format!("http://{addr}/api/health/detail");
 
     let healthy_response = reqwest::get(&url).await.unwrap();
     assert_eq!(healthy_response.status(), reqwest::StatusCode::OK);
@@ -1028,10 +1033,15 @@ async fn health_api_reports_server_up_before_full_recovery_on_postgres() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
-    let response = reqwest::get(format!("http://{addr}/api/health"))
+    let response = reqwest::get(format!("http://{addr}/api/health/detail"))
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
@@ -1064,7 +1074,12 @@ async fn health_api_standalone_mode_reports_status_field() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     let response = reqwest::get(format!("http://{addr}/api/health"))
@@ -1101,7 +1116,12 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery_pg() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     let warmup_json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
@@ -1160,7 +1180,12 @@ async fn health_wait_script_rejects_unhealthy_server_up_response_pg() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     let unhealthy_json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
@@ -1286,10 +1311,15 @@ async fn health_api_includes_latest_config_audit_report() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
-    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health/detail"))
         .await
         .unwrap()
         .json()
@@ -1343,10 +1373,15 @@ async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
-    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health/detail"))
         .await
         .unwrap()
         .json()
@@ -11033,10 +11068,15 @@ async fn health_api_includes_pipeline_override_report_from_postgres_without_sqli
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
-    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+    let json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health/detail"))
         .await
         .unwrap()
         .json()
