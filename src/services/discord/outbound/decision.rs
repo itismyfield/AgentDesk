@@ -6,10 +6,14 @@
 //! future transport implementation can execute without re-encoding policy
 //! branches at every callsite.
 
+use std::path::PathBuf;
+
 use poise::serenity_prelude::{ChannelId, UserId};
 use serde::{Deserialize, Serialize};
 
-use super::message::{DiscordOutboundMessage, OutboundDedupKey, OutboundTarget};
+use super::message::{
+    DiscordOutboundMessage, OutboundAttachmentSource, OutboundDedupKey, OutboundTarget,
+};
 use super::policy::{FallbackPolicy, LengthStrategy};
 use super::result::FallbackUsed;
 
@@ -71,11 +75,25 @@ pub(crate) enum LengthPolicyDecision {
     },
     FileAttachment {
         char_count: usize,
-        filename: String,
-        content_type: String,
-        supplied_attachment: bool,
+        attachments: Vec<AttachmentPolicyDecision>,
         fallback_used: FallbackUsed,
     },
+}
+
+/// Attachment source selected by the planner for file fallback delivery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AttachmentPolicyDecision {
+    pub(crate) filename: String,
+    pub(crate) content_type: Option<String>,
+    pub(crate) source: AttachmentSourceDecision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum AttachmentSourceDecision {
+    InlineBytes { byte_len: usize },
+    Path { path: PathBuf },
+    GeneratedTextBody { char_count: usize },
 }
 
 /// Resolved primary delivery surface before transport-specific setup.
@@ -149,16 +167,35 @@ fn decide_length(
             fallback_used: FallbackUsed::LengthCompacted,
         },
         LengthStrategy::FileAttachment => {
-            let attachment = message.attachments.first();
+            let attachments = if message.attachments.is_empty() {
+                vec![AttachmentPolicyDecision {
+                    filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
+                    content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
+                    source: AttachmentSourceDecision::GeneratedTextBody { char_count },
+                }]
+            } else {
+                message
+                    .attachments
+                    .iter()
+                    .map(|attachment| AttachmentPolicyDecision {
+                        filename: attachment.filename.clone(),
+                        content_type: attachment.content_type.clone(),
+                        source: match &attachment.source {
+                            OutboundAttachmentSource::Bytes { data } => {
+                                AttachmentSourceDecision::InlineBytes {
+                                    byte_len: data.len(),
+                                }
+                            }
+                            OutboundAttachmentSource::Path { path } => {
+                                AttachmentSourceDecision::Path { path: path.clone() }
+                            }
+                        },
+                    })
+                    .collect()
+            };
             LengthPolicyDecision::FileAttachment {
                 char_count,
-                filename: attachment
-                    .map(|value| value.filename.clone())
-                    .unwrap_or_else(|| DEFAULT_TEXT_ATTACHMENT_NAME.to_string()),
-                content_type: attachment
-                    .map(|value| value.content_type.clone())
-                    .unwrap_or_else(|| TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
-                supplied_attachment: attachment.is_some(),
+                attachments,
                 fallback_used: FallbackUsed::FileAttachment,
             }
         }
@@ -294,18 +331,21 @@ mod tests {
             decision.length,
             LengthPolicyDecision::FileAttachment {
                 char_count: 11,
-                filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
-                content_type: TEXT_ATTACHMENT_CONTENT_TYPE.to_string(),
-                supplied_attachment: false,
+                attachments: vec![AttachmentPolicyDecision {
+                    filename: DEFAULT_TEXT_ATTACHMENT_NAME.to_string(),
+                    content_type: Some(TEXT_ATTACHMENT_CONTENT_TYPE.to_string()),
+                    source: AttachmentSourceDecision::GeneratedTextBody { char_count: 11 },
+                }],
                 fallback_used: FallbackUsed::FileAttachment,
             }
         );
     }
 
     #[test]
-    fn file_attachment_policy_decision_uses_supplied_attachment_input() {
+    fn file_attachment_policy_decision_preserves_supplied_attachment_sources() {
         let msg = message_with_policy(policy(LengthStrategy::FileAttachment, FallbackPolicy::None))
-            .with_attachment("report.md", "text/markdown", "payload");
+            .with_bytes_attachment("report.md", Some("text/markdown"), b"payload".to_vec())
+            .with_path_attachment("trace.log", Some("text/plain"), "/tmp/trace.log");
 
         let decision = decide_policy_with_limits(&msg, OutboundPolicyLimits::for_tests(5));
 
@@ -313,9 +353,20 @@ mod tests {
             decision.length,
             LengthPolicyDecision::FileAttachment {
                 char_count: 11,
-                filename: "report.md".into(),
-                content_type: "text/markdown".into(),
-                supplied_attachment: true,
+                attachments: vec![
+                    AttachmentPolicyDecision {
+                        filename: "report.md".into(),
+                        content_type: Some("text/markdown".into()),
+                        source: AttachmentSourceDecision::InlineBytes { byte_len: 7 },
+                    },
+                    AttachmentPolicyDecision {
+                        filename: "trace.log".into(),
+                        content_type: Some("text/plain".into()),
+                        source: AttachmentSourceDecision::Path {
+                            path: PathBuf::from("/tmp/trace.log"),
+                        },
+                    },
+                ],
                 fallback_used: FallbackUsed::FileAttachment,
             }
         );

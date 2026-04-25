@@ -14,6 +14,8 @@
 //! and already implements `Serialize` / `Deserialize`, so this struct can
 //! round-trip through serde without manual glue.
 
+use std::path::PathBuf;
+
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use serde::{Deserialize, Serialize};
 
@@ -151,8 +153,129 @@ pub(crate) struct OutboundMessageSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OutboundAttachment {
     pub(crate) filename: String,
-    pub(crate) content_type: String,
-    pub(crate) content: String,
+    pub(crate) content_type: Option<String>,
+    pub(crate) source: OutboundAttachmentSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OutboundAttachmentSource {
+    Bytes { data: Vec<u8> },
+    Path { path: PathBuf },
+}
+
+/// Metadata that identifies where an outbound message came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundProducer {
+    pub(crate) source: String,
+    pub(crate) component: Option<String>,
+}
+
+impl OutboundProducer {
+    pub(crate) fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            component: None,
+        }
+    }
+
+    pub(crate) fn with_component(mut self, component: impl Into<String>) -> Self {
+        self.component = Some(component.into());
+        self
+    }
+}
+
+/// Which Discord bot identity should execute delivery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OutboundBotSelector {
+    Default,
+    Named { name: String },
+    TokenHash { token_hash: String },
+    ProviderRole { provider: String, role_id: String },
+}
+
+impl Default for OutboundBotSelector {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+/// Optional reply/reference context for sends, edits, interactions, and
+/// command replies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundReferenceContext {
+    pub(crate) message: Option<OutboundMessageReference>,
+    pub(crate) interaction: Option<OutboundInteractionReference>,
+    pub(crate) thread_name_hint: Option<String>,
+    pub(crate) metadata: Vec<OutboundMetadataEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundMessageReference {
+    pub(crate) channel_id: ChannelId,
+    pub(crate) message_id: MessageId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundInteractionReference {
+    pub(crate) interaction_id: String,
+    pub(crate) token_hint: Option<String>,
+    pub(crate) ephemeral: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundMetadataEntry {
+    pub(crate) key: String,
+    pub(crate) value: String,
+}
+
+impl OutboundReferenceContext {
+    pub(crate) fn reply_to(channel_id: ChannelId, message_id: MessageId) -> Self {
+        Self {
+            message: Some(OutboundMessageReference {
+                channel_id,
+                message_id,
+            }),
+            interaction: None,
+            thread_name_hint: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    pub(crate) fn interaction(
+        interaction_id: impl Into<String>,
+        token_hint: Option<impl Into<String>>,
+        ephemeral: bool,
+    ) -> Self {
+        Self {
+            message: None,
+            interaction: Some(OutboundInteractionReference {
+                interaction_id: interaction_id.into(),
+                token_hint: token_hint.map(Into::into),
+                ephemeral,
+            }),
+            thread_name_hint: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_thread_name_hint(mut self, thread_name_hint: impl Into<String>) -> Self {
+        self.thread_name_hint = Some(thread_name_hint.into());
+        self
+    }
+
+    pub(crate) fn with_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.metadata.push(OutboundMetadataEntry {
+            key: key.into(),
+            value: value.into(),
+        });
+        self
+    }
 }
 
 impl OutboundTarget {
@@ -192,6 +315,9 @@ pub(crate) struct DiscordOutboundMessage {
     pub(crate) content: String,
     pub(crate) target: OutboundTarget,
     pub(crate) operation: OutboundOperation,
+    pub(crate) producer: Option<OutboundProducer>,
+    pub(crate) bot: OutboundBotSelector,
+    pub(crate) reference: Option<OutboundReferenceContext>,
     pub(crate) summary: Option<OutboundMessageSummary>,
     pub(crate) attachments: Vec<OutboundAttachment>,
     pub(crate) policy: DiscordOutboundPolicy,
@@ -212,6 +338,9 @@ impl DiscordOutboundMessage {
             content: content.into(),
             target,
             operation: OutboundOperation::Send,
+            producer: None,
+            bot: OutboundBotSelector::Default,
+            reference: None,
             summary: None,
             attachments: Vec::new(),
             policy,
@@ -223,6 +352,21 @@ impl DiscordOutboundMessage {
         self
     }
 
+    pub(crate) fn with_producer(mut self, producer: OutboundProducer) -> Self {
+        self.producer = Some(producer);
+        self
+    }
+
+    pub(crate) fn with_bot(mut self, bot: OutboundBotSelector) -> Self {
+        self.bot = bot;
+        self
+    }
+
+    pub(crate) fn with_reference(mut self, reference: OutboundReferenceContext) -> Self {
+        self.reference = Some(reference);
+        self
+    }
+
     pub(crate) fn with_summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(OutboundMessageSummary {
             content: summary.into(),
@@ -230,16 +374,30 @@ impl DiscordOutboundMessage {
         self
     }
 
-    pub(crate) fn with_attachment(
+    pub(crate) fn with_bytes_attachment(
         mut self,
         filename: impl Into<String>,
-        content_type: impl Into<String>,
-        content: impl Into<String>,
+        content_type: Option<impl Into<String>>,
+        data: impl Into<Vec<u8>>,
     ) -> Self {
         self.attachments.push(OutboundAttachment {
             filename: filename.into(),
-            content_type: content_type.into(),
-            content: content.into(),
+            content_type: content_type.map(Into::into),
+            source: OutboundAttachmentSource::Bytes { data: data.into() },
+        });
+        self
+    }
+
+    pub(crate) fn with_path_attachment(
+        mut self,
+        filename: impl Into<String>,
+        content_type: Option<impl Into<String>>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.attachments.push(OutboundAttachment {
+            filename: filename.into(),
+            content_type: content_type.map(Into::into),
+            source: OutboundAttachmentSource::Path { path: path.into() },
         });
         self
     }
@@ -359,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn message_can_carry_edit_summary_and_attachment_inputs() {
+    fn message_can_carry_edit_summary_and_metadata_inputs() {
         let msg = DiscordOutboundMessage::new(
             "dispatch:7",
             "dispatch:7:edit",
@@ -370,8 +528,17 @@ mod tests {
         .with_operation(OutboundOperation::Edit {
             message_id: MessageId::new(77),
         })
+        .with_producer(OutboundProducer::new("health_api").with_component("send_alias"))
+        .with_bot(OutboundBotSelector::Named {
+            name: "notify".into(),
+        })
+        .with_reference(
+            OutboundReferenceContext::reply_to(ChannelId::new(1), MessageId::new(55))
+                .with_thread_name_hint("support-thread")
+                .with_metadata("route", "/api/discord/send"),
+        )
         .with_summary("short")
-        .with_attachment("full.txt", "text/plain", "full");
+        .with_bytes_attachment("full.txt", Some("text/plain"), b"full".to_vec());
 
         assert_eq!(
             msg.operation,
@@ -379,8 +546,51 @@ mod tests {
                 message_id: MessageId::new(77),
             }
         );
+        assert_eq!(msg.producer.as_ref().unwrap().source, "health_api");
+        assert_eq!(
+            msg.bot,
+            OutboundBotSelector::Named {
+                name: "notify".into(),
+            }
+        );
+        let reference = msg.reference.as_ref().unwrap();
+        assert_eq!(
+            reference.message,
+            Some(OutboundMessageReference {
+                channel_id: ChannelId::new(1),
+                message_id: MessageId::new(55),
+            })
+        );
+        assert_eq!(reference.metadata[0].key, "route");
         assert_eq!(msg.summary.as_ref().unwrap().content, "short");
         assert_eq!(msg.attachments.len(), 1);
+    }
+
+    #[test]
+    fn attachment_inputs_support_bytes_and_paths() {
+        let msg = DiscordOutboundMessage::new(
+            "dispatch:7",
+            "dispatch:7:files",
+            "see files",
+            OutboundTarget::Channel(ChannelId::new(1)),
+            sample_policy(),
+        )
+        .with_bytes_attachment("raw.bin", Some("application/octet-stream"), vec![0, 1, 2])
+        .with_path_attachment("report.txt", None::<String>, "/tmp/report.txt");
+
+        assert_eq!(msg.attachments.len(), 2);
+        assert_eq!(
+            msg.attachments[0].source,
+            OutboundAttachmentSource::Bytes {
+                data: vec![0, 1, 2],
+            }
+        );
+        assert_eq!(
+            msg.attachments[1].source,
+            OutboundAttachmentSource::Path {
+                path: PathBuf::from("/tmp/report.txt"),
+            }
+        );
     }
 
     #[test]
