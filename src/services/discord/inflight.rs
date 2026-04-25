@@ -508,6 +508,13 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     fs::remove_file(path).is_ok()
 }
 
+pub(super) fn inflight_state_file_exists(provider: &ProviderKind, channel_id: u64) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    inflight_state_path(&root, provider, channel_id).exists()
+}
+
 pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
     let Some(root) = inflight_runtime_root() else {
         return false;

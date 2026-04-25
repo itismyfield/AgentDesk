@@ -420,7 +420,10 @@ fn clear_persistent_inflight_for_stop(
     channel_id: ChannelId,
     was_present_at_stop_start: bool,
 ) -> bool {
-    clear_inflight_state(provider, channel_id.get()) || was_present_at_stop_start
+    let removed_now = clear_inflight_state(provider, channel_id.get());
+    let disappeared_during_stop = was_present_at_stop_start
+        && !super::inflight::inflight_state_file_exists(provider, channel_id.get());
+    removed_now || disappeared_during_stop
 }
 
 pub(crate) async fn stop_provider_channel_runtime_with_policy(
@@ -432,11 +435,11 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
 ) -> Option<RuntimeTurnStopResult> {
     let provider = ProviderKind::from_str(provider_name)?;
     let shared = shared_for_provider(registry, &provider).await?;
-    let result = mailbox_cancel_active_turn(&shared, channel_id).await;
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
     let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
     let persistent_inflight_was_present = should_clear_persistent_inflight
-        && super::inflight::load_inflight_state(&provider, channel_id.get()).is_some();
+        && super::inflight::inflight_state_file_exists(&provider, channel_id.get());
+    let result = mailbox_cancel_active_turn(&shared, channel_id).await;
 
     if let Some(token) = result.token.as_ref() {
         let termination_recorded = if !result.already_stopping || cleanup_requested {
