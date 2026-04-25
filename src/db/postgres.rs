@@ -315,6 +315,7 @@ pub async fn sync_agents_from_config_pg(
             .try_get("id")
             .map_err(|error| format!("read postgres agent id: {error}"))?;
         if !config_ids.contains(db_id.as_str()) {
+            clear_agent_fk_references_pg(pool, &db_id).await?;
             sqlx::query("DELETE FROM agents WHERE id = $1")
                 .bind(&db_id)
                 .execute(pool)
@@ -324,6 +325,29 @@ pub async fn sync_agents_from_config_pg(
     }
 
     Ok(agents.len())
+}
+
+/// Clear FK references to `agent_id` before deleting the agent row, so the
+/// `kanban_cards.assigned_agent_id` (and similar nullable FK columns) do not
+/// trip a NO ACTION constraint when the agent is being removed from config.
+/// Mirrors the column list of `move_legacy_agent_references_pg` minus the
+/// non-nullable FKs (which are exclusively populated via dispatch creation
+/// flows that retire alongside the agent).
+async fn clear_agent_fk_references_pg(pool: &PgPool, agent_id: &str) -> Result<(), String> {
+    for sql in [
+        "UPDATE github_repos SET default_agent_id = NULL WHERE default_agent_id = $1",
+        "UPDATE pipeline_stages SET agent_override_id = NULL WHERE agent_override_id = $1",
+        "UPDATE kanban_cards SET assigned_agent_id = NULL WHERE assigned_agent_id = $1",
+        "UPDATE kanban_cards SET owner_agent_id = NULL WHERE owner_agent_id = $1",
+        "UPDATE kanban_cards SET requester_agent_id = NULL WHERE requester_agent_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(agent_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("clear FK refs to agent {agent_id}: {error}"))?;
+    }
+    Ok(())
 }
 
 fn legacy_agent_alias(agent_id: &str) -> Option<String> {
@@ -1137,18 +1161,26 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO agents (id, name, provider, status, xp)
-             VALUES ($1, 'Configured Legacy Maker', 'codex', 'working', 42)",
+             VALUES ($1, 'Configured Legacy Maker', 'codex', 'working', 42)
+             ON CONFLICT (id) DO UPDATE SET
+                 name = EXCLUDED.name,
+                 provider = EXCLUDED.provider,
+                 status = EXCLUDED.status,
+                 xp = EXCLUDED.xp",
         )
         .bind("openclaw-maker")
         .execute(&pool)
         .await
         .expect("insert configured legacy agent");
-        sqlx::query("INSERT INTO github_repos (id, default_agent_id) VALUES ($1, $2)")
-            .bind("owner/repo")
-            .bind("openclaw-maker")
-            .execute(&pool)
-            .await
-            .expect("insert github repo");
+        sqlx::query(
+            "INSERT INTO github_repos (id, default_agent_id) VALUES ($1, $2)
+             ON CONFLICT (id) DO UPDATE SET default_agent_id = EXCLUDED.default_agent_id",
+        )
+        .bind("owner/repo")
+        .bind("openclaw-maker")
+        .execute(&pool)
+        .await
+        .expect("insert github repo");
 
         startup_reseed(&pool, &config)
             .await

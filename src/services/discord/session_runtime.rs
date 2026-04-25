@@ -1802,6 +1802,14 @@ mod tests {
 
     #[test]
     fn sync_inflight_worktree_context_persists_bootstrap_worktree_metadata() {
+        // Serialize against any other test that also mutates AGENTDESK_ROOT_DIR,
+        // so the env var stays consistent across the save/load round-trip when
+        // cargo test schedules tests on multiple threads in CI.
+        static AGENTDESK_ROOT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = AGENTDESK_ROOT_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime").join("state").join("discord")).unwrap();
