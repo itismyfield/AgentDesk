@@ -292,15 +292,32 @@ fn rollback_cancelled_run_cards(
         }
 
         let rollback_result = (|| -> anyhow::Result<bool> {
-            let changed = conn.execute(
-                "UPDATE kanban_cards
-                 SET status = 'ready', updated_at = datetime('now')
-                 WHERE id = ?1 AND status IN ('requested', 'in_progress')",
-                [card_id],
-            )?;
-            if changed == 0 {
-                return Ok(false);
+            // #1081: route through the canonical FSM executor instead of a
+            // direct status write. The enclosing
+            // SAVEPOINT keeps the status change + cleanup atomic, and the
+            // pre-check above ensures we only touch cards in
+            // requested/in_progress. Any concurrent move into a different
+            // status is caught by re-reading inside the savepoint below.
+            let current_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            match current_status.as_deref() {
+                Some("requested") | Some("in_progress") => {}
+                _ => return Ok(false),
             }
+
+            crate::engine::transition::execute_intent_on_conn(
+                conn,
+                &crate::engine::transition::TransitionIntent::UpdateStatus {
+                    card_id: card_id.to_string(),
+                    from: status.clone(),
+                    to: "ready".to_string(),
+                },
+            )?;
 
             crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
             crate::kanban::log_audit_on_conn(
@@ -1151,29 +1168,72 @@ async fn rollback_cancelled_run_cards_pg(
         };
 
         let rollback_result = async {
-            let changed = sqlx::query(
+            // #1081: route status + review/dispatch pointer clears through the
+            // canonical FSM executor (`execute_pg_transition_intent`) instead
+            // of a direct status write. The enclosing `tx` keeps the
+            // transition + ancillary field cleanup atomic.
+            let current_status: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT status FROM kanban_cards WHERE id = $1 FOR UPDATE",
+            )
+            .bind(card_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("reload postgres card status {card_id}: {error}"))?
+            .flatten();
+            match current_status.as_deref() {
+                Some("requested") | Some("in_progress") => {}
+                _ => return Ok(false),
+            }
+            let from_status = current_status
+                .or_else(|| status.clone())
+                .unwrap_or_default();
+
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                &mut tx,
+                &crate::engine::transition::TransitionIntent::UpdateStatus {
+                    card_id: card_id.to_string(),
+                    from: from_status.clone(),
+                    to: "ready".to_string(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                &mut tx,
+                &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+                    card_id: card_id.to_string(),
+                    dispatch_id: None,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(
+                &mut tx,
+                &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                    card_id: card_id.to_string(),
+                    review_status: None,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            sqlx::query(
                 "UPDATE kanban_cards
-                 SET status = 'ready',
-                     latest_dispatch_id = NULL,
-                     review_status = NULL,
-                     review_round = 0,
+                 SET review_round = 0,
                      review_notes = NULL,
                      suggestion_pending_at = NULL,
                      review_entered_at = NULL,
                      awaiting_dod_at = NULL,
                      blocked_reason = NULL,
                      updated_at = NOW()
-                 WHERE id = $1
-                   AND status IN ('requested', 'in_progress')",
+                 WHERE id = $1",
             )
             .bind(card_id)
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("rollback postgres card {card_id}: {error}"))?
-            .rows_affected() as usize;
-            if changed == 0 {
-                return Ok(false);
-            }
+            .map_err(|error| format!("reset postgres card cleanup fields {card_id}: {error}"))?;
 
             sqlx::query(
                 "INSERT INTO card_review_state (

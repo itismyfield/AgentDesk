@@ -29,6 +29,18 @@ pub enum HealthStatus {
     Unhealthy,
 }
 
+/// #964: per-channel watcher + relay state surfaced via
+/// `GET /api/channels/:id/watcher-state`.
+#[derive(Clone, Debug, Serialize)]
+pub struct WatcherStateSnapshot {
+    pub provider: String,
+    pub attached: bool,
+    pub tmux_session: Option<String>,
+    pub last_relay_offset: u64,
+    pub inflight_state_present: bool,
+    pub last_relay_ts_ms: i64,
+}
+
 impl HealthStatus {
     fn rank(self) -> u8 {
         match self {
@@ -193,6 +205,56 @@ impl HealthRegistry {
                 }
             }
         }
+    }
+
+    /// #964: Snapshot per-channel watcher/relay state for observability.
+    ///
+    /// Scans every registered provider and returns the first entry that
+    /// knows about this `channel_id`. When no watcher and no relay-coord
+    /// entry exist, returns `None` so the handler can emit 404. Reads are
+    /// non-blocking atomics + DashMap lookups; no mutex held across await
+    /// after this future completes.
+    pub async fn snapshot_watcher_state(&self, channel_id: u64) -> Option<WatcherStateSnapshot> {
+        let channel = ChannelId::new(channel_id);
+        let providers = self.providers.lock().await;
+        for entry in providers.iter() {
+            let shared = entry.shared.clone();
+            let attached = shared.tmux_watchers.contains_key(&channel);
+            let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
+            let inflight_state_present = ProviderKind::from_str(&entry.name)
+                .map(|pk| super::inflight::load_inflight_state(&pk, channel_id).is_some())
+                .unwrap_or(false);
+            if !attached && !has_relay_coord && !inflight_state_present {
+                continue;
+            }
+            let (last_relay_offset, last_relay_ts_ms) = shared
+                .tmux_relay_coords
+                .get(&channel)
+                .map(|coord| {
+                    (
+                        coord
+                            .confirmed_end_offset
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        coord
+                            .last_relay_ts_ms
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    )
+                })
+                .unwrap_or((0, 0));
+            let tmux_session = ProviderKind::from_str(&entry.name).and_then(|pk| {
+                super::inflight::load_inflight_state(&pk, channel_id)
+                    .and_then(|state| state.tmux_session_name)
+            });
+            return Some(WatcherStateSnapshot {
+                provider: entry.name.clone(),
+                attached,
+                tmux_session,
+                last_relay_offset,
+                inflight_state_present,
+                last_relay_ts_ms,
+            });
+        }
+        None
     }
 
     pub async fn utility_bot_user_id(&self, bot_name: &str) -> Option<u64> {
@@ -2489,6 +2551,76 @@ mod tests {
                 .await;
         assert_eq!(status, "404 Not Found");
         assert!(body.contains("unknown agent target: missing"));
+    }
+
+    // #964: `snapshot_watcher_state` powers `GET /api/channels/:id/watcher-state`.
+    // The endpoint MUST return the six expected fields, and `attached` MUST
+    // reflect the DashMap entry (not just the relay-coord). When no watcher is
+    // installed and no inflight state exists for the channel, the snapshot
+    // returns None so the handler can emit 404.
+    #[tokio::test]
+    async fn snapshot_watcher_state_returns_attached_shape_for_seeded_watcher() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 523_456_789_012_345_678;
+        harness
+            .seed_channel_session(channel_id, "watcher-state-snapshot", Some("session-ws"))
+            .await;
+        let _cancel = harness.seed_watcher(channel_id);
+
+        // Advance the relay-coord watermark so the snapshot surfaces a
+        // non-zero offset + timestamp. This exercises the full readout path
+        // including the atomic load of last_relay_ts_ms added in #964.
+        let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
+        coord
+            .confirmed_end_offset
+            .store(2048, std::sync::atomic::Ordering::Release);
+        coord
+            .last_relay_ts_ms
+            .store(1_700_000_000_000, std::sync::atomic::Ordering::Release);
+
+        let registry = harness.registry();
+        let snapshot = registry
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("watcher state snapshot must be present for seeded channel");
+
+        assert_eq!(snapshot.provider, "codex");
+        assert!(snapshot.attached);
+        assert_eq!(snapshot.last_relay_offset, 2048);
+        assert_eq!(snapshot.last_relay_ts_ms, 1_700_000_000_000);
+        // No inflight JSON written to disk → field is false.
+        assert!(!snapshot.inflight_state_present);
+
+        // Serialization shape matches the HTTP response contract.
+        let serialized = serde_json::to_value(&snapshot).expect("serialize watcher snapshot");
+        let obj = serialized.as_object().expect("snapshot is a JSON object");
+        for field in [
+            "provider",
+            "attached",
+            "tmux_session",
+            "last_relay_offset",
+            "inflight_state_present",
+            "last_relay_ts_ms",
+        ] {
+            assert!(
+                obj.contains_key(field),
+                "snapshot must expose `{field}` in HTTP response",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_watcher_state_returns_none_for_unknown_channel() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let registry = harness.registry();
+        // No seed: neither watcher, relay-coord, nor inflight state exists.
+        assert!(
+            registry
+                .snapshot_watcher_state(999_999_999_999_999_999)
+                .await
+                .is_none(),
+            "unknown channel must return None so the HTTP handler can emit 404",
+        );
     }
 
     #[tokio::test]

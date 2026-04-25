@@ -682,7 +682,7 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
                 axum::routing::get(|| async { StatusCode::OK }),
             )
             .route(
-                "/hook/session",
+                "/dispatched-sessions/webhook",
                 axum::routing::post(|| async { StatusCode::CREATED }),
             )
             .route("/send", axum::routing::post(|| async { StatusCode::OK }))
@@ -713,7 +713,7 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1032,7 +1032,7 @@ async fn health_api_standalone_mode_reports_status_field() {
 }
 
 #[tokio::test]
-async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
+async fn health_wait_script_passes_when_server_is_up_before_full_recovery_pg() {
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -1091,7 +1091,7 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery() {
 }
 
 #[tokio::test]
-async fn health_wait_script_rejects_unhealthy_server_up_response() {
+async fn health_wait_script_rejects_unhealthy_server_up_response_pg() {
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
@@ -5238,7 +5238,7 @@ async fn dispatch_create_and_get() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provider_channels() {
+async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provider_channels_pg() {
     let _env_lock = env_lock();
     let (base_url, state, server_handle) = spawn_mock_dispatch_delivery_server().await;
     let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
@@ -5563,7 +5563,7 @@ async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
 }
 
 #[tokio::test]
-async fn dispatch_create_with_skip_outbox_omits_notify_row() {
+async fn dispatch_create_with_skip_outbox_omits_notify_row_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -5658,7 +5658,7 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
 /// fields are stripped before `build_review_context` runs, and the
 /// validation/refresh chain resolves the real target from the card's history.
 #[tokio::test]
-async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context() {
+async fn dispatch_create_review_strips_untrusted_review_target_fields_from_context_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -5824,7 +5824,7 @@ async fn dispatch_create_review_strips_untrusted_review_target_fields_from_conte
 /// the card — the injected values must be dropped and never resurrected
 /// from the context payload.
 #[tokio::test]
-async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
+async fn dispatch_create_review_ignores_client_trusted_review_target_flag_pg() {
     let db = test_db();
     seed_test_agents(&db);
     let pg_db = TestPostgresDb::create().await;
@@ -5971,7 +5971,7 @@ async fn dispatch_create_review_ignores_client_trusted_review_target_flag() {
 }
 
 #[tokio::test]
-async fn api_docs_returns_category_summaries_by_default() {
+async fn api_docs_returns_group_hierarchy_by_default() {
     let db = test_db();
     let engine = test_engine(&db);
     let app = test_api_router(db, engine, None);
@@ -5986,47 +5986,219 @@ async fn api_docs_returns_category_summaries_by_default() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let categories = json["categories"]
+    let groups = json["groups"]
         .as_array()
-        .expect("docs must return category array");
+        .expect("docs must return group array");
 
-    let names: Vec<&str> = categories
+    let names: Vec<&str> = groups
         .iter()
-        .filter_map(|category| category["name"].as_str())
+        .filter_map(|group| group["name"].as_str())
         .collect();
     assert_eq!(
         names,
         vec![
-            "agents",
+            "runtime",
             "kanban",
-            "dispatches",
-            "queue",
-            "ops",
+            "agents",
             "integrations",
-            "admin"
+            "automation",
+            "config",
+            "observability",
+            "internal",
         ],
-        "docs must expose the #1033 seven-group category contract"
+        "docs must expose the #1063 eight-group hierarchy"
     );
 
-    let dispatches = categories
+    let runtime = groups
         .iter()
-        .find(|category| category["name"] == "dispatches")
-        .expect("dispatches category must be present");
+        .find(|group| group["name"] == "runtime")
+        .expect("runtime group must be present");
+    let runtime_categories = runtime["categories"]
+        .as_array()
+        .expect("runtime group must list categories");
     assert!(
-        dispatches["count"].as_u64().unwrap_or(0) >= 4,
-        "dispatches category count must reflect documented endpoints"
+        runtime_categories
+            .iter()
+            .any(|category| category == "dispatches"),
+        "runtime group must contain the dispatches category: {runtime}"
     );
     assert!(
-        dispatches["description"]
+        runtime["description"]
             .as_str()
             .unwrap_or_default()
-            .contains("Dispatch"),
-        "dispatches category description must be informative: {dispatches}"
+            .to_lowercase()
+            .contains("runtime")
+            || runtime["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("dispatches"),
+        "runtime group description must mention runtime surfaces: {runtime}"
     );
     assert!(
         json.get("endpoints").is_none(),
-        "default docs response must return grouped categories, not flat endpoints"
+        "default docs response must return grouped hierarchy, not flat endpoints"
     );
+    assert!(
+        json.get("categories").is_none(),
+        "default docs response must return groups (not the legacy flat categories field)"
+    );
+}
+
+/// #1063: `GET /api/docs/{group}` lists categories under a group.
+#[tokio::test]
+async fn api_docs_group_kanban_lists_cards_and_reviews() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/kanban")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["group"], "kanban");
+    let categories = json["categories"]
+        .as_array()
+        .expect("group detail must include categories array");
+    let category_names: Vec<&str> = categories
+        .iter()
+        .filter_map(|category| category["name"].as_str())
+        .collect();
+    assert!(
+        category_names.contains(&"kanban"),
+        "kanban group must contain the kanban cards category: {category_names:?}"
+    );
+    assert!(
+        category_names.contains(&"reviews"),
+        "kanban group must contain the reviews category: {category_names:?}"
+    );
+    assert!(
+        category_names.contains(&"pipeline"),
+        "kanban group must contain the pipeline category: {category_names:?}"
+    );
+}
+
+/// #1063: `GET /api/docs/{group}/{category}` returns endpoints for that
+/// category (e.g. `kanban/reviews`).
+#[tokio::test]
+async fn api_docs_group_category_kanban_reviews_returns_endpoints() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/kanban/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["group"], "kanban");
+    assert_eq!(json["category"], "reviews");
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("group/category response must include endpoints array");
+    assert!(
+        endpoints
+            .iter()
+            .any(|ep| ep["path"] == "/api/reviews/verdict"),
+        "kanban/reviews must include the review verdict endpoint"
+    );
+}
+
+/// #1063: unknown group → 404.
+#[tokio::test]
+async fn api_docs_unknown_group_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/not-a-real-group")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// #1063: mismatched group/category → 404.
+#[tokio::test]
+async fn api_docs_group_category_mismatch_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    // `reviews` belongs to the `kanban` group, not `automation`.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/automation/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// #1063 backward compat: `GET /api/docs/{category}` still works for the
+/// legacy category names but responds with `X-Deprecated` header that points
+/// at the new `/group/category` path.
+#[tokio::test]
+async fn api_docs_legacy_category_route_emits_deprecation_header() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/reviews")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let deprecated = response
+        .headers()
+        .get("x-deprecated")
+        .expect("legacy category route must emit X-Deprecated header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(deprecated, "/api/docs/kanban/reviews");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deprecated"], true);
 }
 
 #[tokio::test]
@@ -6190,7 +6362,7 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/kanban")
+                .uri("/docs/kanban/kanban")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6203,6 +6375,7 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["category"], "kanban");
+    assert_eq!(json["group"], "kanban");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -6234,7 +6407,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/agents")
+                .uri("/docs/agents/agents")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6247,6 +6420,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["category"], "agents");
+    assert_eq!(json["group"], "agents");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -6828,6 +7002,188 @@ async fn agent_duplicate_reuses_setup_and_copies_prompt() {
 }
 
 #[tokio::test]
+async fn agent_archive_rejects_when_active_turn_present() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+
+    // Seed an active turn for the managed-agent (status='working').
+    db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat)
+             VALUES ('sess-active', 'managed-agent', 'codex', 'working', 'dispatch-1', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+    let archived = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/archive")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"reason": "blocked", "discord_action": "none"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(archived.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active turn"),
+        "expected 'active turn' error, got: {json:?}"
+    );
+
+    // agent_archive row should NOT be written when rejected.
+    let archive_count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_archive WHERE agent_id = 'managed-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 0);
+}
+
+#[tokio::test]
+async fn agent_duplicate_ignores_sensitive_fields_from_body() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+    seed_setup_agent_for_management_test(
+        app.clone(),
+        runtime_root.path(),
+        "managed-agent",
+        "1473922824350601297",
+    )
+    .await;
+    fs::write(
+        runtime_root
+            .path()
+            .join("config/agents/managed-agent/IDENTITY.md"),
+        "source identity prompt\n",
+    )
+    .unwrap();
+
+    let source_channel = "1473922824350601297";
+    let new_channel = "1473922824350601299";
+
+    // Send sensitive fields that must be ignored (not in the allowlist struct):
+    // - `id` / `agent_id`: must not override new_agent_id
+    // - `discord_channel_id` (raw DB col): must not leak source channel
+    // - `token`, `api_key`, `system_prompt`: must not be carried over
+    let duplicated = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/managed-agent/duplicate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "new_agent_id": "managed-copy-2",
+                        "channel_id": new_channel,
+                        "name": "Managed Copy 2",
+                        "id": "attacker-override",
+                        "agent_id": "attacker-override",
+                        "discord_channel_id": source_channel,
+                        "token": "secret-token",
+                        "api_key": "secret-key",
+                        "system_prompt": "leaked personality"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicated.status(), StatusCode::CREATED);
+
+    // Resulting agent row must use new_agent_id + new channel (via setup's provider→column mapping),
+    // NOT the source channel, and NOT any body-supplied sensitive fields.
+    let (copied_id, channel_primary, channel_alt, channel_cc, channel_cdx, system_prompt): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
+                    discord_channel_cdx, system_prompt
+             FROM agents WHERE id = 'managed-copy-2'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(copied_id, "managed-copy-2");
+    let all_channels = [&channel_primary, &channel_alt, &channel_cc, &channel_cdx];
+    assert!(
+        all_channels
+            .iter()
+            .any(|c| c.as_deref() == Some(new_channel)),
+        "at least one channel column must be the new_channel (got {all_channels:?})"
+    );
+    assert!(
+        all_channels
+            .iter()
+            .all(|c| c.as_deref() != Some(source_channel)),
+        "source channel must not be reused in any column (got {all_channels:?})"
+    );
+    assert!(
+        system_prompt.as_deref() != Some("leaked personality"),
+        "system_prompt from body must NOT be written during duplicate (got {system_prompt:?})"
+    );
+
+    // Attacker-override id must not exist as an agent row.
+    let attacker_rows: i64 = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attacker_rows, 0);
+}
+
+#[tokio::test]
 async fn create_issue_route_builds_pmd_body_and_agent_label() {
     let _env_lock = env_lock();
     let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 819);
@@ -7088,6 +7444,167 @@ async fn create_issue_route_rejects_more_than_ten_dod_items() {
     assert_eq!(json["error"], "dod items must be 10 or fewer");
 }
 
+// #1067: skill promotion integration test — exercise the canonical
+// `/api/github/issues/create` path end-to-end via the mounted Axum router to
+// confirm the create-issue skill body is absorbed by the server endpoint.
+#[cfg(unix)]
+#[tokio::test]
+async fn github_issues_create_canonical_path_returns_created_issue() {
+    let _env_lock = env_lock();
+    let _gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 1067);
+    let db = test_db();
+    let engine = test_engine(&db);
+    db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO agents (id, name) VALUES (?1, ?2)",
+            libsql_rusqlite::params!["adk-backend", "ADK Backend"],
+        )
+        .unwrap();
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/issues/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "#1067 skill promotion",
+                        "background": "create-issue 스킬을 서버 API로 흡수한다.",
+                        "content": [
+                            "POST /api/github/issues/create 엔드포인트 사용.",
+                            "skill body는 서버에서 PMD 포맷으로 변환된다."
+                        ],
+                        "dod": [
+                            "canonical path (/api/github/issues/create)를 통해 이슈가 생성된다",
+                            "응답에 issue_number와 url이 포함된다"
+                        ],
+                        "agent_id": "adk-backend"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["issue"]["number"], 1067);
+    assert_eq!(
+        json["issue"]["url"],
+        "https://github.com/itismyfield/AgentDesk/issues/1067"
+    );
+    assert_eq!(json["issue"]["repo"], "itismyfield/AgentDesk");
+    assert_eq!(
+        json["applied_labels"]
+            .as_array()
+            .and_then(|v| v.first())
+            .and_then(|v| v.as_str()),
+        Some("agent:adk-backend")
+    );
+}
+
+// #1067: skill promotion integration test — watch-agent-turn.
+#[tokio::test]
+async fn sessions_tmux_output_http_route_returns_shape_for_seeded_session() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let session_id: i64;
+    let tmux_name = format!("AgentDesk-codex-1067-http-{}", std::process::id());
+    let session_key = format!("mac-mini:{tmux_name}");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-1067-http', 'Agent 1067', 'codex', '123456789012345678', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-1067-http', 'codex', 'working', datetime('now'), datetime('now'))",
+            libsql_rusqlite::params![session_key.clone()],
+        )
+        .unwrap();
+        session_id = conn
+            .query_row(
+                "SELECT id FROM sessions WHERE session_key = ?1",
+                [&session_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+    }
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/sessions/{session_id}/tmux-output?lines=25"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_id"], session_id);
+    assert_eq!(json["session_key"], session_key);
+    assert_eq!(json["tmux_name"], tmux_name);
+    assert_eq!(json["agent_id"], "agent-1067-http");
+    assert_eq!(json["provider"], "codex");
+    assert_eq!(json["status"], "working");
+    assert_eq!(json["lines_requested"], 25);
+    assert_eq!(json["lines_effective"], 25);
+    // tmux session was never created, so capture returns empty and tmux_alive=false.
+    assert_eq!(json["tmux_alive"], false);
+    assert_eq!(json["recent_output"], "");
+    assert!(json["captured_at_ms"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn sessions_tmux_output_http_route_returns_404_for_unknown_session() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/sessions/987654321/tmux-output")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_id"], 987654321);
+    assert!(
+        json["error"]
+            .as_str()
+            .map(|s| s.contains("not found"))
+            .unwrap_or(false)
+    );
+}
+
 #[tokio::test]
 async fn github_docs_include_issue_creation_endpoint() {
     let db = test_db();
@@ -7097,7 +7614,7 @@ async fn github_docs_include_issue_creation_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/integrations")
+                .uri("/docs/integrations/github")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7118,7 +7635,8 @@ async fn github_docs_include_issue_creation_endpoint() {
             endpoint["method"] == "POST" && endpoint["path"] == "/api/github/issues/create"
         })
         .expect("integration docs must include POST /api/github/issues/create");
-    assert_eq!(json["category"], "integrations");
+    assert_eq!(json["group"], "integrations");
+    assert_eq!(json["category"], "github");
     assert_eq!(create_issue["params"]["repo"]["required"], true);
     assert_eq!(create_issue["params"]["dod"]["type"], "array[string]");
     assert_eq!(create_issue["params"]["agent_id"]["required"], false);
@@ -7195,8 +7713,10 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/auto-queue/entries/{id}",
         "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
         "/api/help",
-        "/api/docs/{category}",
+        "/api/docs/{group}",
+        "/api/docs/{group}/{category}",
         "/api/github/issues/create",
+        "/api/sessions/{id}/tmux-output",
         "/api/stats/memento",
     ] {
         assert!(
@@ -7243,6 +7763,13 @@ async fn api_docs_flat_format_omits_removed_legacy_routes() {
         "/api/api-friction/events",
         "/api/api-friction/patterns",
         "/api/api-friction/process",
+        // #1064 removals
+        "/api/re-review",
+        "/api/hook/session",
+        "/api/auto-queue/activate",
+        "/api/kanban-cards/bulk-action",
+        "/api/kanban-cards/batch-transition",
+        "/api/kanban-cards/{id}/force-transition",
     ] {
         assert!(
             endpoints.iter().all(|ep| ep["path"] != path),
@@ -7277,6 +7804,14 @@ async fn removed_legacy_routes_return_not_found() {
         ("GET", "/api-friction/events"),
         ("GET", "/api-friction/patterns"),
         ("POST", "/api-friction/process"),
+        // #1064 removals
+        ("POST", "/re-review"),
+        ("POST", "/hook/session"),
+        ("DELETE", "/hook/session"),
+        ("POST", "/auto-queue/activate"),
+        ("POST", "/kanban-cards/bulk-action"),
+        ("POST", "/kanban-cards/batch-transition"),
+        ("POST", "/kanban-cards/card-x/force-transition"),
     ] {
         let response = app
             .clone()
@@ -7290,10 +7825,17 @@ async fn removed_legacy_routes_return_not_found() {
             .await
             .unwrap();
 
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "{method} {uri} should return 404 after route cleanup"
+        // 404 when the path is fully removed; 405 when the removed endpoint
+        // collided with a remaining `{id}`-style wildcard route that now
+        // rejects the method (e.g. /kanban-cards/bulk-action matching the
+        // /kanban-cards/{id} GET/PATCH/DELETE route).
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "{method} {uri} should return 404/405 after route cleanup, got {}",
+            response.status()
         );
     }
 }
@@ -7359,7 +7901,7 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/docs/integrations")
+                .uri("/docs/integrations/discord")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7371,7 +7913,8 @@ async fn api_docs_category_exposes_send_to_agent_endpoint() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["category"], "integrations");
+    assert_eq!(json["group"], "integrations");
+    assert_eq!(json["category"], "discord");
 
     let endpoints = json["endpoints"]
         .as_array()
@@ -7424,6 +7967,168 @@ async fn api_docs_category_exposes_skill_prune_and_filter_params() {
         .expect("skills prune endpoint must be documented");
     assert_eq!(prune["params"]["dry_run"]["location"], "query");
     assert_eq!(prune["params"]["dry_run"]["type"], "boolean");
+}
+
+/// #1068 (904-6) — every path in `TOP_40_PAIRED_PATHS` must ship BOTH a
+/// happy-path example AND an error example, plus a curl 1-liner.
+#[tokio::test]
+async fn api_docs_exposes_paired_examples_for_top_40() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("flat docs must return endpoint array");
+
+    let mut missing = Vec::new();
+    for (method, path) in crate::server::routes::docs::TOP_40_PAIRED_PATHS {
+        let Some(ep) = endpoints
+            .iter()
+            .find(|ep| ep["method"] == *method && ep["path"] == *path)
+        else {
+            missing.push(format!("endpoint not found: {method} {path}"));
+            continue;
+        };
+        if !ep["example"].is_object() {
+            missing.push(format!("{method} {path}: example (happy path) is missing"));
+        }
+        if !ep["error_example"].is_object() {
+            missing.push(format!("{method} {path}: error_example is missing"));
+        }
+        let curl = ep["curl_example"].as_str().unwrap_or("");
+        if curl.is_empty() || !curl.starts_with("curl ") {
+            missing.push(format!(
+                "{method} {path}: curl_example is missing or not a curl 1-liner (got {curl:?})"
+            ));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "top-40 paired-scenario coverage is incomplete:\n- {}",
+        missing.join("\n- ")
+    );
+
+    // Guard against the list shrinking below 40.
+    assert_eq!(
+        crate::server::routes::docs::TOP_40_PAIRED_PATHS.len(),
+        40,
+        "#1068 (904-6) requires exactly 40 paired-scenario endpoints"
+    );
+}
+
+/// #1068 (904-6) — `/retry`, `/redispatch`, `/resume`, and `/reopen`
+/// descriptions must make their semantic distinctions explicit so callers stop
+/// conflating them.
+#[tokio::test]
+async fn api_docs_retry_redispatch_resume_reopen_semantics_are_distinguished() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("flat docs must return endpoint array");
+
+    let find_desc = |path: &str| -> String {
+        endpoints
+            .iter()
+            .find(|ep| ep["path"] == path)
+            .and_then(|ep| ep["description"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let retry = find_desc("/api/kanban-cards/{id}/retry").to_lowercase();
+    let redispatch = find_desc("/api/kanban-cards/{id}/redispatch").to_lowercase();
+    let resume = find_desc("/api/kanban-cards/{id}/resume").to_lowercase();
+    let reopen = find_desc("/api/kanban-cards/{id}/reopen").to_lowercase();
+
+    // retry: re-execute the SAME failed step with the same params.
+    assert!(
+        retry.contains("re-execute")
+            || retry.contains("re-run")
+            || retry.contains("same failed step"),
+        "/retry description must explain it re-executes the same failed step: {retry}"
+    );
+    assert!(
+        retry.contains("same"),
+        "/retry description must contrast against /redispatch by mentioning 'same': {retry}"
+    );
+
+    // redispatch: new dispatch id, same intent.
+    assert!(
+        redispatch.contains("new dispatch") || redispatch.contains("new dispatch id"),
+        "/redispatch description must mention that a NEW dispatch id is created: {redispatch}"
+    );
+
+    // resume: continue from a paused/checkpointed state.
+    assert!(
+        resume.contains("continue") || resume.contains("checkpoint"),
+        "/resume description must mention continuing from a checkpoint: {resume}"
+    );
+    assert!(
+        resume.contains("paused") || resume.contains("stuck") || resume.contains("checkpoint"),
+        "/resume description must mention paused/checkpointed state: {resume}"
+    );
+
+    // reopen: move closed/done card back to active.
+    assert!(
+        reopen.contains("closed") || reopen.contains("terminal") || reopen.contains("done"),
+        "/reopen description must mention the card's terminal/closed/done state: {reopen}"
+    );
+    assert!(
+        reopen.contains("active") || reopen.contains("re-admit") || reopen.contains("ready"),
+        "/reopen description must mention re-admitting the card into an active state: {reopen}"
+    );
+
+    // Each of retry/redispatch/resume must reference the others to make the
+    // distinction explicit (reopen already checked via 'closed' + 'active').
+    for (name, desc) in [
+        ("retry", &retry),
+        ("redispatch", &redispatch),
+        ("resume", &resume),
+    ] {
+        let other_refs = ["retry", "redispatch", "resume", "reopen"]
+            .iter()
+            .filter(|n| **n != name)
+            .filter(|n| desc.contains(*n))
+            .count();
+        assert!(
+            other_refs >= 2,
+            "/{name} description must reference at least two of the sibling semantics (retry/redispatch/resume/reopen) to disambiguate; got {other_refs}: {desc}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -7587,7 +8292,7 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         .unwrap();
     let dry_run_json: serde_json::Value = serde_json::from_slice(&dry_run_body).unwrap();
     assert_eq!(dry_run_json["dry_run"], true);
-    assert_eq!(dry_run_json["deleted_from_skills"], 0);
+    assert_eq!(dry_run_json["soft_deleted_from_skills"], 0);
     assert!(
         dry_run_json["stale_skill_ids"]
             .as_array()
@@ -7626,19 +8331,22 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         .await
         .unwrap();
     let prune_json: serde_json::Value = serde_json::from_slice(&prune_body).unwrap();
-    assert_eq!(prune_json["deleted_from_skills"], 1);
+    assert_eq!(prune_json["soft_deleted_from_skills"], 1);
     assert_eq!(prune_json["skill_usage_policy"], "preserved");
 
     {
         let conn = db.lock().unwrap();
-        let stale_count: i64 = conn
+        let stale_live_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill'",
+                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill' AND deleted_at IS NULL",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stale_count, 0, "prune must delete stale skill metadata");
+        assert_eq!(
+            stale_live_count, 0,
+            "prune must soft-delete stale skill metadata"
+        );
 
         let usage_count: i64 = conn
             .query_row(
@@ -8364,7 +9072,7 @@ async fn github_repos_pg_sync_triages_open_issue() {
 }
 
 #[tokio::test]
-async fn cron_jobs_include_github_issue_card_sync_job() {
+async fn cron_jobs_include_github_issue_card_sync_job_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pg_pool = pg_db.connect_and_migrate().await;
     let db = test_db();
@@ -8497,7 +9205,80 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
+async fn cron_api_response_includes_maintenance_section() -> Result<(), Box<dyn std::error::Error>>
+{
+    // #1091: /api/cron-jobs must include dynamically-registered maintenance
+    // jobs, tagged `source: "maintenance"` alongside the existing cron tiers
+    // which are tagged `source: "cron"`.
+    use crate::services::maintenance::{register_maintenance_job, test_serialization_lock};
+    use std::time::Duration;
+
+    // Serialize with any parallel services::maintenance::tests::* test that
+    // clears the process-global registry mid-run.
+    let _maintenance_lock = test_serialization_lock();
+
+    register_maintenance_job("test.cron_api_section", Duration::from_secs(300), || {
+        Box::pin(async { Ok(()) })
+    });
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(Request::builder().uri("/cron-jobs").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let jobs = json["jobs"].as_array().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cron response must include jobs array",
+        )
+    })?;
+
+    // Every job must have a `source` tag, and the set must contain both
+    // cron tiers and our registered maintenance job.
+    let mut saw_cron = false;
+    let mut saw_maintenance = false;
+    let mut saw_target = false;
+    for job in jobs {
+        let source = job["source"].as_str().unwrap_or("");
+        assert!(
+            !source.is_empty(),
+            "every cron-jobs entry must carry a non-empty `source` tag; got {job:?}"
+        );
+        match source {
+            "cron" => saw_cron = true,
+            "maintenance" => saw_maintenance = true,
+            other => panic!("unexpected source {other:?}"),
+        }
+        if job["id"] == "maintenance:test.cron_api_section" {
+            saw_target = true;
+            assert_eq!(job["source"], "maintenance");
+            assert_eq!(job["schedule"]["everyMs"], 300_000);
+            assert_eq!(job["enabled"], true);
+        }
+    }
+    assert!(
+        saw_cron,
+        "response must include at least one `cron` source job"
+    );
+    assert!(
+        saw_maintenance,
+        "response must include at least one `maintenance` source job"
+    );
+    assert!(
+        saw_target,
+        "response must include the registered test.cron_api_section maintenance job"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_quality_api_returns_daily_rollup() -> Result<(), Box<dyn std::error::Error>> {
     let db = test_db();
     seed_test_agents(&db);
     {
@@ -8595,6 +9376,11 @@ async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std
     assert_eq!(json["latest"]["rolling7d"]["measurementUnavailable"], false);
     assert_eq!(json["latest"]["rolling7d"]["turnSuccessRate"], json!(0.8));
     assert_eq!(json["daily"].as_array().map(Vec::len), Some(1));
+    // #1102: DoD-mandated current / trend_7d / trend_30d fields.
+    assert_eq!(json["current"]["agentId"], "agent-1");
+    assert_eq!(json["trend7d"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["trend30d"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["fallbackFromEvents"], false);
 
     let ranking_response = app
         .oneshot(
@@ -8607,7 +9393,179 @@ async fn agent_quality_endpoint_returns_daily_rollup() -> Result<(), Box<dyn std
     let ranking_body = axum::body::to_bytes(ranking_response.into_body(), usize::MAX).await?;
     let ranking_json: serde_json::Value = serde_json::from_slice(&ranking_body)?;
     assert_eq!(ranking_json["agents"][0]["agentId"], "agent-1");
+    assert_eq!(ranking_json["metric"], "turn_success_rate");
+    assert_eq!(ranking_json["window"], "7d");
+    assert_eq!(ranking_json["minSampleSize"], 5);
+    // metric_value for rolling_7d turn_success_rate on the seeded row is 0.8.
+    assert_eq!(ranking_json["agents"][0]["metricValue"], json!(0.8));
 
+    Ok(())
+}
+
+/// #1102 DoD: ranking excludes agents whose rolling_7d sample_size < 5 so
+/// the client doesn't have to filter client-side.
+#[tokio::test]
+async fn agent_quality_api_ranking_excludes_low_sample_size()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    seed_test_agents(&db);
+    {
+        let conn = db.lock()?;
+        // agent-1: sample_size_7d = 2 (below threshold, measurement_unavailable=1)
+        conn.execute(
+            "INSERT INTO agent_quality_daily (
+                agent_id, day, provider, channel_id,
+                turn_success_count, turn_error_count, review_pass_count, review_fail_count,
+                turn_sample_size, review_sample_size, sample_size,
+                turn_success_rate, review_pass_rate,
+                turn_success_count_7d, turn_error_count_7d, review_pass_count_7d, review_fail_count_7d,
+                turn_sample_size_7d, review_sample_size_7d, sample_size_7d,
+                turn_success_rate_7d, review_pass_rate_7d, measurement_unavailable_7d,
+                turn_success_count_30d, turn_error_count_30d, review_pass_count_30d, review_fail_count_30d,
+                turn_sample_size_30d, review_sample_size_30d, sample_size_30d,
+                turn_success_rate_30d, review_pass_rate_30d, measurement_unavailable_30d
+             ) VALUES (
+                'agent-1', date('now'), 'codex', '555',
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0,
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0, 1,
+                1, 0, 1, 0,
+                1, 1, 2,
+                1.0, 1.0, 1
+             )",
+            [],
+        )?;
+        // ag1: sample_size_7d = 10 (well above threshold)
+        conn.execute(
+            "INSERT INTO agent_quality_daily (
+                agent_id, day, provider, channel_id,
+                turn_success_count, turn_error_count, review_pass_count, review_fail_count,
+                turn_sample_size, review_sample_size, sample_size,
+                turn_success_rate, review_pass_rate,
+                turn_success_count_7d, turn_error_count_7d, review_pass_count_7d, review_fail_count_7d,
+                turn_sample_size_7d, review_sample_size_7d, sample_size_7d,
+                turn_success_rate_7d, review_pass_rate_7d, measurement_unavailable_7d,
+                turn_success_count_30d, turn_error_count_30d, review_pass_count_30d, review_fail_count_30d,
+                turn_sample_size_30d, review_sample_size_30d, sample_size_30d,
+                turn_success_rate_30d, review_pass_rate_30d, measurement_unavailable_30d
+             ) VALUES (
+                'ag1', date('now'), 'codex', '333',
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0,
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0, 0,
+                6, 1, 3, 0,
+                7, 3, 10,
+                0.857, 1.0, 0
+             )",
+            [],
+        )?;
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/quality/ranking?metric=turn_success_rate&window=7d")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let agents = json["agents"].as_array().expect("agents array");
+    assert_eq!(agents.len(), 1, "only ag1 (sample_size_7d=10) should pass");
+    assert_eq!(agents[0]["agentId"], "ag1");
+    assert_eq!(agents[0]["rank"], 1);
+    Ok(())
+}
+
+/// #1102 DoD: when `agent_quality_daily` has no rows, the per-agent summary
+/// falls back to an on-the-fly mini-rollup over `agent_quality_event`.
+#[tokio::test]
+async fn agent_quality_api_event_fallback_mini_rollup() -> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    seed_test_agents(&db);
+    {
+        let conn = db.lock()?;
+        // Seed 6 events (enough to exceed QUALITY_SAMPLE_GUARD=5 → window
+        // should be measurable).
+        for (i, etype) in [
+            "turn_complete",
+            "turn_complete",
+            "turn_complete",
+            "turn_complete",
+            "turn_error",
+            "review_pass",
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO agent_quality_event (
+                    source_event_id, correlation_id, agent_id, provider, channel_id,
+                    card_id, dispatch_id, event_type, payload_json, created_at
+                 ) VALUES (?1, NULL, 'agent-1', 'codex', '555', NULL, NULL, ?2, '{}', datetime('now'))",
+                libsql_rusqlite::params![format!("evt-{i}"), etype],
+            )?;
+        }
+    }
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-1/quality")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["agentId"], "agent-1");
+    assert_eq!(
+        json["fallbackFromEvents"], true,
+        "fallbackFromEvents must be true when daily is empty"
+    );
+    let daily_len = json["daily"].as_array().map(Vec::len).unwrap_or(0);
+    assert!(daily_len >= 1, "expected synthesized daily rows");
+    let current_sample = json["current"]["sampleSize"].as_i64().unwrap_or(-1);
+    assert_eq!(current_sample, 6, "6 events synthesized for today");
+    Ok(())
+}
+
+/// #1102 DoD: docs catalog exposes both new quality endpoints.
+#[tokio::test]
+async fn agent_quality_api_docs_catalog_includes_endpoints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/agents?format=flat")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("/api/agents/{id}/quality"),
+        "docs must list /api/agents/{{id}}/quality, got: {text}"
+    );
+    assert!(
+        text.contains("/api/agents/quality/ranking"),
+        "docs must list /api/agents/quality/ranking, got: {text}"
+    );
     Ok(())
 }
 
@@ -11112,7 +12070,7 @@ async fn force_transition_succeeds_with_correct_channel() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft3/force-transition")
+                .uri("/kanban-cards/card-ft3/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -11148,7 +12106,7 @@ async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configu
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft4/force-transition")
+                .uri("/kanban-cards/card-ft4/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "wrong-channel")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -11316,7 +12274,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-terminal/force-transition")
+                .uri("/kanban-cards/card-ft-terminal/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"done"}"#))
@@ -11501,14 +12459,19 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
 }
 
+// #1064: /api/kanban-cards/batch-transition and bulk-action were removed in
+// favour of per-card POST /api/kanban-cards/{id}/transition. The paths now
+// collide with the /kanban-cards/{id} wildcard (GET/PATCH/DELETE), so POST
+// against them returns 405 Method Not Allowed — still unambiguously "not
+// served" from the caller's perspective.
 #[tokio::test]
-async fn batch_transition_returns_per_card_results_and_transitions_targets() {
+async fn removed_batch_transition_route_is_unserved() {
     let db = test_db();
     let engine = test_engine(&db);
     seed_card_with_status(&db, "card-bt-1", "backlog");
     set_pmd_channel(&db, "pmd-chan-123");
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -11516,94 +12479,41 @@ async fn batch_transition_returns_per_card_results_and_transitions_targets() {
                 .uri("/kanban-cards/batch-transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(
-                    r#"{"card_ids":["card-bt-1","missing-card"],"status":"ready"}"#,
-                ))
+                .body(Body::from(r#"{"card_ids":["card-bt-1"],"status":"ready"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let results = json["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["card_id"], "card-bt-1");
-    assert_eq!(results[0]["ok"], true);
-    assert_eq!(results[0]["to"], "ready");
-    assert_eq!(results[1]["card_id"], "missing-card");
-    assert_eq!(results[1]["ok"], false);
-
-    let conn = db.lock().unwrap();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-bt-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "ready");
+    assert!(matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ));
 }
 
 #[tokio::test]
-async fn batch_transition_resolves_issue_numbers_to_cards() {
+async fn removed_bulk_action_route_is_unserved() {
     let db = test_db();
     let engine = test_engine(&db);
-    set_pmd_channel(&db, "pmd-chan-123");
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, github_issue_number, created_at, updated_at
-            ) VALUES (
-                'card-bt-issue', 'Batch Transition Issue', 'backlog', 'medium', 3277, datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    seed_card_with_status(&db, "card-ba-1", "backlog");
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/batch-transition")
+                .uri("/kanban-cards/bulk-action")
                 .header("content-type", "application/json")
-                .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(
-                    r#"{"issue_numbers":[3277,3999],"status":"ready"}"#,
-                ))
+                .body(Body::from(r#"{"action":"pass","card_ids":["card-ba-1"]}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let results = json["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["issue_number"], 3999);
-    assert_eq!(results[0]["ok"], false);
-    assert_eq!(results[1]["card_id"], "card-bt-issue");
-    assert_eq!(results[1]["issue_number"], 3277);
-    assert_eq!(results[1]["ok"], true);
-
-    let conn = db.lock().unwrap();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-bt-issue'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "ready");
+    assert!(matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ));
 }
 
 #[tokio::test]
@@ -11726,7 +12636,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-clean/force-transition")
+                .uri("/kanban-cards/card-ft-clean/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"ready"}"#))
@@ -12149,7 +13059,7 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/kanban-cards/card-ft-clean-pg/force-transition")
+                .uri("/kanban-cards/card-ft-clean-pg/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"ready"}"#))
@@ -15564,7 +16474,7 @@ async fn auto_queue_activate_run_id_does_not_dispatch_restoring_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -15651,7 +16561,7 @@ async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -15736,7 +16646,7 @@ async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -15812,7 +16722,7 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -15925,7 +16835,7 @@ async fn auto_queue_activate_walk_respects_requested_hook_skip() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16013,7 +16923,7 @@ async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16129,7 +17039,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16247,7 +17157,7 @@ async fn auto_queue_activate_consult_required_prefers_registry_counterpart_provi
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16317,7 +17227,7 @@ async fn auto_queue_activate_already_applied_skips_entry_and_completes_run() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16453,7 +17363,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16576,7 +17486,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16745,7 +17655,7 @@ async fn auto_queue_activate_dispatch_create_failure_releases_reserved_slot() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16870,7 +17780,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -16925,7 +17835,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17069,7 +17979,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17097,7 +18007,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17233,7 +18143,7 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17386,7 +18296,7 @@ async fn auto_queue_activate_allows_same_agent_parallel_across_runs_when_free_sl
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17490,7 +18400,7 @@ async fn auto_queue_activate_keeps_single_slot_agent_single_dispatched_group() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -17566,7 +18476,7 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:sess1","status":"working","claude_session_id":"valid-id-123"}"#,
@@ -17596,7 +18506,7 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:sess1","status":"working","claude_session_id":""}"#,
@@ -17689,7 +18599,7 @@ async fn hook_session_persists_raw_provider_session_id_separately() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/hook/session")
+                .uri("/dispatched-sessions/webhook")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"session_key":"test:gemini-raw","status":"working","provider":"gemini","claude_session_id":"latest","session_id":"aa678e6b-c6d3-4dd2-9197-58580c00cc6c"}"#,
@@ -20018,7 +20928,7 @@ async fn smart_activate_dispatches_multiple_groups() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20213,7 +21123,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20272,7 +21182,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -20310,7 +21220,7 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -22702,7 +23612,7 @@ async fn activate_run_id_blocks_phase_gate_paused_runs() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -22927,7 +23837,7 @@ async fn activate_run_id_blocks_phase_gate_paused_runs_pg_path() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23050,7 +23960,7 @@ async fn auto_queue_activate_dispatches_pg_only_run_without_sqlite_mirror() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -23368,7 +24278,7 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/auto-queue/activate")
+                .uri("/auto-queue/dispatch-next")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
@@ -24629,7 +25539,7 @@ async fn batch_rereview_processes_multiple_issues() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/re-review")
+                .uri("/kanban-cards/batch-rereview")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(

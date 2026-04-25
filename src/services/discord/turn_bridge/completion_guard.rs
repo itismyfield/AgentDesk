@@ -663,7 +663,8 @@ pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
 ) -> bool {
     if let Some(pool) = pg_pool {
         if let Err(error) =
-            crate::server::routes::dispatches::queue_dispatch_followup_pg(pool, dispatch_id).await
+            crate::services::dispatches_followup::queue_dispatch_followup_pg(pool, dispatch_id)
+                .await
         {
             tracing::warn!(
                 "[{source}] failed to enqueue postgres dispatch followup for {dispatch_id}: {error}"
@@ -674,7 +675,7 @@ pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
     }
 
     if let Some(db) = db {
-        crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+        crate::services::dispatches_followup::queue_dispatch_followup(db, dispatch_id);
         return true;
     }
 

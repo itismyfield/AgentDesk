@@ -22,7 +22,7 @@ DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DETACHED_CHILD:-0}"
 DEPLOY_LOG_PATH="${AGENTDESK_DEPLOY_LOG_PATH:-}"
 DEPLOY_TEST_MODE="${AGENTDESK_DEPLOY_TEST_MODE:-0}"
 DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DELAY_SECS:-2}"
-DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-20}"
+DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-60}"
 DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
@@ -281,7 +281,11 @@ if setup_sccache_env; then
 else
     echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
     echo "  Install it first for faster release builds (for example: brew install sccache)"
+    echo "  See docs/ci/sccache-setup.md"
+    # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
+    # don't fail the build when the binary is missing.
     export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
 # Build the release binary from the current workspace by default so deploy

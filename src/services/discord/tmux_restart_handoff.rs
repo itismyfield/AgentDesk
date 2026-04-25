@@ -203,6 +203,22 @@ async fn clear_restart_handoff_provider_session(
     provider_kind: &ProviderKind,
     state: &super::inflight::InflightTurnState,
 ) {
+    // #1085 (908-3): preserve provider session_id across watcher-death recovery.
+    //
+    // Previously this site cleared both the in-memory `DiscordSession.session_id`
+    // AND the DB-side `claude_session_id` via `clear_provider_session_id`, which
+    // forced the next user turn to start a fresh provider session even though
+    // the underlying tmux session (and the provider session running inside it)
+    // typically survives the watcher death. The provider session_id is just an
+    // opaque resume token: if the resume fails the CLI transparently falls
+    // back to creating a new session, so keeping it costs nothing and lets
+    // healthy resumes happen on the next turn.
+    //
+    // We still log the recovery event so the operator can correlate it with
+    // any subsequent resume failure, and we still let `clear_inflight_state`
+    // (called by the parent `start_restart_handoff_from_state`) drop the
+    // in-flight turn metadata — that part really must be cleared because the
+    // bound dispatch was just failed.
     let session_key =
         match build_restart_handoff_session_key(state, &shared.token_hash, provider_kind) {
             Some(key) => Some(key),
@@ -210,27 +226,34 @@ async fn clear_restart_handoff_provider_session(
                 super::adk_session::build_adk_session_key(shared, channel_id, provider_kind).await
             }
         };
-    {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.clear_provider_session();
-        }
-    }
-
-    if let Some(key) = session_key {
-        super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ↻ watcher death recovery: cleared provider session before restart handoff for channel {} ({})",
+    let preserved_session_id = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.session_id.clone())
+    };
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    match (session_key.as_deref(), preserved_session_id.as_deref()) {
+        (Some(key), Some(sid)) => tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: preserved provider session before restart handoff for channel {} ({} session_id={})",
+            channel_id.get(),
+            key,
+            sid
+        ),
+        (Some(key), None) => tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: no provider session to preserve for channel {} ({})",
             channel_id.get(),
             key
-        );
-    } else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ↻ watcher death recovery: cleared in-memory provider session before restart handoff for channel {}",
+        ),
+        (None, Some(sid)) => tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: preserved provider session before restart handoff for channel {} (session_id={})",
+            channel_id.get(),
+            sid
+        ),
+        (None, None) => tracing::info!(
+            "  [{ts}] ↻ watcher death recovery: no provider session to preserve for channel {}",
             channel_id.get()
-        );
+        ),
     }
 }
 

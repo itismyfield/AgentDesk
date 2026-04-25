@@ -18,6 +18,9 @@ agentdesk.db
 dist/
 output/
 reports/
+# But keep curated reports under docs/reports/ tracked (#1089 / 908-7).
+!docs/reports/
+!docs/reports/**
 __pycache__/
 *.pyc
 *.tsbuildinfo

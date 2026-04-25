@@ -1,3 +1,26 @@
+//! One-shot provider dispatch (#1100 boundary doc).
+//!
+//! This module is the single execution dispatch point for short-lived,
+//! prompt-in / text-out provider invocations: `execute_simple`,
+//! `execute_simple_with_timeout`, and `execute_structured`. It owns the
+//! `ProviderKind` → provider-specific helper match, timeout/cancel wiring, and
+//! the small `collect_stream_result` helper.
+//!
+//! It deliberately does NOT own:
+//! - long-lived session lifecycle, child stdin handles, or the in-memory
+//!   process session registry — those live in
+//!   [`crate::services::session_backend`] (`SessionBackend` trait,
+//!   `ProcessBackend`, `insert_process_session`/`process_session_*`).
+//! - JSONL stream parsing — also in `session_backend`
+//!   (`parse_stream_message`, `process_stream_line`, …).
+//! - shared low-level utilities used by every provider wrapper (line stream
+//!   reader, allowed-tool compat) — those live in
+//!   [`crate::services::provider_runtime`].
+//!
+//! See `docs/config-domains.md` for the domain boundaries this dispatch
+//! consumes (runtime-config), and `docs/source-of-truth.md` for canonical
+//! provider/session config write paths.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,6 +122,7 @@ pub async fn execute_structured(
                 None,
                 None,
                 model_ref,
+                None,
                 None,
                 None,
             ),

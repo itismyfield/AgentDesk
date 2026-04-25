@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, analytics, departments, escalation, offices, protected_api_domain,
-    receipt, settings, stats,
+    ApiRouter, AppState, analytics, departments, escalation, memory_api, offices,
+    protected_api_domain, receipt, settings, stats,
 };
 
 // Category: admin and ops
@@ -67,6 +67,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/analytics", get(analytics::analytics))
             .route("/analytics/invariants", get(analytics::invariants))
+            .route("/analytics/observability", get(analytics::observability))
+            .route("/analytics/policy-hooks", get(analytics::policy_hooks))
             .route("/quality/events", get(analytics::quality_events))
             .route("/streaks", get(analytics::streaks))
             .route("/achievements", get(analytics::achievements))
@@ -76,7 +78,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/rate-limits", get(analytics::rate_limits))
             .route("/receipt", get(receipt::get_receipt))
             .route("/token-analytics", get(receipt::get_token_analytics))
-            .route("/skills-trend", get(analytics::skills_trend)),
+            .route("/skills-trend", get(analytics::skills_trend))
+            // #1066 /api/memory dual-mode (memento-or-local)
+            .route("/memory/recall", post(memory_api::memory_recall))
+            .route("/memory/remember", post(memory_api::memory_remember))
+            .route("/memory/forget", post(memory_api::memory_forget)),
         state,
     )
 }

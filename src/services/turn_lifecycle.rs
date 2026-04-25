@@ -165,45 +165,37 @@ async fn stop_turn_with_policy(
     }
 }
 
-/// Scan inflight directory for the provider and delete the file matching the given tmux session.
+/// Scan inflight directory for the provider and delete the file matching the
+/// given tmux session.
+///
+/// Thin wrapper that delegates to the single-owner implementation in
+/// `services::discord::inflight` (see `docs/recovery-paths.md` — inflight
+/// cleanup SSoT, issue #1074). Kept as a function rather than inlined so that
+/// existing call sites in this module continue to read naturally.
 pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
-    let inflight_root = match crate::config::runtime_root() {
-        Some(root) => root.join("runtime").join("discord_inflight"),
-        None => return false,
-    };
-
-    let provider_dir = inflight_root.join(provider.as_str());
-    let Ok(entries) = std::fs::read_dir(&provider_dir) else {
-        return false;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(data) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(state) = serde_json::from_str::<serde_json::Value>(&data) else {
-            continue;
-        };
-        if state
-            .get("tmux_session_name")
-            .and_then(|value| value.as_str())
-            == Some(tmux_name)
-        {
-            let _ = std::fs::remove_file(&path);
-            return true;
-        }
-    }
-    false
+    crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::services::discord::health::TestHealthHarness;
     use crate::services::provider::ProviderKind;
+
+    // #1074: the turn_lifecycle wrapper must delegate to the discord SSoT
+    // rather than re-implement the inflight directory scan. Hitting the
+    // wrapper with a tmux name that cannot exist still returns `false`
+    // cleanly — no panic from an unresolved code path.
+    #[test]
+    fn clear_inflight_by_tmux_name_delegates_to_discord_ssot() {
+        let result = super::clear_inflight_by_tmux_name(
+            &ProviderKind::Codex,
+            "AgentDesk-codex-ssot-probe-1074-lifecycle-cdx",
+        );
+        assert!(
+            !result,
+            "turn_lifecycle wrapper must delegate cleanly and return false for unknown tmux name"
+        );
+    }
 
     #[test]
     fn preserve_session_handoff_policy_keeps_inflight_metadata() {
@@ -221,6 +213,56 @@ mod tests {
                 termination_reason_code: None,
             }
             .should_clear_inflight()
+        );
+    }
+
+    // #964: queue-api `cancel_turn` emits `killed=false` when the
+    // `PreserveSessionAndInflight` policy is used. The DoD item #3 pins the
+    // invariant that the watcher registry slot MUST survive such a cancel —
+    // only force-kill (cleanup_tmux=true) is allowed to tear down the watcher.
+    #[tokio::test]
+    async fn stop_turn_preserving_queue_with_killed_false_does_not_cancel_watcher() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 223_456_789_012_345_679;
+        let channel_name = "watcher-preserve-cancel";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(channel_name);
+
+        harness
+            .seed_channel_session(channel_id, channel_name, Some("session-preserve"))
+            .await;
+        harness.seed_active_turn(channel_id, 55, 66).await;
+        let cancel_flag = harness.seed_watcher(channel_id);
+
+        let registry = harness.registry();
+        let result = super::stop_turn_preserving_queue(
+            Some(registry.as_ref()),
+            &super::TurnLifecycleTarget {
+                provider: Some(ProviderKind::Codex),
+                channel_id: Some(poise::serenity_prelude::ChannelId::new(channel_id)),
+                tmux_name,
+            },
+            "queue-api cancel_turn (killed=false preservation test)",
+        )
+        .await;
+
+        // PreserveSessionAndInflight + no actual tmux session → tmux_killed=false.
+        assert!(
+            !result.tmux_killed,
+            "preserve policy must report killed=false"
+        );
+        assert!(!result.inflight_cleared);
+        assert!(result.queue_preserved);
+
+        // Critical DoD invariant: watcher registry slot survives the cancel
+        // and the stale cancel flag was NOT flipped. A future re-dispatch can
+        // reuse or replace this watcher without racing a silent teardown.
+        assert!(
+            harness.has_watcher(channel_id),
+            "watcher registry entry must be preserved across killed=false cancel",
+        );
+        assert!(
+            !cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
+            "watcher cancel flag must NOT be set on killed=false cancel",
         );
     }
 

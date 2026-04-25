@@ -1,164 +1,26 @@
-function _autoQueueHasValue(value) {
-  return value !== null && value !== undefined && !(typeof value === "string" && value.trim() === "");
-}
+/* giant-file-exemption: reason=auto-queue-phase-gate-pending-split ticket=#1078 */
+// #1078: log-context + config readers extracted to policies/lib/auto-queue-{log,config}.js
+var _autoQueueLogLib = require("./lib/auto-queue-log");
+var _autoQueueConfigLib = require("./lib/auto-queue-config");
 
-function _autoQueueLogContextKeys() {
-  return ["run_id", "entry_id", "card_id", "dispatch_id", "thread_group", "batch_phase", "slot_index", "agent_id"];
-}
-
-function _mergeAutoQueueLogContext(target, source) {
-  if (!source) return target;
-  var keys = _autoQueueLogContextKeys();
-  for (var i = 0; i < keys.length; i++) {
-    var key = keys[i];
-    if (!_autoQueueHasValue(target[key]) && _autoQueueHasValue(source[key])) {
-      target[key] = source[key];
-    }
-  }
-  return target;
-}
-
-function _loadAutoQueueEntryLogContext(entryId) {
-  if (!_autoQueueHasValue(entryId)) return null;
-  var rows = agentdesk.db.query(
-    "SELECT run_id, id as entry_id, kanban_card_id as card_id, dispatch_id, agent_id, " +
-    "COALESCE(thread_group, 0) as thread_group, COALESCE(batch_phase, 0) as batch_phase, slot_index " +
-    "FROM auto_queue_entries WHERE id = ? LIMIT 1",
-    [entryId]
-  );
-  return rows.length > 0 ? rows[0] : null;
-}
-
-function _loadAutoQueueDispatchLogContext(dispatchId) {
-  if (!_autoQueueHasValue(dispatchId)) return null;
-  var rows = agentdesk.db.query(
-    "SELECT " +
-    "COALESCE(e.run_id, " +
-    "json_extract(COALESCE(td.context, '{}'), '$.run_id'), " +
-    "json_extract(COALESCE(td.context, '{}'), '$.phase_gate.run_id')) as run_id, " +
-    "COALESCE(e.id, json_extract(COALESCE(td.context, '{}'), '$.entry_id')) as entry_id, " +
-    "COALESCE(e.kanban_card_id, td.kanban_card_id, json_extract(COALESCE(td.context, '{}'), '$.phase_gate.anchor_card_id')) as card_id, " +
-    "td.id as dispatch_id, " +
-    "COALESCE(e.thread_group, CAST(json_extract(COALESCE(td.context, '{}'), '$.thread_group') AS INTEGER)) as thread_group, " +
-    "COALESCE(e.batch_phase, " +
-    "CAST(json_extract(COALESCE(td.context, '{}'), '$.batch_phase') AS INTEGER), " +
-    "CAST(json_extract(COALESCE(td.context, '{}'), '$.phase_gate.batch_phase') AS INTEGER)) as batch_phase, " +
-    "COALESCE(e.slot_index, CAST(json_extract(COALESCE(td.context, '{}'), '$.slot_index') AS INTEGER)) as slot_index, " +
-    "COALESCE(e.agent_id, json_extract(COALESCE(td.context, '{}'), '$.agent_id'), " +
-    "json_extract(COALESCE(td.context, '{}'), '$.target_agent_id'), " +
-    "json_extract(COALESCE(td.context, '{}'), '$.source_agent_id')) as agent_id " +
-    "FROM task_dispatches td " +
-    "LEFT JOIN auto_queue_entries e ON e.dispatch_id = td.id " +
-    "WHERE td.id = ? LIMIT 1",
-    [dispatchId]
-  );
-  return rows.length > 0 ? rows[0] : null;
-}
-
-function _normalizeAutoQueueLogContext(context) {
-  var merged = {};
-  var hydratedEntryId = null;
-  _mergeAutoQueueLogContext(merged, context || {});
-  if (_autoQueueHasValue(merged.entry_id)) {
-    hydratedEntryId = merged.entry_id;
-    _mergeAutoQueueLogContext(merged, _loadAutoQueueEntryLogContext(merged.entry_id));
-  }
-  if (_autoQueueHasValue(merged.dispatch_id)) {
-    _mergeAutoQueueLogContext(merged, _loadAutoQueueDispatchLogContext(merged.dispatch_id));
-  }
-  if (_autoQueueHasValue(merged.entry_id) && merged.entry_id !== hydratedEntryId) {
-    _mergeAutoQueueLogContext(merged, _loadAutoQueueEntryLogContext(merged.entry_id));
-  }
-  return merged;
-}
-
-function _formatAutoQueueLogContext(context) {
-  var orderedKeys = _autoQueueLogContextKeys();
-  var parts = [];
-  for (var i = 0; i < orderedKeys.length; i++) {
-    var key = orderedKeys[i];
-    if (_autoQueueHasValue(context[key])) {
-      parts.push(key + "=" + context[key]);
-    }
-  }
-  return parts.length > 0 ? " | " + parts.join(" ") : "";
-}
-
-function autoQueueLog(level, message, context) {
-  if (!agentdesk.log || typeof agentdesk.log[level] !== "function") return;
-  var merged = _normalizeAutoQueueLogContext(context || {});
-  agentdesk.log[level]("[auto-queue] " + message + _formatAutoQueueLogContext(merged));
-}
+var _autoQueueHasValue = _autoQueueLogLib.hasValue;
+var _autoQueueLogContextKeys = _autoQueueLogLib.logContextKeys;
+var _mergeAutoQueueLogContext = _autoQueueLogLib.mergeLogContext;
+var _loadAutoQueueEntryLogContext = _autoQueueLogLib.loadEntryLogContext;
+var _loadAutoQueueDispatchLogContext = _autoQueueLogLib.loadDispatchLogContext;
+var _normalizeAutoQueueLogContext = _autoQueueLogLib.normalizeLogContext;
+var _formatAutoQueueLogContext = _autoQueueLogLib.formatLogContext;
+var autoQueueLog = _autoQueueLogLib.autoQueueLog;
 
 var PHASE_GATE_HUMAN_ESCALATION_THRESHOLD = 3;
 var PHASE_GATE_FAILURE_TTL_SEC = 7 * 24 * 60 * 60;
 
-function configuredAutoQueueMaxEntryRetries() {
-  var configured = parseInt(agentdesk.config.get("maxEntryRetries"), 10);
-  if (!configured || configured < 1) return 3;
-  return configured;
-}
-
-function configuredStaleDispatchedGraceMinutes() {
-  var configured = parseInt(agentdesk.config.get("staleDispatchedGraceMin"), 10);
-  if (!configured || configured < 1) return 2;
-  return configured;
-}
-
-function configuredStaleDispatchedTerminalStatuses() {
-  var configured = agentdesk.config.get("staleDispatchedTerminalStatuses");
-  var raw = typeof configured === "string" ? configured : "cancelled,failed";
-  var statuses = raw
-    .split(",")
-    .map(function(status) { return String(status || "").trim().toLowerCase(); })
-    .filter(function(status) { return /^[a-z_]+$/.test(status); });
-  return statuses.length > 0 ? statuses : ["cancelled", "failed"];
-}
-
-function configuredStaleDispatchedRecoverNullDispatch() {
-  var configured = agentdesk.config.get("staleDispatchedRecoverNullDispatch");
-  if (configured === null || configured === undefined) return true;
-  return configured === true || configured === "true";
-}
-
-function configuredStaleDispatchedRecoverMissingDispatch() {
-  var configured = agentdesk.config.get("staleDispatchedRecoverMissingDispatch");
-  if (configured === null || configured === undefined) return true;
-  return configured === true || configured === "true";
-}
-
-function staleDispatchedRecoveryConditionsSql() {
-  var conditions = [];
-  if (configuredStaleDispatchedRecoverNullDispatch()) {
-    conditions.push("e.dispatch_id IS NULL");
-  }
-
-  var terminalStatuses = configuredStaleDispatchedTerminalStatuses();
-  if (terminalStatuses.length > 0) {
-    conditions.push(
-      "EXISTS (" +
-        "SELECT 1 FROM task_dispatches td " +
-        "WHERE td.id = e.dispatch_id " +
-        "AND td.status IN (" + terminalStatuses.map(function(status) {
-          return "'" + status + "'";
-        }).join(", ") + ")" +
-      ")"
-    );
-  }
-
-  if (configuredStaleDispatchedRecoverMissingDispatch()) {
-    conditions.push(
-      "(" +
-        "e.dispatch_id IS NOT NULL AND NOT EXISTS (" +
-          "SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
-        ")" +
-      ")"
-    );
-  }
-
-  if (conditions.length === 0) return "0";
-  return conditions.join(" OR ");
-}
+var configuredAutoQueueMaxEntryRetries = _autoQueueConfigLib.maxEntryRetries;
+var configuredStaleDispatchedGraceMinutes = _autoQueueConfigLib.staleDispatchedGraceMinutes;
+var configuredStaleDispatchedTerminalStatuses = _autoQueueConfigLib.staleDispatchedTerminalStatuses;
+var configuredStaleDispatchedRecoverNullDispatch = _autoQueueConfigLib.staleDispatchedRecoverNullDispatch;
+var configuredStaleDispatchedRecoverMissingDispatch = _autoQueueConfigLib.staleDispatchedRecoverMissingDispatch;
+var staleDispatchedRecoveryConditionsSql = _autoQueueConfigLib.staleDispatchedRecoveryConditionsSql;
 
 function notifyAutoQueueEntryFailure(stuck, failure) {
   if (!stuck || !failure || failure.to !== "failed" || failure.changed !== true) return;

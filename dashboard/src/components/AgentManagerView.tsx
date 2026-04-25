@@ -36,6 +36,8 @@ interface AgentManagerViewProps {
   title?: string;
   subtitle?: string;
   scrollable?: boolean;
+  autoOpenCreate?: boolean;
+  onAutoOpenConsumed?: () => void;
 }
 
 export default function AgentManagerView({
@@ -56,6 +58,8 @@ export default function AgentManagerView({
   title,
   subtitle,
   scrollable = true,
+  autoOpenCreate = false,
+  onAutoOpenConsumed,
 }: AgentManagerViewProps) {
   const {
     canShowDispatch,
@@ -145,6 +149,16 @@ export default function AgentManagerView({
     mediaQuery.addListener(updateViewport);
     return () => mediaQuery.removeListener(updateViewport);
   }, []);
+
+  // Auto-open the setup wizard when rendered via the /agents/new route.
+  useEffect(() => {
+    if (!autoOpenCreate) return;
+    if (!setupWizard.open) {
+      openCreateAgent();
+    }
+    onAutoOpenConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenCreate]);
 
   const defaultTitle = tr("에이전트", "Agents");
   const resolvedTitle = title ?? defaultTitle;

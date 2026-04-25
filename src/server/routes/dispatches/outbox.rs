@@ -149,6 +149,41 @@ const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 /// Maximum number of retries before marking as permanent failure.
 const MAX_RETRY_COUNT: i64 = 4;
 
+/// Invariant: `dispatch_outbox_retry_count_in_bounds`.
+///
+/// `dispatch_outbox.retry_count` is a `bigint` (i64 in Rust) with
+/// `MAX_RETRY_COUNT = 4`. A valid row satisfies `0 <= retry_count <=
+/// MAX_RETRY_COUNT + 1`. The `+1` slack tolerates the one-tick window between
+/// `new_count = retry_count + 1` and the status flip to `failed`. Violations
+/// are observed via `record_invariant_check` — no panic in release. See
+/// `docs/invariants.md`.
+fn check_dispatch_outbox_retry_count_in_bounds(
+    outbox_id: i64,
+    dispatch_id: &str,
+    retry_count: i64,
+) {
+    let ok = retry_count >= 0 && retry_count <= MAX_RETRY_COUNT + 1;
+    crate::services::observability::record_invariant_check(
+        ok,
+        crate::services::observability::InvariantViolation {
+            provider: None,
+            channel_id: None,
+            dispatch_id: Some(dispatch_id),
+            session_key: None,
+            turn_id: None,
+            invariant: "dispatch_outbox_retry_count_in_bounds",
+            code_location: "src/server/routes/dispatches/outbox.rs:check_dispatch_outbox_retry_count_in_bounds",
+            message: "dispatch_outbox.retry_count is out of valid bounds",
+            details: serde_json::json!({
+                "outbox_id": outbox_id,
+                "dispatch_id": dispatch_id,
+                "retry_count": retry_count,
+                "max_retry_count": MAX_RETRY_COUNT,
+            }),
+        },
+    );
+}
+
 fn dispatch_notify_delivery_suppressed(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -381,6 +416,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
 
     let count = pending.len();
     for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
+        check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
         if action == "notify" {
             let suppress_delivery = if let Some(pool) = pg_pool {
                 dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
@@ -1655,60 +1691,18 @@ fn truncate_dispatch_message(message: &str) -> String {
 }
 
 // ── #144: Dispatch Notification Outbox ───────────────────────
-
-/// Queue a dispatch completion followup for async processing.
-///
-/// Replaces `tokio::spawn(handle_completed_dispatch_followups(...))`.
-pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
-    if let Ok(conn) = db.separate_conn() {
-        conn.execute(
-            "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
-            [dispatch_id],
-        )
-        .ok();
-    }
-}
-
-pub(crate) fn queue_dispatch_followup_sync(
-    db: &crate::db::Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-) {
-    if let Some(pool) = pg_pool {
-        let dispatch_id_owned = dispatch_id.to_string();
-        if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                queue_dispatch_followup_pg(&bridge_pool, &dispatch_id_owned).await
-            },
-            |error| error,
-        ) {
-            tracing::warn!(
-                dispatch_id = %dispatch_id,
-                "failed to enqueue postgres followup: {error}"
-            );
-        }
-        return;
-    }
-
-    queue_dispatch_followup(db, dispatch_id);
-}
-
-pub(crate) async fn queue_dispatch_followup_pg(
-    pg_pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        "INSERT INTO dispatch_outbox (dispatch_id, action)
-         VALUES ($1, 'followup')
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(dispatch_id)
-    .execute(pg_pool)
-    .await
-    .map_err(|error| format!("enqueue postgres followup for {dispatch_id}: {error}"))?;
-    Ok(())
-}
+//
+// #1075: The follow-up enqueue helpers (queue_dispatch_followup* family)
+// moved to `crate::services::dispatches_followup` so callers in the service
+// layer stop forming a service→route reverse edge. The worker loop below
+// still lives here because it owns the Discord transport side-effects.
+//
+// Thin re-exports kept for the in-module tests at the bottom of this file
+// (still asserting Postgres `dispatch_outbox` insert semantics end-to-end).
+#[cfg(test)]
+use crate::services::dispatches_followup::{
+    queue_dispatch_followup_pg, queue_dispatch_followup_sync,
+};
 
 pub(crate) async fn requeue_dispatch_notify_pg(
     pg_pool: &PgPool,

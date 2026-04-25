@@ -82,6 +82,29 @@ pub(in crate::services::discord) async fn handle_text_command(
     let arg1 = parts.get(1).unwrap_or(&"");
     let arg2 = parts.get(2).unwrap_or(&"");
 
+    // Issue #1005: Before any command-specific handling, classify the command
+    // by risk tier and apply the owner guard. This runs BEFORE the allow_all
+    // branch inside individual arms so that high-risk commands are never
+    // unlocked by `allow_all_users=true`.
+    let risk = super::command_risk(cmd, arg1);
+    if risk.is_high_risk() {
+        let is_owner = check_owner(msg.author.id, &data.shared).await;
+        let high_risk_enabled = super::high_risk_enabled_via_env();
+        let decision = super::evaluate_policy(risk, is_owner, high_risk_enabled);
+        if let Some(reply) = decision.denial_message(cmd) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⛔ CommandPolicy denied {} for {} (id:{}) — risk={:?}",
+                cmd,
+                msg.author.name,
+                msg.author.id.get(),
+                risk,
+            );
+            let _ = msg.reply(&ctx.http, reply).await;
+            return Ok(true);
+        }
+    }
+
     match cmd {
         "!start" => {
             let path_str = if arg1.is_empty() { "." } else { arg1 };
@@ -615,8 +638,11 @@ Any other message is sent to {p}.
 `!escalation timezone <IANA>` — Set scheduled timezone
 `!escalation owner <user_id>` — Override fallback owner user id
 `!escalation pm-channel <channel_id>` — Override PM channel
-`!help` — Show this help",
-                p = provider_name
+`!help` — Show this help
+
+{risk_block}",
+                p = provider_name,
+                risk_block = super::risk_tier_summary_for_help(super::high_risk_enabled_via_env()),
             );
             send_long_message_raw(&ctx.http, channel_id, &help, &data.shared).await?;
             return Ok(true);

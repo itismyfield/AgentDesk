@@ -94,11 +94,18 @@ write_checksum() {
 echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
 echo ""
 
-if ! setup_sccache_env; then
-  echo "Error: sccache not found. Install it first (for example: brew install sccache)."
-  exit 1
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+if setup_sccache_env; then
+  echo "▸ sccache cache: ${SCCACHE_DIR} (size ${SCCACHE_CACHE_SIZE})"
+else
+  echo "⚠ sccache not found in PATH; continuing without rustc wrapper"
+  echo "  Install it for faster release builds (for example: brew install sccache)"
+  echo "  See docs/ci/sccache-setup.md"
+  # Explicitly clear any rustc-wrapper coming from .cargo/config.toml so we
+  # don't fail the build when the binary is missing.
+  export RUSTC_WRAPPER=""
+  export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
-echo "▸ sccache cache: ${SCCACHE_DIR} (size ${SCCACHE_CACHE_SIZE})"
 
 # ── 1. Build Rust binary ──────────────────────────────────────────────────────
 if ! command -v cargo &>/dev/null; then

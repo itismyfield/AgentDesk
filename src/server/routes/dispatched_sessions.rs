@@ -1094,7 +1094,7 @@ pub async fn list_dispatched_sessions(
     (StatusCode::OK, Json(json!({"sessions": sessions})))
 }
 
-/// POST /api/hook/session — upsert session from dcserver
+/// POST /api/dispatched-sessions/webhook — upsert session from dcserver
 pub async fn hook_session(
     State(state): State<AppState>,
     Json(body): Json<HookSessionBody>,
@@ -1130,7 +1130,7 @@ pub async fn hook_session(
                 .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
-    // /api/hook/session is intentionally auth-exempt, so never trust a client-supplied
+    // /api/dispatched-sessions/webhook is intentionally auth-exempt, so never trust a client-supplied
     // agent_id from this payload. Resolve ownership from session/channel/dispatch context only.
     let agent_id = resolve_session_agent_id(
         &conn,
@@ -1409,7 +1409,7 @@ pub async fn gc_thread_sessions(
     )
 }
 
-/// DELETE /api/hook/session — delete a session by session_key
+/// DELETE /api/dispatched-sessions/webhook — delete a session by session_key
 pub async fn delete_session(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
@@ -2776,6 +2776,171 @@ fn classify_session_termination_reason(reason: &str) -> (&'static str, &'static 
     } else {
         ("force_kill", "lifecycle.force_kill")
     }
+}
+
+/// Query parameters for the tmux-output endpoint.
+#[derive(Debug, Deserialize, Default)]
+pub struct TmuxOutputQuery {
+    /// Number of trailing tmux pane lines to capture. Default: 80. Clamped to
+    /// the inclusive range [1, 2000] to avoid accidental giant captures.
+    pub lines: Option<i32>,
+}
+
+const TMUX_OUTPUT_DEFAULT_LINES: i32 = 80;
+const TMUX_OUTPUT_MAX_LINES: i32 = 2000;
+
+async fn load_session_by_id_pg(
+    pool: &PgPool,
+    id: i64,
+) -> Result<Option<(String, Option<String>, Option<String>, Option<String>)>, String> {
+    let row = sqlx::query(
+        "SELECT session_key, agent_id, provider, status
+         FROM sessions
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load postgres session #{id}: {error}"))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let session_key: Option<String> = row
+        .try_get("session_key")
+        .map_err(|error| format!("decode session_key for #{id}: {error}"))?;
+    let agent_id: Option<String> = row
+        .try_get("agent_id")
+        .map_err(|error| format!("decode agent_id for #{id}: {error}"))?;
+    let provider: Option<String> = row
+        .try_get("provider")
+        .map_err(|error| format!("decode provider for #{id}: {error}"))?;
+    let status: Option<String> = row
+        .try_get("status")
+        .map_err(|error| format!("decode status for #{id}: {error}"))?;
+    let Some(session_key) = session_key else {
+        return Ok(None);
+    };
+    Ok(Some((session_key, agent_id, provider, status)))
+}
+
+fn load_session_by_id_sqlite(
+    db: &crate::db::Db,
+    id: i64,
+) -> Result<Option<(String, Option<String>, Option<String>, Option<String>)>, String> {
+    let conn = db.lock().map_err(|error| format!("db lock: {error}"))?;
+    let row = conn
+        .query_row(
+            "SELECT session_key, agent_id, provider, status
+             FROM sessions
+             WHERE id = ?1",
+            libsql_rusqlite::params![id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .ok();
+    match row {
+        Some((Some(session_key), agent_id, provider, status)) => {
+            Ok(Some((session_key, agent_id, provider, status)))
+        }
+        Some(_) | None => Ok(None),
+    }
+}
+
+/// GET /api/sessions/{id}/tmux-output?lines=N
+///
+/// #1067: Skill promotion for watch-agent-turn. Returns the latest N lines of
+/// the tmux pane bound to the session identified by the numeric session id
+/// (`sessions.id`). Reads the session row to derive `hostname:tmux_name` from
+/// `session_key`, then shells out via [`crate::services::platform::tmux::capture_pane`].
+pub async fn tmux_output(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<TmuxOutputQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let requested_lines = params.lines.unwrap_or(TMUX_OUTPUT_DEFAULT_LINES);
+    let effective_lines = requested_lines.max(1).min(TMUX_OUTPUT_MAX_LINES);
+
+    // Lookup session row. Prefer Postgres (authoritative) when available.
+    let session_row = if let Some(pool) = state.pg_pool_ref() {
+        match load_session_by_id_pg(pool, id).await {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        }
+    } else {
+        match load_session_by_id_sqlite(state.sqlite_db(), id) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        }
+    };
+
+    let Some((session_key, agent_id, provider, status)) = session_row else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("session #{id} not found"),
+                "session_id": id,
+            })),
+        );
+    };
+
+    // session_key format: "hostname:tmux_name"
+    let tmux_name = match session_key.split_once(':') {
+        Some((_, name)) if !name.is_empty() => name.to_string(),
+        _ => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "session #{id} session_key does not follow hostname:tmux_name format"
+                    ),
+                    "session_id": id,
+                    "session_key": session_key,
+                })),
+            );
+        }
+    };
+
+    let captured_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0);
+
+    // capture_pane takes scroll_back as a negative offset from the pane bottom.
+    let recent_output = crate::services::platform::tmux::capture_pane(&tmux_name, -effective_lines);
+    let tmux_alive = recent_output.is_some();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "session_id": id,
+            "session_key": session_key,
+            "tmux_name": tmux_name,
+            "tmux_alive": tmux_alive,
+            "agent_id": agent_id,
+            "provider": provider,
+            "status": status,
+            "lines_requested": requested_lines,
+            "lines_effective": effective_lines,
+            "recent_output": recent_output.unwrap_or_default(),
+            "captured_at_ms": captured_at_ms,
+        })),
+    )
 }
 
 /// POST /api/sessions/{session_key}/force-kill
@@ -4954,5 +5119,169 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["sessions"].as_array().unwrap().len(), 0);
+    }
+
+    // #1067: sessions_tmux_output tests — watch-agent-turn skill promotion.
+    #[tokio::test]
+    async fn sessions_tmux_output_returns_404_for_unknown_session_id() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db, engine);
+
+        let (status, body) = tmux_output(
+            State(state),
+            Path(999_999),
+            Query(TmuxOutputQuery { lines: None }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let body: Value = response_json(body);
+        assert_eq!(body["session_id"], 999_999);
+        assert!(
+            body["error"]
+                .as_str()
+                .map(|s| s.contains("not found"))
+                .unwrap_or(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_tmux_output_shape_for_seeded_session_without_live_tmux() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let session_id: i64;
+        let tmux_name = format!("AgentDesk-codex-1067-output-{}", std::process::id());
+        let session_key = format!("mac-mini:{tmux_name}");
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-1067");
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1067', 'codex', 'working', datetime('now'), datetime('now'))",
+                libsql_rusqlite::params![session_key.clone()],
+            )
+            .unwrap();
+            session_id = conn
+                .query_row(
+                    "SELECT id FROM sessions WHERE session_key = ?1",
+                    [&session_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+        }
+        let state = AppState::test_state(db, engine);
+
+        let (status, body) = tmux_output(
+            State(state),
+            Path(session_id),
+            Query(TmuxOutputQuery { lines: Some(20) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = response_json(body);
+        assert_eq!(body["session_id"], session_id);
+        assert_eq!(body["session_key"], session_key);
+        assert_eq!(body["tmux_name"], tmux_name);
+        assert_eq!(body["agent_id"], "agent-1067");
+        assert_eq!(body["provider"], "codex");
+        assert_eq!(body["status"], "working");
+        assert_eq!(body["lines_requested"], 20);
+        assert_eq!(body["lines_effective"], 20);
+        // tmux session was never created, so capture_pane returns None → empty string + alive=false.
+        assert_eq!(body["tmux_alive"], false);
+        assert_eq!(body["recent_output"], "");
+        assert!(body["captured_at_ms"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn sessions_tmux_output_clamps_lines_to_allowed_range() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let session_id: i64;
+        let session_key = format!("mac-mini:AgentDesk-codex-1067-clamp-{}", std::process::id());
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-1067-clamp");
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1067-clamp', 'codex', 'idle', datetime('now'), datetime('now'))",
+                libsql_rusqlite::params![session_key.clone()],
+            )
+            .unwrap();
+            session_id = conn
+                .query_row(
+                    "SELECT id FROM sessions WHERE session_key = ?1",
+                    [&session_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+        }
+        let state = AppState::test_state(db, engine);
+
+        let (status_hi, body_hi) = tmux_output(
+            State(state.clone()),
+            Path(session_id),
+            Query(TmuxOutputQuery { lines: Some(9_999) }),
+        )
+        .await;
+        assert_eq!(status_hi, StatusCode::OK);
+        let body_hi: Value = response_json(body_hi);
+        assert_eq!(body_hi["lines_requested"], 9_999);
+        assert_eq!(body_hi["lines_effective"], 2_000);
+
+        let (status_lo, body_lo) = tmux_output(
+            State(state),
+            Path(session_id),
+            Query(TmuxOutputQuery { lines: Some(-42) }),
+        )
+        .await;
+        assert_eq!(status_lo, StatusCode::OK);
+        let body_lo: Value = response_json(body_lo);
+        assert_eq!(body_lo["lines_requested"], -42);
+        assert_eq!(body_lo["lines_effective"], 1);
+    }
+
+    #[tokio::test]
+    async fn sessions_tmux_output_rejects_malformed_session_key() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let session_id: i64;
+        // session_key without ":" — conflicts with hostname:tmux_name format.
+        let bad_session_key = "no-colon-here".to_string();
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-1067-bad");
+            conn.execute(
+                "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
+                 VALUES (?1, 'agent-1067-bad', 'codex', 'idle', datetime('now'), datetime('now'))",
+                libsql_rusqlite::params![bad_session_key.clone()],
+            )
+            .unwrap();
+            session_id = conn
+                .query_row(
+                    "SELECT id FROM sessions WHERE session_key = ?1",
+                    [&bad_session_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+        }
+        let state = AppState::test_state(db, engine);
+
+        let (status, body) = tmux_output(
+            State(state),
+            Path(session_id),
+            Query(TmuxOutputQuery { lines: None }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = response_json(body);
+        assert_eq!(body["session_id"], session_id);
+        assert_eq!(body["session_key"], bad_session_key);
     }
 }

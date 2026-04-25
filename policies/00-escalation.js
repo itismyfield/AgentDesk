@@ -1,3 +1,4 @@
+/* giant-file-exemption: reason=pre-existing-monitoring-aggregator ticket=#1078 */
 // #515: Suppress repeated monitor alerts for the same issue/card and only
 // re-notify after a longer interval if the problem is still unresolved.
 var ESCALATION_COOLDOWN_SEC = 600;

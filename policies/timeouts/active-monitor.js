@@ -1,3 +1,4 @@
+/* giant-file-exemption: reason=monitor-section-needs-further-split ticket=#1078 */
 module.exports = function attachActiveMonitor(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;

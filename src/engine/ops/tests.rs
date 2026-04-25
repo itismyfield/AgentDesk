@@ -630,6 +630,218 @@ fn test_review_entry_slice_blocks_raw_db_reintroduction() {
     );
 }
 
+/// #1007: Guard the first migrated slice — `ci-recovery.js` must not
+/// regress to raw `agentdesk.db.query/execute` callsites.
+#[test]
+fn policies_raw_db_ci_recovery_slice_stays_typed() {
+    let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/ci-recovery.js");
+    let policy = fs::read_to_string(&policy_path).expect("ci-recovery policy must be readable");
+    assert!(
+        !policy.contains("agentdesk.db.query") && !policy.contains("agentdesk.db.execute"),
+        "ci-recovery.js must stay on typed facades (agentdesk.ciRecovery.*): {policy_path:?}"
+    );
+    // The in-body slice marker must also still be present so future edits
+    // around the escalation status check keep the typed call.
+    assert!(
+        policy.contains("// typed-facade-slice:start ci-recovery"),
+        "ci-recovery.js must keep the typed-facade slice start marker"
+    );
+    assert!(
+        policy.contains("// typed-facade-slice:end ci-recovery"),
+        "ci-recovery.js must keep the typed-facade slice end marker"
+    );
+}
+
+/// #1007: Budget guard — the total count of `agentdesk.db.query` and
+/// `agentdesk.db.execute` callsites across `policies/*.js` must not grow
+/// beyond the whitelist captured at the time of the first migration slice.
+///
+/// New policies / new callsites MUST either:
+///   1. migrate to a typed facade under `agentdesk.<domain>.*`, or
+///   2. annotate the raw-db callsite with the escape-hatch marker
+///      `/* legacy-raw-db: policy=<name> capability=<intent> source_event=<hook> */`
+///      so the audit log at `policy.raw_db_audit` can attribute them.
+///
+/// If this test fails after a legitimate raw-db addition, either lift the
+/// budget here with a PR comment explaining why migration isn't possible
+/// yet, or add the escape-hatch marker and update
+/// `RAW_DB_ESCAPE_HATCH_ALLOWANCE` below.
+#[test]
+fn policies_raw_db_count_stays_within_budget() {
+    // Captured after ci-recovery migration (#1007 first slice). See
+    // docs/generated/policy-db-inventory.md for the classified listing.
+    const RAW_DB_BUDGET: usize = 189;
+    // Number of callsites that are currently annotated with the
+    // escape-hatch marker (`/* legacy-raw-db: ... */`). Starts at 0 and
+    // grows only when a caller explicitly justifies a raw callsite.
+    const RAW_DB_ESCAPE_HATCH_ALLOWANCE: usize = 0;
+
+    let policies_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    let mut total_callsites = 0usize;
+    let mut marked_callsites = 0usize;
+    let mut unmarked_callsites = 0usize;
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip test fixtures
+                    if path.file_name().and_then(|n| n.to_str()) == Some("__tests__") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(&policies_dir, &mut files);
+
+    for file in &files {
+        let src = match fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for (lineno, line) in src.lines().enumerate() {
+            if line.contains("agentdesk.db.query") || line.contains("agentdesk.db.execute") {
+                total_callsites += 1;
+                // Check whether the callsite (this line or the 3 preceding
+                // lines) carries an escape-hatch marker comment.
+                let marker_window_start = lineno.saturating_sub(3);
+                let window: Vec<&str> = src
+                    .lines()
+                    .skip(marker_window_start)
+                    .take(lineno - marker_window_start + 1)
+                    .collect();
+                let window_text = window.join("\n");
+                if window_text.contains("legacy-raw-db:") {
+                    marked_callsites += 1;
+                } else {
+                    unmarked_callsites += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        unmarked_callsites <= RAW_DB_BUDGET,
+        "#1007 raw-db budget exceeded: unmarked callsites={} budget={} (total={} marked={}). \
+         Either migrate the new callsite to a typed facade (see src/engine/ops/ci_recovery_ops.rs for an example) \
+         or annotate it with /* legacy-raw-db: policy=<name> capability=<intent> source_event=<hook> */ \
+         and bump RAW_DB_ESCAPE_HATCH_ALLOWANCE in this test.",
+        unmarked_callsites,
+        RAW_DB_BUDGET,
+        total_callsites,
+        marked_callsites
+    );
+
+    assert!(
+        marked_callsites <= RAW_DB_ESCAPE_HATCH_ALLOWANCE,
+        "#1007 escape-hatch allowance exceeded: marked={} allowance={}. \
+         Bump RAW_DB_ESCAPE_HATCH_ALLOWANCE only if the new annotated callsite is genuinely justified.",
+        marked_callsites,
+        RAW_DB_ESCAPE_HATCH_ALLOWANCE
+    );
+}
+
+/// #1078 (906-2): Policy modularization budget.
+///
+/// Every `.js` file under `policies/` must stay at or below 10240 bytes
+/// (10 KiB). Files above that threshold must carry a top-of-file marker
+/// comment `/* giant-file-exemption: reason=<short> ticket=#<id> */` so
+/// reviewers see at a glance that the bloat was accepted on purpose.
+///
+/// Hard cap: the exempt-file allowance is tracked below. New oversized
+/// files without the marker fail the test. The allowance shrinks only as
+/// existing giants get split into submodules (see `policies/timeouts/` for
+/// the pattern). Raise this number only with an explicit ticket reference.
+#[test]
+fn policies_js_files_under_10kb_budget() {
+    const POLICY_FILE_SIZE_LIMIT: u64 = 10 * 1024;
+    // Allowance for pre-existing oversized files carrying the
+    // `giant-file-exemption:` marker comment. Shrinks when files are split.
+    const GIANT_FILE_EXEMPTION_ALLOWANCE: usize = 8;
+
+    let policies_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip test fixtures and harnesses
+                    if path.file_name().and_then(|n| n.to_str()) == Some("__tests__") {
+                        continue;
+                    }
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(&policies_dir, &mut files);
+    files.sort();
+
+    let mut oversized_unmarked: Vec<(PathBuf, u64)> = Vec::new();
+    let mut oversized_marked: Vec<(PathBuf, u64)> = Vec::new();
+
+    for file in &files {
+        let size = match fs::metadata(file) {
+            Ok(md) => md.len(),
+            Err(_) => continue,
+        };
+        if size <= POLICY_FILE_SIZE_LIMIT {
+            continue;
+        }
+        // Read just the first ~2 KB to look for the marker — it must be near
+        // the top of the file.
+        let head = {
+            let s = fs::read_to_string(file).unwrap_or_default();
+            s.chars().take(2048).collect::<String>()
+        };
+        if head.contains("giant-file-exemption:") {
+            oversized_marked.push((file.clone(), size));
+        } else {
+            oversized_unmarked.push((file.clone(), size));
+        }
+    }
+
+    assert!(
+        oversized_unmarked.is_empty(),
+        "#1078 policy file size budget exceeded: {} file(s) > {} bytes without \
+         `/* giant-file-exemption: reason=... ticket=#... */` marker. \
+         Either split the file into submodules (see policies/timeouts/ for the \
+         pattern) or add the marker comment at the top of the file. Offenders: {:?}",
+        oversized_unmarked.len(),
+        POLICY_FILE_SIZE_LIMIT,
+        oversized_unmarked
+            .iter()
+            .map(|(p, s)| format!("{}={}B", p.display(), s))
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        oversized_marked.len() <= GIANT_FILE_EXEMPTION_ALLOWANCE,
+        "#1078 giant-file-exemption allowance exceeded: marked={} allowance={}. \
+         Each new exemption should come with a ticket to split the file. \
+         Bump GIANT_FILE_EXEMPTION_ALLOWANCE only with explicit justification. \
+         Currently marked: {:?}",
+        oversized_marked.len(),
+        GIANT_FILE_EXEMPTION_ALLOWANCE,
+        oversized_marked
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
     let db = test_db();
@@ -674,11 +886,15 @@ fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
 
     let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js");
     let policy = fs::read_to_string(&policy_path).expect("auto-queue policy must be readable");
+    let policies_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     ctx.with(|ctx| {
         register_globals(&ctx, db.clone()).unwrap();
+        // #1078: auto-queue now requires() helpers from policies/lib/, so the
+        // module loader must be installed before evaluating the policy source.
+        crate::engine::loader::install_policy_module_loader(&ctx, &policies_root, &policies_root).unwrap();
         let _: rquickjs::Value = ctx.eval(r#"agentdesk.registerPolicy = function(_) {};"#).unwrap();
         let _: rquickjs::Value = ctx.eval(policy.as_str()).unwrap();
         let result: String = ctx
@@ -1504,11 +1720,14 @@ fn js_auto_queue_continue_run_after_entry_passes_agent_id_to_activate() {
     let db = test_db();
     let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js");
     let policy = fs::read_to_string(&policy_path).expect("auto-queue policy must be readable");
+    let policies_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     ctx.with(|ctx| {
         register_globals(&ctx, db.clone()).unwrap();
+        // #1078: auto-queue now requires() helpers from policies/lib/.
+        crate::engine::loader::install_policy_module_loader(&ctx, &policies_root, &policies_root).unwrap();
         let _: rquickjs::Value = ctx.eval(r#"agentdesk.registerPolicy = function(_) {};"#).unwrap();
         let _: rquickjs::Value = ctx.eval(policy.as_str()).unwrap();
         let captured: String = ctx

@@ -113,6 +113,7 @@ pub async fn quality_events(
             StatusCode::OK,
             Json(json!({
                 "events": events,
+                "generated_at_ms": chrono::Utc::now().timestamp_millis(),
             })),
         ),
         Err(error) => (
@@ -120,6 +121,114 @@ pub async fn quality_events(
             Json(json!({"error": format!("query agent quality events: {error}")})),
         ),
     }
+}
+
+/// GET /api/analytics/observability
+///
+/// Lightweight foundation-layer view introduced by #1070 (Epic #905 Phase 1).
+/// Surfaces the atomic channel × provider counters and the latest entries of
+/// the in-memory structured event ring buffer without touching SQL.
+#[derive(Debug, Default, Deserialize)]
+pub struct ObservabilityQuery {
+    #[serde(rename = "recentLimit")]
+    pub recent_limit: Option<usize>,
+}
+
+pub async fn observability(
+    Query(params): Query<ObservabilityQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let limit = params.recent_limit.unwrap_or(100).min(1000);
+    let counters = crate::services::observability::metrics::snapshot();
+    let recent_events = crate::services::observability::events::recent(limit);
+    let body = json!({
+        "counters": counters,
+        "recent_events": recent_events,
+        "generated_at_ms": chrono::Utc::now().timestamp_millis(),
+    });
+    (StatusCode::OK, Json(body))
+}
+
+/// GET /api/analytics/policy-hooks
+///
+/// Policy hook observability view (#1080 / Epic #906). Returns recent
+/// `policy_hook_executed` structured events with optional filters on
+/// `policy_name`, `hook_name`, and a lookback window in minutes. Backed by the
+/// in-memory ring buffer populated by `services::observability::events`.
+#[derive(Debug, Default, Deserialize)]
+pub struct PolicyHooksQuery {
+    #[serde(rename = "policyName")]
+    pub policy_name: Option<String>,
+    #[serde(rename = "hookName")]
+    pub hook_name: Option<String>,
+    #[serde(rename = "lastMinutes")]
+    pub last_minutes: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+pub async fn policy_hooks(
+    Query(params): Query<PolicyHooksQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let limit = params.limit.unwrap_or(200).min(2000);
+    // Pull a generous window from the ring buffer, then filter in-memory.
+    let pool = crate::services::observability::events::recent(
+        crate::services::observability::events::MAX_EVENTS,
+    );
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let window_ms = params.last_minutes.map(|m| m.saturating_mul(60_000));
+
+    let mut matched: Vec<serde_json::Value> = Vec::new();
+    for ev in pool.into_iter().rev() {
+        if ev.event_type != "policy_hook_executed" {
+            continue;
+        }
+        if let Some(window) = window_ms {
+            if now_ms.saturating_sub(ev.timestamp_ms) > window {
+                continue;
+            }
+        }
+        if let Some(ref needed) = params.policy_name {
+            let ok = ev
+                .payload
+                .get("policy_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s == needed.as_str())
+                .unwrap_or(false);
+            if !ok {
+                continue;
+            }
+        }
+        if let Some(ref needed) = params.hook_name {
+            let ok = ev
+                .payload
+                .get("hook_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s == needed.as_str())
+                .unwrap_or(false);
+            if !ok {
+                continue;
+            }
+        }
+        matched.push(json!({
+            "timestamp_ms": ev.timestamp_ms,
+            "policy_name": ev.payload.get("policy_name").cloned().unwrap_or(serde_json::Value::Null),
+            "hook_name": ev.payload.get("hook_name").cloned().unwrap_or(serde_json::Value::Null),
+            "policy_version": ev.payload.get("policy_version").cloned().unwrap_or(serde_json::Value::Null),
+            "duration_ms": ev.payload.get("duration_ms").cloned().unwrap_or(serde_json::Value::Null),
+            "result": ev.payload.get("result").cloned().unwrap_or(serde_json::Value::Null),
+            "effects_count": ev.payload.get("effects_count").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+        if matched.len() >= limit {
+            break;
+        }
+    }
+
+    // matched is newest-first (because we iterated in reverse). Keep it that
+    // way for dashboard consumers.
+    let body = json!({
+        "events": matched,
+        "generated_at_ms": now_ms,
+    });
+    (StatusCode::OK, Json(body))
 }
 
 /// GET /api/analytics/invariants
@@ -1462,6 +1571,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_hooks_route_returns_recent_filtered_events() {
+        // Seed the in-memory event ring buffer with synthetic
+        // `policy_hook_executed` entries and verify the route filters them.
+        crate::services::observability::events::reset_for_tests();
+
+        crate::services::observability::events::record_simple(
+            "policy_hook_executed",
+            None,
+            None,
+            serde_json::json!({
+                "policy_name": "alpha-policy",
+                "hook_name": "onTick",
+                "policy_version": "abc123",
+                "duration_ms": 3,
+                "result": "ok",
+                "effects_count": 0,
+            }),
+        );
+        crate::services::observability::events::record_simple(
+            "policy_hook_executed",
+            None,
+            None,
+            serde_json::json!({
+                "policy_name": "beta-policy",
+                "hook_name": "onCardTerminal",
+                "policy_version": "def456",
+                "duration_ms": 7,
+                "result": "err",
+                "effects_count": 1,
+            }),
+        );
+        // Noise event — must not surface.
+        crate::services::observability::events::record_simple(
+            "turn_finished",
+            Some(42),
+            Some("codex"),
+            serde_json::json!({"status": "ok"}),
+        );
+
+        let (status, Json(body)) = policy_hooks(Query(PolicyHooksQuery {
+            policy_name: Some("beta-policy".to_string()),
+            hook_name: None,
+            last_minutes: None,
+            limit: None,
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let events = body["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 1, "only beta-policy event should match");
+        assert_eq!(events[0]["policy_name"], json!("beta-policy"));
+        assert_eq!(events[0]["hook_name"], json!("onCardTerminal"));
+        assert_eq!(events[0]["result"], json!("err"));
+        assert_eq!(events[0]["effects_count"], json!(1));
+        assert_eq!(events[0]["policy_version"], json!("def456"));
+
+        // Unfiltered query should return both policy_hook_executed events
+        // (but not the turn_finished noise event).
+        let (_, Json(body_all)) = policy_hooks(Query(PolicyHooksQuery {
+            policy_name: None,
+            hook_name: None,
+            last_minutes: Some(60),
+            limit: Some(10),
+        }))
+        .await;
+        let events_all = body_all["events"].as_array().unwrap();
+        assert_eq!(events_all.len(), 2);
+    }
+
+    #[tokio::test]
     async fn invariants_route_returns_violation_payload() {
         let _guard = crate::services::observability::test_runtime_lock();
         crate::services::observability::reset_for_tests();
@@ -1566,5 +1745,97 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    /// #1070: foundation-layer `/api/analytics/observability` endpoint shape
+    /// + hot-path wiring check. `emit_turn_started`/`emit_turn_finished` must
+    /// populate the atomic counters that the endpoint exposes.
+    #[tokio::test]
+    async fn observability_route_exposes_atomic_counters_and_recent_events() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        crate::services::observability::metrics::reset_for_tests();
+        crate::services::observability::events::reset_for_tests();
+
+        let db = crate::db::test_db();
+        crate::services::observability::init_observability(db.clone(), None);
+
+        // Attempt + success
+        crate::services::observability::emit_turn_started(
+            "codex",
+            5150,
+            Some("dispatch-obs"),
+            Some("session-obs"),
+            Some("turn-obs"),
+        );
+        crate::services::observability::emit_turn_finished(
+            "codex",
+            5150,
+            Some("dispatch-obs"),
+            Some("session-obs"),
+            Some("turn-obs"),
+            "completed",
+            42,
+            false,
+        );
+        // Attempt + fail (different turn).
+        crate::services::observability::emit_turn_started(
+            "codex",
+            5150,
+            Some("dispatch-obs-2"),
+            Some("session-obs-2"),
+            Some("turn-obs-2"),
+        );
+        crate::services::observability::emit_turn_finished(
+            "codex",
+            5150,
+            Some("dispatch-obs-2"),
+            Some("session-obs-2"),
+            Some("turn-obs-2"),
+            "error",
+            10,
+            false,
+        );
+        // Watcher replacement + guard fire
+        crate::services::observability::emit_watcher_replaced("codex", 5150, "stale_cancel");
+        crate::services::observability::emit_guard_fired(
+            "codex",
+            5150,
+            Some("dispatch-obs"),
+            None,
+            None,
+            "placeholder_suppress",
+        );
+
+        let (status, Json(body)) = observability(Query(ObservabilityQuery {
+            recent_limit: Some(50),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let counters = body["counters"].as_array().expect("counters array");
+        let row = counters
+            .iter()
+            .find(|row| row["channel_id"] == json!(5150) && row["provider"] == json!("codex"))
+            .expect("expected counter row for codex/5150");
+        assert_eq!(row["attempts"], json!(2));
+        assert_eq!(row["success"], json!(1));
+        assert_eq!(row["fail"], json!(1));
+        assert_eq!(row["guard_fires"], json!(1));
+        assert_eq!(row["watcher_replacements"], json!(1));
+        let rate = row["success_rate"].as_f64().expect("success_rate f64");
+        assert!((rate - 0.5).abs() < 1e-9, "success_rate={rate}");
+
+        let events = body["recent_events"].as_array().expect("recent_events");
+        assert!(!events.is_empty());
+        let kinds: std::collections::HashSet<&str> = events
+            .iter()
+            .filter_map(|ev| ev["event_type"].as_str())
+            .collect();
+        assert!(kinds.contains("turn_started"));
+        assert!(kinds.contains("turn_finished"));
+        assert!(kinds.contains("watcher_replaced"));
+        assert!(kinds.contains("guard_fired"));
     }
 }

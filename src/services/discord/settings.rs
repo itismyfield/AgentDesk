@@ -39,7 +39,8 @@ pub(crate) use content::load_longterm_memory_catalog;
 use content::load_peer_agents;
 pub(super) use content::{
     channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, is_known_agent,
-    load_review_tuning_guidance, load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
+    load_review_tuning_guidance, load_role_prompt, load_shared_prompt,
+    load_shared_prompt_for_profile, render_peer_agent_guidance,
 };
 pub(crate) use memory::{memory_settings_for_binding, resolve_memory_settings};
 pub(super) use read::{
@@ -53,8 +54,9 @@ use validation::bot_settings_allow_agent;
 pub(crate) use validation::list_registered_channel_bindings;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
-    has_configured_channel_binding, resolve_role_binding, resolve_workspace,
-    validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
+    has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_role_binding,
+    resolve_workspace, validate_bot_channel_routing,
+    validate_bot_channel_routing_with_provider_channel,
 };
 pub(super) use write::save_bot_settings;
 

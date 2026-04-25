@@ -9,22 +9,33 @@ pub(crate) mod health;
 mod inflight;
 pub(crate) mod internal_api;
 mod mcp_credential_watcher;
+pub(crate) mod meeting_artifact_store;
 pub(crate) mod meeting_orchestrator;
+pub(crate) mod meeting_state_machine;
 mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
+pub(crate) mod monitoring_detector;
 pub(crate) mod monitoring_status;
 mod org_schema;
 pub(crate) mod org_writer;
+pub(crate) mod outbound;
 mod prompt_builder;
 mod queue_io;
+// #1074: landing zone for the future recovery-engine module split
+// (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
+// Named `recovery_paths` to avoid shadowing the existing
+// `recovery_engine as recovery` alias below until the mechanical split lands.
 mod recovery_engine;
+mod recovery_paths;
 mod restart_mode;
+// #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
 pub mod runtime_store;
+pub(crate) mod session_identity;
 mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
@@ -132,7 +143,12 @@ pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
-const SESSION_MAX_IDLE: Duration = Duration::from_secs(60 * 60); // 1 hour
+// #1085 (908-3): extended from 1h → 4h. Working agents idle between dispatch
+// turns and the prior 60-min cap forced the next user/dispatch turn to start a
+// fresh provider session, defeating cache reuse. 4h covers typical "go for
+// lunch / sync meeting" gaps while still bounding zombie growth via the
+// cleanup interval reaper at `mod.rs:2093`.
+const SESSION_MAX_IDLE: Duration = Duration::from_secs(4 * 60 * 60); // 4 hours
 const SESSION_MAX_ASSISTANT_TURNS: usize = 100;
 const SESSION_RECOVERY_CONTEXT_MESSAGES: usize = 10;
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
@@ -478,6 +494,11 @@ pub(super) struct TmuxRelayCoord {
     /// watcher already relies on for Claude Code's `task_notification`
     /// auto-trigger boundary.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
+    /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
+    /// relay. 0 = no confirmed relay observed yet. Read by the
+    /// `watcher-state` observability endpoint (#964). Monotonic is NOT
+    /// required — this is a telemetry field only.
+    pub(super) last_relay_ts_ms: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl TmuxRelayCoord {
@@ -485,6 +506,7 @@ impl TmuxRelayCoord {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }
     }
 }
@@ -724,6 +746,177 @@ impl SharedData {
 #[cfg(test)]
 pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
     make_shared_data_for_tests_with_storage(None, None)
+}
+
+/// #1073: Test-only helpers exposed for the Discord bot integration test
+/// harness under `src/integration_tests/discord_flow/`.
+///
+/// Kept in one place so the harness can reach the `pub(super)` watcher
+/// primitives without widening visibility on production paths. Private
+/// types (`TmuxWatcherHandle`, `InflightTurnState`) never leak out of this
+/// module; consumers only see opaque newtype wrappers.
+#[cfg(test)]
+pub(crate) mod test_harness_exports {
+    use super::TmuxWatcherHandle;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    /// Opaque wrapper around the crate-private watcher registry (a
+    /// `DashMap<ChannelId, TmuxWatcherHandle>`).
+    pub(crate) struct WatcherRegistry {
+        inner: dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    }
+
+    /// Opaque wrapper around an individual `TmuxWatcherHandle`. Construct
+    /// via [`new_test_watcher_handle`]; hand it to [`try_claim_watcher`] /
+    /// [`claim_or_replace_watcher`] to register it.
+    pub(crate) struct WatcherHandle {
+        inner: TmuxWatcherHandle,
+    }
+
+    pub(crate) struct WatcherHandleInspector {
+        pub(crate) cancel: Arc<AtomicBool>,
+        pub(crate) paused: Arc<AtomicBool>,
+    }
+
+    pub(crate) fn new_watcher_registry() -> WatcherRegistry {
+        WatcherRegistry {
+            inner: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Build a fresh watcher handle plus inspection handles on the
+    /// underlying atomic flags so the harness can observe stale-cancellation
+    /// without importing the private `TmuxWatcherHandle` type.
+    pub(crate) fn new_test_watcher_handle() -> (WatcherHandle, WatcherHandleInspector) {
+        let paused = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let inner = TmuxWatcherHandle {
+            paused: paused.clone(),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: cancel.clone(),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+        };
+        let inspector = WatcherHandleInspector { cancel, paused };
+        (WatcherHandle { inner }, inspector)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn try_claim_watcher(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+        handle: WatcherHandle,
+    ) -> bool {
+        super::tmux::try_claim_watcher(&watchers.inner, channel_id, handle.inner)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn claim_or_replace_watcher(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+        handle: WatcherHandle,
+        provider: &ProviderKind,
+        source: &str,
+    ) -> bool {
+        super::tmux::claim_or_replace_watcher(
+            &watchers.inner,
+            channel_id,
+            handle.inner,
+            provider,
+            source,
+        )
+    }
+
+    pub(crate) fn watcher_slot_count(watchers: &WatcherRegistry) -> usize {
+        watchers.inner.len()
+    }
+
+    pub(crate) fn watcher_slot_paused(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> Option<bool> {
+        watchers
+            .inner
+            .get(&channel_id)
+            .map(|entry| entry.paused.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub(crate) mod inflight {
+        use super::super::inflight as inflight_mod;
+        use super::super::{InflightRestartMode, InflightTurnState};
+        use crate::services::provider::ProviderKind;
+
+        /// Opaque wrapper around `InflightTurnState` — the struct itself is
+        /// `pub(super)` within `services::discord`.
+        pub(crate) struct State {
+            inner: InflightTurnState,
+        }
+
+        pub(crate) fn new_state(
+            provider: ProviderKind,
+            channel_id: u64,
+            channel_name: Option<String>,
+            tmux_session_name: Option<String>,
+            last_offset: u64,
+        ) -> State {
+            State {
+                inner: InflightTurnState::new(
+                    provider,
+                    channel_id,
+                    channel_name,
+                    12_345,
+                    67_890,
+                    111_213,
+                    "harness turn".to_string(),
+                    Some("harness-session".to_string()),
+                    tmux_session_name,
+                    Some("/tmp/harness-out.jsonl".to_string()),
+                    Some("/tmp/harness-in.fifo".to_string()),
+                    last_offset,
+                ),
+            }
+        }
+
+        pub(crate) fn channel_id(state: &State) -> u64 {
+            state.inner.channel_id
+        }
+
+        pub(crate) fn tmux_session_name(state: &State) -> Option<&str> {
+            state.inner.tmux_session_name.as_deref()
+        }
+
+        pub(crate) fn restart_mode(state: &State) -> Option<InflightRestartMode> {
+            state.inner.restart_mode
+        }
+
+        /// Save via the public helper; respects `AGENTDESK_ROOT_DIR`.
+        pub(crate) fn save(state: &State) -> Result<(), String> {
+            inflight_mod::save_inflight_state(&state.inner)
+        }
+
+        /// Load all saved inflight states for `provider`. Respects
+        /// `AGENTDESK_ROOT_DIR`.
+        pub(crate) fn load_all(provider: &ProviderKind) -> Vec<State> {
+            inflight_mod::load_inflight_states(provider)
+                .into_iter()
+                .map(|inner| State { inner })
+                .collect()
+        }
+
+        /// Simulate the restart path (`#897`): mark every saved inflight state
+        /// for `provider` with the supplied restart mode. Returns the count.
+        pub(crate) fn mark_all_restart(
+            provider: &ProviderKind,
+            mode: InflightRestartMode,
+        ) -> usize {
+            inflight_mod::mark_all_inflight_states_restart_mode(provider, mode)
+        }
+    }
+
+    pub(crate) use super::InflightRestartMode as RestartMode;
 }
 
 #[cfg(test)]

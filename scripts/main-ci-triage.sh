@@ -909,6 +909,141 @@ EOF
   fi
 }
 
+scenario_three_gate_failures_produce_distinct_identifiers() {
+  # Release-gate triage contract (#1011):
+  # Full tests / PostgreSQL tests / High-risk recovery 가 한 run 에 동시에 red
+  # 이고 이전 run 에서도 동일하게 red 였다면, 세 gate 모두에 대해 서로 다른
+  # identifier + 서로 다른 repro 커맨드를 가진 ci-red 이슈가 생성되어야 한다.
+  local scenario_dir="$TMP_DIR/selftest-three-gate"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[
+  {"id":801,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/801"},
+  {"id":802,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/802"},
+  {"id":803,"name":"High-risk recovery","conclusion":"failure","html_url":"https://example.com/jobs/803"}
+]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[
+  {"id":811,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/811"},
+  {"id":812,"name":"PostgreSQL tests","conclusion":"failure","html_url":"https://example.com/jobs/812"},
+  {"id":813,"name":"High-risk recovery","conclusion":"failure","html_url":"https://example.com/jobs/813"}
+]}
+EOF
+  # Full tests lane: normal cargo test identifier
+  cat >"$scenario_dir/log-200-801.txt" <<'EOF'
+test pipeline::tests::full_suite_regression ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-811.txt" <<'EOF'
+test pipeline::tests::full_suite_regression ... FAILED
+EOF
+  # PG lane: a _pg_ test identifier
+  cat >"$scenario_dir/log-200-802.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-812.txt" <<'EOF'
+test server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state ... FAILED
+EOF
+  # High-risk recovery lane: high_risk_recovery:: scenario
+  cat >"$scenario_dir/log-200-803.txt" <<'EOF'
+test integration_tests::tests::high_risk_recovery::outbox_boundary::scenario_160_1_outbox_batch_delivers_exactly_once ... FAILED
+EOF
+  cat >"$scenario_dir/log-199-813.txt" <<'EOF'
+test integration_tests::tests::high_risk_recovery::outbox_boundary::scenario_160_1_outbox_batch_delivers_exactly_once ... FAILED
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  # Capture every `gh issue create` invocation (there must be 3 distinct ones).
+  cat >"$scenario_dir/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+scenario_dir="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$*" >>"$scenario_dir/gh.log"
+cmd="${1-}"; sub="${2-}"
+if [[ "$cmd" == "label" && "$sub" == "create" ]]; then exit 0; fi
+if [[ "$cmd" == "api" ]]; then
+  endpoint="${2-}"
+  if [[ "$endpoint" == "/repos/test/repo/actions/workflows/1/runs?branch=main&status=completed&per_page=5" ]]; then
+    cat "$scenario_dir/workflow-runs.json"; exit 0
+  fi
+  if [[ "$endpoint" == "/repos/test/repo/actions/runs/200/jobs?per_page=100" ]]; then
+    cat "$scenario_dir/current-jobs.json"; exit 0
+  fi
+  if [[ "$endpoint" == "/repos/test/repo/actions/runs/199/jobs?per_page=100" ]]; then
+    cat "$scenario_dir/previous-jobs.json"; exit 0
+  fi
+fi
+if [[ "$cmd" == "run" && "$sub" == "view" ]]; then
+  run_id="${3-}"; job_id=""; prev=""
+  for arg in "$@"; do
+    if [[ "$prev" == "--job" ]]; then job_id="$arg"; break; fi
+    prev="$arg"
+  done
+  cat "$scenario_dir/log-${run_id}-${job_id}.txt"; exit 0
+fi
+if [[ "$cmd" == "issue" && "$sub" == "list" ]]; then cat "$scenario_dir/open-issues.json"; exit 0; fi
+if [[ "$cmd" == "issue" && "$sub" == "create" ]]; then
+  # Capture title + body so downstream assertions can inspect repro.
+  title_flag=0; body_flag=0; title=""; body=""
+  for arg in "$@"; do
+    if [[ "$title_flag" == "1" ]]; then title="$arg"; title_flag=0; continue; fi
+    if [[ "$body_flag" == "1" ]]; then body="$arg"; body_flag=0; continue; fi
+    if [[ "$arg" == "--title" ]]; then title_flag=1; fi
+    if [[ "$arg" == "--body" ]]; then body_flag=1; fi
+  done
+  printf '=== CREATE ===\ntitle=%s\nbody<<END\n%s\nEND\n' "$title" "$body" >>"$scenario_dir/issue-create.log"
+  exit 0
+fi
+if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then
+  printf '%s\n' "$*" >>"$scenario_dir/issue-comment.txt"; exit 0
+fi
+if [[ "$cmd" == "issue" && "$sub" == "close" ]]; then
+  printf '%s\n' "$*" >>"$scenario_dir/issue-close.txt"; exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+EOF
+  chmod +x "$scenario_dir/gh"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  # 3 distinct issues created — one per gate identifier
+  local create_count
+  create_count="$(grep -c '^=== CREATE ===$' "$scenario_dir/issue-create.log" || true)"
+  if [[ "$create_count" != "3" ]]; then
+    echo "assertion failed: expected 3 ci-red issues for 3 gate failures, got $create_count" >&2
+    cat "$scenario_dir/issue-create.log" >&2
+    exit 1
+  fi
+
+  # Each gate has a distinct identifier in title + distinct repro in body
+  assert_contains "pipeline::tests::full_suite_regression" "$scenario_dir/issue-create.log"
+  assert_contains "postgres_force_transition_to_ready_cleans_up_live_state" "$scenario_dir/issue-create.log"
+  assert_contains "scenario_160_1_outbox_batch_delivers_exactly_once" "$scenario_dir/issue-create.log"
+
+  # Distinct repro lines (one per identifier) — verifies owner/repro/followup per gate.
+  assert_contains "cargo test -p agentdesk pipeline::tests::full_suite_regression -- --exact --nocapture" "$scenario_dir/issue-create.log"
+  assert_contains "cargo test -p agentdesk server::routes::routes_tests::postgres_force_transition_to_ready_cleans_up_live_state -- --exact --nocapture" "$scenario_dir/issue-create.log"
+  assert_contains "cargo test -p agentdesk integration_tests::tests::high_risk_recovery::outbox_boundary::scenario_160_1_outbox_batch_delivers_exactly_once -- --exact --nocapture" "$scenario_dir/issue-create.log"
+
+  # Follow-up label (agent:project-agentdesk) applied to every gate failure.
+  local followup_count
+  followup_count="$(grep -c -- "--label agent:project-agentdesk" "$scenario_dir/gh.log" || true)"
+  if [[ "$followup_count" -lt "3" ]]; then
+    echo "assertion failed: expected at least 3 agent:project-agentdesk label applications, got $followup_count" >&2
+    exit 1
+  fi
+}
+
 run_self_test() {
   require_cmd jq
   scenario_two_run_failure_creates_issue
@@ -919,6 +1054,7 @@ run_self_test() {
   scenario_cancelled_run_does_not_close_issue
   scenario_skipped_lane_does_not_close_issue
   scenario_single_failure_stays_pending
+  scenario_three_gate_failures_produce_distinct_identifiers
   echo "self-test passed"
 }
 

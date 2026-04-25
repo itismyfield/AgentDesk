@@ -21,6 +21,8 @@ mod tests {
     use crate::server::routes::AppState;
     use serde_json::json;
 
+    #[path = "../discord_flow/mod.rs"]
+    mod discord_flow;
     mod high_risk_recovery;
 
     fn test_db() -> db::Db {

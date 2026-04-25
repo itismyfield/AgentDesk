@@ -37,6 +37,34 @@ pub(super) async fn serve_http(
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
     crate::services::observability::init_observability(db.clone(), pg_pool.clone());
 
+    // #1091 (909-2): dynamic maintenance job scheduler. #1092 (909-3) registers
+    // the storage sweep jobs and #1093 (909-4) adds `storage.db_retention`
+    // against the live postgres pool — all wired through
+    // `jobs::spawn_storage_maintenance_jobs`. We register before spawning the
+    // scheduler loop so the first tick picks them up.
+    #[cfg(not(test))]
+    {
+        crate::services::maintenance::jobs::spawn_storage_maintenance_jobs(pg_pool.clone());
+        tokio::spawn(async {
+            crate::services::maintenance::spawn_maintenance_scheduler().await;
+        });
+
+        // #1076 (905-7): run the zombie resource sweep once on boot in
+        // addition to the hourly registration. Detached so a slow sweep
+        // never blocks the HTTP server bringup.
+        tokio::spawn(async {
+            let stats = crate::reconcile::reconcile_zombie_resources().await;
+            tracing::info!(
+                target: "reconcile",
+                orphan_tmux = stats.orphan_tmux_killed,
+                stale_inflight = stats.stale_inflight_removed,
+                zombie_dashmap = stats.zombie_dashmap_trimmed,
+                stale_uploads = stats.stale_uploads_removed,
+                "[zombie-reconcile] boot sweep complete"
+            );
+        });
+    }
+
     let app = build_app(
         &dashboard_dir,
         db.clone(),

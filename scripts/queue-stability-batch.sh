@@ -142,7 +142,7 @@ curl -sf "$API/api/auto-queue/runs/$RUN_ID/order" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"order\": $ORDER_JSON, \"rationale\": \"$RATIONALE\"}" >/dev/null 2>&1
 
-ACTIVATE_RESULT=$(curl -sf "$API/api/auto-queue/activate" -X POST \
+ACTIVATE_RESULT=$(curl -sf "$API/api/auto-queue/dispatch-next" -X POST \
     -H "Content-Type: application/json" \
     -d "{\"run_id\": \"$RUN_ID\"}" 2>/dev/null)
 

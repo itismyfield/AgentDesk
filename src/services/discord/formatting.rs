@@ -352,6 +352,211 @@ mod tests {
         }
     }
 
+    // --- #1043 regression tests: chunker boundary behaviour ----------------------
+    //
+    // These tests freeze the current behaviour of `split_message` at 2000-char
+    // boundaries to prevent regressions where the tail of long agent messages
+    // (e.g. option-blocks A/B/C) disappears from Discord. They also cover the
+    // "message ends mid-code-fence / mid-list" shapes that triggered #1043.
+
+    fn reassemble(chunks: &[String]) -> String {
+        // The chunker may insert ```lang\n ... \n``` wrappers around continuation
+        // chunks when an unclosed code fence spans a chunk boundary, plus it may
+        // drop a single `\n` separator when the break landed on a newline. For the
+        // non-code-block tests we just strip those artefacts back out.
+        let mut out = String::new();
+        for chunk in chunks {
+            if !out.is_empty() && !out.ends_with('\n') {
+                // Chunker breaks at '\n' and strips the newline; re-insert it so
+                // that assembled content matches the original by-line.
+                out.push('\n');
+            }
+            out.push_str(chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn test_split_message_1990_char_single_chunk_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // 1990 chars fits comfortably inside the 2000-char limit (even after the
+        // chunker's internal 10-byte safety margin).
+        let body: String = "a".repeat(1990);
+        assert!(body.len() < DISCORD_MSG_LIMIT);
+
+        let chunks = split_message(&body);
+        assert_eq!(chunks.len(), 1, "1990-char input must not split");
+        assert_eq!(chunks[0], body, "single-chunk content must be preserved");
+        assert!(chunks[0].len() <= DISCORD_MSG_LIMIT);
+    }
+
+    #[test]
+    fn test_split_message_exact_2000_char_no_drop_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Exactly at the Discord limit. Because the chunker reserves 10 bytes of
+        // headroom (to avoid 2001-byte overruns from UTF-8/fence-closing), we
+        // expect 2 chunks; the invariant is that NO content is dropped and each
+        // emitted chunk stays within the Discord limit.
+        let body: String = "b".repeat(DISCORD_MSG_LIMIT);
+        let chunks = split_message(&body);
+
+        assert!(
+            !chunks.is_empty(),
+            "must emit at least one chunk (last-chunk-drop guard)"
+        );
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(
+                chunk.len() <= DISCORD_MSG_LIMIT,
+                "chunk {i} exceeds Discord 2000-byte limit: {}",
+                chunk.len()
+            );
+        }
+        let total_bytes: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(
+            total_bytes,
+            body.len(),
+            "no bytes lost at the exact-2000 boundary"
+        );
+    }
+
+    #[test]
+    fn test_split_message_2010_char_boundary_last_chunk_preserved_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Just past the limit — this is the classic off-by-one zone where the
+        // final short tail (e.g. 10 extra chars of an "A/B/C 선택지" block) could
+        // be silently dropped.
+        let body: String = "c".repeat(DISCORD_MSG_LIMIT + 10);
+        let chunks = split_message(&body);
+
+        assert!(chunks.len() >= 2, "2010-char input must split");
+        for chunk in &chunks {
+            assert!(chunk.len() <= DISCORD_MSG_LIMIT);
+        }
+        // The trailing tail must survive as its own chunk and must not be empty.
+        let last = chunks.last().expect("at least one chunk");
+        assert!(!last.is_empty(), "final chunk must not be empty");
+
+        // Concatenated content equals the original (no pure-ascii fence wrappers
+        // are inserted when there are no code fences in the source).
+        let joined: String = chunks.concat();
+        assert_eq!(joined, body, "no bytes lost near the 2000-char boundary");
+    }
+
+    #[test]
+    fn test_split_message_input_ending_with_fence_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Agent emits a big prose block, then a closing ``` on the last line.
+        // Ensure the trailing fence survives in the final chunk and is not
+        // swallowed by the boundary logic.
+        let mut body = String::new();
+        body.push_str("```rust\n");
+        body.push_str(&"let x = 1;\n".repeat(250)); // ~2750 bytes, forces split
+        body.push_str("```");
+
+        let chunks = split_message(&body);
+        assert!(chunks.len() >= 2, "must split");
+        for chunk in &chunks {
+            assert!(chunk.len() <= DISCORD_MSG_LIMIT);
+        }
+        // Final chunk must end with the closing fence from the source.
+        let last = chunks.last().expect("at least one chunk");
+        assert!(
+            last.trim_end().ends_with("```"),
+            "trailing ``` must not be dropped; final chunk ends with: {:?}",
+            &last[last.len().saturating_sub(40)..]
+        );
+    }
+
+    #[test]
+    fn test_split_message_multiple_fences_keeps_each_chunk_balanced_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Two separate fenced blocks separated by prose, large enough to force
+        // mid-fence splits. Every emitted chunk must have a balanced number of
+        // ``` markers so Discord doesn't render half the message as a code block
+        // and silently truncate option tails.
+        let mut body = String::new();
+        body.push_str("intro line\n");
+        body.push_str("```python\n");
+        body.push_str(&"print('hello world')\n".repeat(60));
+        body.push_str("```\n");
+        body.push_str("middle prose\n");
+        body.push_str("```bash\n");
+        body.push_str(&"echo 'x'\n".repeat(200));
+        body.push_str("```\n");
+        body.push_str("outro line — option A/B/C");
+
+        let chunks = split_message(&body);
+        assert!(chunks.len() >= 2);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(
+                chunk.len() <= DISCORD_MSG_LIMIT,
+                "chunk {i} too big: {}",
+                chunk.len()
+            );
+            let fence_count = chunk.matches("```").count();
+            assert!(
+                fence_count % 2 == 0,
+                "chunk {i} has unbalanced ``` fences ({fence_count}); Discord would render this as an open code block and hide the tail"
+            );
+        }
+        // The trailing "option A/B/C" sentinel MUST appear in the last chunk.
+        let last = chunks.last().unwrap();
+        assert!(
+            last.contains("option A/B/C"),
+            "final option block disappeared: {last:?}"
+        );
+    }
+
+    #[test]
+    fn test_split_message_ending_mid_bullet_list_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Simulates an agent reply that overflows the first chunk and ends with
+        // a short bullet-list tail (the exact shape #1043 reported missing).
+        let filler: String = "filler line\n".repeat(180); // ~2160 bytes
+        let tail = "\n- 선택지 A: 계속\n- 선택지 B: 중단\n- 선택지 C: 보류";
+        let body = format!("{filler}{tail}");
+
+        let chunks = split_message(&body);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= DISCORD_MSG_LIMIT);
+        }
+
+        // The combined chunk content must still contain every option bullet.
+        let joined = reassemble(&chunks);
+        for opt in ["선택지 A", "선택지 B", "선택지 C"] {
+            assert!(
+                joined.contains(opt),
+                "{opt} was dropped; reassembled tail = {:?}",
+                &joined[joined.len().saturating_sub(120)..]
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_message_last_chunk_is_short_tail_issue1043() {
+        use super::{DISCORD_MSG_LIMIT, split_message};
+
+        // Long body that spills a tiny (<30 byte) tail into the final chunk.
+        // Verifies the final-chunk emission path is taken and no drop occurs.
+        let body: String = "d".repeat(DISCORD_MSG_LIMIT + 25);
+        let chunks = split_message(&body);
+
+        assert!(chunks.len() >= 2);
+        let last = chunks.last().unwrap();
+        assert!(!last.is_empty(), "short tail must not be dropped");
+        assert!(last.len() <= DISCORD_MSG_LIMIT);
+        // All 'd's combined must equal the original length (no off-by-one).
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, body.len());
+    }
+
     #[test]
     fn test_build_long_message_attachment_without_summary_uses_generic_notice() {
         use super::{DISCORD_MSG_LIMIT, build_long_message_attachment};
@@ -1224,12 +1429,29 @@ pub(super) fn format_for_discord(s: &str) -> String {
 /// Send a message using poise Context, splitting if necessary
 pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Result<(), Error> {
     if text.len() <= DISCORD_MSG_LIMIT {
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "send_long_message_ctx",
+            chunk_index = 0usize,
+            byte_len = text.len(),
+            total_chunks = 1usize,
+            "discord send single"
+        );
         ctx.say(text).await?;
         return Ok(());
     }
 
     let chunks = split_message(text);
+    let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "send_long_message_ctx",
+            chunk_index = i,
+            byte_len = chunk.len(),
+            total_chunks = total,
+            "discord send chunk"
+        );
         if i == 0 {
             ctx.say(chunk).await?;
         } else {
@@ -1249,6 +1471,15 @@ pub(super) async fn send_long_message_raw(
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
     if text.len() <= DISCORD_MSG_LIMIT {
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "send_long_message_raw",
+            channel_id = channel_id.get(),
+            chunk_index = 0usize,
+            byte_len = text.len(),
+            total_chunks = 1usize,
+            "discord send single"
+        );
         rate_limit_wait(shared, channel_id).await;
         channel_id
             .send_message(http, CreateMessage::new().content(text))
@@ -1257,7 +1488,17 @@ pub(super) async fn send_long_message_raw(
     }
 
     let chunks = split_message(text);
-    for chunk in &chunks {
+    let total = chunks.len();
+    for (i, chunk) in chunks.iter().enumerate() {
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "send_long_message_raw",
+            channel_id = channel_id.get(),
+            chunk_index = i,
+            byte_len = chunk.len(),
+            total_chunks = total,
+            "discord send chunk"
+        );
         rate_limit_wait(shared, channel_id).await;
         channel_id
             .send_message(http, CreateMessage::new().content(chunk))
@@ -1277,10 +1518,28 @@ pub(super) async fn replace_long_message_raw(
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
     let chunks = split_message(text);
+    let total = chunks.len();
     let Some(first_chunk) = chunks.first() else {
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "replace_long_message_raw",
+            channel_id = channel_id.get(),
+            total_chunks = 0usize,
+            "discord replace: no chunks"
+        );
         return Ok(());
     };
 
+    tracing::debug!(
+        target: "discord::chunker",
+        path = "replace_long_message_raw",
+        channel_id = channel_id.get(),
+        message_id = message_id.get(),
+        chunk_index = 0usize,
+        byte_len = first_chunk.len(),
+        total_chunks = total,
+        "discord edit first chunk"
+    );
     rate_limit_wait(shared, channel_id).await;
     let edit_result = channel_id
         .edit_message(http, message_id, EditMessage::new().content(first_chunk))
@@ -1296,7 +1555,17 @@ pub(super) async fn replace_long_message_raw(
         return send_long_message_raw(http, channel_id, text, shared).await;
     }
 
-    for chunk in chunks.iter().skip(1) {
+    for (offset, chunk) in chunks.iter().skip(1).enumerate() {
+        let i = offset + 1;
+        tracing::debug!(
+            target: "discord::chunker",
+            path = "replace_long_message_raw",
+            channel_id = channel_id.get(),
+            chunk_index = i,
+            byte_len = chunk.len(),
+            total_chunks = total,
+            "discord send continuation chunk"
+        );
         rate_limit_wait(shared, channel_id).await;
         channel_id
             .send_message(http, CreateMessage::new().content(chunk))
@@ -1312,7 +1581,14 @@ pub(super) async fn replace_long_message_raw(
 /// paths where overflow is delivered as additional inline messages. The
 /// agent-to-agent `/api/send` path uses [`build_long_message_attachment`]
 /// instead so recipient bots receive a single self-contained message + `.txt`.
+///
+/// Emits structured `tracing::debug!` logs at `target: "discord::chunker"` for
+/// every chunk produced (chunk_index, byte_len, boundary_kind, in_code_block).
+/// This is the tracepoint referenced by issue #1043 to diagnose any case where
+/// the tail of a long agent message fails to reach Discord (e.g. option block
+/// A/B/C sections disappearing near the 2000-char boundary).
 pub(super) fn split_message(text: &str) -> Vec<String> {
+    let total_bytes = text.len();
     let mut chunks = Vec::new();
     let mut remaining = text;
     let mut in_code_block = false;
@@ -1338,13 +1614,27 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
                 chunk.push('\n');
             }
             chunk.push_str(remaining);
+            let byte_len = chunk.len();
+            let was_in_code_block = in_code_block;
             chunks.push(chunk);
+            tracing::debug!(
+                target: "discord::chunker",
+                chunk_index = chunks.len() - 1,
+                byte_len,
+                boundary_kind = "final",
+                in_code_block = was_in_code_block,
+                total_bytes,
+                "split_message emit"
+            );
             break;
         }
 
         // Find a safe split point
         let safe_end = floor_char_boundary(remaining, effective_limit);
-        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
+        let (split_at, boundary_kind) = match remaining[..safe_end].rfind('\n') {
+            Some(idx) => (idx, "newline"),
+            None => (safe_end, "hard"),
+        };
 
         let (raw_chunk, rest) = remaining.split_at(split_at);
 
@@ -1375,9 +1665,27 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
             chunk.push_str("\n```");
         }
 
+        let byte_len = chunk.len();
+        let fence_was_open_at_emit = in_code_block;
         chunks.push(chunk);
+        tracing::debug!(
+            target: "discord::chunker",
+            chunk_index = chunks.len() - 1,
+            byte_len,
+            boundary_kind,
+            in_code_block = fence_was_open_at_emit,
+            total_bytes,
+            "split_message emit"
+        );
         remaining = rest.strip_prefix('\n').unwrap_or(rest);
     }
+
+    tracing::debug!(
+        target: "discord::chunker",
+        total_chunks = chunks.len(),
+        total_bytes,
+        "split_message done"
+    );
 
     chunks
 }

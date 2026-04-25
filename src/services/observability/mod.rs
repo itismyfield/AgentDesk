@@ -13,6 +13,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::db::Db;
 
+// Foundation observability layer introduced by #1070 (Epic #905 Phase 1).
+// `metrics` → lightweight channel/provider atomic counters for hot paths.
+// `events`  → bounded in-memory structured event log + periodic JSONL flush.
+pub mod events;
+pub mod metrics;
+
 const EVENT_BATCH_SIZE: usize = 64;
 const EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const SNAPSHOT_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
@@ -361,7 +367,16 @@ pub struct AgentQualitySummary {
     pub generated_at: String,
     pub agent_id: String,
     pub latest: Option<AgentQualityDailyRecord>,
+    /// Alias for `latest` — DoD-mandated field name (#1102).
+    pub current: Option<AgentQualityDailyRecord>,
     pub daily: Vec<AgentQualityDailyRecord>,
+    /// Last 7 days of daily rows (newest-first), DoD-mandated (#1102).
+    pub trend_7d: Vec<AgentQualityDailyRecord>,
+    /// Last 30 days of daily rows (newest-first), DoD-mandated (#1102).
+    pub trend_30d: Vec<AgentQualityDailyRecord>,
+    /// True when `daily` is synthesized from `agent_quality_event` because
+    /// the daily rollup table was empty — see #1102 fallback path.
+    pub fallback_from_events: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -375,12 +390,64 @@ pub struct AgentQualityRankingEntry {
     pub latest_day: String,
     pub rolling_7d: AgentQualityWindow,
     pub rolling_30d: AgentQualityWindow,
+    /// The chosen metric value for the requested (metric, window) pair
+    /// — populated when the ranking endpoint is called with `metric`/`window`
+    /// query params. `None` when the agent has no available measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRankingMetric {
+    TurnSuccessRate,
+    ReviewPassRate,
+}
+
+impl QualityRankingMetric {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("review_pass_rate") | Some("review") => Self::ReviewPassRate,
+            _ => Self::TurnSuccessRate,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TurnSuccessRate => "turn_success_rate",
+            Self::ReviewPassRate => "review_pass_rate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityRankingWindow {
+    Seven,
+    Thirty,
+}
+
+impl QualityRankingWindow {
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("30d") | Some("30") => Self::Thirty,
+            _ => Self::Seven,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Seven => "7d",
+            Self::Thirty => "30d",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentQualityRankingResponse {
     pub generated_at: String,
+    pub metric: String,
+    pub window: String,
+    pub min_sample_size: i64,
     pub agents: Vec<AgentQualityRankingEntry>,
 }
 
@@ -406,6 +473,8 @@ pub fn init_observability(db: Db, pg_pool: Option<PgPool>) {
         storage.pg_pool = pg_pool;
     }
     ensure_worker(&runtime);
+    // #1070: start the periodic JSONL flush task for the in-memory event log.
+    events::ensure_flusher();
 }
 
 pub fn emit_turn_started(
@@ -415,6 +484,18 @@ pub fn emit_turn_started(
     session_key: Option<&str>,
     turn_id: Option<&str>,
 ) {
+    // #1070: lightweight atomic counter for turn_bridge attempt entry.
+    metrics::record_attempt(channel_id, provider);
+    events::record(events::StructuredEvent::new(
+        "turn_started",
+        Some(channel_id),
+        Some(provider),
+        json!({
+            "dispatch_id": dispatch_id,
+            "session_key": session_key,
+            "turn_id": turn_id,
+        }),
+    ));
     emit_event(
         "turn_started",
         Some(provider),
@@ -446,6 +527,25 @@ pub fn emit_turn_finished(
         normalized_outcome.as_deref(),
         Some("completed") | Some("tmux_handoff")
     );
+    // #1070: atomic success/fail counters for dispatch outcome.
+    if is_success {
+        metrics::record_success(channel_id, provider);
+    } else {
+        metrics::record_fail(channel_id, provider);
+    }
+    events::record(events::StructuredEvent::new(
+        "turn_finished",
+        Some(channel_id),
+        Some(provider),
+        json!({
+            "dispatch_id": dispatch_id,
+            "session_key": session_key,
+            "turn_id": turn_id,
+            "outcome": normalized_outcome,
+            "duration_ms": duration_ms.max(0),
+            "tmux_handoff": tmux_handoff,
+        }),
+    ));
     emit_event(
         "turn_finished",
         Some(provider),
@@ -474,6 +574,19 @@ pub fn emit_guard_fired(
     turn_id: Option<&str>,
     guard_type: &str,
 ) {
+    // #1070: atomic guard-fire counter.
+    metrics::record_guard_fire(channel_id, provider);
+    events::record(events::StructuredEvent::new(
+        "guard_fired",
+        Some(channel_id),
+        Some(provider),
+        json!({
+            "dispatch_id": dispatch_id,
+            "session_key": session_key,
+            "turn_id": turn_id,
+            "guard_type": normalize_string(guard_type),
+        }),
+    ));
     emit_event(
         "guard_fired",
         Some(provider),
@@ -493,6 +606,14 @@ pub fn emit_guard_fired(
 }
 
 pub fn emit_watcher_replaced(provider: &str, channel_id: u64, source: &str) {
+    // #1070: atomic watcher-replacement counter for claim_or_replace stale cancel.
+    metrics::record_watcher_replacement(channel_id, provider);
+    events::record(events::StructuredEvent::new(
+        "watcher_replaced",
+        Some(channel_id),
+        Some(provider),
+        json!({ "source": normalize_string(source) }),
+    ));
     emit_event(
         "watcher_replaced",
         Some(provider),
@@ -998,12 +1119,58 @@ pub async fn query_agent_quality_summary(
         query_agent_quality_daily_sqlite(&conn, Some(agent_id), days, limit)?
     };
 
+    // #1102 fallback: when the daily rollup is empty (e.g. the rollup job
+    // from #1101 hasn't run yet in this environment), synthesize a mini
+    // rollup directly from `agent_quality_event`.
+    let (daily, fallback_from_events) = if daily.is_empty() {
+        let synthetic = match pg_pool {
+            Some(pool) => synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
+                    Vec::new()
+                }),
+            None => match db.read_conn() {
+                Ok(conn) => synth_agent_quality_daily_from_events_sqlite(&conn, agent_id, 30)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            "[quality] sqlite event-fallback mini-rollup failed: {error}"
+                        );
+                        Vec::new()
+                    }),
+                Err(error) => {
+                    tracing::warn!("[quality] event-fallback sqlite conn failed: {error}");
+                    Vec::new()
+                }
+            },
+        };
+        let fallback = !synthetic.is_empty();
+        (synthetic, fallback)
+    } else {
+        (daily, false)
+    };
+
+    let trend_7d = slice_daily_trend(&daily, 7);
+    let trend_30d = slice_daily_trend(&daily, 30);
+    let latest = daily.first().cloned();
+
     Ok(AgentQualitySummary {
         generated_at: now_kst(),
         agent_id: agent_id.to_string(),
-        latest: daily.first().cloned(),
+        current: latest.clone(),
+        latest,
         daily,
+        trend_7d,
+        trend_30d,
+        fallback_from_events,
     })
+}
+
+fn slice_daily_trend(
+    daily: &[AgentQualityDailyRecord],
+    max_days: usize,
+) -> Vec<AgentQualityDailyRecord> {
+    daily.iter().take(max_days).cloned().collect()
 }
 
 pub async fn query_agent_quality_ranking(
@@ -1011,7 +1178,27 @@ pub async fn query_agent_quality_ranking(
     pg_pool: Option<&PgPool>,
     limit: usize,
 ) -> Result<AgentQualityRankingResponse> {
+    query_agent_quality_ranking_with(
+        db,
+        pg_pool,
+        limit,
+        QualityRankingMetric::TurnSuccessRate,
+        QualityRankingWindow::Seven,
+        QUALITY_SAMPLE_GUARD,
+    )
+    .await
+}
+
+pub async fn query_agent_quality_ranking_with(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    limit: usize,
+    metric: QualityRankingMetric,
+    window: QualityRankingWindow,
+    min_sample_size: i64,
+) -> Result<AgentQualityRankingResponse> {
     let limit = normalized_quality_ranking_limit(limit);
+    let min_sample_size = min_sample_size.max(0);
     let agents = if let Some(pool) = pg_pool {
         match query_agent_quality_ranking_pg(pool, limit).await {
             Ok(records) => records,
@@ -1033,9 +1220,48 @@ pub async fn query_agent_quality_ranking(
         query_agent_quality_ranking_sqlite(&conn, limit)?
     };
 
+    // Filter by sample_size >= min_sample_size (#1102 DoD), then attach
+    // metric_value and re-rank by the requested (metric, window) pair.
+    let mut filtered: Vec<AgentQualityRankingEntry> = agents
+        .into_iter()
+        .filter(|entry| ranking_window_sample_size(entry, window) >= min_sample_size)
+        .map(|mut entry| {
+            entry.metric_value = pick_ranking_metric_value(&entry, metric, window);
+            entry
+        })
+        .collect();
+
+    // Sort by the chosen metric desc, NULLs last; tiebreak on sample size desc,
+    // then agent_id asc for determinism.
+    filtered.sort_by(|a, b| {
+        let av = a.metric_value;
+        let bv = b.metric_value;
+        match (av, bv) {
+            (Some(ax), Some(bx)) => bx
+                .partial_cmp(&ax)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    ranking_window_sample_size(b, window)
+                        .cmp(&ranking_window_sample_size(a, window))
+                })
+                .then_with(|| a.agent_id.cmp(&b.agent_id)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.agent_id.cmp(&b.agent_id),
+        }
+    });
+
+    // Re-rank 1..n after filtering/sorting.
+    for (idx, entry) in filtered.iter_mut().enumerate() {
+        entry.rank = (idx + 1) as i64;
+    }
+
     Ok(AgentQualityRankingResponse {
         generated_at: now_kst(),
-        agents,
+        metric: metric.label().to_string(),
+        window: window.label().to_string(),
+        min_sample_size,
+        agents: filtered,
     })
 }
 
@@ -1582,6 +1808,19 @@ async fn query_agent_quality_events_pg(
 }
 
 async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
+    // #1101 extends #930's rollup with four additional daily metrics:
+    //   * avg_rework_count   — avg(review_fail per card) over cards that had
+    //                          at least one review_fail that day.
+    //   * cost_per_done_card — sum(card_transitioned.payload->>'cost') /
+    //                          count(card_transitioned → done).
+    //   * latency_p50_ms     — percentile_cont(0.5) over turn_complete
+    //                          payload->>'duration_ms'.
+    //   * latency_p99_ms     — percentile_cont(0.99) over turn_complete
+    //                          payload->>'duration_ms'.
+    //
+    // All four are nullable; they land as NULL when the requisite events are
+    // absent for an agent/day, which is also how the dashboard renders
+    // "측정 불가" downstream.
     let row_count = sqlx::query_scalar::<_, i64>(
         "WITH daily_counts AS (
              SELECT agent_id,
@@ -1595,6 +1834,52 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
              FROM agent_quality_event
              WHERE agent_id IS NOT NULL
                AND btrim(agent_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
+         ),
+         rework_per_card AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    card_id,
+                    COUNT(*)::double precision AS review_fail_count
+             FROM agent_quality_event
+             WHERE event_type = 'review_fail'
+               AND agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND card_id IS NOT NULL AND btrim(card_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date, card_id
+         ),
+         rework_agg AS (
+             SELECT agent_id, day, AVG(review_fail_count) AS avg_rework_count
+             FROM rework_per_card
+             GROUP BY agent_id, day
+         ),
+         cost_agg AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    SUM(COALESCE(NULLIF(payload->>'cost', ''), '0')::double precision) AS cost_total,
+                    COUNT(*) FILTER (
+                        WHERE event_type = 'card_transitioned'
+                          AND payload->>'to' = 'done'
+                    )::bigint AS done_card_count
+             FROM agent_quality_event
+             WHERE agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND created_at >= NOW() - INTERVAL '45 days'
+             GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
+         ),
+         latency_agg AS (
+             SELECT agent_id,
+                    (created_at AT TIME ZONE 'Asia/Seoul')::date AS day,
+                    percentile_cont(0.5) WITHIN GROUP (
+                        ORDER BY NULLIF(payload->>'duration_ms', '')::double precision
+                    ) AS latency_p50_ms,
+                    percentile_cont(0.99) WITHIN GROUP (
+                        ORDER BY NULLIF(payload->>'duration_ms', '')::double precision
+                    ) AS latency_p99_ms
+             FROM agent_quality_event
+             WHERE event_type = 'turn_complete'
+               AND agent_id IS NOT NULL AND btrim(agent_id) <> ''
+               AND payload ? 'duration_ms'
                AND created_at >= NOW() - INTERVAL '45 days'
              GROUP BY agent_id, (created_at AT TIME ZONE 'Asia/Seoul')::date
          ),
@@ -1632,14 +1917,23 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                       d.review_fail_count
          ),
          normalized AS (
-             SELECT *,
-                    turn_success_count_7d + turn_error_count_7d AS turn_sample_size_7d,
-                    review_pass_count_7d + review_fail_count_7d AS review_sample_size_7d,
-                    turn_success_count_7d + turn_error_count_7d + review_pass_count_7d + review_fail_count_7d AS sample_size_7d,
-                    turn_success_count_30d + turn_error_count_30d AS turn_sample_size_30d,
-                    review_pass_count_30d + review_fail_count_30d AS review_sample_size_30d,
-                    turn_success_count_30d + turn_error_count_30d + review_pass_count_30d + review_fail_count_30d AS sample_size_30d
-             FROM windowed
+             SELECT w.*,
+                    w.turn_success_count_7d + w.turn_error_count_7d AS turn_sample_size_7d,
+                    w.review_pass_count_7d + w.review_fail_count_7d AS review_sample_size_7d,
+                    w.turn_success_count_7d + w.turn_error_count_7d + w.review_pass_count_7d + w.review_fail_count_7d AS sample_size_7d,
+                    w.turn_success_count_30d + w.turn_error_count_30d AS turn_sample_size_30d,
+                    w.review_pass_count_30d + w.review_fail_count_30d AS review_sample_size_30d,
+                    w.turn_success_count_30d + w.turn_error_count_30d + w.review_pass_count_30d + w.review_fail_count_30d AS sample_size_30d,
+                    r.avg_rework_count,
+                    CASE WHEN COALESCE(c.done_card_count, 0) > 0
+                         THEN COALESCE(c.cost_total, 0) / c.done_card_count
+                         ELSE NULL END AS cost_per_done_card,
+                    l.latency_p50_ms,
+                    l.latency_p99_ms
+             FROM windowed w
+             LEFT JOIN rework_agg  r ON r.agent_id = w.agent_id AND r.day = w.day
+             LEFT JOIN cost_agg    c ON c.agent_id = w.agent_id AND c.day = w.day
+             LEFT JOIN latency_agg l ON l.agent_id = w.agent_id AND l.day = w.day
          ),
          upserted AS (
              INSERT INTO agent_quality_daily (
@@ -1676,6 +1970,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                  turn_success_rate_30d,
                  review_pass_rate_30d,
                  measurement_unavailable_30d,
+                 avg_rework_count,
+                 cost_per_done_card,
+                 latency_p50_ms,
+                 latency_p99_ms,
                  computed_at
              )
              SELECT agent_id,
@@ -1711,6 +2009,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                     CASE WHEN turn_sample_size_30d > 0 THEN turn_success_count_30d::double precision / turn_sample_size_30d ELSE NULL END,
                     CASE WHEN review_sample_size_30d > 0 THEN review_pass_count_30d::double precision / review_sample_size_30d ELSE NULL END,
                     sample_size_30d < $1,
+                    avg_rework_count,
+                    cost_per_done_card,
+                    CASE WHEN latency_p50_ms IS NULL THEN NULL ELSE latency_p50_ms::bigint END,
+                    CASE WHEN latency_p99_ms IS NULL THEN NULL ELSE latency_p99_ms::bigint END,
                     NOW()
              FROM normalized
              ON CONFLICT (agent_id, day) DO UPDATE SET
@@ -1745,6 +2047,10 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
                  turn_success_rate_30d = EXCLUDED.turn_success_rate_30d,
                  review_pass_rate_30d = EXCLUDED.review_pass_rate_30d,
                  measurement_unavailable_30d = EXCLUDED.measurement_unavailable_30d,
+                 avg_rework_count = EXCLUDED.avg_rework_count,
+                 cost_per_done_card = EXCLUDED.cost_per_done_card,
+                 latency_p50_ms = EXCLUDED.latency_p50_ms,
+                 latency_p99_ms = EXCLUDED.latency_p99_ms,
                  computed_at = EXCLUDED.computed_at
              RETURNING 1
          )
@@ -1756,6 +2062,218 @@ async fn upsert_agent_quality_daily_pg(pool: &PgPool) -> Result<u64> {
     .map_err(|error| anyhow!("upsert postgres agent quality daily: {error}"))?;
 
     Ok(row_count.max(0) as u64)
+}
+
+/// #1102 event-based fallback (postgres): synthesize per-day records from
+/// `agent_quality_event` when the daily rollup table is empty for this
+/// agent. Only counts turn/review success/fail events, rolling windows are
+/// computed in-memory over the returned days.
+async fn synth_agent_quality_daily_from_events_pg(
+    pool: &PgPool,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let days = days.clamp(1, MAX_QUALITY_DAYS);
+    let rows = sqlx::query(
+        "SELECT to_char((created_at AT TIME ZONE 'Asia/Seoul')::date, 'YYYY-MM-DD') AS day_text,
+                MAX(provider) FILTER (WHERE provider IS NOT NULL AND btrim(provider) <> '') AS provider,
+                MAX(channel_id) FILTER (WHERE channel_id IS NOT NULL AND btrim(channel_id) <> '') AS channel_id,
+                COUNT(*) FILTER (WHERE event_type = 'turn_complete')::bigint AS turn_success_count,
+                COUNT(*) FILTER (WHERE event_type = 'turn_error')::bigint AS turn_error_count,
+                COUNT(*) FILTER (WHERE event_type = 'review_pass')::bigint AS review_pass_count,
+                COUNT(*) FILTER (WHERE event_type = 'review_fail')::bigint AS review_fail_count
+         FROM agent_quality_event
+         WHERE agent_id = $1
+           AND created_at >= NOW() - ($2::bigint || ' days')::interval
+         GROUP BY day_text
+         ORDER BY day_text DESC",
+    )
+    .bind(agent_id)
+    .bind(days)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("synth agent quality daily (pg): {error}"))?;
+
+    let buckets: Vec<SynthDailyBucket> = rows
+        .into_iter()
+        .map(|row| {
+            Ok::<_, anyhow::Error>(SynthDailyBucket {
+                day: row
+                    .try_get::<String, _>("day_text")
+                    .map_err(|e| anyhow!("decode synth day: {e}"))?,
+                provider: row.try_get::<Option<String>, _>("provider").ok().flatten(),
+                channel_id: row
+                    .try_get::<Option<String>, _>("channel_id")
+                    .ok()
+                    .flatten(),
+                turn_success: row
+                    .try_get::<i64, _>("turn_success_count")
+                    .unwrap_or(0)
+                    .max(0),
+                turn_error: row
+                    .try_get::<i64, _>("turn_error_count")
+                    .unwrap_or(0)
+                    .max(0),
+                review_pass: row
+                    .try_get::<i64, _>("review_pass_count")
+                    .unwrap_or(0)
+                    .max(0),
+                review_fail: row
+                    .try_get::<i64, _>("review_fail_count")
+                    .unwrap_or(0)
+                    .max(0),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(buckets_to_synth_records(agent_id, buckets))
+}
+
+/// #1102 event-based fallback (sqlite): same as the pg variant but uses
+/// SQLite's date() on a localtime-shifted timestamp.
+fn synth_agent_quality_daily_from_events_sqlite(
+    conn: &Connection,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let days = days.clamp(1, MAX_QUALITY_DAYS);
+    let mut stmt = conn.prepare(
+        "SELECT date(created_at, '+9 hours') AS day_text,
+                MAX(provider) AS provider,
+                MAX(channel_id) AS channel_id,
+                SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END) AS turn_success_count,
+                SUM(CASE WHEN event_type = 'turn_error' THEN 1 ELSE 0 END) AS turn_error_count,
+                SUM(CASE WHEN event_type = 'review_pass' THEN 1 ELSE 0 END) AS review_pass_count,
+                SUM(CASE WHEN event_type = 'review_fail' THEN 1 ELSE 0 END) AS review_fail_count
+         FROM agent_quality_event
+         WHERE agent_id = ?1
+           AND created_at >= datetime('now', ?2)
+         GROUP BY day_text
+         ORDER BY day_text DESC",
+    )?;
+    let interval = format!("-{days} days");
+    let rows = stmt.query_map(libsql_rusqlite::params![agent_id, interval], |row| {
+        Ok(SynthDailyBucket {
+            day: row.get::<_, String>(0)?,
+            provider: row.get::<_, Option<String>>(1)?,
+            channel_id: row.get::<_, Option<String>>(2)?,
+            turn_success: row.get::<_, i64>(3).unwrap_or(0).max(0),
+            turn_error: row.get::<_, i64>(4).unwrap_or(0).max(0),
+            review_pass: row.get::<_, i64>(5).unwrap_or(0).max(0),
+            review_fail: row.get::<_, i64>(6).unwrap_or(0).max(0),
+        })
+    })?;
+    let buckets = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
+    Ok(buckets_to_synth_records(agent_id, buckets))
+}
+
+#[derive(Debug, Clone)]
+struct SynthDailyBucket {
+    day: String,
+    provider: Option<String>,
+    channel_id: Option<String>,
+    turn_success: i64,
+    turn_error: i64,
+    review_pass: i64,
+    review_fail: i64,
+}
+
+fn buckets_to_synth_records(
+    agent_id: &str,
+    buckets: Vec<SynthDailyBucket>,
+) -> Vec<AgentQualityDailyRecord> {
+    // Buckets come in DESC order; compute rolling 7d/30d windows via a
+    // forward sum over ascending index.
+    let now = now_kst();
+    buckets
+        .iter()
+        .enumerate()
+        .map(|(idx, bucket)| {
+            let window = |size: usize| -> (i64, i64, i64, i64) {
+                // idx is position in DESC list → next `size` items are older.
+                let end = (idx + size).min(buckets.len());
+                let slice = &buckets[idx..end];
+                let ts = slice.iter().map(|b| b.turn_success).sum::<i64>();
+                let te = slice.iter().map(|b| b.turn_error).sum::<i64>();
+                let rp = slice.iter().map(|b| b.review_pass).sum::<i64>();
+                let rf = slice.iter().map(|b| b.review_fail).sum::<i64>();
+                (ts, te, rp, rf)
+            };
+            let (ts7, te7, rp7, rf7) = window(7);
+            let (ts30, te30, rp30, rf30) = window(30);
+            let turn_sample = bucket.turn_success + bucket.turn_error;
+            let review_sample = bucket.review_pass + bucket.review_fail;
+            let sample = turn_sample + review_sample;
+            let turn_rate = if turn_sample > 0 {
+                Some(bucket.turn_success as f64 / turn_sample as f64)
+            } else {
+                None
+            };
+            let review_rate = if review_sample > 0 {
+                Some(bucket.review_pass as f64 / review_sample as f64)
+            } else {
+                None
+            };
+            let turn_sample_7d = ts7 + te7;
+            let review_sample_7d = rp7 + rf7;
+            let sample_7d = turn_sample_7d + review_sample_7d;
+            let turn_sample_30d = ts30 + te30;
+            let review_sample_30d = rp30 + rf30;
+            let sample_30d = turn_sample_30d + review_sample_30d;
+            let unavailable_7d = sample_7d < QUALITY_SAMPLE_GUARD;
+            let unavailable_30d = sample_30d < QUALITY_SAMPLE_GUARD;
+            AgentQualityDailyRecord {
+                agent_id: agent_id.to_string(),
+                day: bucket.day.clone(),
+                provider: bucket.provider.clone(),
+                channel_id: bucket.channel_id.clone(),
+                turn_success_count: bucket.turn_success,
+                turn_error_count: bucket.turn_error,
+                review_pass_count: bucket.review_pass,
+                review_fail_count: bucket.review_fail,
+                turn_sample_size: turn_sample,
+                review_sample_size: review_sample,
+                sample_size: sample,
+                turn_success_rate: turn_rate,
+                review_pass_rate: review_rate,
+                rolling_7d: quality_window(
+                    7,
+                    sample_7d,
+                    unavailable_7d,
+                    turn_sample_7d,
+                    if turn_sample_7d > 0 {
+                        Some(ts7 as f64 / turn_sample_7d as f64)
+                    } else {
+                        None
+                    },
+                    review_sample_7d,
+                    if review_sample_7d > 0 {
+                        Some(rp7 as f64 / review_sample_7d as f64)
+                    } else {
+                        None
+                    },
+                ),
+                rolling_30d: quality_window(
+                    30,
+                    sample_30d,
+                    unavailable_30d,
+                    turn_sample_30d,
+                    if turn_sample_30d > 0 {
+                        Some(ts30 as f64 / turn_sample_30d as f64)
+                    } else {
+                        None
+                    },
+                    review_sample_30d,
+                    if review_sample_30d > 0 {
+                        Some(rp30 as f64 / review_sample_30d as f64)
+                    } else {
+                        None
+                    },
+                ),
+                computed_at: now.clone(),
+            }
+        })
+        .collect()
 }
 
 fn measurement_label(unavailable: bool) -> Option<String> {
@@ -2033,6 +2551,39 @@ fn quality_ranking_entry_from_daily(
         latest_day: record.day,
         rolling_7d: record.rolling_7d,
         rolling_30d: record.rolling_30d,
+        metric_value: None,
+    }
+}
+
+/// Pick the metric value for a ranking entry given the (metric, window)
+/// pair. Returns `None` when the window is measurement-unavailable or the
+/// underlying rate is NULL.
+fn pick_ranking_metric_value(
+    entry: &AgentQualityRankingEntry,
+    metric: QualityRankingMetric,
+    window: QualityRankingWindow,
+) -> Option<f64> {
+    let win = match window {
+        QualityRankingWindow::Seven => &entry.rolling_7d,
+        QualityRankingWindow::Thirty => &entry.rolling_30d,
+    };
+    if win.measurement_unavailable {
+        return None;
+    }
+    match metric {
+        QualityRankingMetric::TurnSuccessRate => win.turn_success_rate,
+        QualityRankingMetric::ReviewPassRate => win.review_pass_rate,
+    }
+}
+
+/// Return the sample size for the requested window on a ranking entry.
+fn ranking_window_sample_size(
+    entry: &AgentQualityRankingEntry,
+    window: QualityRankingWindow,
+) -> i64 {
+    match window {
+        QualityRankingWindow::Seven => entry.rolling_7d.sample_size,
+        QualityRankingWindow::Thirty => entry.rolling_30d.sample_size,
     }
 }
 
@@ -3161,6 +3712,163 @@ mod tests {
         Ok(())
     }
 
+    /// #930: query_agent_quality_events must filter out rows older than the
+    /// requested `days` window.
+    #[tokio::test]
+    async fn agent_quality_query_excludes_rows_older_than_days_window() -> Result<()> {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        // Insert directly so we can control created_at: one row at "now" and
+        // one row 30 days in the past for the same agent.
+        let conn = db
+            .separate_conn()
+            .expect("open sqlite agent quality test connection");
+        conn.execute(
+            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
+             VALUES (?1, ?2, ?3, datetime('now'))",
+            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
+        )
+        .expect("insert recent quality event");
+        conn.execute(
+            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
+             VALUES (?1, ?2, ?3, datetime('now', '-30 days'))",
+            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
+        )
+        .expect("insert old quality event");
+
+        let recent = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-window".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(
+            recent.len(),
+            1,
+            "days=7 must exclude the 30-day-old row, got {recent:?}"
+        );
+
+        // days=60 must include both rows.
+        let wide = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-window".to_string()),
+                days: 60,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(
+            wide.len(),
+            2,
+            "days=60 must include both rows, got {wide:?}"
+        );
+
+        Ok(())
+    }
+
+    /// #930: query_agent_quality_events must scope rows to the requested
+    /// `agent_id` and never bleed events from other agents.
+    #[tokio::test]
+    async fn agent_quality_query_filters_by_agent_id() -> Result<()> {
+        let _guard = test_runtime_lock();
+        reset_for_tests();
+        let db = crate::db::test_db();
+        init_observability(db.clone(), None);
+
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-A".to_string()),
+            correlation_id: Some("dispatch-A".to_string()),
+            agent_id: Some("agent-A".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("100".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-A".to_string()),
+            event_type: "turn_complete".to_string(),
+            payload: json!({"who": "A"}),
+        });
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-B".to_string()),
+            correlation_id: Some("dispatch-B".to_string()),
+            agent_id: Some("agent-B".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("200".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-B".to_string()),
+            event_type: "turn_complete".to_string(),
+            payload: json!({"who": "B"}),
+        });
+        emit_agent_quality_event(AgentQualityEvent {
+            source_event_id: Some("turn-A2".to_string()),
+            correlation_id: Some("dispatch-A2".to_string()),
+            agent_id: Some("agent-A".to_string()),
+            provider: Some("codex".to_string()),
+            channel_id: Some("100".to_string()),
+            card_id: None,
+            dispatch_id: Some("dispatch-A2".to_string()),
+            event_type: "review_pass".to_string(),
+            payload: json!({"who": "A2"}),
+        });
+        flush_for_tests().await;
+
+        let only_a = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-A".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(only_a.len(), 2, "agent-A should have 2 events");
+        assert!(
+            only_a
+                .iter()
+                .all(|e| e.agent_id.as_deref() == Some("agent-A")),
+            "filter must not return rows from other agents: {only_a:?}"
+        );
+
+        let only_b = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: Some("agent-B".to_string()),
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].agent_id.as_deref(), Some("agent-B"));
+
+        // No agent_id filter → both agents' events come back.
+        let unscoped = query_agent_quality_events(
+            &db,
+            None,
+            &AgentQualityFilters {
+                agent_id: None,
+                days: 7,
+                limit: 50,
+            },
+        )
+        .await?;
+        assert!(
+            unscoped.len() >= 3,
+            "unscoped query should include events from both agents, got {unscoped:?}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn counter_updates_are_thread_safe() {
         let _guard = test_runtime_lock();
@@ -3250,5 +3958,255 @@ mod tests {
             overhead_per_emit_ns < 50_000,
             "emit overhead too high: {overhead_per_emit_ns}ns/op"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #1101 agent_quality_daily rollup PG integration tests.
+    //
+    // These tests create a scratch Postgres DB via the admin connection,
+    // run migrations, seed `agent_quality_event` rows, invoke the rollup,
+    // and assert the upserted `agent_quality_daily` row matches the
+    // expected metrics. They are gated on a live Postgres admin URL,
+    // matching the retrospectives PG test harness.
+    // -----------------------------------------------------------------
+
+    fn quality_rollup_postgres_base_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        format!("postgresql://{user}@{host}:{port}")
+    }
+
+    fn quality_rollup_admin_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", quality_rollup_postgres_base_url(), admin_db)
+    }
+
+    struct QualityRollupPgHarness {
+        admin_url: String,
+        database_name: String,
+        pool: PgPool,
+    }
+
+    impl QualityRollupPgHarness {
+        async fn try_setup() -> Option<Self> {
+            let admin_url = quality_rollup_admin_url();
+            let admin_pool = match sqlx::PgPool::connect(&admin_url).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!(
+                        "[agent_quality_daily tests] skipping — Postgres admin unavailable: {error}"
+                    );
+                    return None;
+                }
+            };
+            let database_name = format!("agentdesk_aqd_{}", uuid::Uuid::new_v4().simple());
+            if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+                .execute(&admin_pool)
+                .await
+            {
+                eprintln!("[agent_quality_daily tests] CREATE DATABASE failed, skipping: {error}");
+                admin_pool.close().await;
+                return None;
+            }
+            admin_pool.close().await;
+
+            let db_url = format!("{}/{}", quality_rollup_postgres_base_url(), database_name);
+            let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
+            if let Err(error) = crate::db::postgres::migrate(&pool).await {
+                eprintln!("[agent_quality_daily tests] migrate failed, skipping: {error}");
+                pool.close().await;
+                return None;
+            }
+            Some(Self {
+                admin_url,
+                database_name,
+                pool,
+            })
+        }
+
+        async fn teardown(self) {
+            self.pool.close().await;
+            if let Ok(admin_pool) = sqlx::PgPool::connect(&self.admin_url).await {
+                let _ = sqlx::query(
+                    "SELECT pg_terminate_backend(pid)
+                     FROM pg_stat_activity
+                     WHERE datname = $1 AND pid <> pg_backend_pid()",
+                )
+                .bind(&self.database_name)
+                .execute(&admin_pool)
+                .await;
+                let _ = sqlx::query(&format!(
+                    "DROP DATABASE IF EXISTS \"{}\"",
+                    self.database_name
+                ))
+                .execute(&admin_pool)
+                .await;
+                admin_pool.close().await;
+            }
+        }
+    }
+
+    async fn insert_quality_event(
+        pool: &PgPool,
+        agent_id: &str,
+        event_type: &str,
+        card_id: Option<&str>,
+        payload: Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_quality_event (
+                agent_id, event_type, card_id, payload, created_at
+             ) VALUES ($1, $2::agent_quality_event_type, $3, CAST($4 AS jsonb), NOW())",
+        )
+        .bind(agent_id)
+        .bind(event_type)
+        .bind(card_id)
+        .bind(payload.to_string())
+        .execute(pool)
+        .await
+        .expect("insert agent_quality_event");
+    }
+
+    #[tokio::test]
+    async fn agent_quality_daily_rollup_computes_core_metrics_for_two_agents() {
+        let Some(harness) = QualityRollupPgHarness::try_setup().await else {
+            return;
+        };
+        let pool = harness.pool.clone();
+
+        // agent-A — meets sample-size guard (>=5 events), with reworks on card-1.
+        for _ in 0..4 {
+            insert_quality_event(
+                &pool,
+                "agent-A",
+                "turn_complete",
+                None,
+                json!({"duration_ms": 500}),
+            )
+            .await;
+        }
+        insert_quality_event(&pool, "agent-A", "turn_error", None, json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_pass", Some("card-1"), json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_fail", Some("card-1"), json!({})).await;
+        insert_quality_event(&pool, "agent-A", "review_fail", Some("card-1"), json!({})).await;
+
+        // agent-B — below guard (only 2 events).
+        insert_quality_event(
+            &pool,
+            "agent-B",
+            "turn_complete",
+            None,
+            json!({"duration_ms": 100}),
+        )
+        .await;
+        insert_quality_event(&pool, "agent-B", "review_pass", Some("card-2"), json!({})).await;
+
+        let report = run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("rollup succeeds");
+        assert!(
+            report.upserted_rows >= 2,
+            "expected 2+ rows, got {:?}",
+            report
+        );
+
+        let row_a = sqlx::query(
+            "SELECT turn_success_rate, review_pass_rate, sample_size, avg_rework_count,
+                    measurement_unavailable_7d
+             FROM agent_quality_daily WHERE agent_id = 'agent-A'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent-A row");
+        let turn_rate: Option<f64> = row_a.try_get("turn_success_rate").unwrap();
+        let review_rate: Option<f64> = row_a.try_get("review_pass_rate").unwrap();
+        let sample_size: i64 = row_a.try_get("sample_size").unwrap();
+        let rework: Option<f64> = row_a.try_get("avg_rework_count").unwrap();
+        assert_eq!(sample_size, 8, "agent-A sample_size (4+1+1+2)");
+        assert!(
+            (turn_rate.unwrap() - 0.8).abs() < 1e-6,
+            "turn_rate={turn_rate:?}"
+        );
+        assert!(
+            (review_rate.unwrap() - (1.0 / 3.0)).abs() < 1e-6,
+            "review_rate={review_rate:?}"
+        );
+        assert_eq!(rework, Some(2.0), "avg_rework_count for card-1 = 2 fails");
+
+        // agent-B sample_size=2 < 5 guard → measurement_unavailable_7d = TRUE.
+        let row_b = sqlx::query(
+            "SELECT sample_size, measurement_unavailable_7d FROM agent_quality_daily
+             WHERE agent_id = 'agent-B'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("agent-B row");
+        let sb: i64 = row_b.try_get("sample_size").unwrap();
+        let unavail: bool = row_b.try_get("measurement_unavailable_7d").unwrap();
+        assert_eq!(sb, 2);
+        assert!(unavail, "agent-B must trigger 측정 불가 guard");
+
+        harness.teardown().await;
+    }
+
+    #[tokio::test]
+    async fn agent_quality_daily_rollup_is_idempotent_on_repeated_runs() {
+        let Some(harness) = QualityRollupPgHarness::try_setup().await else {
+            return;
+        };
+        let pool = harness.pool.clone();
+
+        for _ in 0..5 {
+            insert_quality_event(&pool, "agent-idem", "turn_complete", None, json!({})).await;
+        }
+
+        run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("first rollup");
+        let row_count_1: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_quality_daily WHERE agent_id = 'agent-idem'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count_1, 1);
+
+        // Re-run — row count must stay 1 (upsert, not append).
+        run_agent_quality_rollup_pg(&pool)
+            .await
+            .expect("second rollup");
+        let row_count_2: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_quality_daily WHERE agent_id = 'agent-idem'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row_count_2, 1, "re-running rollup must not duplicate row");
+
+        harness.teardown().await;
     }
 }

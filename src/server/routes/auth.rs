@@ -38,6 +38,7 @@ pub async fn auth_middleware(
     if path == "/health"
         || path == "/auth/session"
         || path.starts_with("/hook/")
+        || path == "/dispatched-sessions/webhook"
         || path.starts_with("/internal/")
     {
         return next.run(req).await;

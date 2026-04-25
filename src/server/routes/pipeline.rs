@@ -8,8 +8,83 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 
 use super::AppState;
+use crate::db::table_metadata;
+
+/// #1097 (910-3) — readonly guard.
+///
+/// Returns an HTTP 405 response when `db_source_of_truth(table) == 'file'`
+/// or `'file-canonical'`.  Call at the top of any mutating route that
+/// targets a table whose canonical source lives on disk.
+async fn reject_if_readonly(
+    state: &AppState,
+    table: &str,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let source = if let Some(pool) = state.pg_pool_ref() {
+        table_metadata::source_of_truth_pg(pool, table).await
+    } else {
+        match state.sqlite_db().read_conn() {
+            Ok(conn) => table_metadata::source_of_truth_sqlite(&conn, table),
+            Err(_) => None,
+        }
+    };
+
+    match source {
+        Some(s) if s.is_readonly() => Some((
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({
+                "error": format!(
+                    "table '{}' is file-canonical; edit policies/default-pipeline.yaml \
+                     and restart the server to apply changes",
+                    table
+                ),
+                "table": table,
+                "source_of_truth": match s {
+                    table_metadata::Source::File => "file",
+                    table_metadata::Source::FileCanonical => "file-canonical",
+                    table_metadata::Source::Db => "db",
+                },
+            })),
+        )),
+        _ => None,
+    }
+}
 
 // ── Query / Body types ─────────────────────────────────────────
+
+/// #1082 — accepted `on_failure` policy values.
+/// Kept in sync with `crate::pipeline::OnFailurePolicy`.
+pub const STAGE_ON_FAILURE_VALUES: &[&str] =
+    &["escalate", "retry-with-backoff", "fallback-stage", "fail"];
+
+/// #1082 — accepted `backoff` policy values.
+pub const STAGE_BACKOFF_VALUES: &[&str] = &["exponential", "linear", "none"];
+
+/// Validate a stage's `on_failure` string. Returns `Err(value)` with the
+/// offending value when unknown, `Ok(())` otherwise (including None/empty).
+pub fn validate_on_failure(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_ON_FAILURE_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "on_failure='{}' is invalid; expected one of {:?}",
+            v, STAGE_ON_FAILURE_VALUES
+        )),
+    }
+}
+
+/// Validate a stage's `backoff` string.
+pub fn validate_backoff(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_empty() => Ok(()),
+        Some(v) if STAGE_BACKOFF_VALUES.iter().any(|a| *a == v) => Ok(()),
+        Some(v) => Err(format!(
+            "backoff='{}' is invalid; expected one of {:?}",
+            v, STAGE_BACKOFF_VALUES
+        )),
+    }
+}
 
 // ── Dashboard v2 types (/pipeline/...) ────────────────────────
 
@@ -42,6 +117,9 @@ pub struct PutStageItem {
     pub on_failure: Option<String>,
     pub on_failure_target: Option<String>,
     pub max_retries: Option<i64>,
+    /// #1082 backoff policy. One of STAGE_BACKOFF_VALUES. Not persisted to DB
+    /// in this iteration; accepted for forward-compat in the API payload.
+    pub backoff: Option<String>,
     pub skip_condition: Option<String>,
     pub parallel_with: Option<String>,
 }
@@ -100,6 +178,47 @@ pub async fn put_stages(
     State(state): State<AppState>,
     Json(body): Json<PutStagesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // #1097: reject when pipeline_stages is file-canonical.
+    if let Some(resp) = reject_if_readonly(&state, "pipeline_stages").await {
+        return resp;
+    }
+
+    // #1082: validate retry/backoff/on_failure before any DB writes.
+    for stage in &body.stages {
+        if let Err(msg) = validate_on_failure(stage.on_failure.as_deref()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("stage '{}': {msg}", stage.stage_name),
+                    "stage": stage.stage_name,
+                })),
+            );
+        }
+        if let Err(msg) = validate_backoff(stage.backoff.as_deref()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("stage '{}': {msg}", stage.stage_name),
+                    "stage": stage.stage_name,
+                })),
+            );
+        }
+        if let Some(mr) = stage.max_retries {
+            if mr < 0 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "stage '{}': max_retries={mr} must be >= 0",
+                            stage.stage_name
+                        ),
+                        "stage": stage.stage_name,
+                    })),
+                );
+            }
+        }
+    }
+
     let stages = if let Some(pool) = state.pg_pool_ref() {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
@@ -266,6 +385,11 @@ pub async fn delete_stages(
     State(state): State<AppState>,
     Query(params): Query<DeleteStagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // #1097: reject when pipeline_stages is file-canonical.
+    if let Some(resp) = reject_if_readonly(&state, "pipeline_stages").await {
+        return resp;
+    }
+
     if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
             .bind(&params.repo)
@@ -308,7 +432,7 @@ pub async fn delete_stages(
     }
 }
 
-/// GET /api/pipeline/cards/{cardId} — card pipeline state with history
+/// GET /api/pipeline/cards/{card_id} — card pipeline state with history
 pub async fn get_card_pipeline(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -432,7 +556,7 @@ pub async fn get_card_pipeline(
     )
 }
 
-/// GET /api/pipeline/cards/{cardId}/history
+/// GET /api/pipeline/cards/{card_id}/history
 pub async fn get_card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -471,7 +595,7 @@ pub async fn get_card_history(
     (StatusCode::OK, Json(json!({"history": history})))
 }
 
-/// GET /api/pipeline/cards/{cardId}/transcripts?limit=10
+/// GET /api/pipeline/cards/{card_id}/transcripts?limit=10
 pub async fn get_card_transcripts(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
@@ -1497,5 +1621,77 @@ mod tests {
         assert_eq!(body["transcripts"][0]["github_issue_number"], 525);
         assert_eq!(body["transcripts"][0]["events"][0]["kind"], "result");
         assert_eq!(body["transcripts"][0]["duration_ms"], 6100);
+    }
+
+    /// #1097 (910-3): pipeline_stages is file-canonical, so PUT/DELETE
+    /// must be rejected with HTTP 405.
+    #[tokio::test]
+    async fn put_stages_rejected_when_db_source_of_truth_is_file() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        // pipeline_stages is seeded as file-canonical by the schema migrator.
+        let body = PutStagesBody {
+            repo: "owner/repo".to_string(),
+            stages: vec![PutStageItem {
+                stage_name: "build".to_string(),
+                stage_order: Some(1),
+                trigger_after: None,
+                entry_skill: None,
+                provider: None,
+                agent_override_id: None,
+                timeout_minutes: None,
+                on_failure: None,
+                on_failure_target: None,
+                max_retries: None,
+                backoff: None,
+                skip_condition: None,
+                parallel_with: None,
+            }],
+        };
+
+        let (status, Json(json)) = put_stages(State(state.clone()), Json(body)).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(json["table"], "pipeline_stages");
+        assert_eq!(json["source_of_truth"], "file-canonical");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("file-canonical")
+        );
+
+        let (status2, Json(json2)) = delete_stages(
+            State(state),
+            Query(DeleteStagesQuery {
+                repo: "owner/repo".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status2, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(json2["table"], "pipeline_stages");
+    }
+
+    // ── #1082 validator tests ──────────────────────────────────
+
+    #[test]
+    fn validate_on_failure_accepts_enum_and_rejects_others() {
+        assert!(validate_on_failure(None).is_ok());
+        assert!(validate_on_failure(Some("")).is_ok());
+        for v in STAGE_ON_FAILURE_VALUES {
+            assert!(validate_on_failure(Some(v)).is_ok(), "expected {} ok", v);
+        }
+        let err = validate_on_failure(Some("bogus")).unwrap_err();
+        assert!(err.contains("bogus"), "{err}");
+    }
+
+    #[test]
+    fn validate_backoff_accepts_enum_and_rejects_others() {
+        assert!(validate_backoff(None).is_ok());
+        for v in STAGE_BACKOFF_VALUES {
+            assert!(validate_backoff(Some(v)).is_ok(), "expected {} ok", v);
+        }
+        assert!(validate_backoff(Some("cubic")).is_err());
     }
 }

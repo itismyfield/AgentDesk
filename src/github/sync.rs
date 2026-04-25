@@ -564,7 +564,10 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     card_id: &str,
 ) -> Result<(), String> {
     // Keep this sync limited to entry cleanup. Run completion and phase-gate
-    // decisions are handled by the auto-queue policy hook after terminal sync.
+    // decisions for `done` entries are handled by the auto-queue policy hook
+    // (#815 handoff). `skipped` pending entries are finalized inline by
+    // `update_entry_status_on_pg_tx` — see explicit sweep at the end for why
+    // we still fall back to `maybe_finalize_run_if_ready_pg` for those runs.
     let dispatched_rows = sqlx::query(
         "SELECT id
          FROM auto_queue_entries
@@ -600,7 +603,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     }
 
     let pending_rows = sqlx::query(
-        "SELECT id
+        "SELECT id, run_id
          FROM auto_queue_entries
          WHERE kanban_card_id = $1
            AND status = 'pending'
@@ -613,10 +616,15 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     .await
     .map_err(|error| format!("load pending auto-queue entries for {card_id}: {error}"))?;
 
+    let mut pending_run_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     for row in pending_rows {
         let entry_id: String = row
             .try_get("id")
             .map_err(|error| format!("read pending auto-queue entry id: {error}"))?;
+        if let Ok(Some(run_id)) = row.try_get::<Option<String>, _>("run_id") {
+            pending_run_ids.insert(run_id);
+        }
         crate::db::auto_queue::update_entry_status_on_pg_tx(
             tx,
             &entry_id,
@@ -625,6 +633,17 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
             &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
         )
         .await?;
+    }
+
+    // #1019: PG github-sync's close path never fires the auto-queue policy
+    // hook, so we cannot rely on it to finalize a run after its last
+    // `skipped` entry is recorded. `update_entry_status_on_pg_tx` already
+    // attempts finalization inline, but an explicit sweep per-affected-run
+    // here keeps the invariant defensively ordered even if a concurrent
+    // update earlier in the tx races the inline check — making the CI
+    // `_pg` lane deterministic.
+    for run_id in pending_run_ids {
+        let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
     }
 
     Ok(())

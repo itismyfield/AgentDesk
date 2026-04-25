@@ -1,4 +1,5 @@
 pub mod agent_protocol;
+pub mod agent_quality;
 pub mod api_friction;
 pub mod auto_queue;
 pub mod claude;
@@ -9,8 +10,10 @@ pub mod discord;
 pub mod discord_config_audit;
 pub mod discord_dm_reply_store;
 pub mod dispatches;
+pub mod dispatches_followup;
 pub mod gemini;
 pub mod kanban;
+pub mod maintenance;
 pub mod mcp_config;
 pub mod memory;
 pub mod message_outbox;
@@ -29,11 +32,13 @@ pub mod retrospectives;
 pub mod service_error;
 pub mod session_backend;
 pub mod settings;
+pub mod slo;
 pub mod termination_audit;
 pub mod tmux_common;
 pub mod tmux_diagnostics;
 #[cfg(unix)]
 pub mod tmux_wrapper;
+pub mod tool_output_guard;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 

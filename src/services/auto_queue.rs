@@ -1082,11 +1082,57 @@ async fn build_entry_view_pg(
     ))
 }
 
+/// Invariant: `auto_queue_slot_single_active_entry`.
+///
+/// Within a single auto_queue_run, each `(agent_id, slot_index)` pair must own
+/// at most one entry in the `dispatched` state. Violations indicate a tick bug
+/// (failed slot release, double-pick) and are observed via
+/// `record_invariant_check` without panicking — release builds must not trip
+/// on transient tick races. See `docs/invariants.md`.
+fn check_auto_queue_slot_single_active_entry(run_id: &str, entries: &[AutoQueueStatusEntryView]) {
+    let mut dispatched_per_slot: HashMap<(String, i64), Vec<String>> = HashMap::new();
+    for entry in entries {
+        if entry.status != "dispatched" {
+            continue;
+        }
+        let Some(slot_index) = entry.slot_index else {
+            continue;
+        };
+        dispatched_per_slot
+            .entry((entry.agent_id.clone(), slot_index))
+            .or_default()
+            .push(entry.id.clone());
+    }
+    for ((agent_id, slot_index), entry_ids) in &dispatched_per_slot {
+        let ok = entry_ids.len() <= 1;
+        crate::services::observability::record_invariant_check(
+            ok,
+            crate::services::observability::InvariantViolation {
+                provider: None,
+                channel_id: None,
+                dispatch_id: None,
+                session_key: None,
+                turn_id: None,
+                invariant: "auto_queue_slot_single_active_entry",
+                code_location: "src/services/auto_queue.rs:check_auto_queue_slot_single_active_entry",
+                message: "auto_queue run has multiple dispatched entries on the same slot",
+                details: json!({
+                    "run_id": run_id,
+                    "agent_id": agent_id,
+                    "slot_index": slot_index,
+                    "entry_ids": entry_ids,
+                }),
+            },
+        );
+    }
+}
+
 fn assemble_status_response(
     run: AutoQueueRunRecord,
     entries: Vec<AutoQueueStatusEntryView>,
     phase_gates: Vec<PhaseGateView>,
 ) -> AutoQueueStatusResponse {
+    check_auto_queue_slot_single_active_entry(&run.id, &entries);
     let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
     let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
     for entry in &entries {

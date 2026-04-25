@@ -215,23 +215,61 @@ pub(crate) fn format_monitoring_message(entries: &[MonitoringEntry]) -> Option<S
     match entries {
         [] => None,
         [entry] => Some(format!(
-            "👁️ 모니터링 중: {} (시작 {})",
+            "{} {}: {} (시작 {})",
+            entry_icon(entry),
+            entry_headline(entry),
             entry.description,
             format_kst_hhmm(entry.started_at)
         )),
         entries => {
+            let has_system_detected = entries.iter().any(is_system_detected);
             let mut lines = Vec::with_capacity(entries.len() + 1);
             lines.push(format!("👁️ 모니터링 중 ({}건):", entries.len()));
             lines.extend(entries.iter().map(|entry| {
-                format!(
-                    "- {} ({})",
-                    entry.description,
-                    format_kst_hhmm(entry.started_at)
-                )
+                if has_system_detected {
+                    format!(
+                        "- {} {} ({})",
+                        entry_icon(entry),
+                        entry.description,
+                        format_kst_hhmm(entry.started_at)
+                    )
+                } else {
+                    format!(
+                        "- {} ({})",
+                        entry.description,
+                        format_kst_hhmm(entry.started_at)
+                    )
+                }
             }));
             Some(lines.join("\n"))
         }
     }
+}
+
+/// Icon prefix for a monitoring entry.
+///
+/// `system-detected:*` entries use a distinct icon (🤔) to signal that the
+/// server inferred the state rather than an agent explicitly registering it.
+fn entry_icon(entry: &MonitoringEntry) -> &'static str {
+    if is_system_detected(entry) {
+        "🤔"
+    } else {
+        "👁️"
+    }
+}
+
+/// Short headline rendered for single-entry channels. `system-detected:*`
+/// entries carry an inference disclaimer so the user knows it's heuristic.
+fn entry_headline(entry: &MonitoringEntry) -> &'static str {
+    if is_system_detected(entry) {
+        "에이전트 대기 중(추정)"
+    } else {
+        "모니터링 중"
+    }
+}
+
+fn is_system_detected(entry: &MonitoringEntry) -> bool {
+    entry.key.starts_with("system-detected:")
 }
 
 fn format_kst_hhmm(value: DateTime<Utc>) -> String {
@@ -271,6 +309,50 @@ mod tests {
         assert_eq!(
             format_monitoring_message(&entries),
             Some("👁️ 모니터링 중: 터미널 신호 대기 (시작 10:20)".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn format_single_system_detected_message_uses_distinct_icon() -> Result<(), chrono::ParseError>
+    {
+        let entries = vec![entry(
+            "system-detected:idle",
+            "에이전트 대기 중(추정) — 30초 이상 출력 없음",
+            "2026-04-24T01:20:00Z",
+        )?];
+
+        assert_eq!(
+            format_monitoring_message(&entries),
+            Some(
+                "🤔 에이전트 대기 중(추정): 에이전트 대기 중(추정) — 30초 이상 출력 없음 (시작 10:20)"
+                    .to_string()
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn format_mixed_entries_uses_per_line_icons() -> Result<(), chrono::ParseError> {
+        let entries = vec![
+            entry(
+                "agent-registered:td",
+                "TD 등록 대기",
+                "2026-04-24T01:20:00Z",
+            )?,
+            entry(
+                "system-detected:idle",
+                "에이전트 대기 중(추정) — 30초 이상 출력 없음",
+                "2026-04-24T02:05:00Z",
+            )?,
+        ];
+
+        assert_eq!(
+            format_monitoring_message(&entries),
+            Some(
+                "👁️ 모니터링 중 (2건):\n- 👁️ TD 등록 대기 (10:20)\n- 🤔 에이전트 대기 중(추정) — 30초 이상 출력 없음 (11:05)"
+                    .to_string()
+            )
         );
         Ok(())
     }

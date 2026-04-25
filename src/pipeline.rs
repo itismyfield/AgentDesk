@@ -837,16 +837,117 @@ pub struct ClockConfig {
     pub mode: Option<String>,
 }
 
+/// Backoff policy for stage retries (#1082).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackoffPolicy {
+    /// Fixed 1m → 5m → 15m exponential schedule.
+    Exponential,
+    /// Linear 5m between retries.
+    Linear,
+    /// No backoff — immediate retry by the next tick.
+    None,
+}
+
+impl Default for BackoffPolicy {
+    fn default() -> Self {
+        BackoffPolicy::Exponential
+    }
+}
+
+/// `on_failure` policy for stages (#1082).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnFailurePolicy {
+    /// Escalate to manual intervention / PM channel.
+    Escalate,
+    /// Retry according to `backoff` schedule until `max_retries` is reached.
+    RetryWithBackoff,
+    /// Fall back to the stage named by `on_failure_target`.
+    FallbackStage,
+    /// Fail the card immediately (backward-compatible default).
+    Fail,
+}
+
+impl Default for OnFailurePolicy {
+    fn default() -> Self {
+        OnFailurePolicy::Fail
+    }
+}
+
+/// `on_exhaust` policy for timeouts (#1082).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnExhaustPolicy {
+    /// Escalate to PM / manual intervention after retries exhausted.
+    Escalate,
+    /// Notify watchers without state change.
+    Notify,
+    /// Fail the card.
+    Fail,
+}
+
+impl Default for OnExhaustPolicy {
+    fn default() -> Self {
+        OnExhaustPolicy::Escalate
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
     pub duration: String,
     pub clock: String,
     #[serde(default)]
     pub max_retries: Option<u32>,
+    /// Legacy free-form on_exhaust (state id to transition to).
+    /// Preferred: use `on_exhaust_policy` for typed behavior.
     #[serde(default)]
     pub on_exhaust: Option<String>,
+    /// Typed exhaust policy (#1082). When set, overrides legacy string behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_exhaust_policy: Option<OnExhaustPolicy>,
+    /// Backoff policy between retries (#1082).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<BackoffPolicy>,
     #[serde(default)]
     pub condition: Option<String>,
+}
+
+impl TimeoutConfig {
+    /// Default max_retries when caller did not specify (1, per #1082 DoD).
+    pub const DEFAULT_MAX_RETRIES: u32 = 1;
+
+    /// Resolve `max_retries`, defaulting to `DEFAULT_MAX_RETRIES` (>=1).
+    pub fn effective_max_retries(&self) -> u32 {
+        self.max_retries
+            .filter(|v| *v >= 1)
+            .unwrap_or(Self::DEFAULT_MAX_RETRIES)
+    }
+
+    /// Resolve backoff policy, defaulting to Exponential.
+    pub fn effective_backoff(&self) -> BackoffPolicy {
+        self.backoff.unwrap_or_default()
+    }
+
+    /// Resolve exhaust policy, defaulting to Escalate.
+    pub fn effective_on_exhaust_policy(&self) -> OnExhaustPolicy {
+        self.on_exhaust_policy.unwrap_or_default()
+    }
+
+    /// Compute backoff delay for the Nth retry (1-indexed).
+    /// Exponential schedule: 1m → 5m → 15m → 15m (capped).
+    /// Linear: 5m per retry.
+    pub fn backoff_delay_seconds(&self, attempt: u32) -> u64 {
+        match self.effective_backoff() {
+            BackoffPolicy::None => 0,
+            BackoffPolicy::Linear => 5 * 60,
+            BackoffPolicy::Exponential => match attempt {
+                0 | 1 => 60,
+                2 => 5 * 60,
+                _ => 15 * 60,
+            },
+        }
+    }
 }
 
 fn default_phase_gate_dispatch_to() -> String {
@@ -1236,6 +1337,12 @@ impl PipelineConfig {
                     key,
                     timeout.clock
                 );
+            }
+            // #1082: max_retries must be >= 1 when explicitly set.
+            if let Some(mr) = timeout.max_retries {
+                if mr == 0 {
+                    anyhow::bail!("timeout '{}' has max_retries=0; must be >= 1", key);
+                }
             }
         }
 
@@ -1807,6 +1914,8 @@ mod tests {
                 clock: "started_at".into(),
                 max_retries: None,
                 on_exhaust: None,
+                on_exhaust_policy: None,
+                backoff: None,
                 condition: None,
             },
         );
@@ -1824,6 +1933,8 @@ mod tests {
                 clock: "no_such_clock".into(),
                 max_retries: None,
                 on_exhaust: None,
+                on_exhaust_policy: None,
+                backoff: None,
                 condition: None,
             },
         );
@@ -1841,6 +1952,8 @@ mod tests {
                 clock: "custom_at".into(),
                 max_retries: None,
                 on_exhaust: None,
+                on_exhaust_policy: None,
+                backoff: None,
                 condition: Some("some_field = 'value'".into()),
             },
         );
@@ -1864,10 +1977,138 @@ mod tests {
                 clock: "started_at".into(),
                 max_retries: None,
                 on_exhaust: None,
+                on_exhaust_policy: None,
+                backoff: None,
                 condition: None,
             },
         );
         assert!(p.validate().is_ok());
+    }
+
+    // ── #1082 retry/backoff/on_exhaust tests ──────────────────────
+
+    #[test]
+    fn timeout_effective_max_retries_defaults_to_one() {
+        let t = TimeoutConfig {
+            duration: "1m".into(),
+            clock: "started_at".into(),
+            max_retries: None,
+            on_exhaust: None,
+            on_exhaust_policy: None,
+            backoff: None,
+            condition: None,
+        };
+        assert_eq!(t.effective_max_retries(), 1);
+        assert_eq!(t.effective_backoff(), BackoffPolicy::Exponential);
+        assert_eq!(t.effective_on_exhaust_policy(), OnExhaustPolicy::Escalate);
+    }
+
+    #[test]
+    fn timeout_exponential_schedule_matches_spec() {
+        let t = TimeoutConfig {
+            duration: "1m".into(),
+            clock: "started_at".into(),
+            max_retries: Some(3),
+            on_exhaust: None,
+            on_exhaust_policy: Some(OnExhaustPolicy::Escalate),
+            backoff: Some(BackoffPolicy::Exponential),
+            condition: None,
+        };
+        // 1m → 5m → 15m schedule from #1082 DoD.
+        assert_eq!(t.backoff_delay_seconds(1), 60);
+        assert_eq!(t.backoff_delay_seconds(2), 300);
+        assert_eq!(t.backoff_delay_seconds(3), 900);
+        // Capped past the schedule.
+        assert_eq!(t.backoff_delay_seconds(7), 900);
+    }
+
+    #[test]
+    fn timeout_linear_and_none_policies() {
+        let linear = TimeoutConfig {
+            duration: "1m".into(),
+            clock: "started_at".into(),
+            max_retries: Some(2),
+            on_exhaust: None,
+            on_exhaust_policy: None,
+            backoff: Some(BackoffPolicy::Linear),
+            condition: None,
+        };
+        assert_eq!(linear.backoff_delay_seconds(1), 300);
+        assert_eq!(linear.backoff_delay_seconds(5), 300);
+
+        let none = TimeoutConfig {
+            duration: "1m".into(),
+            clock: "started_at".into(),
+            max_retries: Some(2),
+            on_exhaust: None,
+            on_exhaust_policy: None,
+            backoff: Some(BackoffPolicy::None),
+            condition: None,
+        };
+        assert_eq!(none.backoff_delay_seconds(1), 0);
+    }
+
+    #[test]
+    fn validate_rejects_max_retries_zero() {
+        let mut p = minimal_pipeline();
+        p.clocks.insert(
+            "in_progress".into(),
+            ClockConfig {
+                set: "started_at".into(),
+                mode: None,
+            },
+        );
+        p.timeouts.insert(
+            "in_progress".into(),
+            TimeoutConfig {
+                duration: "1h".into(),
+                clock: "started_at".into(),
+                max_retries: Some(0),
+                on_exhaust: None,
+                on_exhaust_policy: None,
+                backoff: None,
+                condition: None,
+            },
+        );
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("max_retries=0"), "{err}");
+    }
+
+    #[test]
+    fn on_failure_and_on_exhaust_policies_roundtrip_yaml() {
+        let yaml = r#"
+duration: 1h
+clock: started_at
+max_retries: 3
+backoff: exponential
+on_exhaust: in_progress
+on_exhaust_policy: escalate
+"#;
+        let t: TimeoutConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(t.max_retries, Some(3));
+        assert_eq!(t.backoff, Some(BackoffPolicy::Exponential));
+        assert_eq!(t.on_exhaust.as_deref(), Some("in_progress"));
+        assert_eq!(t.on_exhaust_policy, Some(OnExhaustPolicy::Escalate));
+    }
+
+    #[test]
+    fn default_pipeline_yaml_loads_with_new_fields() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("policies/default-pipeline.yaml");
+        if !path.exists() {
+            return; // env without policies dir — skip.
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        let config: PipelineConfig = serde_yaml::from_str(&content).unwrap();
+        config.validate().expect("default pipeline validates");
+
+        let req = config
+            .timeouts
+            .get("requested")
+            .expect("requested timeout present");
+        assert_eq!(req.effective_backoff(), BackoffPolicy::Exponential);
+        assert_eq!(req.effective_on_exhaust_policy(), OnExhaustPolicy::Escalate);
+        assert!(req.effective_max_retries() >= 1);
     }
 
     #[tokio::test]

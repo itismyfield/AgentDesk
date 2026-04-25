@@ -1,6 +1,7 @@
 use super::settings::{
     MemoryBackendKind, ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance,
-    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
+    load_role_prompt, load_shared_prompt, load_shared_prompt_for_profile,
+    render_peer_agent_guidance,
 };
 use super::*;
 use crate::services::memory::{
@@ -593,30 +594,80 @@ static AGENT_PERFORMANCE_PROMPT_CACHE: OnceLock<
     Mutex<HashMap<String, AgentPerformancePromptCacheEntry>>,
 > = OnceLock::new();
 
+/// Hour-aligned cache bucket used by the self-feedback prompt block (#1103).
+/// Returning the same bucket guarantees the same cached string is served for
+/// the entire hour, which is what makes the system prompt prefix stable
+/// (Anthropic prefix cache hits) until the next hourly rollup tick.
 fn agent_performance_hour_bucket() -> i64 {
     chrono::Utc::now().timestamp() / 3600
 }
 
-fn agent_performance_prompt_section(
+/// Look up the cached self-feedback section if it is still valid for the
+/// supplied hour bucket. Returns `Some(Some(string))` for a fresh hit with a
+/// payload, `Some(None)` for a fresh hit that previously resolved to `None`,
+/// or `None` when no entry is fresh (caller must repopulate).
+fn lookup_cached_agent_performance_section(
+    cache_key: &str,
+    hour_bucket: i64,
+) -> Option<Option<String>> {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    let entry = guard.get(cache_key)?;
+    if entry.hour_bucket == hour_bucket {
+        Some(entry.section.clone())
+    } else {
+        None
+    }
+}
+
+fn store_agent_performance_section(cache_key: String, hour_bucket: i64, section: Option<String>) {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            cache_key,
+            AgentPerformancePromptCacheEntry {
+                hour_bucket,
+                section,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+fn reset_agent_performance_cache_for_tests() {
+    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.clear();
+    }
+}
+
+/// Resolve the self-feedback section for the supplied role binding using a
+/// caller-provided loader. Extracted so tests can drive the cache without
+/// touching the live database (#1103).
+fn agent_performance_prompt_section_with_loader<L>(
     role_binding: Option<&RoleBinding>,
     profile: DispatchProfile,
-) -> Option<String> {
+    hour_bucket: i64,
+    loader: L,
+) -> Option<String>
+where
+    L: FnOnce(&str) -> Result<Option<String>, String>,
+{
     let binding = role_binding?;
+    // A/B toggle (#1103): the channel-level `self_feedback_enabled` flag (named
+    // `quality_feedback_injection_enabled` on the resolved binding) gates the
+    // entire injection. ReviewLite turns also skip — they already strip
+    // optional context for cost.
     if profile != DispatchProfile::Full || !binding.quality_feedback_injection_enabled {
         return None;
     }
 
-    let hour_bucket = agent_performance_hour_bucket();
     let cache_key = binding.role_id.clone();
-    let cache = AGENT_PERFORMANCE_PROMPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock()
-        && let Some(entry) = guard.get(&cache_key)
-        && entry.hour_bucket == hour_bucket
-    {
-        return entry.section.clone();
+    if let Some(cached) = lookup_cached_agent_performance_section(&cache_key, hour_bucket) {
+        return cached;
     }
 
-    let section = match super::internal_api::get_agent_quality_prompt_section(&binding.role_id) {
+    let section = match loader(&binding.role_id) {
         Ok(section) => section,
         Err(error) => {
             tracing::warn!(
@@ -627,16 +678,20 @@ fn agent_performance_prompt_section(
         }
     };
 
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(
-            cache_key,
-            AgentPerformancePromptCacheEntry {
-                hour_bucket,
-                section: section.clone(),
-            },
-        );
-    }
+    store_agent_performance_section(cache_key, hour_bucket, section.clone());
     section
+}
+
+fn agent_performance_prompt_section(
+    role_binding: Option<&RoleBinding>,
+    profile: DispatchProfile,
+) -> Option<String> {
+    agent_performance_prompt_section_with_loader(
+        role_binding,
+        profile,
+        agent_performance_hour_bucket(),
+        |role_id| super::internal_api::get_agent_quality_prompt_section(role_id),
+    )
 }
 
 fn render_channel_participants(
@@ -741,8 +796,9 @@ pub(super) fn build_system_prompt(
                     system_prompt_owned.push_str(&guidance);
                 }
             }
-        } else if let Some(shared_prompt) = load_shared_prompt() {
-            // Full profile: inject complete shared agent prompt (AGENTS.md)
+        } else if let Some(shared_prompt) = load_shared_prompt_for_profile("full") {
+            // Full profile: inject the `full` + `all` sections of the shared agent prompt.
+            // Profile-gated blocks (`review-lite`, `headless`) are stripped at load time.
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
             system_prompt_owned.push_str(&shared_prompt);
             tracing::warn!(
@@ -1641,4 +1697,180 @@ mod tests {
     // per-agent prompts moved out of the repo (operator-private content, now
     // canonical in the operator's Obsidian vault — see docs/source-of-truth.md).
     // Content-level validation now lives with the prompt author's editor workflow.
+
+    // ─────────────────────────────────────────────────────────────────────
+    // #1103 — Self-feedback prompt block tests
+    //
+    // These tests cover the *cache* and *channel A/B toggle* layers. The
+    // formatter and rework category classifier are tested directly in
+    // `internal_api::self_feedback_tests` against `AgentQualitySnapshot` so
+    // they don't need a Postgres pool.
+    // ─────────────────────────────────────────────────────────────────────
+
+    use super::super::settings::RoleBinding;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Serialise the cache-aware tests — they share a process-wide static
+    /// cache, so cargo's parallel test runner would otherwise interleave
+    /// `reset_agent_performance_cache_for_tests` calls with concurrent
+    /// `lookup_cached_agent_performance_section` reads from sibling tests.
+    fn cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn make_role_binding(role_id: &str, quality_feedback_enabled: bool) -> RoleBinding {
+        RoleBinding {
+            role_id: role_id.to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            quality_feedback_injection_enabled: quality_feedback_enabled,
+            memory: Default::default(),
+        }
+    }
+
+    #[test]
+    fn self_feedback_section_is_cached_within_same_hour_bucket() {
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let binding = make_role_binding("role-cache-stable", true);
+        let calls = AtomicUsize::new(0);
+        let bucket = 42_i64;
+
+        let first = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            bucket,
+            |role_id| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(format!(
+                    "[Agent Performance — Last 7 Days]\nrole={role_id}"
+                )))
+            },
+        );
+        let second = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            bucket,
+            |_| {
+                panic!("loader must not run for a same-bucket cache hit");
+            },
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "loader hit exactly once");
+        assert!(first.unwrap().contains("role=role-cache-stable"));
+    }
+
+    #[test]
+    fn self_feedback_section_recomputes_after_bucket_rollover() {
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let binding = make_role_binding("role-bucket-roll", true);
+
+        let prev = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            100,
+            |_| Ok(Some("v1".to_string())),
+        );
+        let next = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            101,
+            |_| Ok(Some("v2".to_string())),
+        );
+
+        assert_eq!(prev, Some("v1".to_string()));
+        assert_eq!(next, Some("v2".to_string()));
+    }
+
+    #[test]
+    fn self_feedback_section_skipped_when_channel_toggle_off() {
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let binding = make_role_binding("role-toggle-off", false);
+        let calls = AtomicUsize::new(0);
+
+        let result = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            7,
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("should-not-render".to_string()))
+            },
+        );
+
+        assert!(result.is_none());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "loader must not run when toggle is off"
+        );
+    }
+
+    #[test]
+    fn self_feedback_section_skipped_for_review_lite() {
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let binding = make_role_binding("role-review-lite", true);
+
+        let result = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::ReviewLite,
+            7,
+            |_| Ok(Some("never".to_string())),
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn self_feedback_section_caches_negative_lookup() {
+        // Anthropic cache hit also relies on stability when the loader returns
+        // None (e.g. fresh agent with no rollup row yet) — the cached `None`
+        // must be served on subsequent calls so the prompt prefix stays
+        // identical until the bucket rolls.
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let binding = make_role_binding("role-empty", true);
+        let calls = AtomicUsize::new(0);
+
+        let first = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            9,
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            },
+        );
+        let second = agent_performance_prompt_section_with_loader(
+            Some(&binding),
+            DispatchProfile::Full,
+            9,
+            |_| panic!("loader must not run on cached negative hit"),
+        );
+
+        assert!(first.is_none());
+        assert!(second.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn self_feedback_section_skips_when_role_binding_absent() {
+        let _guard = cache_test_lock();
+        reset_agent_performance_cache_for_tests();
+        let result =
+            agent_performance_prompt_section_with_loader(None, DispatchProfile::Full, 1, |_| {
+                panic!("loader must not run without a binding")
+            });
+        assert!(result.is_none());
+    }
 }

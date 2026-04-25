@@ -1,3 +1,4 @@
+/* giant-file-exemption: reason=kanban-core-lifecycle-pending-split ticket=#1078 */
 /**
  * kanban-rules.js — ADK Policy: Core Kanban Lifecycle
  * priority: 10 (runs first)

@@ -107,6 +107,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     ensure_session_transcripts_schema(conn)?;
     ensure_turns_schema(conn)?;
     ensure_observability_schema(conn)?;
+    ensure_slo_schema(conn)?;
+    ensure_quality_regression_schema(conn)?;
     run_migration_once(
         conn,
         SESSION_AGENT_ID_BACKFILL_META_KEY,
@@ -118,6 +120,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         backfill_session_transcript_agent_ids,
     )?;
     ensure_memento_feedback_stats_schema(conn)?;
+    ensure_local_memory_schema(conn)?;
+    ensure_db_table_metadata_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -2013,6 +2017,10 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
             turn_success_rate_30d          REAL,
             review_pass_rate_30d           REAL,
             measurement_unavailable_30d    INTEGER NOT NULL DEFAULT 1,
+            avg_rework_count               REAL,
+            cost_per_done_card             REAL,
+            latency_p50_ms                 INTEGER,
+            latency_p99_ms                 INTEGER,
             computed_at                    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_id, day)
         );
@@ -2026,6 +2034,65 @@ fn ensure_agent_quality_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_quality_daily_review_pass_7d
             ON agent_quality_daily (review_pass_rate_7d DESC)
             WHERE measurement_unavailable_7d = 0;",
+    )?;
+    // #1101 extended metrics — ALTERs handle pre-existing DBs that already
+    // have the base table from the #930 era. `execute_batch` errors on
+    // duplicate columns are swallowed via `let _`.
+    let _ = conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN avg_rework_count REAL;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN cost_per_done_card REAL;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN latency_p50_ms INTEGER;");
+    let _ =
+        conn.execute_batch("ALTER TABLE agent_quality_daily ADD COLUMN latency_p99_ms INTEGER;");
+    Ok(())
+}
+
+// #1072 turn-lifecycle SLO storage (Epic #905 Phase 1).
+fn ensure_slo_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS slo_aggregates (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_start_ms  INTEGER NOT NULL,
+            window_end_ms    INTEGER NOT NULL,
+            metric           TEXT NOT NULL,
+            value            REAL NOT NULL,
+            sample_size      INTEGER NOT NULL DEFAULT 0,
+            threshold        REAL,
+            breached         INTEGER NOT NULL DEFAULT 0,
+            created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_slo_aggregates_metric_window
+            ON slo_aggregates (metric, window_end_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_slo_aggregates_created_at
+            ON slo_aggregates (created_at DESC);
+        CREATE TABLE IF NOT EXISTS slo_alert_cooldowns (
+            metric         TEXT NOT NULL,
+            channel_id     TEXT NOT NULL,
+            alerted_at_ms  INTEGER NOT NULL,
+            last_value     REAL NOT NULL,
+            PRIMARY KEY (metric, channel_id)
+        );",
+    )?;
+    Ok(())
+}
+
+// #1104 (911-4) agent quality regression alert cooldown — sqlite parity for
+// migrations/postgres/0020_quality_regression_cooldowns.sql.
+fn ensure_quality_regression_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS quality_regression_cooldowns (
+            agent_id         TEXT NOT NULL,
+            metric           TEXT NOT NULL,
+            alerted_at_ms    INTEGER NOT NULL,
+            last_baseline    REAL NOT NULL,
+            last_current     REAL NOT NULL,
+            last_delta       REAL NOT NULL,
+            last_sample_size INTEGER NOT NULL,
+            PRIMARY KEY (agent_id, metric)
+        );
+        CREATE INDEX IF NOT EXISTS idx_quality_regression_cooldowns_alerted
+            ON quality_regression_cooldowns (alerted_at_ms DESC);",
     )?;
     Ok(())
 }
@@ -2317,6 +2384,57 @@ fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
             END AS coverage_rate
          FROM memento_feedback_turn_stats
          GROUP BY stat_date, agent_id, provider;",
+    )?;
+
+    Ok(())
+}
+
+/// #1097 (910-3) — per-table source-of-truth metadata.
+///
+/// Mirrors `migrations/postgres/0019_db_table_metadata.sql`.  Tables
+/// marked `file` or `file-canonical` here are readonly at the API
+/// layer; see `src/db/table_metadata.rs` and the `pipeline_stages`
+/// guard in `src/server/routes/pipeline.rs`.
+fn ensure_db_table_metadata_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS db_table_metadata (
+            table_name      TEXT PRIMARY KEY,
+            source_of_truth TEXT NOT NULL
+                CHECK (source_of_truth IN ('db', 'file', 'file-canonical')),
+            file_path       TEXT,
+            last_synced_at  DATETIME
+        );",
+    )?;
+
+    // Seed pipeline_stages as file-canonical (policies/default-pipeline.yaml).
+    conn.execute(
+        "INSERT OR IGNORE INTO db_table_metadata
+             (table_name, source_of_truth, file_path, last_synced_at)
+         VALUES ('pipeline_stages', 'file-canonical', 'policies/default-pipeline.yaml', NULL)",
+        [],
+    )?;
+
+    Ok(())
+}
+
+/// #1066 — local_memory backing table for `/api/memory/{recall,remember,forget}`.
+/// Used when memento MCP is unavailable or `ADK_FORCE_LOCAL_MEMORY=1`.
+fn ensure_local_memory_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS local_memory (
+            id          TEXT PRIMARY KEY,
+            content     TEXT NOT NULL,
+            topic       TEXT NOT NULL DEFAULT '',
+            kind        TEXT NOT NULL DEFAULT '',
+            importance  REAL,
+            workspace   TEXT,
+            keywords    TEXT,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_local_memory_workspace
+            ON local_memory (workspace);
+        CREATE INDEX IF NOT EXISTS idx_local_memory_topic
+            ON local_memory (topic);",
     )?;
 
     Ok(())

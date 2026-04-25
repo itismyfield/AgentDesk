@@ -141,6 +141,7 @@ fn agent_channel_for_setup(input: &AgentSetupConfigInput) -> Option<AgentChannel
         reasoning_effort: None,
         peer_agents: None,
         quality_feedback_injection: None,
+        cache_ttl_minutes: None,
     }))
 }
 
@@ -504,6 +505,18 @@ pub(super) fn resolve_role_binding(
     let config = load_agentdesk_config()?;
     let (agent, provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
     Some(role_binding_from_channel(agent, provider_key, channel))
+}
+
+/// Resolve the prompt-cache TTL bucket (#1088) for a Discord channel based on
+/// the configured `cache_ttl_minutes` field on its `AgentChannelConfig`.
+/// Returns the normalized minutes value (5 or 60) or `None` for the default.
+pub(crate) fn resolve_cache_ttl_minutes(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<u32> {
+    let config = load_agentdesk_config()?;
+    let (_agent, _provider_key, channel) = find_channel_binding(&config, channel_id, channel_name)?;
+    channel.cache_ttl_minutes()
 }
 
 pub(super) fn resolve_workspace(

@@ -3021,6 +3021,86 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
+    // #964 DoD item #2: integration-level fixture — when terminal success
+    // has been observed but the tmux output file still has bytes trailing
+    // beyond the confirmed relay end, `terminal_success_output_drained_for_recovery`
+    // MUST return false so the caller reattaches the watcher instead of
+    // declaring the turn complete and silently detaching.
+    #[tokio::test]
+    async fn terminal_success_drain_refuses_to_stop_when_output_file_has_pending_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir for drain test");
+        let output_path = tmp.path().join("pending-output.jsonl");
+        // File length = 200. Confirmed end = 120. 80 bytes of pending tmux
+        // output remain after the last relay. tmux_session=None skips the
+        // live-session path and uses the pure metadata guard.
+        std::fs::write(&output_path, vec![b'x'; 200]).expect("seed pending output file");
+
+        let drained = super::terminal_success_output_drained_for_recovery(
+            output_path.to_str().expect("utf8 path"),
+            120,
+            None,
+        )
+        .await;
+
+        assert!(
+            !drained,
+            "drain guard must refuse stop when tmux_tail_offset > confirmed_end",
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_success_drain_allows_stop_when_confirmed_end_reaches_tail() {
+        let tmp = tempfile::tempdir().expect("tempdir for drain test");
+        let output_path = tmp.path().join("drained-output.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 200]).expect("seed drained output file");
+
+        // Confirmed end == tail, and with tmux_session=None the function
+        // takes the fast path (no live session → just check the invariant
+        // + quiet-period gate). The quiet-period value passed is the module
+        // constant, which terminal_success_watcher_stop_allowed accepts.
+        let drained = super::terminal_success_output_drained_for_recovery(
+            output_path.to_str().expect("utf8 path"),
+            200,
+            None,
+        )
+        .await;
+        assert!(drained, "drain guard must permit stop when fully drained");
+    }
+
+    // #964: watcher-tmux lifecycle invariant — the terminal-success drain
+    // guard must refuse to stop the watcher whenever the confirmed relay end
+    // trails the current tmux output tail, or when the drain window has not
+    // held long enough. Both are required; either alone is insufficient.
+    #[test]
+    fn terminal_success_drain_guard_requires_confirmed_end_and_quiet_period() {
+        let quiet = TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD;
+
+        // Happy path: confirmed_end == tmux_tail AND quiet_for has elapsed.
+        assert!(terminal_success_watcher_stop_allowed(100, 100, quiet));
+        assert!(terminal_success_watcher_stop_allowed(
+            100,
+            100,
+            quiet + std::time::Duration::from_secs(1),
+        ));
+
+        // Confirmed end trails tail: watcher must NOT stop even after quiet
+        // period — tmux still produced output the watcher has not relayed.
+        assert!(!terminal_success_watcher_stop_allowed(99, 100, quiet));
+        assert!(!terminal_success_watcher_stop_allowed(0, 100, quiet * 4,));
+
+        // Drain window too short: the file may still be producing bytes.
+        assert!(!terminal_success_watcher_stop_allowed(
+            100,
+            100,
+            quiet - std::time::Duration::from_millis(1),
+        ));
+
+        // Confirmed end surpassing tmux_tail is still a stop-allowed condition
+        // (this covers the bridge-delivered case where response_sent_offset is
+        // recorded beyond the observed file metadata length).
+        assert!(terminal_success_watcher_stop_allowed(200, 100, quiet));
+    }
+
     #[test]
     fn recovery_phase_round_trips_through_str() {
         let variants = [

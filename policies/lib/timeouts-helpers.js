@@ -1,3 +1,5 @@
+/* giant-file-exemption: reason=shared-helpers-bundle ticket=#1078 */
+/** @module policies/lib/timeouts-helpers */
 function sendDeadlockAlert(message) {
   return notifyDeadlockManager(message, "timeouts");
 }

@@ -100,6 +100,7 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
 
 fn db_query_raw(db: Option<&Db>, pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     let started = std::time::Instant::now();
+    emit_raw_db_audit("agentdesk.db.query", sql);
     let params: Vec<serde_json::Value> =
         match parse_params_json(params_json, "agentdesk.db.query.parse_params", sql) {
             Ok(params) => params,
@@ -265,6 +266,7 @@ fn db_execute_raw(
     params_json: &str,
 ) -> String {
     let started = std::time::Instant::now();
+    emit_raw_db_audit("agentdesk.db.execute", sql);
     if let Some(violation) = detect_core_table_write(sql) {
         return serde_json::json!({ "error": violation.error_message() }).to_string();
     }
@@ -796,6 +798,106 @@ where
         Some(value) => serde_json::json!(value),
         None => serde_json::Value::Null,
     }
+}
+
+/// Emit a structured audit log whenever the legacy raw-DB escape hatch
+/// (`agentdesk.db.query` / `agentdesk.db.execute`) fires from a policy.
+///
+/// Part of #1007 — gives ops a paper trail for residual raw SQL usage
+/// while the typed-facade migration proceeds slice by slice. The payload
+/// includes:
+///   * `origin` — the JS entrypoint name (query vs execute)
+///   * `sql_category` — SELECT/INSERT/UPDATE/DELETE/etc., derived from
+///     the first SQL keyword
+///   * `policy_name`, `capability`, `source_event` — parsed from the
+///     inline escape-hatch marker comment
+///     `/* legacy-raw-db: policy=… capability=… source_event=… */`
+///     when callers annotate the callsite (optional)
+fn emit_raw_db_audit(origin: &str, sql: &str) {
+    let category = sql_category(sql);
+    let marker = parse_raw_db_marker(sql);
+    tracing::info!(
+        target: "policy.raw_db_audit",
+        origin = origin,
+        sql_category = category,
+        policy_name = marker.policy.as_deref().unwrap_or("<unspecified>"),
+        capability = marker.capability.as_deref().unwrap_or("<unspecified>"),
+        source_event = marker.source_event.as_deref().unwrap_or("<unspecified>"),
+        sql = %compact_sql(sql),
+        "policy raw-db escape hatch invoked"
+    );
+}
+
+fn sql_category(sql: &str) -> &'static str {
+    let trimmed = sql.trim_start();
+    // Skip leading comments and whitespace
+    let mut cursor = trimmed;
+    loop {
+        let next = cursor.trim_start();
+        if let Some(rest) = next.strip_prefix("--") {
+            cursor = match rest.find('\n') {
+                Some(i) => &rest[i + 1..],
+                None => "",
+            };
+            continue;
+        }
+        if let Some(rest) = next.strip_prefix("/*") {
+            cursor = match rest.find("*/") {
+                Some(i) => &rest[i + 2..],
+                None => "",
+            };
+            continue;
+        }
+        cursor = next;
+        break;
+    }
+    let first = cursor
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    match first.as_str() {
+        "SELECT" | "WITH" => "select",
+        "INSERT" => "insert",
+        "UPDATE" => "update",
+        "DELETE" => "delete",
+        "REPLACE" => "replace",
+        "CREATE" => "ddl_create",
+        "DROP" => "ddl_drop",
+        "ALTER" => "ddl_alter",
+        "PRAGMA" => "pragma",
+        _ => "other",
+    }
+}
+
+#[derive(Default)]
+struct RawDbMarker {
+    policy: Option<String>,
+    capability: Option<String>,
+    source_event: Option<String>,
+}
+
+fn parse_raw_db_marker(sql: &str) -> RawDbMarker {
+    let mut marker = RawDbMarker::default();
+    // Look for `/* legacy-raw-db: key=value key=value ... */`
+    let Some(start) = sql.find("legacy-raw-db:") else {
+        return marker;
+    };
+    let rest = &sql[start + "legacy-raw-db:".len()..];
+    let end = rest.find("*/").unwrap_or(rest.len());
+    let body = rest[..end].trim();
+    for pair in body.split_whitespace() {
+        if let Some((k, v)) = pair.split_once('=') {
+            let v = v.trim_matches(|c: char| c == '"' || c == '\'');
+            match k.trim() {
+                "policy" | "policy_name" => marker.policy = Some(v.to_string()),
+                "capability" => marker.capability = Some(v.to_string()),
+                "source_event" | "event" => marker.source_event = Some(v.to_string()),
+                _ => {}
+            }
+        }
+    }
+    marker
 }
 
 fn compact_sql(sql: &str) -> String {

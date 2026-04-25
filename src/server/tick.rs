@@ -55,6 +55,9 @@ pub(super) async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             {
                 tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
             }
+            // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1).
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let _ = crate::services::slo::run_aggregation_tick(Some(&db), None, now_ms).await;
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);
         }

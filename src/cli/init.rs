@@ -309,25 +309,35 @@ agents:
 }
 
 fn default_shared_prompt() -> &'static str {
-    r#"# Shared Agent Rules
-
+    // Profile markers (`<!-- profile: full -->` / `review-lite` / `headless`) gate
+    // sections per dispatch type — see settings::content::load_shared_prompt_for_profile.
+    r#"<!-- profile: all -->
 ## Communication
 - Respond in the user's language.
-- Be concise and direct.
-- Discord 발신자는 `[User: NAME (ID: N)]` prefix로 구분한다. 발신자가 바뀌어도 이전 요청자의 의도를 자동으로 무효화하지 않는다.
+- Discord 발신자는 `[User: NAME (ID: N)]` prefix로 구분한다.
 
 ## Work Style
-- Plan before implementing.
-- Verify your work before reporting done.
-- Fix bugs autonomously without asking "how should I fix this?"
+- Plan briefly, verify before reporting done, fix bugs autonomously.
 - Check `GET /api/docs` or `GET /api/docs/{category}` before guessing ADK API calls.
-- When ADK API usage causes repeated trial-and-error, record it as `api-friction` instead of bypassing with direct DB access.
+- ADK API 반복 시행착오는 `api-friction`으로 기록 (DB 직접 접근 우회 금지).
+<!-- /profile -->
 
+<!-- profile: full -->
 ## Search Safety
-- Prefer `rg` or the Grep tool over `grep -r` / `grep -rn`; they honor ignore files and avoid crawling build outputs.
-- Scope searches to the smallest relevant subdirectory instead of the workspace root.
-- If recursive `grep` is unavoidable, always pass `--exclude-dir={target,node_modules,.git,dist,build,.next}`.
-- Do not recursively scan build artifacts or dependency trees in ways that can stall a turn without output.
+- `grep -r` 직접 사용 대신 `rg` 또는 Grep tool (.gitignore 존중).
+- 검색 범위는 필요한 하위 디렉터리로 한정.
+- 부득이 시 `--exclude-dir={target,node_modules,.git,dist,build,.next}` 필수.
+<!-- /profile -->
+
+<!-- profile: review-lite -->
+## Review 모드
+- 한국어로 소통. 코드/문서 검증 후 평가. raw 로그 덤프 금지.
+<!-- /profile -->
+
+<!-- profile: headless -->
+## Headless 모드
+- 결과·다음 액션을 1~2줄로. 중간 서술 최소.
+<!-- /profile -->
 "#
 }
 

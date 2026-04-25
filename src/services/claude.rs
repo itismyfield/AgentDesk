@@ -57,6 +57,7 @@ fn build_tmux_launch_env_lines(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
+    cache_ttl_minutes: Option<u32>,
 ) -> String {
     let mut env_lines = String::from("unset CLAUDECODE\n");
     if let Some(exec_path) = exec_path {
@@ -90,8 +91,28 @@ fn build_tmux_launch_env_lines(
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
     }
+    // #1088: prompt-cache TTL bucket. Claude CLI honors this env var by
+    // setting cache_control.ttl on the underlying API call.
+    if let Some(ttl_str) = cache_ttl_env_value(cache_ttl_minutes) {
+        env_lines.push_str(&format!(
+            "export CLAUDE_CODE_EXTENDED_CACHE_TTL={}\n",
+            ttl_str
+        ));
+    }
 
     env_lines
+}
+
+/// Map a normalized cache TTL minutes value (#1088) to the string passed to
+/// the Claude CLI via the `CLAUDE_CODE_EXTENDED_CACHE_TTL` env var, which the
+/// CLI in turn forwards as `cache_control.ttl` on the Anthropic API call.
+/// Returns `None` for the default 5m bucket (no env var emitted).
+pub(crate) fn cache_ttl_env_value(cache_ttl_minutes: Option<u32>) -> Option<&'static str> {
+    match crate::config::normalize_cache_ttl_minutes(cache_ttl_minutes) {
+        Some(60) => Some("1h"),
+        // 5m is the default; no need to set the env var explicitly.
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -438,6 +459,7 @@ pub fn execute_command_simple_with_timeout(
 /// Execute a command using Claude CLI with streaming output
 /// If `system_prompt` is None, uses the default file manager system prompt.
 /// If `system_prompt` is Some(""), no system prompt is appended.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -453,6 +475,7 @@ pub fn execute_command_streaming(
     model_override: Option<&str>,
     fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
+    cache_ttl_minutes: Option<u32>,
 ) -> Result<(), String> {
     debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
@@ -569,6 +592,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     report_channel_id,
                     report_provider,
                     compact_percent,
+                    cache_ttl_minutes,
                 );
             } else {
                 // Local without tmux → ProcessBackend (new path)
@@ -1159,6 +1183,7 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_percent: Option<u64>,
+    cache_ttl_minutes: Option<u32>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
@@ -1319,6 +1344,7 @@ fn execute_streaming_local_tmux(
         report_channel_id,
         report_provider,
         compact_percent,
+        cache_ttl_minutes,
     );
 
     let script_content = format!(
@@ -1873,12 +1899,55 @@ mod tests {
             Some(7),
             Some(ProviderKind::Claude),
             None,
+            None,
         );
 
         assert!(env_lines.contains("unset CLAUDECODE"));
         assert!(env_lines.contains("export PATH='/tmp/provider:/usr/bin'"));
         assert!(env_lines.contains(&format!("export {}=7", RESTART_REPORT_CHANNEL_ENV)));
         assert!(env_lines.contains(&format!("export {}=claude", RESTART_REPORT_PROVIDER_ENV)));
+        // Default 5m TTL → no env var emitted.
+        assert!(!env_lines.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
+    }
+
+    #[test]
+    fn test_tmux_launch_env_lines_emit_extended_cache_ttl_for_60min_bucket() {
+        let env_lines = build_tmux_launch_env_lines(None, None, None, None, Some(60));
+        assert!(
+            env_lines.contains("export CLAUDE_CODE_EXTENDED_CACHE_TTL=1h"),
+            "expected 1h TTL env var, got: {env_lines}"
+        );
+    }
+
+    #[test]
+    fn test_tmux_launch_env_lines_default_ttl_emits_no_extended_cache_env() {
+        let env_lines = build_tmux_launch_env_lines(None, None, None, None, Some(5));
+        assert!(
+            !env_lines.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"),
+            "5m default TTL must NOT emit env var, got: {env_lines}"
+        );
+    }
+
+    #[test]
+    fn test_tmux_launch_env_lines_invalid_ttl_falls_back_to_default() {
+        // Anything other than 5/60 must be rejected by normalize_cache_ttl_minutes
+        // and treated as the default 5m bucket → no env var emitted.
+        for invalid in [0u32, 1, 4, 6, 30, 59, 61, 120] {
+            let env_lines = build_tmux_launch_env_lines(None, None, None, None, Some(invalid));
+            assert!(
+                !env_lines.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"),
+                "invalid TTL {invalid} leaked env var: {env_lines}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cache_ttl_env_value_normalizes_buckets() {
+        assert_eq!(cache_ttl_env_value(None), None);
+        assert_eq!(cache_ttl_env_value(Some(5)), None);
+        assert_eq!(cache_ttl_env_value(Some(60)), Some("1h"));
+        assert_eq!(cache_ttl_env_value(Some(0)), None);
+        assert_eq!(cache_ttl_env_value(Some(120)), None);
     }
 
     #[test]

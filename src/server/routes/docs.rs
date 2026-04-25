@@ -1,7 +1,8 @@
 use axum::{
     Json,
     extract::{Path, Query},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,6 +44,10 @@ impl ParamDoc {
 struct ExampleDoc {
     pub request: Value,
     pub response: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +62,15 @@ struct EndpointDoc {
     pub params: BTreeMap<String, ParamDoc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<ExampleDoc>,
+    /// #1068 (904-6) paired-scenario companion: canonical 4xx failure example.
+    /// When present, surfaces alongside the happy-path `example` so callers can
+    /// see both the success shape and the most common error shape at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_example: Option<ExampleDoc>,
+    /// #1068 (904-6) curl 1-liner reference. Intentionally a single physical
+    /// line so it can be copy-pasted directly into a terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curl_example: Option<&'static str>,
     #[serde(skip_serializing_if = "is_false")]
     pub deprecated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,7 +87,32 @@ impl EndpointDoc {
     }
 
     fn with_example(mut self, request: Value, response: Value) -> Self {
-        self.example = Some(ExampleDoc { request, response });
+        self.example = Some(ExampleDoc {
+            request,
+            response,
+            status: Some(200),
+            scenario: Some("happy"),
+        });
+        self
+    }
+
+    /// #1068 (904-6) paired-scenario companion. Records the canonical 4xx
+    /// failure response (shape + status) so callers can see both the success
+    /// shape from `with_example` and the most common mistake at once.
+    fn with_error_example(mut self, status: u16, request: Value, response: Value) -> Self {
+        self.error_example = Some(ExampleDoc {
+            request,
+            response,
+            status: Some(status),
+            scenario: Some("error"),
+        });
+        self
+    }
+
+    /// #1068 (904-6) curl 1-liner. Must stay a single physical line so it can
+    /// be copy-pasted into a terminal without escaping line breaks.
+    fn with_curl(mut self, curl: &'static str) -> Self {
+        self.curl_example = Some(curl);
         self
     }
 
@@ -114,6 +153,8 @@ fn ep(
         description,
         params: BTreeMap::new(),
         example: None,
+        error_example: None,
+        curl_example: None,
         deprecated: false,
         canonical_path: None,
     }
@@ -156,6 +197,61 @@ fn body_param(kind: &'static str, required: bool, description: &'static str) -> 
     }
 }
 
+// ---------------------------------------------------------------------------
+// #1068 (904-6) — top-40 paired-scenario endpoints.
+//
+// These are the high-traffic runtime/kanban/agent/queue/integration endpoints
+// that must ship with BOTH a happy-path example AND an error example plus a
+// curl 1-liner so agents can learn the contract without reading source.
+//
+// The test `api_docs_exposes_paired_examples_for_top_40` iterates this slice
+// and asserts `example`, `error_example`, and `curl_example` are all populated.
+// Endpoints not in this list may rely on `// TODO: example` markers in their
+// description text while paired coverage expands in follow-up issues.
+// ---------------------------------------------------------------------------
+pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
+    ("GET", "/api/health"),
+    ("POST", "/api/discord/send"),
+    ("POST", "/api/discord/send-to-agent"),
+    ("POST", "/api/discord/send-dm"),
+    ("GET", "/api/agents"),
+    ("POST", "/api/agents"),
+    ("GET", "/api/agents/{id}"),
+    ("PATCH", "/api/agents/{id}"),
+    ("POST", "/api/agents/setup"),
+    ("POST", "/api/agents/{id}/turn/start"),
+    ("POST", "/api/agents/{id}/turn/stop"),
+    ("GET", "/api/agents/{id}/quality"),
+    ("GET", "/api/agents/quality/ranking"),
+    ("GET", "/api/kanban-cards"),
+    ("POST", "/api/kanban-cards"),
+    ("GET", "/api/kanban-cards/{id}"),
+    ("PATCH", "/api/kanban-cards/{id}"),
+    ("POST", "/api/kanban-cards/{id}/transition"),
+    ("POST", "/api/kanban-cards/{id}/retry"),
+    ("POST", "/api/kanban-cards/{id}/redispatch"),
+    ("POST", "/api/kanban-cards/{id}/resume"),
+    ("POST", "/api/kanban-cards/{id}/reopen"),
+    ("POST", "/api/kanban-cards/assign-issue"),
+    ("GET", "/api/dispatches"),
+    ("POST", "/api/dispatches"),
+    ("GET", "/api/dispatches/{id}"),
+    ("PATCH", "/api/dispatches/{id}"),
+    ("POST", "/api/auto-queue/generate"),
+    ("POST", "/api/auto-queue/dispatch-next"),
+    ("GET", "/api/auto-queue/status"),
+    ("POST", "/api/auto-queue/pause"),
+    ("POST", "/api/auto-queue/resume"),
+    ("POST", "/api/auto-queue/cancel"),
+    ("PATCH", "/api/auto-queue/reorder"),
+    ("POST", "/api/github/issues/create"),
+    ("GET", "/api/pipeline/cards/{card_id}"),
+    ("GET", "/api/analytics/observability"),
+    ("GET", "/api/analytics/invariants"),
+    ("POST", "/api/reviews/verdict"),
+    ("GET", "/api/docs"),
+];
+
 const CANONICAL_CATEGORIES: [&str; 7] = [
     "agents",
     "kanban",
@@ -174,13 +270,111 @@ fn canonical_category(category: &str) -> &'static str {
         "auto-queue" | "cron" | "queue" => "queue",
         "analytics" | "auth" | "docs" | "health" | "monitoring" | "stats" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
-        "departments" | "offices" | "onboarding" | "policies" | "settings" | "skills" => "admin",
+        "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
+        | "skills" => "admin",
         _ => "ops",
     }
 }
 
 fn is_canonical_category(category: &str) -> bool {
     CANONICAL_CATEGORIES.contains(&category)
+}
+
+// ---------------------------------------------------------------------------
+// #1063 — 8-group hierarchical docs taxonomy.
+//
+// The hierarchy is:
+//   GET /api/docs                     -> { groups: [{name, description, categories: [names]}] }
+//   GET /api/docs/{group}             -> { group, categories: [{name, description, endpoint_count}] }
+//   GET /api/docs/{group}/{category}  -> { group, category, endpoints: [full endpoint docs] }
+//
+// `CANONICAL_CATEGORIES` (the legacy 7-group contract) is retained so that
+// existing callers of `/api/docs/{category}` (and `api_help`) keep working,
+// but the default root response now reflects the new GROUP_NAMES hierarchy.
+// ---------------------------------------------------------------------------
+
+const GROUP_NAMES: [&str; 8] = [
+    "runtime",
+    "kanban",
+    "agents",
+    "integrations",
+    "automation",
+    "config",
+    "observability",
+    "internal",
+];
+
+/// Maps a fine-grained endpoint category (the value stored on
+/// `EndpointDoc.subcategory` when present, otherwise `EndpointDoc.category`)
+/// to its owning top-level group.
+fn category_to_group(category: &str) -> &'static str {
+    match category {
+        // runtime — turns, sessions, dispatches, server lifecycle, messages
+        "dispatches" | "dispatched-sessions" | "sessions" | "messages" => "runtime",
+        // kanban — cards, pipeline, reviews, pm, repo config
+        "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
+        // agents — agents, agent-setup, agent-quality, roles
+        "agents" => "agents",
+        // integrations — discord, github, meetings, provider, mcp
+        "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
+        // automation — auto-queue, policies, scheduler, cron, maintenance
+        "auto-queue" | "queue" | "cron" | "policies" => "automation",
+        // config — settings, onboarding, knowledge, source-of-truth, skills,
+        // offices, departments, memory (#1066 /api/memory dual-mode)
+        "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
+        // observability — analytics, metrics, events, slo, diagnostics,
+        // monitoring, stats, health, auth
+        "analytics" | "monitoring" | "stats" | "health" | "auth" => "observability",
+        // internal — debug, testing, internal endpoints, docs discovery
+        "internal" | "docs" => "internal",
+        _ => "internal",
+    }
+}
+
+/// Short human-readable description for one of the top-level groups.
+fn group_description(group: &str) -> &'static str {
+    match group {
+        "runtime" => "Turns, sessions, dispatches, message log, and server lifecycle surfaces.",
+        "kanban" => {
+            "Kanban cards, pipeline state, reviews (kanban/reviews), PM decisions, and repo board config."
+        }
+        "agents" => {
+            "Agent registry, turn control, setup wizard, quality telemetry, and role metadata."
+        }
+        "integrations" => {
+            "Discord, GitHub, round-table meetings, and provider/MCP integration entrypoints."
+        }
+        "automation" => {
+            "Auto-queue generation and dispatch, policies, cron, and scheduled maintenance jobs."
+        }
+        "config" => {
+            "Settings, onboarding, skill catalog, knowledge, and source-of-truth config surfaces."
+        }
+        "observability" => {
+            "Analytics, metrics, events, SLO signals, diagnostics, health, and monitoring surfaces."
+        }
+        "internal" => "Internal, debug, testing, and API-docs discovery endpoints.",
+        _ => "Miscellaneous API endpoints.",
+    }
+}
+
+/// Returns the effective fine-grained category for an endpoint (subcategory if
+/// present, otherwise canonical category).
+fn effective_category(endpoint: &EndpointDoc) -> &'static str {
+    endpoint.subcategory.unwrap_or(endpoint.category)
+}
+
+/// For a given top-level group, return the list of distinct fine-grained
+/// categories under it plus their endpoint counts, in a deterministic order.
+fn categories_for_group(endpoints: &[EndpointDoc], group: &str) -> Vec<(&'static str, usize)> {
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for endpoint in endpoints {
+        let category = effective_category(endpoint);
+        if category_to_group(category) == group {
+            *counts.entry(category).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
 }
 
 fn category_description(category: &str) -> &'static str {
@@ -215,6 +409,9 @@ fn category_description(category: &str) -> &'static str {
         "internal" => "Internal-only thread reuse helpers used by the runtime.",
         "kanban-repos" => "Kanban repository settings and ownership metadata.",
         "meetings" => "Round-table meeting lifecycle and issue generation.",
+        "memory" => {
+            "Memory fragment CRUD (recall/remember/forget) with auto-selected memento-or-local backend."
+        }
         "messages" => "Message log read/write APIs.",
         "monitoring" => "Channel monitoring status entries and rendered status updates.",
         "offices" => "Office CRUD, ordering, and agent membership.",
@@ -289,13 +486,33 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "outbox_age": 0,
                 "recovery_duration": 0.12
             }),
-        ),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"status": "degraded", "server_up": true, "fully_recovered": false, "db": false, "error": "db connection failing"}),
+        )
+        .with_curl("curl http://localhost:8787/api/health"),
         ep(
             "POST",
             "/api/discord/send",
             "discord",
             "Send a Discord channel message",
-        ),
+        )
+        .with_params([
+            ("channel_id", body_param("string", true, "Target Discord channel snowflake")),
+            ("message", body_param("string", true, "Message body (markdown supported)")),
+        ])
+        .with_example(
+            json!({"body": {"channel_id": "1473922824350601297", "message": "hello"}}),
+            json!({"ok": true, "message_id": "1500000000000000000"}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"message": "hello"}}),
+            json!({"error": "channel_id is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"channel_id\":\"1473922824350601297\",\"message\":\"hello\"}'"),
         ep("POST", "/api/send", "discord", "Deprecated alias for /api/discord/send")
             .deprecated_alias("/api/discord/send"),
         ep(
@@ -316,7 +533,17 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 )
                 .with_enum(&["announce", "notify"]),
             ),
-        ]),
+        ])
+        .with_example(
+            json!({"body": {"role_id": "project-agentdesk", "message": "deploy done", "mode": "announce"}}),
+            json!({"ok": true, "channel_id": "1473922824350601297", "message_id": "1500000000000000001"}),
+        )
+        .with_error_example(
+            404,
+            json!({"body": {"role_id": "ghost-agent", "message": "hi"}}),
+            json!({"error": "agent not found: ghost-agent"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send-to-agent -H 'Content-Type: application/json' -d '{\"role_id\":\"project-agentdesk\",\"message\":\"deploy done\"}'"),
         ep(
             "POST",
             "/api/send_to_agent",
@@ -329,12 +556,62 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/discord/send-dm",
             "discord",
             "Send a Discord direct message",
-        ),
+        )
+        .with_params([
+            ("user_id", body_param("string", true, "Target Discord user snowflake")),
+            ("message", body_param("string", true, "DM body")),
+        ])
+        .with_example(
+            json!({"body": {"user_id": "100000000000000000", "message": "heads-up"}}),
+            json!({"ok": true, "message_id": "1500000000000000002"}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"message": "heads-up"}}),
+            json!({"error": "user_id is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send-dm -H 'Content-Type: application/json' -d '{\"user_id\":\"100000000000000000\",\"message\":\"heads-up\"}'"),
         ep("POST", "/api/senddm", "discord", "Deprecated alias for /api/discord/send-dm")
             .deprecated_alias("/api/discord/send-dm"),
-        ep("GET", "/api/agents", "agents", "List all agents"),
-        ep("POST", "/api/agents", "agents", "Create an agent"),
-        ep("GET", "/api/agents/{id}", "agents", "Get agent by ID"),
+        ep("GET", "/api/agents", "agents", "List all agents")
+            .with_example(
+                json!({}),
+                json!({"agents": [{"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "1473922824350601297"}]}),
+            )
+            .with_error_example(
+                500,
+                json!({}),
+                json!({"error": "internal: failed to load agents"}),
+            )
+            .with_curl("curl http://localhost:8787/api/agents"),
+        ep("POST", "/api/agents", "agents", "Create an agent")
+            .with_params([
+                ("id", body_param("string", true, "New agent id (role_id)")),
+                ("name", body_param("string", true, "Display name")),
+                ("discord_channel_id", body_param("string", false, "Primary Discord channel")),
+            ])
+            .with_example(
+                json!({"body": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "1473922824350601297"}}),
+                json!({"agent": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "1473922824350601297"}}),
+            )
+            .with_error_example(
+                409,
+                json!({"body": {"id": "project-agentdesk", "name": "dup"}}),
+                json!({"error": "agent id already exists: project-agentdesk"}),
+            )
+            .with_curl("curl -X POST http://localhost:8787/api/agents -H 'Content-Type: application/json' -d '{\"id\":\"pm-planner\",\"name\":\"PM Planner\"}'"),
+        ep("GET", "/api/agents/{id}", "agents", "Get agent by ID")
+            .with_params([("id", path_param("Agent id"))])
+            .with_example(
+                json!({"path": {"id": "project-agentdesk"}}),
+                json!({"agent": {"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "1473922824350601297"}}),
+            )
+            .with_error_example(
+                404,
+                json!({"path": {"id": "ghost"}}),
+                json!({"error": "agent not found: ghost"}),
+            )
+            .with_curl("curl http://localhost:8787/api/agents/project-agentdesk"),
         ep("PATCH", "/api/agents/{id}", "agents", "Update agent metadata and prompt content")
             .with_params([
                 ("id", path_param("Agent id")),
@@ -346,8 +623,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"path": {"id": "project-agentdesk"}, "body": {"name": "AgentDesk", "prompt_content": "# role\n...", "auto_commit": false}}),
                 json!({"agent": {"id": "project-agentdesk"}, "prompt": {"changed": true}}),
-            ),
-        ep("DELETE", "/api/agents/{id}", "agents", "Delete agent"),
+            )
+            .with_error_example(
+                404,
+                json!({"path": {"id": "ghost"}, "body": {"name": "x"}}),
+                json!({"error": "agent not found: ghost"}),
+            )
+            .with_curl("curl -X PATCH http://localhost:8787/api/agents/project-agentdesk -H 'Content-Type: application/json' -d '{\"name\":\"AgentDesk\"}'"),
+        ep("DELETE", "/api/agents/{id}", "agents", "Delete agent // TODO: example"),
         ep(
             "POST",
             "/api/agents/{id}/archive",
@@ -368,13 +651,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/agents/{id}/unarchive",
             "agents",
-            "Restore an archived agent config binding and mark archive state unarchived.",
+            "Restore an archived agent config binding and mark archive state unarchived. // TODO: example",
         ),
         ep(
             "POST",
             "/api/agents/{id}/duplicate",
             "agents",
-            "Duplicate an agent by reusing /api/agents/setup with the source prompt as template.",
+            "Duplicate an agent by reusing /api/agents/setup with the source prompt as template. // TODO: example",
         )
         .with_params([
             ("id", path_param("Source agent id")),
@@ -387,61 +670,61 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/onboarding/status",
             "onboarding",
-            "Get onboarding status",
+            "Get onboarding status // TODO: example",
         ),
         ep(
             "GET",
             "/api/onboarding/draft",
             "onboarding",
-            "Get onboarding resume draft",
+            "Get onboarding resume draft // TODO: example",
         ),
         ep(
             "PUT",
             "/api/onboarding/draft",
             "onboarding",
-            "Persist onboarding resume draft",
+            "Persist onboarding resume draft // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/onboarding/draft",
             "onboarding",
-            "Clear onboarding resume draft",
+            "Clear onboarding resume draft // TODO: example",
         ),
         ep(
             "POST",
             "/api/onboarding/validate-token",
             "onboarding",
-            "Validate onboarding token",
+            "Validate onboarding token // TODO: example",
         ),
         ep(
             "GET",
             "/api/onboarding/channels",
             "onboarding",
-            "List onboarding candidate channels",
+            "List onboarding candidate channels // TODO: example",
         ),
         ep(
             "POST",
             "/api/onboarding/channels",
             "onboarding",
-            "Persist onboarding channel selection",
+            "Persist onboarding channel selection // TODO: example",
         ),
         ep(
             "POST",
             "/api/onboarding/complete",
             "onboarding",
-            "Complete onboarding",
+            "Complete onboarding // TODO: example",
         ),
         ep(
             "POST",
             "/api/onboarding/check-provider",
             "onboarding",
-            "Validate provider installation and credentials",
+            "Validate provider installation and credentials // TODO: example",
         ),
         ep(
             "POST",
             "/api/onboarding/generate-prompt",
             "onboarding",
-            "Generate onboarding prompt",
+            "Generate onboarding prompt // TODO: example",
         ),
         ep(
             "POST",
@@ -496,42 +779,48 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "rolled_back": [],
                 "errors": [],
             }),
-        ),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"agent_id": "x", "channel_id": "1473922824350601297", "provider": "unknown", "prompt_template_path": "config/agents/_shared.prompt.md"}}),
+            json!({"error": "provider must be one of claude|codex|gemini|qwen"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/setup -H 'Content-Type: application/json' -d '{\"agent_id\":\"project-agentdesk\",\"channel_id\":\"1473922824350601297\",\"provider\":\"codex\",\"prompt_template_path\":\"config/agents/_shared.prompt.md\",\"dry_run\":true}'"),
         ep(
             "GET",
             "/api/agents/{id}/offices",
             "agents",
-            "List offices for agent",
+            "List offices for agent // TODO: example",
         ),
         ep(
             "POST",
             "/api/agents/{id}/signal",
             "agents",
-            "Send runtime signal to agent",
+            "Send runtime signal to agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/agents/{id}/cron",
             "agents",
-            "List cron jobs for agent",
+            "List cron jobs for agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/agents/{id}/skills",
             "agents",
-            "List skills for agent",
+            "List skills for agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/agents/{id}/dispatched-sessions",
             "agents",
-            "List dispatched sessions for agent",
+            "List dispatched sessions for agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/agents/{id}/turn",
             "agents",
-            "Get active turn status and recent output",
+            "Get active turn status and recent output // TODO: example",
         ),
         ep(
             "POST",
@@ -579,32 +868,130 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "turn_id": "discord:1473922824350601297:9100000000000000000",
                 "status": "started"
             }),
-        ),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"id": "family-counsel"}, "body": {"prompt": "do it"}}),
+            json!({"error": "turn already active for this agent mailbox", "active_turn_id": "discord:1473922824350601297:9000000000000000000"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\"}'"),
         ep(
             "POST",
             "/api/agents/{id}/turn/stop",
             "agents",
             "Stop the active turn for agent",
-        ),
+        )
+        .with_params([("id", path_param("Agent id"))])
+        .with_example(
+            json!({"path": {"id": "family-counsel"}}),
+            json!({"ok": true, "turn_id": "discord:1473922824350601297:9100000000000000000", "status": "stopped"}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "family-counsel"}}),
+            json!({"error": "no active turn for agent"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/stop"),
         ep(
             "GET",
             "/api/agents/{id}/transcripts",
             "agents",
-            "List recent completed turn transcripts for agent",
+            "List recent completed turn transcripts for agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/agents/{id}/timeline",
             "agents",
-            "Agent activity timeline",
+            "Agent activity timeline // TODO: example",
         ),
-        ep("GET", "/api/sessions", "sessions", "List sessions"),
-        ep("GET", "/api/policies", "policies", "List policies"),
+        ep(
+            "GET",
+            "/api/agents/{id}/quality",
+            "agents",
+            "Per-agent quality summary (#1102): current + trend_7d + trend_30d from agent_quality_daily with event-based mini-rollup fallback",
+        )
+        .with_params([
+            ("id", path_param("Agent id")),
+            (
+                "days",
+                query_param("integer", false, "Lookback window in days for the daily trend")
+                    .with_default(30),
+            ),
+            (
+                "limit",
+                query_param("integer", false, "Max daily rows to return").with_default(60),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}, "query": {"days": 30}}),
+            json!({"agent_id": "project-agentdesk", "current": {"turn_success_rate": 0.92, "sample_size": 50}, "trend_7d": {"turn_success_rate": 0.9}, "trend_30d": {"turn_success_rate": 0.88}}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "ghost"}}),
+            json!({"error": "agent not found: ghost"}),
+        )
+        .with_curl("curl 'http://localhost:8787/api/agents/project-agentdesk/quality?days=30'"),
+        ep(
+            "GET",
+            "/api/agents/quality/ranking",
+            "agents",
+            "Cross-agent quality ranking (#1102): sorts by the requested metric×window with sample_size >= min_sample_size",
+        )
+        .with_params([
+            (
+                "limit",
+                query_param("integer", false, "Max agents to return").with_default(50),
+            ),
+            (
+                "metric",
+                ParamDoc {
+                    location: "query",
+                    kind: "string",
+                    required: false,
+                    description: "Ranking metric",
+                    enum_values: None,
+                    default: None,
+                }
+                .with_enum(&["turn_success_rate", "review_pass_rate"])
+                .with_default("turn_success_rate"),
+            ),
+            (
+                "window",
+                ParamDoc {
+                    location: "query",
+                    kind: "string",
+                    required: false,
+                    description: "Rolling window",
+                    enum_values: None,
+                    default: None,
+                }
+                .with_enum(&["7d", "30d"])
+                .with_default("7d"),
+            ),
+            (
+                "min_sample_size",
+                query_param("integer", false, "Exclude agents with window sample_size below this threshold")
+                    .with_default(5),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"metric": "turn_success_rate", "window": "7d", "limit": 10}}),
+            json!({"ranking": [{"agent_id": "project-agentdesk", "turn_success_rate": 0.94, "sample_size": 20}]}),
+        )
+        .with_error_example(
+            400,
+            json!({"query": {"metric": "unknown", "window": "7d"}}),
+            json!({"error": "metric must be one of turn_success_rate|review_pass_rate"}),
+        )
+        .with_curl("curl 'http://localhost:8787/api/agents/quality/ranking?metric=turn_success_rate&window=7d&limit=10'"),
+        ep("GET", "/api/sessions", "sessions", "List sessions // TODO: example"),
+        ep("GET", "/api/policies", "policies", "List policies // TODO: example"),
         ep(
             "GET",
             "/api/auth/session",
             "auth",
-            "Get current auth session",
+            "Get current auth session // TODO: example",
         ),
         ep("GET", "/api/kanban-cards", "kanban", "List kanban cards")
             .with_params([
@@ -624,7 +1011,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"query": {"status": "ready"}}),
                 json!({"cards": [{"id": "card-1", "title": "Fix docs", "status": "ready", "priority": "high"}]}),
-            ),
+            )
+            .with_error_example(
+                400,
+                json!({"query": {"status": "invalid_status"}}),
+                json!({"error": "unknown pipeline status: invalid_status"}),
+            )
+            .with_curl("curl 'http://localhost:8787/api/kanban-cards?status=ready'"),
         ep("POST", "/api/kanban-cards", "kanban", "Create kanban card")
             .with_params([
                 ("title", body_param("string", true, "Card title")),
@@ -645,41 +1038,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"body": {"title": "Test Card", "priority": "high"}}),
                 json!({"card": {"id": "uuid-card-1", "title": "Test Card", "status": "backlog", "priority": "high"}}),
-            ),
+            )
+            .with_error_example(
+                400,
+                json!({"body": {"priority": "high"}}),
+                json!({"error": "title is required"}),
+            )
+            .with_curl("curl -X POST http://localhost:8787/api/kanban-cards -H 'Content-Type: application/json' -d '{\"title\":\"Test Card\",\"priority\":\"high\"}'"),
         ep(
             "GET",
             "/api/kanban-cards/stalled",
             "kanban",
-            "List stalled cards",
-        ),
-        ep(
-            "POST",
-            "/api/kanban-cards/bulk-action",
-            "kanban",
-            "Apply the same action to multiple cards",
-        )
-        .with_params([
-            (
-                "action",
-                body_param("string", true, "Bulk action name")
-                    .with_enum(&["pass", "reset", "cancel", "transition"]),
-            ),
-            (
-                "card_ids",
-                body_param("string[]", true, "Target card ids"),
-            ),
-            (
-                "target_status",
-                body_param(
-                    "string",
-                    false,
-                    "Required when action=transition; target pipeline status",
-                ),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"action": "transition", "card_ids": ["card-1", "card-2"], "target_status": "ready"}}),
-            json!({"action": "transition", "results": [{"id": "card-1", "ok": true}, {"id": "card-2", "ok": true}]}),
+            "List stalled cards // TODO: example",
         ),
         ep(
             "POST",
@@ -713,13 +1083,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"github_repo": "itismyfield/AgentDesk", "github_issue_number": 426, "title": "Improve docs", "assignee_agent_id": "project-agentdesk"}}),
             json!({"card": {"id": "card-426", "status": "ready", "github_issue_number": 426, "assigned_agent_id": "project-agentdesk"}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"body": {"github_repo": "unknown/repo", "github_issue_number": 1, "title": "x", "assignee_agent_id": "ghost"}}),
+            json!({"error": "assignee agent not found: ghost"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/assign-issue -H 'Content-Type: application/json' -d '{\"github_repo\":\"itismyfield/AgentDesk\",\"github_issue_number\":426,\"title\":\"Improve docs\",\"assignee_agent_id\":\"project-agentdesk\"}'"),
         ep("GET", "/api/kanban-cards/{id}", "kanban", "Get card by ID")
             .with_params([("id", path_param("Kanban card ID"))])
             .with_example(
                 json!({"path": {"id": "card-1"}}),
                 json!({"card": {"id": "card-1", "title": "Fix docs", "status": "ready"}}),
-            ),
+            )
+            .with_error_example(
+                404,
+                json!({"path": {"id": "ghost-card"}}),
+                json!({"error": "card not found: ghost-card"}),
+            )
+            .with_curl("curl http://localhost:8787/api/kanban-cards/card-1"),
         ep("PATCH", "/api/kanban-cards/{id}", "kanban", "Update card")
             .with_params([
                 ("id", path_param("Kanban card ID")),
@@ -772,12 +1154,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"path": {"id": "card-1"}, "body": {"status": "ready", "priority": "high"}}),
                 json!({"card": {"id": "card-1", "status": "ready", "priority": "high"}}),
-            ),
+            )
+            .with_error_example(
+                404,
+                json!({"path": {"id": "ghost-card"}, "body": {"status": "ready"}}),
+                json!({"error": "card not found: ghost-card"}),
+            )
+            .with_curl("curl -X PATCH http://localhost:8787/api/kanban-cards/card-1 -H 'Content-Type: application/json' -d '{\"status\":\"ready\",\"priority\":\"high\"}'"),
         ep(
             "DELETE",
             "/api/kanban-cards/{id}",
             "kanban",
-            "Delete card",
+            "Delete card // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
@@ -833,46 +1221,9 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/re-review",
-            "kanban",
-            "Deprecated alias for /api/kanban-cards/batch-rereview",
-        )
-        .deprecated_alias("/api/kanban-cards/batch-rereview"),
-        ep(
-            "POST",
-            "/api/kanban-cards/batch-transition",
-            "kanban",
-            "Force-transition multiple cards",
-        )
-        .with_params([
-            (
-                "issue_numbers",
-                body_param("number[]", false, "GitHub issue numbers to resolve into cards"),
-            ),
-            (
-                "card_ids",
-                body_param("string[]", false, "Explicit card ids to transition"),
-            ),
-            ("status", body_param("string", true, "Target pipeline status")),
-            (
-                "cancel_dispatches",
-                body_param(
-                    "boolean",
-                    false,
-                    "When transitioning to backlog/ready, also cancel active dispatches",
-                )
-                .with_default(true),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"card_ids": ["card-1", "card-2"], "status": "ready", "cancel_dispatches": true}}),
-            json!({"results": [{"card_id": "card-1", "ok": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}]}),
-        ),
-        ep(
-            "POST",
             "/api/kanban-cards/{id}/reopen",
             "kanban",
-            "Reopen a terminal card",
+            "Reopen a terminal card: move a closed/done card back to an active pipeline state (ready). Distinct from /retry (same failed step), /redispatch (new dispatch id), and /resume (continue checkpoint); reopen re-admits a terminal card into the board.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -898,7 +1249,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"reason": "manual reopen", "reset_full": true}}),
             json!({"card": {"id": "card-1", "status": "ready"}, "reopened": true, "reset_full": true, "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1, "from": "done", "to": "ready", "reason": "manual reopen"}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "does-not-exist"}, "body": {}}),
+            json!({"error": "card not found: does-not-exist"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-1/reopen -H 'Content-Type: application/json' -d '{\"reason\":\"manual reopen\",\"reset_full\":true}'"),
         ep(
             "POST",
             "/api/kanban-cards/{id}/transition",
@@ -921,15 +1278,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"status": "ready", "cancel_dispatches": true}}),
             json!({"card": {"id": "card-1", "status": "ready"}, "forced": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}),
-        ),
-        ep(
-            "POST",
-            "/api/kanban-cards/{id}/force-transition",
-            "kanban",
-            "Deprecated alias for /api/kanban-cards/{id}/transition",
         )
-        .deprecated_alias("/api/kanban-cards/{id}/transition"),
-        ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card")
+        .with_error_example(
+            400,
+            json!({"path": {"id": "card-1"}, "body": {}}),
+            json!({"error": "status is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-1/transition -H 'Content-Type: application/json' -d '{\"status\":\"ready\",\"cancel_dispatches\":true}'"),
+        ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card: re-execute the same failed step with the same intent and context (optionally swapping assignee). Distinct from /redispatch (creates a NEW dispatch id), /resume (continues a checkpointed turn), and /reopen (re-admits a closed card).")
             .with_params([
                 ("id", path_param("Kanban card ID")),
                 (
@@ -944,12 +1300,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"path": {"id": "card-1"}, "body": {"assignee_agent_id": "agent-review"}}),
                 json!({"card": {"id": "card-1", "assigned_agent_id": "agent-review", "latest_dispatch_id": "dispatch-retry-1"}}),
-            ),
+            )
+            .with_error_example(
+                409,
+                json!({"path": {"id": "card-1"}, "body": {}}),
+                json!({"error": "card has no failed dispatch to retry"}),
+            )
+            .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-1/retry -H 'Content-Type: application/json' -d '{\"assignee_agent_id\":\"agent-review\"}'"),
         ep(
             "POST",
             "/api/kanban-cards/{id}/redispatch",
             "kanban",
-            "Cancel current dispatch and kick off a new one",
+            "Redispatch: cancel the current live dispatch and create a brand-new dispatch entry with a new dispatch_id for the same card intent. Distinct from /retry (re-executes the SAME step with the same params), /resume (continues a checkpoint), and /reopen (re-admits a closed card).",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -961,12 +1323,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"reason": "stale thread"}}),
             json!({"card": {"id": "card-1", "latest_dispatch_id": "dispatch-redispatch-1", "status": "requested"}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "card-unknown"}, "body": {"reason": "stale thread"}}),
+            json!({"error": "card not found: card-unknown"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-1/redispatch -H 'Content-Type: application/json' -d '{\"reason\":\"stale thread\"}'"),
         ep(
             "POST",
             "/api/kanban-cards/{id}/resume",
             "kanban",
-            "Resume a stuck card by analyzing current state",
+            "Resume: continue a stuck/paused card from its current checkpointed state by inspecting review/dispatch state and issuing the minimal next action. Distinct from /retry (re-run same failed step), /redispatch (new dispatch id), and /reopen (re-admit closed card).",
         )
         .with_params([
             (
@@ -986,7 +1354,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "card-resume"}, "body": {"reason": "manual resume"}}),
             json!({"card": {"id": "card-resume", "status": "in_progress"}, "action": {"type": "new_implementation_dispatch", "dispatch_id": "dispatch-resume-1"}}),
-        ),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"id": "card-in-review"}, "body": {}}),
+            json!({"error": "resume blocked: card is in manual-intervention review; retry with force=true"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-resume/resume -H 'Content-Type: application/json' -d '{\"reason\":\"manual resume\"}'"),
         ep(
             "PATCH",
             "/api/kanban-cards/{id}/defer-dod",
@@ -1020,65 +1394,65 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/kanban-cards/{id}/reviews",
             "kanban",
-            "List reviews for card",
+            "List reviews for card // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/review-state",
             "kanban",
-            "Get canonical review-state record for card",
+            "Get canonical review-state record for card // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/audit-log",
             "kanban",
-            "Get audit log for card",
+            "Get audit log for card // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-cards/{id}/comments",
             "kanban",
-            "Get GitHub comments for linked card issue",
+            "Get GitHub comments for linked card issue // TODO: example",
         )
         .with_params([("id", path_param("Kanban card ID"))]),
         ep(
             "GET",
             "/api/kanban-repos",
             "kanban-repos",
-            "List kanban repos",
+            "List kanban repos // TODO: example",
         ),
         ep(
             "POST",
             "/api/kanban-repos",
             "kanban-repos",
-            "Create kanban repo",
+            "Create kanban repo // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/kanban-repos/{owner}/{repo}",
             "kanban-repos",
-            "Update kanban repo",
+            "Update kanban repo // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/kanban-repos/{owner}/{repo}",
             "kanban-repos",
-            "Delete kanban repo",
+            "Delete kanban repo // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/kanban-reviews/{id}/decisions",
             "reviews",
-            "Update review decisions",
+            "Update review decisions // TODO: example",
         ),
         ep(
             "POST",
             "/api/kanban-reviews/{id}/trigger-rework",
             "reviews",
-            "Trigger rework for review",
+            "Trigger rework for review // TODO: example",
         ),
         ep("GET", "/api/dispatches", "dispatches", "List dispatches")
             .with_params([
@@ -1094,7 +1468,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             .with_example(
                 json!({"query": {"status": "pending"}}),
                 json!({"dispatches": [{"id": "dispatch-1", "kanban_card_id": "card-1", "to_agent_id": "agent-1", "status": "pending", "title": "Implement feature"}]}),
-            ),
+            )
+            .with_error_example(
+                400,
+                json!({"query": {"status": "invalid"}}),
+                json!({"error": "unknown dispatch status: invalid"}),
+            )
+            .with_curl("curl 'http://localhost:8787/api/dispatches?status=pending'"),
         ep(
             "POST",
             "/api/dispatches",
@@ -1132,7 +1512,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"kanban_card_id": "card-1", "to_agent_id": "ch-td", "title": "Do it", "skip_outbox": true}}),
             json!({"dispatch": {"id": "dispatch-1", "kanban_card_id": "card-1", "to_agent_id": "ch-td", "status": "pending", "title": "Do it"}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"body": {"kanban_card_id": "ghost", "to_agent_id": "ghost", "title": "x"}}),
+            json!({"error": "agent not found: ghost"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/dispatches -H 'Content-Type: application/json' -d '{\"kanban_card_id\":\"card-1\",\"to_agent_id\":\"ch-td\",\"title\":\"Do it\"}'"),
         ep(
             "GET",
             "/api/dispatches/{id}",
@@ -1143,7 +1529,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "dispatch-1"}}),
             json!({"dispatch": {"id": "dispatch-1", "status": "pending", "kanban_card_id": "card-1"}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "dispatch-ghost"}}),
+            json!({"error": "dispatch not found: dispatch-ghost"}),
+        )
+        .with_curl("curl http://localhost:8787/api/dispatches/dispatch-1"),
         ep(
             "PATCH",
             "/api/dispatches/{id}",
@@ -1164,72 +1556,89 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"path": {"id": "dispatch-1"}, "body": {"status": "completed", "result": {"summary": "done"}}}),
             json!({"dispatch": {"id": "dispatch-1", "status": "completed", "result": {"summary": "done"}}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"id": "dispatch-ghost"}, "body": {"status": "completed"}}),
+            json!({"error": "dispatch not found: dispatch-ghost"}),
+        )
+        .with_curl("curl -X PATCH http://localhost:8787/api/dispatches/dispatch-1 -H 'Content-Type: application/json' -d '{\"status\":\"completed\"}'"),
         ep(
             "POST",
             "/api/internal/link-dispatch-thread",
             "internal",
-            "Link dispatch to an existing Discord thread",
+            "Link dispatch to an existing Discord thread // TODO: example",
         ),
         ep(
             "GET",
             "/api/internal/card-thread",
             "internal",
-            "Resolve thread metadata for a card",
+            "Resolve thread metadata for a card // TODO: example",
         ),
         ep(
             "GET",
             "/api/internal/pending-dispatch-for-thread",
             "internal",
-            "Find pending dispatch bound to a thread",
+            "Find pending dispatch bound to a thread // TODO: example",
         ),
         ep(
             "GET",
             "/api/pipeline/stages",
             "pipeline",
-            "List pipeline stages",
+            "List pipeline stages // TODO: example",
         ),
         ep(
             "PUT",
             "/api/pipeline/stages",
             "pipeline",
-            "Replace all pipeline stages",
+            "Replace all pipeline stages // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/pipeline/stages",
             "pipeline",
-            "Delete pipeline stages",
+            "Delete pipeline stages // TODO: example",
         ),
         ep(
             "GET",
-            "/api/pipeline/cards/{cardId}",
+            "/api/pipeline/cards/{card_id}",
             "pipeline",
             "Get card pipeline state",
+        )
+        .with_params([("card_id", path_param("Kanban card ID"))])
+        .with_example(
+            json!({"path": {"card_id": "card-1"}}),
+            json!({"card_id": "card-1", "status": "ready", "stage": "implementation", "review_status": null}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"card_id": "ghost-card"}}),
+            json!({"error": "card not found: ghost-card"}),
+        )
+        .with_curl("curl http://localhost:8787/api/pipeline/cards/card-1"),
+        ep(
+            "GET",
+            "/api/pipeline/cards/{card_id}/history",
+            "pipeline",
+            "Get card transition history // TODO: example",
         ),
         ep(
             "GET",
-            "/api/pipeline/cards/{cardId}/history",
+            "/api/pipeline/cards/{card_id}/transcripts",
             "pipeline",
-            "Get card transition history",
-        ),
-        ep(
-            "GET",
-            "/api/pipeline/cards/{cardId}/transcripts",
-            "pipeline",
-            "List completed turn transcripts linked to card dispatches",
+            "List completed turn transcripts linked to card dispatches // TODO: example",
         ),
         ep(
             "GET",
             "/api/pipeline/config/default",
             "pipeline",
-            "Get default pipeline config",
+            "Get default pipeline config // TODO: example",
         ),
         ep(
             "GET",
             "/api/pipeline/config/effective",
             "pipeline",
-            "Get effective merged pipeline config",
+            "Get effective merged pipeline config // TODO: example",
         )
         .with_params([
             (
@@ -1245,31 +1654,31 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/pipeline/config/repo/{owner}/{repo}",
             "pipeline",
-            "Get repo pipeline override",
+            "Get repo pipeline override // TODO: example",
         ),
         ep(
             "PUT",
             "/api/pipeline/config/repo/{owner}/{repo}",
             "pipeline",
-            "Set repo pipeline override",
+            "Set repo pipeline override // TODO: example",
         ),
         ep(
             "GET",
             "/api/pipeline/config/agent/{agent_id}",
             "pipeline",
-            "Get agent pipeline override",
+            "Get agent pipeline override // TODO: example",
         ),
         ep(
             "PUT",
             "/api/pipeline/config/agent/{agent_id}",
             "pipeline",
-            "Set agent pipeline override",
+            "Set agent pipeline override // TODO: example",
         ),
         ep(
             "GET",
             "/api/pipeline/config/graph",
             "pipeline",
-            "Get pipeline graph",
+            "Get pipeline graph // TODO: example",
         )
         .with_params([
             (
@@ -1281,7 +1690,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 query_param("string", false, "Agent id for config resolution"),
             ),
         ]),
-        ep("GET", "/api/github/repos", "github", "List GitHub repos"),
+        ep("GET", "/api/github/repos", "github", "List GitHub repos // TODO: example"),
         ep(
             "POST",
             "/api/github/issues/create",
@@ -1387,7 +1796,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "applied_labels": ["agent:adk-backend"],
                 "pmd_format_version": 1
             }),
-        ),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"repo": "ADK", "title": "no DoD"}}),
+            json!({"error": "dod is required and must contain 1-10 entries"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/github/issues/create -H 'Content-Type: application/json' -d '{\"repo\":\"ADK\",\"title\":\"Example\",\"background\":\"bg\",\"content\":[\"do thing\"],\"dod\":[\"it works\"]}'"),
         ep(
             "POST",
             "/api/issues",
@@ -1395,107 +1810,107 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Deprecated alias for /api/github/issues/create",
         )
         .deprecated_alias("/api/github/issues/create"),
-        ep("POST", "/api/github/repos", "github", "Register GitHub repo"),
+        ep("POST", "/api/github/repos", "github", "Register GitHub repo // TODO: example"),
         ep(
             "POST",
             "/api/github/repos/{owner}/{repo}/sync",
             "github",
-            "Sync GitHub repo",
+            "Sync GitHub repo // TODO: example",
         ),
         ep(
             "GET",
             "/api/github-repos",
             "github-dashboard",
-            "List GitHub repos for dashboard",
+            "List GitHub repos for dashboard // TODO: example",
         ),
         ep(
             "GET",
             "/api/github-issues",
             "github-dashboard",
-            "List GitHub issues for dashboard",
+            "List GitHub issues for dashboard // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/github-issues/{owner}/{repo}/{number}/close",
             "github-dashboard",
-            "Close GitHub issue from dashboard",
+            "Close GitHub issue from dashboard // TODO: example",
         ),
         ep(
             "GET",
             "/api/github-closed-today",
             "github-dashboard",
-            "List issues closed today",
+            "List issues closed today // TODO: example",
         ),
-        ep("GET", "/api/offices", "offices", "List offices"),
-        ep("POST", "/api/offices", "offices", "Create office"),
+        ep("GET", "/api/offices", "offices", "List offices // TODO: example"),
+        ep("POST", "/api/offices", "offices", "Create office // TODO: example"),
         ep(
             "PATCH",
             "/api/offices/reorder",
             "offices",
-            "Reorder offices",
+            "Reorder offices // TODO: example",
         ),
-        ep("PATCH", "/api/offices/{id}", "offices", "Update office"),
-        ep("DELETE", "/api/offices/{id}", "offices", "Delete office"),
+        ep("PATCH", "/api/offices/{id}", "offices", "Update office // TODO: example"),
+        ep("DELETE", "/api/offices/{id}", "offices", "Delete office // TODO: example"),
         ep(
             "POST",
             "/api/offices/{id}/agents",
             "offices",
-            "Add agent to office",
+            "Add agent to office // TODO: example",
         ),
         ep(
             "POST",
             "/api/offices/{id}/agents/batch",
             "offices",
-            "Batch add agents to office",
+            "Batch add agents to office // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/offices/{id}/agents/{agentId}",
             "offices",
-            "Remove agent from office",
+            "Remove agent from office // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/offices/{id}/agents/{agentId}",
             "offices",
-            "Update office agent",
+            "Update office agent // TODO: example",
         ),
         ep(
             "GET",
             "/api/departments",
             "departments",
-            "List departments",
+            "List departments // TODO: example",
         ),
         ep(
             "POST",
             "/api/departments",
             "departments",
-            "Create department",
+            "Create department // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/departments/reorder",
             "departments",
-            "Reorder departments",
+            "Reorder departments // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/departments/{id}",
             "departments",
-            "Update department",
+            "Update department // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/departments/{id}",
             "departments",
-            "Delete department",
+            "Delete department // TODO: example",
         ),
-        ep("GET", "/api/stats", "stats", "Get system stats"),
+        ep("GET", "/api/stats", "stats", "Get system stats // TODO: example"),
         ep(
             "GET",
             "/api/stats/memento",
             "stats",
-            "Get hourly Memento logical call counts and dedup hit rates",
+            "Get hourly Memento logical call counts and dedup hit rates // TODO: example",
         )
         .with_params([(
             "hours",
@@ -1702,163 +2117,183 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/dispatched-sessions",
             "dispatched-sessions",
-            "List dispatched sessions",
+            "List dispatched sessions // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/dispatched-sessions/cleanup",
             "dispatched-sessions",
-            "Delete stale dispatched sessions",
+            "Delete stale dispatched sessions // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/dispatched-sessions/gc-threads",
             "dispatched-sessions",
-            "Garbage-collect orphaned thread sessions",
+            "Garbage-collect orphaned thread sessions // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/dispatched-sessions/{id}",
             "dispatched-sessions",
-            "Update dispatched session",
+            "Update dispatched session // TODO: example",
         ),
         ep(
             "POST",
             "/api/dispatched-sessions/webhook",
             "dispatched-sessions",
-            "Session webhook",
+            "Session webhook // TODO: example",
         ),
-        ep(
-            "POST",
-            "/api/hook/session",
-            "dispatched-sessions",
-            "Deprecated alias for /api/dispatched-sessions/webhook",
-        )
-        .deprecated_alias("/api/dispatched-sessions/webhook"),
         ep(
             "DELETE",
             "/api/dispatched-sessions/webhook",
             "dispatched-sessions",
-            "Delete session webhook state",
+            "Delete session webhook state // TODO: example",
         ),
-        ep(
-            "DELETE",
-            "/api/hook/session",
-            "dispatched-sessions",
-            "Deprecated alias for /api/dispatched-sessions/webhook",
-        )
-        .deprecated_alias("/api/dispatched-sessions/webhook"),
         ep(
             "GET",
             "/api/dispatched-sessions/claude-session-id",
             "dispatched-sessions",
-            "Resolve Claude session id by session key",
+            "Resolve Claude session id by session key // TODO: example",
         ),
         ep(
             "POST",
             "/api/dispatched-sessions/clear-stale-session-id",
             "dispatched-sessions",
-            "Clear stale Claude session id",
+            "Clear stale Claude session id // TODO: example",
         ),
         ep(
             "POST",
             "/api/dispatched-sessions/clear-session-id",
             "dispatched-sessions",
-            "Clear Claude session id by session key",
+            "Clear Claude session id by session key // TODO: example",
         ),
         ep(
             "POST",
             "/api/sessions/{session_key}/force-kill",
             "sessions",
-            "Force-kill session and optionally retry",
+            "Force-kill session and optionally retry // TODO: example",
+        ),
+        ep(
+            "GET",
+            "/api/sessions/{id}/tmux-output",
+            "sessions",
+            "Capture recent tmux pane output for a session (watch-agent-turn skill promotion)",
+        )
+        .with_params([
+            ("id", path_param("Session id (sessions.id)")),
+            (
+                "lines",
+                query_param(
+                    "integer",
+                    false,
+                    "Trailing tmux pane lines to capture (1..=2000)",
+                )
+                .with_default(80),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"lines": 40}}),
+            json!({
+                "session_id": 42,
+                "session_key": "mac-mini:remoteCC-claude-foo",
+                "tmux_name": "remoteCC-claude-foo",
+                "tmux_alive": true,
+                "agent_id": "ch-dd",
+                "provider": "claude",
+                "status": "working",
+                "lines_requested": 40,
+                "lines_effective": 40,
+                "recent_output": "...tail of tmux pane...",
+                "captured_at_ms": 1_745_000_000_000_i64
+            }),
         ),
         ep(
             "GET",
             "/api/session-termination-events",
             "sessions",
-            "List recorded session termination events",
+            "List recorded session termination events // TODO: example",
         ),
-        ep("GET", "/api/messages", "messages", "List messages"),
-        ep("POST", "/api/messages", "messages", "Create message"),
+        ep("GET", "/api/messages", "messages", "List messages // TODO: example"),
+        ep("POST", "/api/messages", "messages", "Create message // TODO: example"),
         ep(
             "GET",
             "/api/discord-bindings",
             "discord",
-            "List Discord bindings",
+            "List Discord bindings // TODO: example",
         ),
         ep(
             "GET",
             "/api/discord/channels/{id}/messages",
             "discord",
-            "Read channel or thread messages",
+            "Read channel or thread messages // TODO: example",
         ),
         ep(
             "GET",
             "/api/discord/channels/{id}",
             "discord",
-            "Get channel or thread info",
+            "Get channel or thread info // TODO: example",
         ),
         ep(
             "POST",
             "/api/dm-reply/register",
             "discord",
-            "Register DM reply handler",
+            "Register DM reply handler // TODO: example",
         ),
         ep(
             "GET",
             "/api/round-table-meetings",
             "meetings",
-            "List meetings",
+            "List meetings // TODO: example",
         ),
         ep(
             "POST",
             "/api/round-table-meetings",
             "meetings",
-            "Create or update meeting",
+            "Create or update meeting // TODO: example",
         ),
         ep(
             "POST",
             "/api/round-table-meetings/start",
             "meetings",
-            "Start meeting",
+            "Start meeting // TODO: example",
         ),
         ep(
             "GET",
             "/api/round-table-meetings/{id}",
             "meetings",
-            "Get meeting by ID",
+            "Get meeting by ID // TODO: example",
         ),
         ep(
             "DELETE",
             "/api/round-table-meetings/{id}",
             "meetings",
-            "Delete meeting",
+            "Delete meeting // TODO: example",
         ),
         ep(
             "PATCH",
             "/api/round-table-meetings/{id}/issue-repo",
             "meetings",
-            "Update meeting issue repository",
+            "Update meeting issue repository // TODO: example",
         ),
         ep(
             "POST",
             "/api/round-table-meetings/{id}/issues",
             "meetings",
-            "Create meeting issues",
+            "Create meeting issues // TODO: example",
         ),
         ep(
             "POST",
             "/api/round-table-meetings/{id}/issues/discard",
             "meetings",
-            "Discard one meeting issue",
+            "Discard one meeting issue // TODO: example",
         ),
         ep(
             "POST",
             "/api/round-table-meetings/{id}/issues/discard-all",
             "meetings",
-            "Discard all meeting issues",
+            "Discard all meeting issues // TODO: example",
         ),
-        ep("GET", "/api/skills/catalog", "skills", "List skill catalog").with_params([(
+        ep("GET", "/api/skills/catalog", "skills", "List skill catalog // TODO: example").with_params([(
             "include_stale",
             query_param(
                 "boolean",
@@ -1870,7 +2305,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/skills/ranking",
             "skills",
-            "Skill usage ranking",
+            "Skill usage ranking // TODO: example",
         )
         .with_params([
             (
@@ -1890,7 +2325,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
         ]),
-        ep("POST", "/api/skills/prune", "skills", "Preview or prune stale skill metadata")
+        ep("POST", "/api/skills/prune", "skills", "Preview or prune stale skill metadata // TODO: example")
             .with_params([(
                 "dry_run",
                 query_param(
@@ -1899,7 +2334,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "When true, report stale skill ids without deleting skills rows",
                 ),
             )]),
-        ep("GET", "/api/cron-jobs", "cron", "List cron jobs"),
+        ep("GET", "/api/cron-jobs", "cron", "List cron jobs // TODO: example"),
         ep(
             "POST",
             "/api/auto-queue/generate",
@@ -1966,12 +2401,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "review_mode": "disabled", "unified_thread": true, "max_concurrent_threads": 2}}),
             json!({"run": {"id": "run-1", "status": "generated", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}]}),
-        ),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"repo": "test-repo", "issue_numbers": []}}),
+            json!({"error": "issue_numbers or entries must be non-empty"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/auto-queue/generate -H 'Content-Type: application/json' -d '{\"repo\":\"test-repo\",\"issue_numbers\":[423,405]}'"),
         ep(
             "POST",
             "/api/auto-queue/dispatch",
             "auto-queue",
-            "Declaratively generate and optionally activate grouped auto-queue work",
+            "Deprecated (#1064): use /api/auto-queue/generate + /api/auto-queue/dispatch-next. Remains functional for legacy CLI callers with the groups body shape.",
         )
         .with_params([
             (
@@ -2080,14 +2521,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"repo": "test-repo", "unified_thread": false}}),
             json!({"dispatched": [{"id": "entry-1", "card_id": "card-423", "dispatch_id": "dispatch-1", "status": "dispatched"}], "count": 1, "active_groups": 1, "pending_groups": 1}),
-        ),
-        ep(
-            "POST",
-            "/api/auto-queue/activate",
-            "auto-queue",
-            "Deprecated alias for /api/auto-queue/dispatch-next",
         )
-        .deprecated_alias("/api/auto-queue/dispatch-next"),
+        .with_error_example(
+            404,
+            json!({"body": {"run_id": "run-ghost"}}),
+            json!({"error": "auto-queue run not found: run-ghost"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/auto-queue/dispatch-next -H 'Content-Type: application/json' -d '{\"repo\":\"test-repo\"}'"),
         ep(
             "GET",
             "/api/auto-queue/status",
@@ -2107,7 +2547,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"query": {"repo": "test-repo"}}),
             json!({"run": {"id": "run-1", "status": "active", "review_mode": "enabled"}, "entries": [{"id": "entry-1", "status": "pending", "github_issue_number": 423}], "agents": {"agent-1": {"pending": 1, "dispatched": 0, "done": 0, "skipped": 0}}, "thread_groups": {"0": {"status": "pending", "pending": 1, "dispatched": 0, "done": 0, "skipped": 0, "entries": [{"id": "entry-1", "card_id": "card-423", "status": "pending", "github_issue_number": 423, "batch_phase": 0}]}}}),
-        ),
+        )
+        .with_error_example(
+            404,
+            json!({"query": {"repo": "no-such-repo"}}),
+            json!({"error": "no auto-queue run for repo: no-such-repo"}),
+        )
+        .with_curl("curl 'http://localhost:8787/api/auto-queue/status?repo=test-repo'"),
         ep(
             "GET",
             "/api/auto-queue/history",
@@ -2240,7 +2686,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"orderedIds": ["entry-2", "entry-1"], "agentId": "agent-1"}}),
             json!({"ok": true}),
-        ),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"agentId": "agent-1"}}),
+            json!({"error": "orderedIds is required"}),
+        )
+        .with_curl("curl -X PATCH http://localhost:8787/api/auto-queue/reorder -H 'Content-Type: application/json' -d '{\"orderedIds\":[\"entry-2\",\"entry-1\"],\"agentId\":\"agent-1\"}'"),
         ep(
             "POST",
             "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
@@ -2318,14 +2770,26 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "released_slots": 0,
                 "cleared_slot_sessions": 0
             }),
-        ),
+        )
+        .with_error_example(
+            409,
+            json!({}),
+            json!({"error": "no active runs to pause"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/auto-queue/pause -H 'Content-Type: application/json' -d '{}'"),
         ep(
             "POST",
             "/api/auto-queue/resume",
             "auto-queue",
-            "Resume paused runs and dispatch next entries",
+            "Resume paused runs and dispatch next entries: continues a run from its paused checkpoint (vs. /retry which re-executes a failed step, /redispatch which creates a new dispatch id, or /reopen which re-admits a closed card).",
         )
-        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "dispatched": 1})),
+        .with_example(json!({}), json!({"ok": true, "resumed_runs": 1, "dispatched": 1}))
+        .with_error_example(
+            409,
+            json!({}),
+            json!({"error": "no paused runs to resume"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/auto-queue/resume"),
         ep(
             "POST",
             "/api/auto-queue/cancel",
@@ -2335,7 +2799,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({}),
             json!({"ok": true, "cancelled_entries": 3, "cancelled_runs": 1}),
-        ),
+        )
+        .with_error_example(
+            409,
+            json!({}),
+            json!({"error": "no cancellable runs"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/auto-queue/cancel -H 'Content-Type: application/json' -d '{}'"),
         ep(
             "POST",
             "/api/auto-queue/runs/{id}/order",
@@ -2369,43 +2839,49 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/channels/{id}/queue",
             "queue",
-            "List queue entries for a Discord channel",
+            "List queue entries for a Discord channel // TODO: example",
+        ),
+        ep(
+            "GET",
+            "/api/channels/{id}/watcher-state",
+            "monitoring",
+            "Snapshot tmux-watcher lifecycle state for a channel (#964): attached, tmux_session, last_relay_offset, inflight_state_present, last_relay_ts_ms // TODO: example",
         ),
         ep(
             "GET",
             "/api/dispatches/pending",
             "queue",
-            "List pending dispatches",
+            "List pending dispatches // TODO: example",
         ),
         ep(
             "POST",
             "/api/dispatches/{id}/cancel",
             "queue",
-            "Cancel a queued dispatch",
+            "Cancel a queued dispatch // TODO: example",
         ),
         ep(
             "POST",
             "/api/dispatches/cancel-all",
             "queue",
-            "Cancel all queued dispatches",
+            "Cancel all queued dispatches // TODO: example",
         ),
         ep(
             "POST",
             "/api/turns/{channel_id}/cancel",
             "queue",
-            "Cancel a live turn by channel",
+            "Cancel a live turn by channel // TODO: example",
         ),
         ep(
             "POST",
             "/api/turns/{channel_id}/extend-timeout",
             "queue",
-            "Extend live turn timeout",
+            "Extend live turn timeout // TODO: example",
         ),
         ep(
             "POST",
             "/api/channels/{channel_id}/monitoring",
             "monitoring",
-            "Create or update a channel monitoring status entry",
+            "Create or update a channel monitoring status entry // TODO: example",
         )
         .with_params([
             ("channel_id", path_param("Discord channel ID")),
@@ -2419,20 +2895,20 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/channels/{channel_id}/monitoring",
             "monitoring",
-            "List channel monitoring status entries",
+            "List channel monitoring status entries // TODO: example",
         )
         .with_params([("channel_id", path_param("Discord channel ID"))]),
         ep(
             "DELETE",
             "/api/channels/{channel_id}/monitoring/{key}",
             "monitoring",
-            "Remove a channel monitoring status entry",
+            "Remove a channel monitoring status entry // TODO: example",
         )
         .with_params([
             ("channel_id", path_param("Discord channel ID")),
             ("key", path_param("Monitoring entry key")),
         ]),
-        ep("GET", "/api/analytics", "analytics", "Observability counters and structured events")
+        ep("GET", "/api/analytics", "analytics", "Observability counters and structured events // TODO: example")
             .with_params([
                 (
                     "provider",
@@ -2474,12 +2950,43 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "limit",
                 query_param("integer", false, "Maximum recent violations to return").with_default(50),
             ),
-        ]),
+        ])
+        .with_example(
+            json!({"query": {"limit": 10}}),
+            json!({"counts": {"dispatch_without_card": 0}, "recent_violations": []}),
+        )
+        .with_error_example(
+            400,
+            json!({"query": {"limit": -1}}),
+            json!({"error": "limit must be non-negative"}),
+        )
+        .with_curl("curl 'http://localhost:8787/api/analytics/invariants?limit=10'"),
+        ep(
+            "GET",
+            "/api/analytics/observability",
+            "analytics",
+            "Foundation-layer atomic counters per channel×provider + in-memory structured event ring (#1070)",
+        )
+        .with_params([(
+            "recentLimit",
+            query_param("integer", false, "Maximum recent events to return (<=1000)")
+                .with_default(100),
+        )])
+        .with_example(
+            json!({"query": {"recentLimit": 50}}),
+            json!({"counters": [{"channel_id": "1473922824350601297", "provider": "codex", "turns_total": 320, "errors_total": 3}], "recent_events": []}),
+        )
+        .with_error_example(
+            400,
+            json!({"query": {"recentLimit": 9999}}),
+            json!({"error": "recentLimit must be <= 1000"}),
+        )
+        .with_curl("curl 'http://localhost:8787/api/analytics/observability?recentLimit=50'"),
         ep(
             "GET",
             "/api/quality/events",
             "analytics",
-            "Agent quality raw event stream",
+            "Agent quality raw event stream // TODO: example",
         )
         .with_params([
             (
@@ -2495,33 +3002,33 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 query_param("integer", false, "Maximum recent events to return").with_default(200),
             ),
         ]),
-        ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
-        ep("GET", "/api/achievements", "analytics", "Agent achievements"),
+        ep("GET", "/api/streaks", "analytics", "Agent activity streaks // TODO: example"),
+        ep("GET", "/api/achievements", "analytics", "Agent achievements // TODO: example"),
         ep(
             "GET",
             "/api/activity-heatmap",
             "analytics",
-            "Activity heatmap by hour",
+            "Activity heatmap by hour // TODO: example",
         ),
-        ep("GET", "/api/audit-logs", "analytics", "Audit logs"),
+        ep("GET", "/api/audit-logs", "analytics", "Audit logs // TODO: example"),
         ep(
             "GET",
             "/api/machine-status",
             "analytics",
-            "Machine online status",
+            "Machine online status // TODO: example",
         ),
         ep(
             "GET",
             "/api/rate-limits",
             "analytics",
-            "Cached rate limits per provider",
+            "Cached rate limits per provider // TODO: example",
         ),
-        ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
+        ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot // TODO: example"),
         ep(
             "GET",
             "/api/token-analytics",
             "analytics",
-            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns",
+            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns // TODO: example",
         )
         .with_params([(
             "period",
@@ -2540,7 +3047,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/skills-trend",
             "analytics",
-            "Skill usage trend by day",
+            "Skill usage trend by day // TODO: example",
         ),
         ep(
             "GET",
@@ -2556,36 +3063,77 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/docs",
             "docs",
-            "List the seven canonical documentation groups or return the legacy flat endpoint list",
+            "List the eight #1063 top-level documentation groups, or return the flat endpoint list with format=flat",
         )
         .with_params([(
             "format",
-            query_param("string", false, "Use format=flat for the legacy endpoint array"),
+            query_param("string", false, "Use format=flat for the full endpoint array"),
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "queue", "count": 15, "description": "Auto-queue generation, activation, ordering, live queue views, and turn control."}]}),
+            json!({"groups": [{"name": "runtime", "description": "Turns, sessions, dispatches, message log, and server lifecycle surfaces.", "categories": ["dispatches", "sessions"]}]}),
+        )
+        .with_error_example(
+            400,
+            json!({"query": {"format": "xml"}}),
+            json!({"error": "unsupported format: xml; use format=flat for the flat endpoint list"}),
+        )
+        .with_curl("curl http://localhost:8787/api/docs"),
+        ep(
+            "GET",
+            "/api/docs/{group}",
+            "docs",
+            "List the fine-grained categories inside one of the eight #1063 groups (runtime/kanban/agents/integrations/automation/config/observability/internal). Falls back to legacy flat-category output with X-Deprecated header when a category name is supplied instead.",
+        )
+        .with_params([(
+            "group",
+            path_param("Group name such as runtime, kanban, automation, or integrations"),
+        )])
+        .with_example(
+            json!({"path": {"group": "kanban"}}),
+            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24}, {"name": "reviews", "endpoint_count": 8}]}),
         ),
         ep(
             "GET",
-            "/api/docs/{category}",
+            "/api/docs/{group}/{category}",
             "docs",
-            "Get detailed docs for one canonical category, including params and examples where available",
+            "Get detailed endpoints for one fine-grained category nested inside a group (e.g. kanban/reviews, automation/auto-queue).",
         )
-        .with_params([(
-            "category",
-            path_param("Canonical docs category name such as queue, kanban, or dispatches"),
-        )])
+        .with_params([
+            (
+                "group",
+                path_param("Top-level group name such as kanban or automation"),
+            ),
+            (
+                "category",
+                path_param("Category under the group such as reviews or auto-queue"),
+            ),
+        ])
         .with_example(
-            json!({"path": {"category": "dispatches"}}),
-            json!({"category": "dispatches", "count": 5, "endpoints": [{"method": "POST", "path": "/api/dispatches", "category": "dispatches", "description": "Create dispatch"}]}),
+            json!({"path": {"group": "kanban", "category": "reviews"}}),
+            json!({"group": "kanban", "category": "reviews", "count": 8, "endpoints": [{"method": "POST", "path": "/api/reviews/verdict"}]}),
         ),
         ep(
             "POST",
             "/api/reviews/verdict",
             "reviews",
             "Submit review verdict",
-        ),
+        )
+        .with_params([
+            ("card_id", body_param("string", true, "Kanban card under review")),
+            ("verdict", body_param("string", true, "approved | rejected | needs_changes")),
+            ("summary", body_param("string", false, "Short reviewer summary")),
+        ])
+        .with_example(
+            json!({"body": {"card_id": "card-1", "verdict": "approved", "summary": "LGTM"}}),
+            json!({"ok": true, "review_id": "review-1", "card": {"id": "card-1", "review_status": "approved"}}),
+        )
+        .with_error_example(
+            400,
+            json!({"body": {"card_id": "card-1"}}),
+            json!({"error": "verdict is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/reviews/verdict -H 'Content-Type: application/json' -d '{\"card_id\":\"card-1\",\"verdict\":\"approved\",\"summary\":\"LGTM\"}'"),
         ep(
             "POST",
             "/api/review-verdict",
@@ -2597,7 +3145,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/decision",
             "reviews",
-            "Submit review-decision action",
+            "Submit review-decision action // TODO: example",
         ),
         ep(
             "POST",
@@ -2610,7 +3158,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/reviews/tuning/aggregate",
             "reviews",
-            "Aggregate review-tuning outcomes",
+            "Aggregate review-tuning outcomes // TODO: example",
         ),
         ep(
             "POST",
@@ -2641,6 +3189,84 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"card_id": "card-1", "decision": "requeue", "comment": "needs reprioritization"}}),
             json!({"ok": true, "card_id": "card-1", "decision": "requeue", "message": "Card moved back to ready for reprioritization"}),
         ),
+        // #1066 /api/memory dual-mode
+        ep(
+            "POST",
+            "/api/memory/recall",
+            "memory",
+            "Recall memory fragments by keyword/text. Auto-selects memento or local backend (ADK_FORCE_LOCAL_MEMORY=1 forces local).",
+        )
+        .with_params([
+            (
+                "keywords",
+                body_param("array", false, "List of keywords matched via LIKE in local mode"),
+            ),
+            (
+                "text",
+                body_param("string", false, "Free-form text appended to keyword filters"),
+            ),
+            (
+                "workspace",
+                body_param("string", false, "Optional workspace scope filter"),
+            ),
+            (
+                "limit",
+                body_param("integer", false, "Max fragments returned (default 20, max 200)"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"keywords": ["postgres"], "workspace": "ops", "limit": 5}}),
+            json!({
+                "fragments": [{"id": "mem-abc", "content": "PostgreSQL cutover done", "topic": "pg-cutover"}],
+                "source": "local",
+                "detected_backend": "local"
+            }),
+        ),
+        ep(
+            "POST",
+            "/api/memory/remember",
+            "memory",
+            "Persist a memory fragment. Auto-selects memento or local backend.",
+        )
+        .with_params([
+            ("content", body_param("string", true, "Fragment content")),
+            ("topic", body_param("string", true, "Topic label for grouping")),
+            (
+                "type",
+                body_param(
+                    "string",
+                    true,
+                    "Fragment type: fact/decision/error/preference/procedure/relation/episode",
+                ),
+            ),
+            (
+                "importance",
+                body_param("number", false, "Importance score 0.0–1.0"),
+            ),
+            (
+                "workspace",
+                body_param("string", false, "Optional workspace scope"),
+            ),
+            (
+                "keywords",
+                body_param("array", false, "Optional keyword array"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"content": "Agent #1066 landed", "topic": "release", "type": "decision"}}),
+            json!({"id": "mem-abc", "source": "local"}),
+        ),
+        ep(
+            "POST",
+            "/api/memory/forget",
+            "memory",
+            "Remove a memory fragment by id. Returns 404 when the id is not found.",
+        )
+        .with_params([("id", body_param("string", true, "Fragment id returned by remember"))])
+        .with_example(
+            json!({"body": {"id": "mem-abc"}}),
+            json!({"ok": true, "source": "local"}),
+        ),
     ]
 }
 
@@ -2656,7 +3282,17 @@ pub async fn api_help() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// GET /api/docs — summary by canonical category, or legacy flat format when `?format=flat`.
+/// GET /api/docs — #1063 hierarchical response.
+///
+/// Default response is the new 8-group hierarchy:
+/// ```json
+/// { "groups": [ { "name": "runtime", "description": "...",
+///                 "categories": ["dispatches", "sessions", ...] }, ... ] }
+/// ```
+///
+/// When `?format=flat` is passed, returns the full flat endpoint list
+/// (preserved for backward-compatible tooling and the endpoint-coverage
+/// contract tests).
 pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Value>) {
     let endpoints = all_endpoints();
     if query
@@ -2667,39 +3303,92 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
         return (StatusCode::OK, Json(json!({ "endpoints": endpoints })));
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "categories": category_summaries(&endpoints),
-        })),
-    )
+    let groups: Vec<Value> = GROUP_NAMES
+        .iter()
+        .map(|group| {
+            let categories: Vec<&'static str> = categories_for_group(&endpoints, group)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            json!({
+                "name": group,
+                "description": group_description(group),
+                "categories": categories,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(json!({ "groups": groups })))
 }
 
-/// GET /api/docs/{category} — detailed endpoints for one canonical category.
-pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Json<Value>) {
+/// Core logic for the single-segment docs route, shared between the HTTP
+/// handler and the in-process CLI helper. Returns `(status, headers, body)`.
+fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Value) {
     let endpoints = all_endpoints();
-    let requested = category.as_str();
-    let canonical = if is_canonical_category(requested) {
-        Some(requested)
+
+    // Primary: treat as group name.
+    if GROUP_NAMES.contains(&segment) {
+        if flat {
+            let matching: Vec<EndpointDoc> = endpoints
+                .into_iter()
+                .filter(|endpoint| category_to_group(effective_category(endpoint)) == segment)
+                .collect();
+            return (
+                StatusCode::OK,
+                HeaderMap::new(),
+                json!({ "endpoints": matching }),
+            );
+        }
+
+        let categories: Vec<Value> = categories_for_group(&endpoints, segment)
+            .into_iter()
+            .map(|(name, count)| {
+                json!({
+                    "name": name,
+                    "description": category_description(name),
+                    "endpoint_count": count,
+                })
+            })
+            .collect();
+        return (
+            StatusCode::OK,
+            HeaderMap::new(),
+            json!({
+                "group": segment,
+                "description": group_description(segment),
+                "categories": categories,
+            }),
+        );
+    }
+
+    // Backward compat: legacy flat category route.
+    let canonical: Option<&'static str> = if is_canonical_category(segment) {
+        // The CANONICAL_CATEGORIES array stores &'static str literals so we can
+        // recover a 'static lifetime by matching against the constant list.
+        CANONICAL_CATEGORIES
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == segment)
     } else {
         endpoints
             .iter()
-            .find(|endpoint| endpoint.subcategory == Some(requested))
+            .find(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
             .map(|endpoint| endpoint.category)
     };
 
     let Some(canonical) = canonical else {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("unknown docs category: {category}") })),
+            HeaderMap::new(),
+            json!({ "error": format!("unknown docs group or category: {segment}") }),
         );
     };
 
-    let legacy_drilldown = requested != canonical;
+    let legacy_drilldown = segment != canonical;
     let matching: Vec<EndpointDoc> = if legacy_drilldown {
         endpoints
             .into_iter()
-            .filter(|endpoint| endpoint.subcategory == Some(requested))
+            .filter(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
             .collect()
     } else {
         endpoints
@@ -2711,19 +3400,109 @@ pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Jso
     if matching.is_empty() {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("unknown docs category: {category}") })),
+            HeaderMap::new(),
+            json!({ "error": format!("unknown docs group or category: {segment}") }),
+        );
+    }
+
+    // Emit deprecation hint pointing at the new /group/category route.
+    let mut headers = HeaderMap::new();
+    let group_for_category = category_to_group(segment);
+    let canonical_path = format!("/api/docs/{group_for_category}/{segment}");
+    if let Ok(value) = HeaderValue::from_str(&canonical_path) {
+        headers.insert("X-Deprecated", value);
+    }
+
+    (
+        StatusCode::OK,
+        headers,
+        json!({
+            "category": segment,
+            "canonical_category": canonical,
+            "description": category_description(segment),
+            "count": matching.len(),
+            "deprecated": true,
+            "canonical_path": canonical_path,
+            "subcategories": subcategory_summaries(&matching, canonical),
+            "endpoints": matching,
+        }),
+    )
+}
+
+/// GET /api/docs/{group_or_category}
+///
+/// Preferred behavior (#1063): `group` is one of the 8 top-level group names,
+/// response is `{ group, categories: [{name, description, endpoint_count}] }`.
+///
+/// Backward-compatible fallback: if the segment matches a legacy category name
+/// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
+/// like `reviews`), returns the old category-detail shape with an
+/// `X-Deprecated` header pointing at the new route. Callers should migrate to
+/// `GET /api/docs/{group}/{category}`.
+pub async fn api_docs_group_or_category(
+    Path(segment): Path<String>,
+    Query(query): Query<ApiDocsQuery>,
+) -> impl IntoResponse {
+    let flat = query
+        .format
+        .as_deref()
+        .is_some_and(|format| format.eq_ignore_ascii_case("flat"));
+    let (status, headers, body) = resolve_docs_segment(&segment, flat);
+    (status, headers, Json(body))
+}
+
+/// Back-compat shim for the in-process CLI `cmd_docs` path. Routes a single
+/// category name through the legacy branch and returns the body with the
+/// resolved status. Headers (including `X-Deprecated`) are dropped because
+/// the CLI prints JSON only.
+pub async fn api_docs_category(Path(category): Path<String>) -> (StatusCode, Json<Value>) {
+    let (status, _headers, body) = resolve_docs_segment(&category, false);
+    (status, Json(body))
+}
+
+/// GET /api/docs/{group}/{category} — endpoints for one fine-grained
+/// category nested under a specific group.
+pub async fn api_docs_group_category(
+    Path((group, category)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    if !GROUP_NAMES.contains(&group.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("unknown docs group: {group}") })),
+        );
+    }
+
+    if category_to_group(&category) != group.as_str() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("category {category} does not belong to group {group}")
+            })),
+        );
+    }
+
+    let endpoints = all_endpoints();
+    let matching: Vec<EndpointDoc> = endpoints
+        .into_iter()
+        .filter(|endpoint| effective_category(endpoint) == category.as_str())
+        .collect();
+
+    if matching.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("no endpoints documented for {group}/{category}")
+            })),
         );
     }
 
     (
         StatusCode::OK,
         Json(json!({
-            "category": category.clone(),
-            "canonical_category": canonical,
+            "group": group,
+            "category": category,
             "description": category_description(&category),
             "count": matching.len(),
-            "deprecated": legacy_drilldown,
-            "subcategories": subcategory_summaries(&matching, canonical),
             "endpoints": matching,
         })),
     )

@@ -1,3 +1,4 @@
+/* giant-file-exemption: reason=merge-automation-pending-split ticket=#1078 */
 // ── merge-automation.js ──────────────────────────────────────────────────
 // Automates PR merging and worktree cleanup after review passes.
 //
@@ -35,7 +36,12 @@ var CODEX_NOTIFICATION_TTL_SECONDS = 6 * 60 * 60;
 
 var mergeAutomation = {
   name: "merge-automation",
-  priority: 200,  // Run after all other policies
+  // #1079: pipeline.js sits at priority 200. Bump merge-automation to 201 so
+  // the (priority, hook) tuple is unambiguous for the orchestrator. Running
+  // *after* pipeline preserves the original "Run after all other policies"
+  // intent — pipeline first routes dispatchables, then merge-automation acts
+  // on terminal cards.
+  priority: 201,
 
   // ── Card reached terminal → trigger auto-merge ──────────────────────
   onCardTerminal: function(payload) {

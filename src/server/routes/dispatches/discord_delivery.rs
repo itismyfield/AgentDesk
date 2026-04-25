@@ -259,20 +259,24 @@ pub(crate) enum ReviewFollowupKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DispatchMessagePostErrorKind {
+pub(crate) enum DispatchMessagePostErrorKind {
     MessageTooLong,
     Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct DispatchMessagePostError {
+pub(crate) struct DispatchMessagePostError {
     kind: DispatchMessagePostErrorKind,
     detail: String,
 }
 
 impl DispatchMessagePostError {
-    pub(super) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
+    pub(crate) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
         Self { kind, detail }
+    }
+
+    pub(crate) fn kind(&self) -> DispatchMessagePostErrorKind {
+        self.kind
     }
 
     pub(super) fn is_length_error(&self) -> bool {
@@ -509,6 +513,63 @@ fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
         || (body.contains("50035") && lowered.contains("length"))
 }
 
+/// Pure POST helper — no pre-truncation. Used by the unified outbound API
+/// (see `crate::services::discord::outbound`) which owns the length policy.
+pub(crate) async fn post_raw_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message: &str,
+) -> Result<String, DispatchMessagePostError> {
+    let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
+    let response = client
+        .post(&message_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to post dispatch message to {channel_id}: {error}"),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let kind = if is_discord_length_error(status, &body) {
+            DispatchMessagePostErrorKind::MessageTooLong
+        } else {
+            DispatchMessagePostErrorKind::Other
+        };
+        return Err(DispatchMessagePostError::new(
+            kind,
+            format!("failed to post dispatch message to {channel_id}: {status} {body}"),
+        ));
+    }
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to parse dispatch message response for {channel_id}: {error}"),
+            )
+        })?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("dispatch message response for {channel_id} omitted message id"),
+            )
+        })
+}
+
 async fn post_dispatch_message_once_to_channel(
     client: &reqwest::Client,
     token: &str,
@@ -587,27 +648,48 @@ pub(super) async fn post_dispatch_message_to_channel(
     message: &str,
     minimal_message: &str,
 ) -> Result<String, DispatchMessagePostError> {
-    match post_dispatch_message_once_to_channel(client, token, base_url, channel_id, message).await
-    {
-        Ok(message_id) => Ok(message_id),
-        Err(error)
-            if error.is_length_error()
-                && !minimal_message.trim().is_empty()
-                && minimal_message != message =>
-        {
-            tracing::warn!(
-                "[dispatch] Message too long for channel {channel_id}; retrying with minimal fallback"
-            );
-            post_dispatch_message_once_to_channel(
-                client,
-                token,
-                base_url,
-                channel_id,
-                minimal_message,
-            )
-            .await
+    // #1006: route through the unified outbound API. The API owns length
+    // truncation + minimal-fallback retry; the dispatch outbox correlation id
+    // is injected at the higher level where dispatch_id is known, so this
+    // helper uses anonymous delivery (no dedup key).
+    use crate::services::discord::outbound::{
+        DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
+        OutboundDeduper, deliver_outbound,
+    };
+
+    let outbound_client =
+        HttpOutboundClient::new(client.clone(), token.to_string(), base_url.to_string());
+    let dedup = OutboundDeduper::new();
+    let outbound_msg = DiscordOutboundMessage::new(channel_id, message);
+    let policy = DiscordOutboundPolicy::dispatch_outbox(minimal_message.to_string());
+
+    match deliver_outbound(&outbound_client, &dedup, outbound_msg, policy).await {
+        DeliveryResult::Success { message_id } => Ok(message_id),
+        DeliveryResult::Fallback { message_id, kind } => {
+            if matches!(
+                kind,
+                crate::services::discord::outbound::FallbackKind::MinimalFallback
+            ) {
+                tracing::warn!(
+                    "[dispatch] Message too long for channel {channel_id}; retried with minimal fallback"
+                );
+            }
+            Ok(message_id)
         }
-        Err(error) => Err(error),
+        DeliveryResult::Skipped { .. } => Err(DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!("unexpected skip for channel {channel_id}"),
+        )),
+        DeliveryResult::PermanentFailure { detail } => {
+            let kind = if detail.to_ascii_lowercase().contains("base_type_max_length")
+                || detail.contains("length")
+            {
+                DispatchMessagePostErrorKind::MessageTooLong
+            } else {
+                DispatchMessagePostErrorKind::Other
+            };
+            Err(DispatchMessagePostError::new(kind, detail))
+        }
     }
 }
 
@@ -3577,6 +3659,13 @@ async fn send_review_result_message_via_http(
     token: &str,
     discord_api_base: &str,
 ) -> Result<(), String> {
+    // #1006 (secondary slice): review followup now routes through the
+    // unified outbound API so it inherits length-safety and dedup support.
+    use crate::services::discord::outbound::{
+        DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
+        deliver_outbound,
+    };
+
     let client = reqwest::Client::new();
     let target_channel = resolve_review_followup_target_channel(
         db,
@@ -3588,35 +3677,34 @@ async fn send_review_result_message_via_http(
         channel_id_num,
     )
     .await?;
-    let url = discord_api_url(
-        discord_api_base,
-        &format!("/channels/{target_channel}/messages"),
-    );
 
-    match client
-        .post(&url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": message}))
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => Ok(()),
-        Ok(response) => match kind {
+    let outbound_client =
+        HttpOutboundClient::new(client, token.to_string(), discord_api_base.to_string());
+    // Correlation ids are attached for observability + future DB-backed dedup;
+    // an ephemeral per-call deduper is used here so process-local state does
+    // not silently swallow legitimate repeated notifications. Follow-up slices
+    // will wire a shared DB-backed store keyed on these correlation ids.
+    let dedup = crate::services::discord::outbound::OutboundDeduper::new();
+    let semantic_event_id = match kind {
+        ReviewFollowupKind::Pass => format!("review:{card_id}:pass"),
+        ReviewFollowupKind::Unknown => format!("review:{card_id}:unknown"),
+    };
+    let outbound_msg = DiscordOutboundMessage::new(target_channel.clone(), message)
+        .with_correlation(format!("review:{card_id}"), semantic_event_id);
+    let policy = DiscordOutboundPolicy::review_notification(None);
+
+    match deliver_outbound(&outbound_client, &dedup, outbound_msg, policy).await {
+        DeliveryResult::Success { .. } | DeliveryResult::Fallback { .. } => Ok(()),
+        DeliveryResult::Skipped { .. } => {
+            // Duplicate suppression is a success for the caller.
+            Ok(())
+        }
+        DeliveryResult::PermanentFailure { detail } => match kind {
             ReviewFollowupKind::Pass => Err(format!(
-                "discord API error {} for pass notification",
-                response.status()
+                "discord request failed for pass notification: {detail}"
             )),
             ReviewFollowupKind::Unknown => Err(format!(
-                "discord API error {} for unknown-verdict notification",
-                response.status()
-            )),
-        },
-        Err(error) => match kind {
-            ReviewFollowupKind::Pass => Err(format!(
-                "discord request failed for pass notification: {error}"
-            )),
-            ReviewFollowupKind::Unknown => Err(format!(
-                "discord request failed for unknown-verdict notification: {error}"
+                "discord request failed for unknown-verdict notification: {detail}"
             )),
         },
     }

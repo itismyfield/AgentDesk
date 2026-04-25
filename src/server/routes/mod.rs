@@ -21,6 +21,7 @@ pub mod kanban;
 pub mod kanban_repos;
 mod maintenance;
 pub mod meetings;
+pub mod memory_api;
 pub mod messages;
 pub mod monitoring;
 pub mod offices;
@@ -180,6 +181,16 @@ pub fn api_router_with_pg(
     crate::services::discord::monitoring_status::spawn_expiry_sweeper(
         state::global_monitoring_store(),
         state.health_registry.clone(),
+    );
+
+    // #1031: Server-level idle detection — register `system-detected:idle`
+    // monitoring entries when an active turn has no tmux output > 30s.
+    #[cfg(not(test))]
+    crate::services::discord::monitoring_detector::spawn_idle_detector(
+        state::global_monitoring_store(),
+        state.health_registry.clone(),
+        Some(state.db.clone()),
+        state.pg_pool.clone(),
     );
 
     compose_api_router(state.clone()).with_state(state)

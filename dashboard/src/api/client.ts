@@ -750,6 +750,9 @@ export async function getStalledCards(): Promise<KanbanCard[]> {
   return request("/api/kanban-cards/stalled");
 }
 
+// #1064: bulk-action consolidated into per-card POST /kanban-cards/{id}/transition.
+// Server-side pipeline lookup for terminal/initial states is now the caller's
+// responsibility — each action resolves a concrete target_status before iteration.
 export async function bulkKanbanAction(
   action: "pass" | "reset" | "cancel" | "transition",
   card_ids: string[],
@@ -758,14 +761,36 @@ export async function bulkKanbanAction(
   action: string;
   results: Array<{ id: string; ok: boolean; error?: string }>;
 }> {
-  return request("/api/kanban-cards/bulk-action", {
-    method: "POST",
-    body: JSON.stringify({
-      action,
-      card_ids,
-      target_status: targetStatus,
+  let resolvedTarget: string | undefined = targetStatus;
+  if (action === "pass" || action === "cancel") {
+    resolvedTarget = "done";
+  } else if (action === "reset") {
+    resolvedTarget = "backlog";
+  } else if (action === "transition") {
+    if (!resolvedTarget) {
+      throw new Error("transition action requires target_status");
+    }
+  }
+
+  const results = await Promise.all(
+    card_ids.map(async (id) => {
+      try {
+        await request(`/api/kanban-cards/${encodeURIComponent(id)}/transition`, {
+          method: "POST",
+          body: JSON.stringify({ status: resolvedTarget }),
+        });
+        return { id, ok: true };
+      } catch (error) {
+        return {
+          id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
     }),
-  });
+  );
+
+  return { action, results };
 }
 
 export async function getKanbanRepoSources(): Promise<KanbanRepoSource[]> {
@@ -1166,7 +1191,15 @@ export interface AgentQualitySummary {
   generatedAt: string;
   agentId: string;
   latest: AgentQualityDailyRecord | null;
+  /** #1102: alias for `latest` — DoD-mandated field. */
+  current?: AgentQualityDailyRecord | null;
   daily: AgentQualityDailyRecord[];
+  /** #1102: last 7 days of daily rows (newest-first). */
+  trend7d?: AgentQualityDailyRecord[];
+  /** #1102: last 30 days of daily rows (newest-first). */
+  trend30d?: AgentQualityDailyRecord[];
+  /** #1102: true when `daily` is synthesized from agent_quality_event. */
+  fallbackFromEvents?: boolean;
 }
 
 export interface AgentQualityRankingEntry {
@@ -1178,10 +1211,21 @@ export interface AgentQualityRankingEntry {
   latestDay: string;
   rolling7d: AgentQualityWindow;
   rolling30d: AgentQualityWindow;
+  /** #1102: value of the chosen (metric, window). null when unavailable. */
+  metricValue?: number | null;
 }
+
+export type AgentQualityRankingMetric = "turn_success_rate" | "review_pass_rate";
+export type AgentQualityRankingWindow = "7d" | "30d";
 
 export interface AgentQualityRankingResponse {
   generatedAt: string;
+  /** #1102 */
+  metric?: AgentQualityRankingMetric;
+  /** #1102 */
+  window?: AgentQualityRankingWindow;
+  /** #1102: sample_size threshold applied to the requested window. */
+  minSampleSize?: number;
   agents: AgentQualityRankingEntry[];
 }
 
@@ -1195,8 +1239,13 @@ export async function getAgentQuality(
 
 export async function getAgentQualityRanking(
   limit = 20,
+  metric?: AgentQualityRankingMetric,
+  window?: AgentQualityRankingWindow,
 ): Promise<AgentQualityRankingResponse> {
-  return request(`/api/agents/quality/ranking?limit=${limit}`);
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (metric) params.set("metric", metric);
+  if (window) params.set("window", window);
+  return request(`/api/agents/quality/ranking?${params.toString()}`);
 }
 
 // ── Agent Timeline ──
@@ -1233,8 +1282,9 @@ export interface DiscordBinding {
 }
 
 export async function getDiscordBindings(): Promise<DiscordBinding[]> {
+  // #1065: canonical /api/discord/bindings (legacy /api/discord-bindings still accepted).
   const data = await request<{ bindings: DiscordBinding[] }>(
-    "/api/discord-bindings",
+    "/api/discord/bindings",
   );
   return data.bindings;
 }
@@ -1857,7 +1907,7 @@ export async function activateAutoQueue(
   const body: Record<string, unknown> = {};
   if (repo) body.repo = repo;
   if (agentId) body.agent_id = agentId;
-  return request("/api/auto-queue/activate", {
+  return request("/api/auto-queue/dispatch-next", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -1932,9 +1982,14 @@ export async function reorderAutoQueueEntries(
   orderedIds: string[],
   agentId?: string | null,
 ): Promise<{ ok: boolean }> {
-  return request("/api/auto-queue/reorder", {
+  // #1065: canonical /api/queue/reorder + snake_case body.
+  // Legacy /api/auto-queue/reorder + {orderedIds, agentId} still accepted via aliases.
+  return request("/api/queue/reorder", {
     method: "PATCH",
-    body: JSON.stringify({ orderedIds, agentId: agentId ?? undefined }),
+    body: JSON.stringify({
+      ordered_ids: orderedIds,
+      agent_id: agentId ?? undefined,
+    }),
   });
 }
 

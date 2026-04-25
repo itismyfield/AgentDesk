@@ -36,6 +36,14 @@ pub struct AgentQualityQuery {
 #[derive(Debug, Deserialize)]
 pub struct AgentQualityRankingQuery {
     pub limit: Option<usize>,
+    /// Which metric to rank by. One of `turn_success_rate` (default) or
+    /// `review_pass_rate`.
+    pub metric: Option<String>,
+    /// Which rolling window to use. One of `7d` (default) or `30d`.
+    pub window: Option<String>,
+    /// Override the minimum sample_size threshold. Defaults to 5
+    /// (`QUALITY_SAMPLE_GUARD`).
+    pub min_sample_size: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,10 +97,17 @@ pub async fn agents_quality_ranking(
     Query(query): Query<AgentQualityRankingQuery>,
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match crate::services::observability::query_agent_quality_ranking(
+    use crate::services::observability::{QualityRankingMetric, QualityRankingWindow};
+    let metric = QualityRankingMetric::parse(query.metric.as_deref());
+    let window = QualityRankingWindow::parse(query.window.as_deref());
+    let min_sample_size = query.min_sample_size.unwrap_or(5);
+    match crate::services::observability::query_agent_quality_ranking_with(
         &state.db,
         state.pg_pool_ref(),
         query.limit.unwrap_or(50),
+        metric,
+        window,
+        min_sample_size,
     )
     .await
     {

@@ -1,3 +1,4 @@
+/* giant-file-exemption: reason=review-lifecycle-pending-split ticket=#1078 */
 /**
  * review-automation.js — ADK Policy: Review Lifecycle
  * priority: 50

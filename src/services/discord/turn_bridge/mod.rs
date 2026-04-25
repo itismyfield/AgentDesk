@@ -322,6 +322,15 @@ fn advance_tmux_relay_confirmed_end(
         }
     }
 
+    // #964: observability timestamp — updated whenever the watermark advances
+    // (including the CAS-loser path, since that still proves a peer completed
+    // a relay) so `GET /api/channels/:id/watcher-state` can surface the most
+    // recent relay activity without blocking on disk state.
+    relay_coord.last_relay_ts_ms.store(
+        chrono::Utc::now().timestamp_millis(),
+        std::sync::atomic::Ordering::Release,
+    );
+
     let confirmed_end = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
@@ -1003,6 +1012,15 @@ pub(super) fn spawn_turn_bridge(
                             }
                         }
                         StreamMessage::ToolResult { content, is_error } => {
+                            // #1084: flag oversize tool outputs + record metrics.
+                            // Never mutates `content` — the agent and transcript
+                            // still see the raw output; only a warn log + counters
+                            // fire when thresholds are exceeded.
+                            let _ = crate::services::tool_output_guard::observe(
+                                last_tool_name.as_deref(),
+                                is_error,
+                                &content,
+                            );
                             if let Some(ref tn) = last_tool_name {
                                 let status = if is_error { "✗" } else { "✓" };
                                 let detail = last_tool_summary

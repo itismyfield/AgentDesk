@@ -1,6 +1,34 @@
 # default-pipeline.yaml — canonical pipeline definition
 # This file defines the state machine that kanban.rs enforces.
 # Editing this file changes pipeline behavior without rebuilding.
+#
+# ── State / Stage SSoT relationship (#1081) ─────────────────────
+#
+# There are two orthogonal concepts in the system; they must not be
+# conflated or duplicated:
+#
+#   * Card states (FSM)  — owned by this YAML file and enforced by the
+#                          Rust FSM in `src/engine/transition.rs`. Valid
+#                          values and transitions live in the `states:`
+#                          and `transitions:` blocks below.
+#
+#   * Pipeline stages    — owned by the `pipeline_stages` table
+#                          (repo/agent level configuration, managed via
+#                          `/api/pipeline-stages` and the auto-queue).
+#                          Stages are a *scheduling* abstraction layered
+#                          on top of the FSM: each stage dispatches work
+#                          that drives one or more FSM transitions, but
+#                          the FSM itself is the single owner of the
+#                          `kanban_cards.status` column.
+#
+# The one legal bridge between the two is `pipeline_stage_id` on
+# `kanban_cards`, assigned by `policies/pipeline.js` when a card enters a
+# dispatchable state. All `status` updates must go through the FSM
+# (`kanban::transition_status_with_opts` / `_pg` or — for low-level
+# callers that already hold a connection — `execute_intent_on_conn`).
+# A lint test (`lint_no_direct_kanban_status_update_in_production` in
+# `src/kanban.rs`) fails the build if production code issues a direct
+# `UPDATE kanban_cards SET status` outside the FSM executor.
 
 name: default
 version: 1
@@ -125,10 +153,40 @@ phase_gate:
   dispatch_to: self
   dispatch_type: phase-gate
   pass_verdict: phase_gate_passed
+  # #1082: `checks` now references names registered via policies/phase_gate.js.
+  # YAML lists the gate names only; their implementations live in the JS
+  # registry (`agentdesk.registerPhaseGate(name, fn)`).
   checks:
     - merge_verified
     - issue_closed
     - build_passed
+
+# ── Stage → FSM feedback (#1081) ─────────────────────────────────
+#
+# Pipeline stages (stored in the `pipeline_stages` table) may declare
+# an `on_failure` policy. When a stage's dispatch fails (code failure,
+# verdict=reject, timeout exhaust), the pipeline resolver maps that to
+# one of the following FSM-visible actions:
+#
+#   on_failure: fail      — leave card in current state, surface to PMD
+#                           via escalation (default).
+#   on_failure: rework    — route the card back into a rework loop by
+#                           transitioning toward `in_progress` via the
+#                           review-rework path. This lets the FSM reuse
+#                           its existing `review → in_progress` gated
+#                           transition (see `transitions` above) instead
+#                           of teaching stages how to mutate status.
+#   on_failure: skip      — mark this stage skipped, advance to the next
+#                           stage without changing FSM state.
+#
+# `on_failure_target` (optional) pins the destination stage when the
+# default next-stage resolution is insufficient. The FSM state changes
+# triggered by these policies still flow exclusively through the FSM
+# executor — the stage layer never writes `kanban_cards.status` itself.
+
+stage_failure_policy:
+  default: fail
+  allowed: [fail, rework, skip]
 
 # ── Clocks ────────────────────────────────────────────────────────
 #
@@ -150,24 +208,40 @@ clocks:
 # Evaluated by timeouts.js on each onTick cycle.
 
 timeouts:
+  # #1082: max_retries >= 1, backoff: exponential (1m→5m→15m),
+  # on_exhaust_policy: escalate | notify | fail.  Legacy `on_exhaust` (string
+  # state id) remains accepted for backward-compat when `on_exhaust_policy`
+  # is not set.
+
   requested:
     duration: 45m
     clock: requested_at
     max_retries: 10
-    on_exhaust: requested
+    backoff: exponential
+    on_exhaust: requested           # legacy (state to re-enter)
+    on_exhaust_policy: escalate     # #1082 typed policy
 
   in_progress:
     duration: 2h
     clock: started_at
+    max_retries: 1
+    backoff: exponential
     on_exhaust: in_progress
+    on_exhaust_policy: escalate
 
   review:
     duration: 30m
     clock: review_entered_at
+    max_retries: 1
+    backoff: exponential
     on_exhaust: review
+    on_exhaust_policy: escalate
 
   awaiting_dod:
     duration: 15m
     clock: awaiting_dod_at
     condition: review_status = 'awaiting_dod'
+    max_retries: 1
+    backoff: exponential
     on_exhaust: review
+    on_exhaust_policy: escalate

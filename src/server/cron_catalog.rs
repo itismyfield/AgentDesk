@@ -78,3 +78,15 @@ pub fn github_issue_sync_descriptor(interval_minutes: u64) -> Option<CronJobDesc
         kv_label: "github_sync".to_string(),
     })
 }
+
+/// #1072 Turn-lifecycle SLO aggregation (Epic #905 Phase 1).
+/// Piggybacks on the 5-minute tier — exposed separately so the cron-jobs API
+/// can surface the aggregator as a distinct job for observability.
+pub fn slo_aggregation_descriptor() -> CronJobDescriptor {
+    CronJobDescriptor {
+        job_id: "slo_aggregation".to_string(),
+        name: "SLO aggregation — 3 turn-lifecycle metrics (success rate, duplicate relays, avg latency) + threshold alerter".to_string(),
+        every_ms: 300_000,
+        kv_label: "5min".to_string(),
+    }
+}

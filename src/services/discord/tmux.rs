@@ -392,13 +392,19 @@ fn strip_inprogress_indicators(body: &str) -> String {
     lines.join("\n")
 }
 
-fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &'static str) -> String {
+fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &str) -> String {
     let cleaned = strip_inprogress_indicators(text);
     let trimmed = cleaned.trim_end();
     if trimmed.ends_with(label) {
         return trimmed.to_string();
     }
     if trimmed.is_empty() {
+        // #1009: label itself may exceed DISCORD_MSG_LIMIT when monitor entries
+        // balloon — guard here too (the with-body branch below already guards).
+        let limit = super::DISCORD_MSG_LIMIT;
+        if label.len() > limit {
+            return truncate_str(label, limit);
+        }
         return label.to_string();
     }
 
@@ -409,7 +415,13 @@ fn rewrite_placeholder_as_terminal_suppressed(text: &str, label: &'static str) -
     } else {
         trimmed.to_string()
     };
-    format!("{base}{suffix}")
+    let composed = format!("{base}{suffix}");
+    // Final belt-and-suspenders guard (rare: suffix.len() ≥ DISCORD_MSG_LIMIT).
+    if composed.len() > super::DISCORD_MSG_LIMIT {
+        truncate_str(&composed, super::DISCORD_MSG_LIMIT)
+    } else {
+        composed
+    }
 }
 
 fn reconstructed_inflight_placeholder_body(state: &super::inflight::InflightTurnState) -> String {
@@ -680,6 +692,57 @@ fn monitor_auto_turn_completion_notice(label: &str, event_count: usize) -> Strin
     format!("🔔 Monitor 완료: {label} (events={event_count})")
 }
 
+/// #1009: Shared formatter for the monitor auto-turn suppressed-placeholder
+/// summary line. Produces:
+///   - `🔔 Monitor n회 처리 · 다음 모니터: {key1, key2, ...}` when entries > 0
+///   - `🔔 Monitor n회 처리 · (등록된 모니터 없음)` when entries == 0
+/// Entry keys are emitted in the order the store returns them. Called from
+/// both `suppressed_placeholder_action` (via the monitor-aware wrapper) and
+/// the lifecycle-notice path so both channels use identical copy.
+pub(super) fn format_monitor_suppressed_label(event_count: usize, entry_keys: &[String]) -> String {
+    if entry_keys.is_empty() {
+        format!("🔔 Monitor {}회 처리 · (등록된 모니터 없음)", event_count)
+    } else {
+        format!(
+            "🔔 Monitor {}회 처리 · 다음 모니터: {{{}}}",
+            event_count,
+            entry_keys.join(", ")
+        )
+    }
+}
+
+/// #1009: Compose the full suppressed-placeholder body for monitor auto-turn.
+/// Rebuilds the existing `last_edit_text`-preserve + label-append behaviour
+/// from `rewrite_placeholder_as_terminal_suppressed` but with the dynamic
+/// `format_monitor_suppressed_label` text. Length-guarded against
+/// `DISCORD_MSG_LIMIT` by the underlying rewrite helper.
+pub(super) fn format_monitor_suppressed_body(
+    last_edit_text: &str,
+    event_count: usize,
+    entry_keys: &[String],
+) -> String {
+    let label = format_monitor_suppressed_label(event_count, entry_keys);
+    rewrite_placeholder_as_terminal_suppressed(last_edit_text, &label)
+}
+
+/// #1009: System-level hint injected once per monitor auto-turn entry so the
+/// agent produces a 1-line summary + next action before terminating. Returned
+/// verbatim at the claim sites; callers log it and record the one-shot flag.
+pub(super) const MONITOR_AUTO_TURN_PREAMBLE_HINT: &str = "[system] 모니터 자동 턴 종료 전, 이번 턴에서 확인한 상태 1줄 요약과 다음 액션을 반드시 남겨주세요.";
+
+/// #1009: One-shot guard for `MONITOR_AUTO_TURN_PREAMBLE_HINT` injection.
+/// Returns `Some(hint)` on first call per turn and flips `injected` to true;
+/// subsequent calls return `None` so the hint is never repeated within a
+/// single monitor auto-turn frame.
+pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Option<&'static str> {
+    if *injected {
+        None
+    } else {
+        *injected = true;
+        Some(MONITOR_AUTO_TURN_PREAMBLE_HINT)
+    }
+}
+
 fn enqueue_monitor_auto_turn_suppressed_notification(
     pg_pool: Option<&sqlx::PgPool>,
     db: Option<&crate::db::Db>,
@@ -883,6 +946,74 @@ fn ensure_monitor_auto_turn_inflight(
             );
         }
     }
+}
+
+fn reset_stale_relay_watermark_if_output_regressed(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    observed_output_end: u64,
+    context: &str,
+) -> bool {
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+    let mut confirmed = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    while confirmed != 0 && observed_output_end < confirmed {
+        match relay_coord.confirmed_end_offset.compare_exchange(
+            confirmed,
+            0,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                relay_coord
+                    .last_relay_ts_ms
+                    .store(0, std::sync::atomic::Ordering::Release);
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={})",
+                    tmux_session_name,
+                    channel_id.get(),
+                    context,
+                    observed_output_end,
+                    confirmed
+                );
+                return true;
+            }
+            Err(observed) => confirmed = observed,
+        }
+    }
+
+    false
+}
+
+fn reset_stale_local_relay_offset_if_output_regressed(
+    last_relayed_offset: &mut Option<u64>,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    observed_output_end: u64,
+    context: &str,
+) -> bool {
+    let Some(prev_offset) = *last_relayed_offset else {
+        return false;
+    };
+    if observed_output_end >= prev_offset {
+        return false;
+    }
+
+    *last_relayed_offset = None;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] 👁 Reset stale tmux local relay offset for {} (channel {}, context={}, observed_output_end={}, stale_last_relayed={})",
+        tmux_session_name,
+        channel_id.get(),
+        context,
+        observed_output_end,
+        prev_offset
+    );
+    true
 }
 
 /// #826 P1 #2 (option b): Decide which of the two offset watermarks
@@ -2624,6 +2755,23 @@ pub(super) async fn tmux_output_watcher_with_restore(
             None
         }
     };
+    if let Ok(meta) = std::fs::metadata(&output_path) {
+        let observed_output_end = meta.len();
+        reset_stale_relay_watermark_if_output_regressed(
+            &shared,
+            channel_id,
+            &tmux_session_name,
+            observed_output_end,
+            "watcher_start",
+        );
+        reset_stale_local_relay_offset_if_output_regressed(
+            &mut last_relayed_offset,
+            channel_id,
+            &tmux_session_name,
+            observed_output_end,
+            "watcher_start",
+        );
+    }
     // Rolling-size-cap rotation state. The watcher loop spins predictably
     // (~500ms sleeps) so a mod-N gate on an iteration counter gives a
     // regular-ish cadence for the size check without hitting the fs every
@@ -2694,6 +2842,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     if prev_offset > new_size {
                         current_offset = new_size;
                         last_relayed_offset = Some(new_size);
+                        reset_stale_relay_watermark_if_output_regressed(
+                            &shared,
+                            channel_id,
+                            &tmux_session_name,
+                            new_size,
+                            "jsonl_rotation",
+                        );
                     }
                 }
                 Ok(None) => {}
@@ -2875,6 +3030,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let mut monitor_auto_turn_claimed = false;
         let mut monitor_auto_turn_deferred = false;
         let mut monitor_auto_turn_finished = false;
+        // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the
+        // hint text is emitted exactly once per watcher turn frame.
+        let mut monitor_auto_turn_preamble_injected = false;
 
         // Process any complete lines we already have
         let initial_outcome = process_watcher_lines(
@@ -2921,6 +3079,16 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 data_start_offset,
                 current_offset,
             );
+            if let Some(hint) =
+                consume_monitor_auto_turn_preamble_once(&mut monitor_auto_turn_preamble_injected)
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔔 monitor auto-turn preamble hint injected (channel {}): {}",
+                    channel_id.get(),
+                    hint
+                );
+            }
         }
 
         // Keep reading until result or timeout
@@ -3033,6 +3201,16 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                 data_start_offset,
                                 current_offset,
                             );
+                            if let Some(hint) = consume_monitor_auto_turn_preamble_once(
+                                &mut monitor_auto_turn_preamble_injected,
+                            ) {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 🔔 monitor auto-turn preamble hint injected (channel {}): {}",
+                                    channel_id.get(),
+                                    hint
+                                );
+                            }
                         }
                         if provider_overload_message.is_none() {
                             provider_overload_message = outcome.provider_overload_message;
@@ -3781,6 +3959,23 @@ pub(super) async fn tmux_output_watcher_with_restore(
         // Duplicate-relay guard: if we already relayed from this same data
         // range, suppress. Use strict `<` so output starting exactly at the
         // previous boundary is treated as the next turn rather than a re-read.
+        if let Ok(meta) = std::fs::metadata(&output_path) {
+            let observed_output_end = meta.len();
+            reset_stale_relay_watermark_if_output_regressed(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                observed_output_end,
+                "pre_local_dedupe",
+            );
+            reset_stale_local_relay_offset_if_output_regressed(
+                &mut last_relayed_offset,
+                channel_id,
+                &tmux_session_name,
+                observed_output_end,
+                "pre_local_dedupe",
+            );
+        }
         if let Some(prev_offset) = last_relayed_offset {
             if data_start_offset < prev_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3923,6 +4118,15 @@ pub(super) async fn tmux_output_watcher_with_restore(
         // single-instance case; this coord layer closes the multi-instance
         // duplicate-relay hole.
         let relay_coord = shared.tmux_relay_coord(channel_id);
+        if let Ok(meta) = std::fs::metadata(&output_path) {
+            reset_stale_relay_watermark_if_output_regressed(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                meta.len(),
+                "pre_relay",
+            );
+        }
         let confirmed_end_pre_claim = relay_coord
             .confirmed_end_offset
             .load(std::sync::atomic::Ordering::Acquire);
@@ -4093,6 +4297,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             }
             relay_ok
         } else if relay_decision.suppressed {
+            let monitor_event_count = tool_state.transcript_events.len();
             if matches!(
                 task_notification_kind,
                 Some(TaskNotificationKind::MonitorAutoTurn)
@@ -4103,7 +4308,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &tmux_session_name,
                     data_start_offset,
-                    tool_state.transcript_events.len(),
+                    monitor_event_count,
                 );
             }
             let task_notification_detail = format!(
@@ -4125,13 +4330,39 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 task_notification_kind,
                 reattach_offset_match: false,
             };
+            let mut decision = decide_placeholder_suppression(&ctx);
+            // #1009: Monitor auto-turn gets a richer suppressed-placeholder body
+            // (event count + current MonitoringStore entry keys) in place of the
+            // generic internal-suppression label.
+            if matches!(
+                task_notification_kind,
+                Some(TaskNotificationKind::MonitorAutoTurn)
+            ) {
+                if let PlaceholderSuppressDecision::Edit(_) = &decision {
+                    let entry_keys: Vec<String> = {
+                        let store_arc = crate::server::routes::state::global_monitoring_store();
+                        let store = store_arc.lock().await;
+                        store
+                            .list(channel_id.get())
+                            .into_iter()
+                            .map(|entry| entry.key)
+                            .collect()
+                    };
+                    let body = format_monitor_suppressed_body(
+                        &last_edit_text,
+                        monitor_event_count,
+                        &entry_keys,
+                    );
+                    decision = PlaceholderSuppressDecision::Edit(body);
+                }
+            }
             apply_placeholder_suppression(
                 &http,
                 channel_id,
                 &shared,
                 placeholder_msg_id,
                 ctx.origin,
-                decide_placeholder_suppression(&ctx),
+                decision,
                 Some(&task_notification_detail),
             )
             .await;
@@ -5904,20 +6135,23 @@ async fn sweep_orphan_session_files() {
 mod tests {
     use super::{
         DeadSessionCleanupPlan, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
-        MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision, PlaceholderSuppressContext,
-        PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
-        SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
-        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
-        claim_or_replace_watcher, clear_recent_watcher_reattach_offsets_for_tests,
+        MONITOR_AUTO_TURN_PREAMBLE_HINT, MONITOR_AUTO_TURN_REASON_CODE, OffsetAdvanceDecision,
+        PlaceholderSuppressContext, PlaceholderSuppressDecision, PlaceholderSuppressOrigin,
+        READY_FOR_INPUT_STUCK_REASON, SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL,
+        SuppressedPlaceholderAction, TmuxWatcherHandle, WatcherToolState,
+        build_bg_trigger_session_key, claim_or_replace_watcher,
+        clear_recent_watcher_reattach_offsets_for_tests, consume_monitor_auto_turn_preamble_once,
         dead_session_cleanup_plan, decide_placeholder_suppression,
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
-        finish_monitor_auto_turn, lifecycle_reason_code_for_tmux_exit,
-        load_restored_provider_session_id, matching_recent_watcher_reattach_offset,
-        missing_inflight_fallback_plan, notify_path_offset_advance_decision,
-        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
-        process_watcher_lines, record_recent_watcher_reattach_offset,
-        refresh_session_heartbeat_from_tmux_output, restored_watcher_turn_from_inflight,
+        finish_monitor_auto_turn, format_monitor_suppressed_body, format_monitor_suppressed_label,
+        lifecycle_reason_code_for_tmux_exit, load_restored_provider_session_id,
+        matching_recent_watcher_reattach_offset, missing_inflight_fallback_plan,
+        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
+        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
+        record_recent_watcher_reattach_offset, refresh_session_heartbeat_from_tmux_output,
+        reset_stale_local_relay_offset_if_output_regressed,
+        reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
         tmux_death_is_normal_completion, wait_for_reacquired_turn_bridge_inflight_state,
@@ -6081,6 +6315,126 @@ mod tests {
 
         let watcher = watchers.get(&channel_id).expect("watcher should exist");
         assert!(watcher.paused.load(Ordering::Relaxed));
+    }
+
+    // #964: dedupe single-winner invariant. When two watchers try to register
+    // for the same channel, `claim_or_replace_watcher` must cancel the stale
+    // handle and install the fresh one — only the new watcher relays. The old
+    // cross-watcher path that let both exist and "skip each other" would leave
+    // the channel without any watcher when the incoming loop iteration also
+    // saw its sibling's confirmed_end and skipped relay. This test pins the
+    // replace-not-skip behavior for the registry.
+    #[test]
+    fn claim_or_replace_watcher_dedupes_to_single_winner_and_cancels_stale() {
+        let watchers = dashmap::DashMap::new();
+        let channel_id = ChannelId::new(1485506232256168124);
+
+        let initial = test_watcher_handle();
+        let initial_cancel = initial.cancel.clone();
+        let initial_paused = initial.paused.clone();
+        initial_paused.store(false, Ordering::Relaxed);
+
+        assert!(super::try_claim_watcher(&watchers, channel_id, initial));
+        assert!(!initial_cancel.load(Ordering::Relaxed));
+
+        let incoming = test_watcher_handle();
+        let incoming_cancel = incoming.cancel.clone();
+        let incoming_paused = incoming.paused.clone();
+        // Mark the incoming as distinct from initial to verify the slot
+        // actually swapped to the new handle (not just kept the old one).
+        incoming_paused.store(true, Ordering::Relaxed);
+
+        let fresh = claim_or_replace_watcher(
+            &watchers,
+            channel_id,
+            incoming,
+            &ProviderKind::Codex,
+            "unit-test-dedupe",
+        );
+        assert!(!fresh, "replacement must return false (not a fresh slot)");
+        assert_eq!(watchers.len(), 1, "exactly one watcher entry survives");
+
+        // Stale handle was cancelled so its loop iteration exits quietly
+        // rather than continuing alongside the new watcher.
+        assert!(initial_cancel.load(Ordering::Relaxed));
+        // New handle is NOT cancelled — it relays.
+        assert!(!incoming_cancel.load(Ordering::Relaxed));
+
+        let surviving = watchers.get(&channel_id).expect("watcher should exist");
+        assert!(
+            surviving.paused.load(Ordering::Relaxed),
+            "slot must hold the incoming handle (paused=true), not the stale one",
+        );
+    }
+
+    #[test]
+    fn stale_relay_watermark_resets_when_output_offset_regresses() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1485506232256168125);
+        let relay_coord = shared.tmux_relay_coord(channel_id);
+        relay_coord
+            .confirmed_end_offset
+            .store(1_548_758, Ordering::Release);
+        relay_coord.last_relay_ts_ms.store(12345, Ordering::Release);
+
+        assert!(reset_stale_relay_watermark_if_output_regressed(
+            shared.as_ref(),
+            channel_id,
+            "AgentDesk-claude-adk-cc-t1494846231539613809",
+            438_675,
+            "unit-test",
+        ));
+        assert_eq!(relay_coord.confirmed_end_offset.load(Ordering::Acquire), 0);
+        assert_eq!(relay_coord.last_relay_ts_ms.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn relay_watermark_does_not_reset_for_same_output_epoch() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1485506232256168126);
+        let relay_coord = shared.tmux_relay_coord(channel_id);
+        relay_coord
+            .confirmed_end_offset
+            .store(1_024, Ordering::Release);
+
+        assert!(!reset_stale_relay_watermark_if_output_regressed(
+            shared.as_ref(),
+            channel_id,
+            "AgentDesk-codex-adk-cdx",
+            1_024,
+            "unit-test",
+        ));
+        assert_eq!(
+            relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+            1_024
+        );
+
+        assert!(!reset_stale_relay_watermark_if_output_regressed(
+            shared.as_ref(),
+            channel_id,
+            "AgentDesk-codex-adk-cdx",
+            2_048,
+            "unit-test",
+        ));
+        assert_eq!(
+            relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+            1_024
+        );
+    }
+
+    #[test]
+    fn stale_local_relay_offset_resets_when_output_offset_regresses() {
+        let channel_id = ChannelId::new(1485506232256168127);
+        let mut last_relayed_offset = Some(1_548_758);
+
+        assert!(reset_stale_local_relay_offset_if_output_regressed(
+            &mut last_relayed_offset,
+            channel_id,
+            "AgentDesk-claude-adk-cc-t1494846231539613809",
+            438_675,
+            "unit-test",
+        ));
+        assert_eq!(last_relayed_offset, None);
     }
 
     #[test]
@@ -7171,6 +7525,98 @@ mod tests {
         assert_eq!(
             suppressed_placeholder_action(false, 99, "already visible"),
             SuppressedPlaceholderAction::None
+        );
+    }
+
+    // ── #1009 Monitor suppressed-placeholder formatter tests ──────────────────
+
+    #[test]
+    fn format_monitor_suppressed_label_with_entries_lists_keys() {
+        let keys = vec!["ci-build".to_string(), "pr-review".to_string()];
+        let label = format_monitor_suppressed_label(3, &keys);
+        assert_eq!(
+            label,
+            "🔔 Monitor 3회 처리 · 다음 모니터: {ci-build, pr-review}"
+        );
+    }
+
+    #[test]
+    fn format_monitor_suppressed_label_with_no_entries_shows_empty_marker() {
+        let label = format_monitor_suppressed_label(2, &[]);
+        assert_eq!(label, "🔔 Monitor 2회 처리 · (등록된 모니터 없음)");
+    }
+
+    #[test]
+    fn format_monitor_suppressed_body_appends_label_after_existing_body() {
+        let keys = vec!["ci-build".to_string()];
+        let body = format_monitor_suppressed_body("부분 응답", 1, &keys);
+        assert!(
+            body.starts_with("부분 응답"),
+            "preserves prior body: {body}"
+        );
+        assert!(
+            body.contains("🔔 Monitor 1회 처리 · 다음 모니터: {ci-build}"),
+            "appends monitor summary label: {body}"
+        );
+        assert!(
+            !body.contains(SUPPRESSED_INTERNAL_LABEL),
+            "monitor body must not carry the generic internal label: {body}"
+        );
+    }
+
+    #[test]
+    fn format_monitor_suppressed_body_guards_against_discord_msg_limit() {
+        // Build an oversize pre-existing body AND an oversize set of entry keys
+        // so the combined output would exceed DISCORD_MSG_LIMIT without a guard.
+        let oversize_body = "가".repeat(super::super::DISCORD_MSG_LIMIT);
+        let entry_keys: Vec<String> = (0..500).map(|i| format!("monitor-key-{i}")).collect();
+        let body = format_monitor_suppressed_body(&oversize_body, 9, &entry_keys);
+        assert!(
+            body.len() <= super::super::DISCORD_MSG_LIMIT,
+            "expected body len {} to be <= DISCORD_MSG_LIMIT {}",
+            body.len(),
+            super::super::DISCORD_MSG_LIMIT
+        );
+    }
+
+    #[test]
+    fn consume_monitor_auto_turn_preamble_once_is_one_shot_per_turn() {
+        let mut flag = false;
+        let first = consume_monitor_auto_turn_preamble_once(&mut flag);
+        assert_eq!(first, Some(MONITOR_AUTO_TURN_PREAMBLE_HINT));
+        assert!(flag, "flag must flip to true after first consumption");
+        assert!(
+            first
+                .expect("first consumption returns the hint")
+                .contains("1줄 요약"),
+            "hint must mention 1-line summary requirement"
+        );
+        assert!(
+            first
+                .expect("first consumption returns the hint")
+                .contains("다음 액션"),
+            "hint must mention next-action requirement"
+        );
+
+        // Subsequent calls within the same turn must return None.
+        assert_eq!(consume_monitor_auto_turn_preamble_once(&mut flag), None);
+        assert_eq!(consume_monitor_auto_turn_preamble_once(&mut flag), None);
+    }
+
+    #[test]
+    fn terminal_relay_decision_direct_sends_when_monitor_turn_has_assistant_response() {
+        // #1009 DoD regression lock: when the monitor auto-turn produces an
+        // assistant response text, the terminal relay MUST take the direct-send
+        // path (suppressed=false) — no suppression, no placeholder rewrite.
+        let decision = terminal_relay_decision(true, Some(TaskNotificationKind::MonitorAutoTurn));
+        assert_eq!(
+            decision,
+            super::TerminalRelayDecision {
+                should_direct_send: true,
+                should_tag_monitor_origin: true,
+                should_enqueue_notify_outbox: false,
+                suppressed: false,
+            }
         );
     }
 

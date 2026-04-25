@@ -223,6 +223,54 @@ pub async fn cancel_turn(
     }
 }
 
+// ── GET /api/channels/:id/watcher-state ─────────────────────────
+
+/// #964: snapshot the tmux-watcher lifecycle state for a channel.
+///
+/// Returns `{ provider, attached, tmux_session, last_relay_offset,
+/// inflight_state_present, last_relay_ts_ms }` on success. Used by
+/// operators to diagnose "watcher detached silently while tmux still
+/// producing output" incidents.
+///
+/// 404 is returned when neither watcher nor inflight state is known
+/// for the channel across all registered providers.
+pub async fn get_watcher_state(
+    State(state): State<AppState>,
+    Path(channel_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let channel_num: u64 = match channel_id.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "channel_id must be a numeric Discord channel ID"})),
+            );
+        }
+    };
+
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "health registry unavailable in this runtime"})),
+        );
+    };
+
+    match registry.snapshot_watcher_state(channel_num).await {
+        Some(snapshot) => {
+            let body = serde_json::to_value(&snapshot)
+                .unwrap_or_else(|_| json!({"error": "failed to serialize watcher snapshot"}));
+            (StatusCode::OK, Json(body))
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "no watcher, relay-coord, or inflight state for this channel",
+                "channel_id": channel_id,
+            })),
+        ),
+    }
+}
+
 // ── POST /api/turns/:channel_id/extend-timeout ───────────────────
 
 #[derive(Deserialize)]

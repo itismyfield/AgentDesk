@@ -61,6 +61,7 @@ impl MaintenanceJobRegistry {
         Self::new(vec![
             Arc::new(NoopHeartbeatJob),
             Arc::new(AgentQualityRollupJob),
+            Arc::new(QualityRegressionAlerterJob),
         ])
     }
 
@@ -108,6 +109,38 @@ impl MaintenanceJob for AgentQualityRollupJob {
                 upserted_rows = report.upserted_rows,
                 alert_count = report.alert_count,
                 "agent quality rollup completed"
+            );
+            Ok(())
+        })
+    }
+}
+
+/// #1104 (911-4) hourly regression rule engine.
+///
+/// Runs the rule engine in `services::agent_quality::regression_alerts`
+/// against the `agent_quality_daily` rollup. The 15s startup stagger keeps
+/// it sequenced AFTER `agent_quality_rollup` (stagger=0) on the same tick
+/// so alerts always evaluate against the freshest aggregates.
+struct QualityRegressionAlerterJob;
+
+impl MaintenanceJob for QualityRegressionAlerterJob {
+    fn name(&self) -> &'static str {
+        "quality_regression_alerter"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(15))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let sent =
+                crate::services::agent_quality::regression_alerts::run_regression_alerter_pg(pool)
+                    .await?;
+            tracing::info!(
+                job = self.name(),
+                alerts_dispatched = sent,
+                "agent quality regression alerter completed"
             );
             Ok(())
         })
