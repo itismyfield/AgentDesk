@@ -6,6 +6,7 @@ pub(crate) mod formatting;
 mod gateway;
 mod handoff;
 pub(crate) mod health;
+mod idle_detector;
 mod inflight;
 pub(crate) mod internal_api;
 mod mcp_credential_watcher;
@@ -687,6 +688,32 @@ impl SharedData {
 
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {
         self.health_registry.upgrade()
+    }
+
+    /// #1031: snapshot every active mailbox for the idle-detector pass.
+    /// Reduces the per-channel snapshot to the minimal fields the detector
+    /// actually consumes — `cancel_token` / `recovery_started_at` — so the
+    /// detector module never imports the private mailbox types.
+    pub(super) async fn mailbox_snapshots_for_idle_detector(&self) -> Vec<(ChannelId, bool, bool)> {
+        self.mailboxes
+            .snapshot_all()
+            .await
+            .into_iter()
+            .map(|(channel_id, snapshot)| {
+                (
+                    channel_id,
+                    snapshot.cancel_token.is_some(),
+                    snapshot.recovery_started_at.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    /// #1031: borrow the same `health_registry()` Arc the rest of the discord
+    /// runtime uses. Exposed under a distinct name so the idle detector does
+    /// not depend on the un-public method.
+    pub(super) fn health_registry_for_idle_detector(&self) -> Option<Arc<health::HealthRegistry>> {
+        self.health_registry()
     }
 
     /// Fetch the per-channel relay coordination state, creating a fresh one
