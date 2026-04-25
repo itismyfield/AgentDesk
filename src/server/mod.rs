@@ -1884,6 +1884,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_message_outbox_batch_preserves_long_payload_for_send_delivery() {
+        let db = test_db();
+        let long_content = "L".repeat(2_500);
+        let message_id = insert_pending_message(&db, "channel:1492506767085801535", &long_content);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+
+        let processed = drain_message_outbox_batch_once_sqlite(&db, {
+            let delivered = delivered.clone();
+            move |target, content, source, bot| {
+                let delivered = delivered.clone();
+                async move {
+                    delivered.lock().unwrap().push(json!({
+                        "target": target,
+                        "content": content,
+                        "source": source,
+                        "bot": bot,
+                    }));
+                    ("200 OK".to_string(), json!({"ok": true}).to_string())
+                }
+            }
+        })
+        .await;
+
+        let captured = delivered.lock().unwrap().clone();
+        let (status, error, sent_at) = message_row_status(&db, message_id);
+
+        assert_eq!(processed, 1);
+        assert_eq!(status, "sent");
+        assert_eq!(error, None);
+        assert!(sent_at.is_some(), "successful delivery must stamp sent_at");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["content"], long_content);
+        assert_eq!(captured[0]["bot"], "notify");
+    }
+
+    #[tokio::test]
     async fn drain_message_outbox_batch_marks_http_failures_failed() {
         let db = test_db();
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
