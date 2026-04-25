@@ -18,11 +18,11 @@
 //! - Process-alive (`pid` / session close) detection is similarly deferred.
 //!   Time-based staleness is the v1 trigger.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
-
-use std::sync::atomic::Ordering;
 
 use super::SharedData;
 use super::formatting::{
@@ -71,13 +71,12 @@ fn classify_age(age_secs: u64) -> SweepDecision {
     }
 }
 
-fn build_stalled_placeholder(state: &InflightTurnState, age_secs: u64) -> String {
+fn build_stalled_placeholder(state: &InflightTurnState) -> String {
     let started_at_unix = parse_started_at_unix(&state.started_at).unwrap_or_else(|| {
-        // Fall back to "now - age" so the relative tag still anchors near the
-        // observed staleness when the persisted started_at is unparseable.
-        chrono::Utc::now().timestamp() - age_secs as i64
+        // Fall back to now only for malformed legacy state. The normal path
+        // uses persisted started_at so the stalled content stays stable.
+        chrono::Utc::now().timestamp()
     });
-    let reason_label = format!("⚠ stalled — no stream {age_secs}s");
     let mut text = build_monitor_handoff_placeholder(
         MonitorHandoffStatus::Active,
         MonitorHandoffReason::AsyncDispatch,
@@ -86,7 +85,7 @@ fn build_stalled_placeholder(state: &InflightTurnState, age_secs: u64) -> String
         None,
     );
     text.push('\n');
-    text.push_str(&reason_label);
+    text.push_str("⚠ stalled — no stream progress");
     text
 }
 
@@ -122,13 +121,15 @@ async fn edit_placeholder_safe(
 /// Run a single sweep pass for the given provider. Public for testability —
 /// callers in the bootstrap path schedule this on a fixed cadence via
 /// `spawn_placeholder_sweeper`.
-pub(super) async fn run_placeholder_sweep_pass(
+async fn run_placeholder_sweep_pass(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
+    stalled_tracker: &mut StalledEditTracker,
 ) -> SweepPassReport {
     let mut report = SweepPassReport::default();
     let states = load_inflight_states_for_sweep(provider);
+    stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
             // Rebind-origin inflights do not represent a real Discord turn.
@@ -161,19 +162,27 @@ pub(super) async fn run_placeholder_sweep_pass(
         }
         // Re-stat guard for the EDIT path: between
         // `load_inflight_states_for_sweep` and the awaited Discord edit, the
-        // owning turn may write a fresh inflight state or stream the first
-        // response chunk. Skip the edit (and the abandoned-branch evict) if
-        // the file mtime advanced past our snapshot.
-        if !inflight_state_file_still_stale(provider, state.channel_id, age_secs) {
+        // owning turn may complete entirely (state file removed), have a
+        // brand-new turn replace it (different user_msg_id), or stream the
+        // first response chunk (mtime advances). Skip the edit (and the
+        // abandoned-branch evict) unless the same turn we snapshotted is
+        // still on disk and still stale.
+        if !inflight_state_still_same_turn(provider, &state, age_secs) {
             continue;
         }
         match classify_age(age_secs) {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
-                let text = build_stalled_placeholder(&state, age_secs);
+                if !stalled_tracker.mark_pending(provider, &state) {
+                    continue;
+                }
+                let text = build_stalled_placeholder(&state);
                 if edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await
                 {
+                    stalled_tracker.mark_edited(provider, &state);
                     report.stalled += 1;
+                } else {
+                    stalled_tracker.clear_pending(provider, &state);
                 }
             }
             SweepDecision::Abandoned => {
@@ -181,14 +190,20 @@ pub(super) async fn run_placeholder_sweep_pass(
                 let edited =
                     edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text)
                         .await;
-                // Skip eviction when the terminal Discord edit failed (rate
-                // limit / transient outage). Leaving the state in place lets
-                // the next sweep pass retry. The recheck after the await
-                // also defends against a fresh turn writing state during
-                // the edit itself — only evict if the file is still the
-                // same stale entry we saw and the edit succeeded.
-                if edited && inflight_state_file_still_stale(provider, state.channel_id, age_secs) {
-                    finalize_abandoned_mailbox(shared, provider, state.channel_id).await;
+                // Recheck after the awaited edit covers three concerns:
+                //   1. Edit failure (rate limit / 5xx): leave state for the
+                //      next pass to retry.
+                //   2. New turn raced in during the await (different
+                //      user_msg_id): do not abandon the new turn's mailbox
+                //      or delete its state.
+                //   3. Original turn completed during the await (state file
+                //      gone): turn_bridge already finalized its mailbox —
+                //      calling mailbox_finish_turn again would no-op or
+                //      corrupt a freshly started follow-up turn.
+                // `inflight_state_still_same_turn` covers (2) and (3); edit
+                // success covers (1).
+                if edited && inflight_state_still_same_turn(provider, &state, age_secs) {
+                    finalize_abandoned_mailbox(shared, provider, &state).await;
                     if delete_inflight_state_file(provider, state.channel_id) {
                         report.abandoned += 1;
                     }
@@ -199,21 +214,124 @@ pub(super) async fn run_placeholder_sweep_pass(
     report
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StalledEditKey {
+    provider: String,
+    channel_id: u64,
+    message_id: u64,
+    updated_at: String,
+}
+
+impl StalledEditKey {
+    fn new(provider: &ProviderKind, state: &InflightTurnState) -> Self {
+        Self {
+            provider: provider.as_str().to_string(),
+            channel_id: state.channel_id,
+            message_id: state.current_msg_id,
+            updated_at: state.updated_at.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct StalledEditTracker {
+    edited: HashSet<StalledEditKey>,
+    pending: HashSet<StalledEditKey>,
+}
+
+impl StalledEditTracker {
+    fn retain_live(&mut self, provider: &ProviderKind, states: &[(InflightTurnState, u64)]) {
+        let provider_id = provider.as_str();
+        let live: HashSet<StalledEditKey> = states
+            .iter()
+            .map(|(state, _)| StalledEditKey::new(provider, state))
+            .collect();
+        self.edited
+            .retain(|key| key.provider != provider_id || live.contains(key));
+        self.pending
+            .retain(|key| key.provider != provider_id || live.contains(key));
+    }
+
+    fn mark_pending(&mut self, provider: &ProviderKind, state: &InflightTurnState) -> bool {
+        let key = StalledEditKey::new(provider, state);
+        if self.edited.contains(&key) || self.pending.contains(&key) {
+            return false;
+        }
+        self.pending.insert(key);
+        true
+    }
+
+    fn mark_edited(&mut self, provider: &ProviderKind, state: &InflightTurnState) {
+        let key = StalledEditKey::new(provider, state);
+        self.pending.remove(&key);
+        self.edited.insert(key);
+    }
+
+    fn clear_pending(&mut self, provider: &ProviderKind, state: &InflightTurnState) {
+        self.pending.remove(&StalledEditKey::new(provider, state));
+    }
+}
+
 /// Drop the per-channel mailbox active turn that the abandoned inflight was
 /// driving. Without this, the channel's `cancel_token` and `global_active`
 /// counter stay set, so subsequent user messages see an in-flight turn and
 /// get queued behind a placeholder that is already terminal.
+///
+/// Soft-queued interventions: `mailbox_finish_turn` returns `has_pending`
+/// when there are buffered queue items. The sweeper does not own a
+/// `TurnGateway` and so cannot dispatch the next queued turn inline the
+/// way `turn_bridge::run` does. Log the leftover so operators notice;
+/// the next user message on the channel (or any external dequeue
+/// trigger) will pick the queue back up because the active turn slot is
+/// now released.
 async fn finalize_abandoned_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    channel_id: u64,
+    state: &InflightTurnState,
 ) {
-    let channel = serenity::ChannelId::new(channel_id);
+    let channel = serenity::ChannelId::new(state.channel_id);
     let finish = super::mailbox_finish_turn(shared, provider, channel).await;
     if let Some(removed_token) = finish.removed_token {
         removed_token.cancelled.store(true, Ordering::Relaxed);
         shared.global_active.fetch_sub(1, Ordering::Relaxed);
     }
+    if finish.has_pending {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] 🧹 placeholder sweeper: channel {} active slot released but ≥1 queued message(s) remain — next external trigger will resume dequeue",
+            state.channel_id
+        );
+    }
+}
+
+/// True when the inflight state on disk for `state.channel_id` still names
+/// the same turn (matching `user_msg_id` and `current_msg_id`) AND the file
+/// mtime is not significantly fresher than our snapshot. Returns `false`
+/// when the file is gone (original turn completed mid-await) or has been
+/// replaced by a new turn for the same channel.
+fn inflight_state_still_same_turn(
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    snapshot_age_secs: u64,
+) -> bool {
+    const SLACK_SECS: u64 = 5;
+    let states = load_inflight_states_for_sweep(provider);
+    let Some((current, current_age)) = states
+        .into_iter()
+        .find(|(state, _)| state.channel_id == snapshot.channel_id)
+    else {
+        // File gone — original turn completed (turn_bridge cleared its
+        // own state on success/cancel). Do not act: any edit would target
+        // a message the completing turn already owned, and a mailbox
+        // finalize would race a fresh follow-up turn.
+        return false;
+    };
+    if current.user_msg_id != snapshot.user_msg_id
+        || current.current_msg_id != snapshot.current_msg_id
+    {
+        return false;
+    }
+    current_age + SLACK_SECS >= snapshot_age_secs
 }
 
 fn inflight_state_file_still_stale(
@@ -228,16 +346,21 @@ fn inflight_state_file_still_stale(
     // our wall-clock measurement.
     const SLACK_SECS: u64 = 5;
     let states = load_inflight_states_for_sweep(provider);
-    let Some((_, current_age)) = states
+    let current_age = states
         .into_iter()
         .find(|(state, _)| state.channel_id == channel_id)
-    else {
-        // File already gone — another path cleared it. Treat as still stale
-        // so the calling code's delete becomes a no-op without triggering a
-        // false-positive "preserved fresh state" decision.
-        return true;
-    };
-    current_age + SLACK_SECS >= snapshot_age_secs
+        .map(|(_, age)| age);
+    observed_state_still_stale(snapshot_age_secs, current_age, SLACK_SECS)
+}
+
+fn observed_state_still_stale(
+    snapshot_age_secs: u64,
+    current_age_secs: Option<u64>,
+    slack_secs: u64,
+) -> bool {
+    current_age_secs
+        .map(|current_age| current_age + slack_secs >= snapshot_age_secs)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -255,9 +378,11 @@ pub(super) fn spawn_placeholder_sweeper(
     provider: ProviderKind,
 ) {
     tokio::spawn(async move {
+        let mut stalled_tracker = StalledEditTracker::default();
         tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
         loop {
-            let report = run_placeholder_sweep_pass(&http, &shared, &provider).await;
+            let report =
+                run_placeholder_sweep_pass(&http, &shared, &provider, &mut stalled_tracker).await;
             if report.stalled > 0 || report.abandoned > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -324,11 +449,35 @@ mod tests {
     }
 
     #[test]
-    fn build_stalled_placeholder_contains_age_badge() {
+    fn build_stalled_placeholder_uses_stable_badge() {
         let state = make_state(1234, 5678);
-        let text = build_stalled_placeholder(&state, 90);
+        let text = build_stalled_placeholder(&state);
         assert!(text.starts_with("🔄 **백그라운드 처리 중**"));
-        assert!(text.contains("⚠ stalled — no stream 90s"));
+        assert!(text.contains("⚠ stalled — no stream progress"));
+        assert!(!text.contains("90s"));
+    }
+
+    #[test]
+    fn stalled_edit_tracker_allows_one_edit_per_state_update() {
+        let provider = ProviderKind::Codex;
+        let mut state = make_state(1234, 5678);
+        state.updated_at = "2026-04-25 12:00:00".to_string();
+        let mut tracker = StalledEditTracker::default();
+
+        assert!(tracker.mark_pending(&provider, &state));
+        assert!(!tracker.mark_pending(&provider, &state));
+        tracker.mark_edited(&provider, &state);
+        assert!(!tracker.mark_pending(&provider, &state));
+
+        state.updated_at = "2026-04-25 12:01:00".to_string();
+        assert!(tracker.mark_pending(&provider, &state));
+    }
+
+    #[test]
+    fn missing_inflight_file_is_not_stale_equal() {
+        assert!(!observed_state_still_stale(120, None, 5));
+        assert!(!observed_state_still_stale(120, Some(100), 5));
+        assert!(observed_state_still_stale(120, Some(116), 5));
     }
 
     #[test]
