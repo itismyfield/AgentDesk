@@ -1811,15 +1811,19 @@ mod tests {
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime").join("state").join("discord")).unwrap();
 
-        struct EnvReset;
+        struct EnvReset(Option<std::ffi::OsString>);
         impl Drop for EnvReset {
             fn drop(&mut self) {
-                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
             }
         }
 
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
-        let _reset = EnvReset;
+        let _reset = EnvReset(previous_root);
 
         let provider = crate::services::provider::ProviderKind::Codex;
         let inflight = crate::services::discord::inflight::InflightTurnState::new(

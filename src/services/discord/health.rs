@@ -415,6 +415,14 @@ fn runtime_stop_wait_timeout() -> std::time::Duration {
     }
 }
 
+fn clear_persistent_inflight_for_stop(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    was_present_at_stop_start: bool,
+) -> bool {
+    clear_inflight_state(provider, channel_id.get()) || was_present_at_stop_start
+}
+
 pub(crate) async fn stop_provider_channel_runtime_with_policy(
     registry: &HealthRegistry,
     provider_name: &str,
@@ -426,6 +434,9 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     let shared = shared_for_provider(registry, &provider).await?;
     let result = mailbox_cancel_active_turn(&shared, channel_id).await;
     let cleanup_requested = cleanup_policy.should_cleanup_tmux();
+    let should_clear_persistent_inflight = cleanup_policy.should_clear_inflight();
+    let persistent_inflight_was_present = should_clear_persistent_inflight
+        && super::inflight::load_inflight_state(&provider, channel_id.get()).is_some();
 
     if let Some(token) = result.token.as_ref() {
         let termination_recorded = if !result.already_stopping || cleanup_requested {
@@ -439,7 +450,12 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
                 lifecycle_path: "canonical",
                 had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
-                persistent_inflight_cleared: false,
+                persistent_inflight_cleared: should_clear_persistent_inflight
+                    && clear_persistent_inflight_for_stop(
+                        &provider,
+                        channel_id,
+                        persistent_inflight_was_present,
+                    ),
                 termination_recorded,
             });
         }
@@ -467,8 +483,8 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         .intervention_queue
         .len();
     mailbox_clear_recovery_marker(&shared, channel_id).await;
-    let persistent_inflight_cleared = if cleanup_policy.should_clear_inflight() {
-        clear_inflight_state(&provider, channel_id.get())
+    let persistent_inflight_cleared = if should_clear_persistent_inflight {
+        clear_persistent_inflight_for_stop(&provider, channel_id, persistent_inflight_was_present)
     } else {
         false
     };
