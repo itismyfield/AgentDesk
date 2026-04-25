@@ -15,6 +15,10 @@ import AgentCard from "./AgentCard";
 import { getAgentLevel, getAgentTitle } from "./AgentInfoCard";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
+import {
+  archiveBlockedByActiveTurn,
+  resolveArchiveChannelImpact,
+} from "./archive-impact";
 
 interface AgentsTabProps {
   tr: Translator;
@@ -274,8 +278,10 @@ export default function AgentsTab({
               }}
             >
               <option value="status">{tr("정렬: 상태", "Sort: Status")}</option>
+              <option value="department">{tr("정렬: 부서", "Sort: Department")}</option>
               <option value="name">{tr("정렬: 이름", "Sort: Name")}</option>
               <option value="xp">{tr("정렬: XP", "Sort: XP")}</option>
+              <option value="activity">{tr("정렬: 활동량", "Sort: Activity")}</option>
               <option value="created">{tr("정렬: 생성일", "Sort: Created")}</option>
               <option value="archived">{tr("정렬: 보관일", "Sort: Archived")}</option>
             </select>
@@ -537,18 +543,80 @@ export default function AgentsTab({
                       </SurfaceNotice>
                     ) : null}
 
-                    {confirmArchiveId === selectedAgent.id && (
-                      <SurfaceNotice tone="warn">
-                        <div className="space-y-2">
-                          <div className="font-medium">
-                            {tr("보관하면 role_map에서 비활성화되고 Discord 채널은 readonly 처리됩니다.", "Archiving disables the role map entry and makes the Discord channel readonly.")}
+                    {confirmArchiveId === selectedAgent.id && (() => {
+                      const channelImpact = resolveArchiveChannelImpact(selectedAgent);
+                      const blocked = archiveBlockedByActiveTurn(selectedAgent);
+                      const roleLabel = (role: "primary" | "alt" | "codex") =>
+                        role === "primary"
+                          ? tr("기본", "Primary")
+                          : role === "alt"
+                            ? tr("대체", "Alt")
+                            : tr("Codex", "Codex");
+                      return (
+                        <SurfaceNotice tone={blocked ? "danger" : "warn"} data-testid="archive-confirm-impact">
+                          <div className="space-y-2">
+                            <div className="font-medium">
+                              {tr(
+                                "보관하면 role_map에서 비활성화되고 아래 Discord 채널이 readonly 처리됩니다.",
+                                "Archiving disables the role map entry and makes the following Discord channels readonly.",
+                              )}
+                            </div>
+                            {channelImpact.length > 0 ? (
+                              <ul
+                                className="space-y-1 rounded-xl border px-3 py-2 text-xs"
+                                style={{
+                                  borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+                                  background: "color-mix(in srgb, var(--th-bg-surface) 86%, transparent)",
+                                  color: "var(--th-text-secondary)",
+                                }}
+                                data-testid="archive-confirm-channels"
+                              >
+                                {channelImpact.map((channel) => (
+                                  <li
+                                    key={`${channel.role}-${channel.id}`}
+                                    className="flex items-center justify-between gap-3"
+                                  >
+                                    <span className="font-mono">#{channel.id}</span>
+                                    <span
+                                      className="rounded-full border px-2 py-0.5 text-[10px]"
+                                      style={{
+                                        borderColor:
+                                          "color-mix(in srgb, var(--th-border) 60%, transparent)",
+                                        color: "var(--th-text-muted)",
+                                      }}
+                                    >
+                                      {roleLabel(channel.role)}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr(
+                                  "연결된 Discord 채널이 없습니다.",
+                                  "No Discord channels are bound to this agent.",
+                                )}
+                              </div>
+                            )}
+                            {blocked ? (
+                              <div className="text-xs font-medium" style={{ color: "var(--th-accent-danger)" }}>
+                                {tr(
+                                  "현재 진행 중인 턴이 있어 API가 보관 요청을 거부합니다. 턴이 끝난 뒤 다시 시도하세요.",
+                                  "An active turn will cause the API to reject the request. Wait for the turn to finish.",
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                {tr(
+                                  "보관 해제하면 동일한 채널로 role_map 이 복원됩니다.",
+                                  "Unarchiving will restore the role_map binding to the same channels.",
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                            {tr("진행 중 세션이 있으면 API가 거부합니다. 필요하면 이 화면에서 다시 시도할 수 있습니다.", "The API refuses active sessions. You can retry from this panel.")}
-                          </div>
-                        </div>
-                      </SurfaceNotice>
-                    )}
+                        </SurfaceNotice>
+                      );
+                    })()}
 
                     <div className="flex flex-wrap gap-2">
                       <SurfaceActionButton onClick={() => onEditAgent(selectedAgent)} tone="neutral">

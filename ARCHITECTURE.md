@@ -103,8 +103,9 @@ src/
 │   │   ├── mock_discord.rs
 │   │   ├── mod.rs
 │   │   └── scenarios.rs
-│   └── tests/
-│       └── high_risk_recovery.rs
+│   ├── tests/
+│   │   └── high_risk_recovery.rs
+│   └── agents_setup_e2e.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -379,7 +380,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | Path | Purpose |
 | --- | --- |
 | `src/cli/` | Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers. |
-| `src/compat/` | Backward-compatibility shims for deprecated paths and legacy runtime aliases. |
+| `src/compat/` | Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven. |
 | `src/db/` | SQLite access layer and schema authority (`src/db/schema.rs`). |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |

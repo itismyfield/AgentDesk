@@ -3292,7 +3292,7 @@ pub struct BatchRereviewBody {
     pub reason: Option<String>,
 }
 
-/// POST /api/re-review
+/// POST /api/kanban-cards/batch-rereview (formerly /api/re-review, removed in #1064)
 ///
 /// Batch endpoint. Accepts a list of GitHub issue numbers,
 /// looks up each card, and calls the rereview logic for each.

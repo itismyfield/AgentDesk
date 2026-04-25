@@ -84,7 +84,7 @@ Two tables manage the auto-queue:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/auto-queue/generate` | POST | Manual generation trigger |
-| `/api/auto-queue/activate` | POST | Manual activation trigger |
+| `/api/auto-queue/dispatch-next` | POST | Manual activation trigger (formerly `/api/auto-queue/activate`, removed in #1064) |
 | `/api/auto-queue/status` | GET | Current queue status |
 | `/api/auto-queue/entries/{id}/skip` | PATCH | Skip queue entry |
 | `/api/auto-queue/runs/{id}` | PATCH | Update run |
