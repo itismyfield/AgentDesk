@@ -2,7 +2,10 @@ use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -266,9 +269,76 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
     })
 }
 
+// #1083: Track recall context size emitted per mode so #1083 can compare
+// before/after average context bytes per channel without wiring a full A/B
+// harness. Counters are global (process-wide); the call site logs the per-turn
+// size and the average is computed by `recall_size_average_bytes`.
+static FULL_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static FULL_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_CONTEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
+static SKIPPED_CONTEXT_TURNS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RecallSizeBucket {
+    Full,
+    IdentityOnly,
+    Skipped,
+}
+
+pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
+    match bucket {
+        RecallSizeBucket::Full => {
+            FULL_CONTEXT_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
+            FULL_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
+        }
+        RecallSizeBucket::IdentityOnly => {
+            IDENTITY_CONTEXT_BYTES_TOTAL.fetch_add(bytes as u64, Ordering::Relaxed);
+            IDENTITY_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
+        }
+        RecallSizeBucket::Skipped => {
+            SKIPPED_CONTEXT_TURNS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[allow(dead_code)] // exposed for ad-hoc inspection / future stats endpoint
+pub(crate) fn recall_size_snapshot() -> Value {
+    fn average(total: u64, count: u64) -> u64 {
+        if count == 0 { 0 } else { total / count }
+    }
+
+    let full_total = FULL_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
+    let full_turns = FULL_CONTEXT_TURNS.load(Ordering::Relaxed);
+    let identity_total = IDENTITY_CONTEXT_BYTES_TOTAL.load(Ordering::Relaxed);
+    let identity_turns = IDENTITY_CONTEXT_TURNS.load(Ordering::Relaxed);
+    let skipped_turns = SKIPPED_CONTEXT_TURNS.load(Ordering::Relaxed);
+
+    json!({
+        "full": {
+            "turns": full_turns,
+            "bytes_total": full_total,
+            "bytes_avg": average(full_total, full_turns),
+        },
+        "identity_only": {
+            "turns": identity_turns,
+            "bytes_total": identity_total,
+            "bytes_avg": average(identity_total, identity_turns),
+        },
+        "skipped": {
+            "turns": skipped_turns,
+        },
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn reset_memento_throttle_for_tests() {
     with_state(|state| {
         *state = MementoThrottleState::default();
     });
+    FULL_CONTEXT_BYTES_TOTAL.store(0, Ordering::Relaxed);
+    FULL_CONTEXT_TURNS.store(0, Ordering::Relaxed);
+    IDENTITY_CONTEXT_BYTES_TOTAL.store(0, Ordering::Relaxed);
+    IDENTITY_CONTEXT_TURNS.store(0, Ordering::Relaxed);
+    SKIPPED_CONTEXT_TURNS.store(0, Ordering::Relaxed);
 }

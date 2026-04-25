@@ -79,6 +79,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "hello".to_string(),
+                mode: crate::services::memory::RecallMode::Full,
             })
             .await;
         restore_temp_root(prev);
