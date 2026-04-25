@@ -1787,12 +1787,22 @@ pub(super) fn spawn_turn_bridge(
             // Tmux watcher is handling response delivery — this is normal.
             // Don't delete placeholder — update it so the user sees the turn is still active.
             // The tmux watcher will replace this content when output arrives.
+            //
+            // #1114: information-rich monitor handoff placeholder. Uses
+            // <t:UNIX:R> for client-side relative-time rendering (no server
+            // refresh needed) and surfaces the last seen tool/command + the
+            // handoff reason so the user knows what's still in flight.
+            let started_at_unix = chrono::Utc::now().timestamp()
+                - i64::try_from(turn_start.elapsed().as_secs()).unwrap_or(0);
+            let placeholder_text = super::formatting::build_monitor_handoff_placeholder(
+                super::formatting::MonitorHandoffStatus::Active,
+                super::formatting::MonitorHandoffReason::AsyncDispatch,
+                started_at_unix,
+                current_tool_line.as_deref(),
+                None,
+            );
             let _ = gateway
-                .edit_message(
-                    channel_id,
-                    current_msg_id,
-                    "⏳ 모니터로 이어서 처리 중...\n결과가 준비되면 같은 채널로 바로 이어서 보냅니다.",
-                )
+                .edit_message(channel_id, current_msg_id, &placeholder_text)
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
