@@ -319,9 +319,7 @@ CREATE TABLE IF NOT EXISTS dispatch_outbox (
     next_attempt_at TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     processed_at    TIMESTAMPTZ,
-    error           TEXT,
-    delivery_status TEXT,
-    delivery_result JSONB
+    error           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS kanban_audit_logs (

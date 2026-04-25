@@ -356,6 +356,20 @@ impl DispatchNotifyDeliveryResult {
             detail: Some(detail.into()),
         }
     }
+
+    pub(crate) fn with_thread_creation_fallback(mut self, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        self.status = "fallback".to_string();
+        self.fallback_kind = Some(match self.fallback_kind.take() {
+            Some(existing) => format!("ThreadCreationParentChannel+{existing}"),
+            None => "ThreadCreationParentChannel".to_string(),
+        });
+        self.detail = Some(match self.detail.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{detail}; {existing}"),
+            _ => detail,
+        });
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3283,7 +3297,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                     tracing::info!(
                         "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
                     );
-                    return Ok(outcome.delivery);
+                    return Ok(outcome.delivery.with_thread_creation_fallback(format!(
+                        "thread creation failed with {status}; delivered to parent channel {channel_id_text}"
+                    )));
                 }
                 Err(e) => {
                     tracing::warn!("[dispatch] Fallback dispatch message failed: {e}");
@@ -4060,6 +4076,7 @@ mod tests {
         unarchive_failures_remaining: usize,
         message_length_failures_remaining: usize,
         message_length_failure_min_chars: Option<usize>,
+        thread_create_status: Option<axum::http::StatusCode>,
         calls: Vec<String>,
         posted_messages: Vec<(String, String)>,
         thread_names: HashMap<String, String>,
@@ -4073,7 +4090,7 @@ mod tests {
         Arc<Mutex<MockDiscordState>>,
         tokio::task::JoinHandle<()>,
     ) {
-        spawn_mock_discord_server_with_config(initial_archived, 0, 0, None).await
+        spawn_mock_discord_server_with_config(initial_archived, 0, 0, None, None).await
     }
 
     async fn spawn_mock_discord_server_with_failures(
@@ -4088,6 +4105,7 @@ mod tests {
             initial_archived,
             unarchive_failures_remaining,
             0,
+            None,
             None,
         )
         .await
@@ -4107,8 +4125,19 @@ mod tests {
             0,
             message_length_failures_remaining,
             Some(message_length_failure_min_chars),
+            None,
         )
         .await
+    }
+
+    async fn spawn_mock_discord_server_with_thread_creation_failure(
+        status: axum::http::StatusCode,
+    ) -> (
+        String,
+        Arc<Mutex<MockDiscordState>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        spawn_mock_discord_server_with_config(false, 0, 0, None, Some(status)).await
     }
 
     async fn spawn_mock_discord_server_with_config(
@@ -4116,6 +4145,7 @@ mod tests {
         unarchive_failures_remaining: usize,
         message_length_failures_remaining: usize,
         message_length_failure_min_chars: Option<usize>,
+        thread_create_status: Option<axum::http::StatusCode>,
     ) -> (
         String,
         Arc<Mutex<MockDiscordState>>,
@@ -4209,6 +4239,14 @@ mod tests {
             state
                 .calls
                 .push(format!("POST /channels/{channel_id}/threads"));
+            if let Some(status) = state.thread_create_status {
+                return (
+                    status,
+                    Json(serde_json::json!({
+                        "message": "mock thread creation failure"
+                    })),
+                );
+            }
             let thread_id = "thread-created".to_string();
             state
                 .thread_parents
@@ -4308,6 +4346,7 @@ mod tests {
             unarchive_failures_remaining,
             message_length_failures_remaining,
             message_length_failure_min_chars,
+            thread_create_status,
             calls: Vec::new(),
             posted_messages: Vec::new(),
             thread_names: HashMap::new(),
@@ -4570,6 +4609,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    }
+
+    #[tokio::test]
+    async fn thread_creation_failure_records_parent_channel_send_as_fallback_delivery() {
+        let (base_url, state, server_handle) =
+            spawn_mock_discord_server_with_thread_creation_failure(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-thread-fallback', 'Thread fallback', 'requested', 'agent-1',
+                    'dispatch-thread-fallback', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+                ) VALUES (
+                    'dispatch-thread-fallback', 'card-thread-fallback', 'agent-1', 'implementation',
+                    'pending', 'Thread fallback', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let delivery = send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "Thread fallback",
+            "card-thread-fallback",
+            "dispatch-thread-fallback",
+            "announce-token",
+            &base_url,
+            None,
+        )
+        .await
+        .expect("parent-channel fallback delivery succeeds");
+
+        server_handle.abort();
+
+        assert_eq!(delivery.status, "fallback");
+        assert_eq!(
+            delivery.fallback_kind.as_deref(),
+            Some("ThreadCreationParentChannel")
+        );
+        assert!(
+            delivery
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("thread creation failed")
+        );
+        assert_eq!(delivery.target_channel_id.as_deref(), Some("123"));
+        let state = state.lock().unwrap();
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/123/threads".to_string())
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/123/messages".to_string())
+        );
     }
 
     #[tokio::test]

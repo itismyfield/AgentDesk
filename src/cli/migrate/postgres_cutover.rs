@@ -621,6 +621,8 @@ struct DispatchOutboxRow {
     created_at: Option<String>,
     processed_at: Option<String>,
     error: Option<String>,
+    delivery_status: Option<String>,
+    delivery_result: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2697,8 +2699,18 @@ fn load_all_sessions(conn: &Connection) -> Result<Vec<SessionRow>, String> {
 }
 
 fn load_all_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>, String> {
+    let delivery_status_sql = if sqlite_column_exists(conn, "dispatch_outbox", "delivery_status") {
+        "delivery_status"
+    } else {
+        "NULL"
+    };
+    let delivery_result_sql = if sqlite_column_exists(conn, "dispatch_outbox", "delivery_result") {
+        "delivery_result"
+    } else {
+        "NULL"
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id,
                     dispatch_id,
                     action,
@@ -2710,10 +2722,12 @@ fn load_all_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>,
                     next_attempt_at,
                     created_at,
                     processed_at,
-                    error
+                    error,
+                    {delivery_status_sql},
+                    {delivery_result_sql}
              FROM dispatch_outbox
-             ORDER BY id ASC",
-        )
+             ORDER BY id ASC"
+        ))
         .map_err(|e| format!("prepare dispatch_outbox export: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -2732,6 +2746,8 @@ fn load_all_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>,
                 created_at: row.get(9)?,
                 processed_at: row.get(10)?,
                 error: row.get(11)?,
+                delivery_status: row.get(12)?,
+                delivery_result: row.get(13)?,
             })
         })
         .map_err(|e| format!("query dispatch_outbox export: {e}"))?;
@@ -3521,8 +3537,18 @@ fn load_live_sessions(conn: &Connection) -> Result<Vec<SessionRow>, String> {
 }
 
 fn load_open_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>, String> {
+    let delivery_status_sql = if sqlite_column_exists(conn, "dispatch_outbox", "delivery_status") {
+        "delivery_status"
+    } else {
+        "NULL"
+    };
+    let delivery_result_sql = if sqlite_column_exists(conn, "dispatch_outbox", "delivery_result") {
+        "delivery_result"
+    } else {
+        "NULL"
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id,
                     dispatch_id,
                     action,
@@ -3534,11 +3560,13 @@ fn load_open_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>
                     next_attempt_at,
                     created_at,
                     processed_at,
-                    error
+                    error,
+                    {delivery_status_sql},
+                    {delivery_result_sql}
              FROM dispatch_outbox
              WHERE status <> 'done' OR processed_at IS NULL
-             ORDER BY id ASC",
-        )
+             ORDER BY id ASC"
+        ))
         .map_err(|e| format!("prepare dispatch_outbox export: {e}"))?;
     let rows = stmt
         .query_map([], |row| {
@@ -3557,6 +3585,8 @@ fn load_open_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>
                 created_at: row.get(9)?,
                 processed_at: row.get(10)?,
                 error: row.get(11)?,
+                delivery_status: row.get(12)?,
+                delivery_result: row.get(13)?,
             })
         })
         .map_err(|e| format!("query dispatch_outbox export: {e}"))?;
@@ -4368,7 +4398,9 @@ async fn import_live_state_into_pg(
                 next_attempt_at,
                 created_at,
                 processed_at,
-                error
+                error,
+                delivery_status,
+                delivery_result
              )
              VALUES (
                 $1,
@@ -4382,7 +4414,9 @@ async fn import_live_state_into_pg(
                 CAST($9 AS timestamptz),
                 COALESCE(CAST($10 AS timestamptz), NOW()),
                 CAST($11 AS timestamptz),
-                $12
+                $12,
+                $13,
+                CAST($14 AS jsonb)
              )
              ON CONFLICT (id) DO UPDATE
              SET dispatch_id = EXCLUDED.dispatch_id,
@@ -4395,7 +4429,9 @@ async fn import_live_state_into_pg(
                  next_attempt_at = EXCLUDED.next_attempt_at,
                  created_at = EXCLUDED.created_at,
                  processed_at = EXCLUDED.processed_at,
-                 error = EXCLUDED.error",
+                 error = EXCLUDED.error,
+                 delivery_status = EXCLUDED.delivery_status,
+                 delivery_result = EXCLUDED.delivery_result",
         )
         .bind(row.id)
         .bind(&row.dispatch_id)
@@ -4409,6 +4445,8 @@ async fn import_live_state_into_pg(
         .bind(&row.created_at)
         .bind(&row.processed_at)
         .bind(&row.error)
+        .bind(&row.delivery_status)
+        .bind(&row.delivery_result)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("import postgres dispatch_outbox {}: {e}", row.id))?;
@@ -6183,10 +6221,13 @@ mod tests {
                 1, 'dispatch-1', 'card-1', 'implementation', 'pending', 'completed', 'test', '{\"status\":\"ok\"}', '2026-04-18 09:20:00'
             );
             INSERT INTO dispatch_outbox (
-                id, dispatch_id, action, agent_id, card_id, title, status, retry_count, next_attempt_at, created_at, processed_at, error
+                id, dispatch_id, action, agent_id, card_id, title, status, retry_count,
+                next_attempt_at, created_at, processed_at, error, delivery_status, delivery_result
             )
             VALUES (
-                1, 'dispatch-1', 'notify', 'agent-1', 'card-1', 'Notify', 'done', 0, NULL, '2026-04-18 09:10:00', '2026-04-18 09:20:00', NULL
+                1, 'dispatch-1', 'notify', 'agent-1', 'card-1', 'Notify', 'done', 0,
+                NULL, '2026-04-18 09:10:00', '2026-04-18 09:20:00', NULL,
+                'success', '{\"status\":\"success\",\"dispatch_id\":\"dispatch-1\"}'
             );
             INSERT INTO dispatch_queue (id, kanban_card_id, priority_score, queued_at)
             VALUES (1, 'card-1', 10.5, '2026-04-18 09:08:00');
@@ -6695,7 +6736,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, status, agent_id, card_id) VALUES ('dispatch-cutover', 'notify', 'pending', 'project-agentdesk', 'card-cutover')",
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, agent_id, card_id, delivery_status, delivery_result
+             ) VALUES (
+                'dispatch-cutover', 'notify', 'pending', 'project-agentdesk', 'card-cutover',
+                'duplicate', '{\"status\":\"duplicate\",\"semantic_event_id\":\"dispatch:dispatch-cutover:notify\"}'
+             )",
             [],
         )
         .unwrap();
@@ -6707,6 +6753,16 @@ mod tests {
         assert_eq!(snapshot.task_dispatches.len(), 1);
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(snapshot.dispatch_outbox.len(), 1);
+        assert_eq!(
+            snapshot.dispatch_outbox[0].delivery_status.as_deref(),
+            Some("duplicate")
+        );
+        assert_eq!(
+            snapshot.dispatch_outbox[0].delivery_result.as_deref(),
+            Some(
+                r#"{"status":"duplicate","semantic_event_id":"dispatch:dispatch-cutover:notify"}"#
+            )
+        );
         assert_eq!(snapshot.kanban_cards.len(), 1);
         assert_eq!(snapshot.agents.len(), 1);
         assert_eq!(snapshot.kanban_cards[0].id, "card-cutover");
@@ -6997,6 +7053,11 @@ mod tests {
             created_at: Some("2026-04-18 10:00:00".to_string()),
             processed_at: None,
             error: None,
+            delivery_status: Some("fallback".to_string()),
+            delivery_result: Some(
+                r#"{"status":"fallback","fallback_kind":"ThreadCreationParentChannel"}"#
+                    .to_string(),
+            ),
         }];
 
         let summary =
@@ -7067,7 +7128,7 @@ mod tests {
         assert_eq!(second.agents_upserted, 1);
 
         let outbox_row = sqlx::query(
-            "SELECT status, retry_count
+            "SELECT status, retry_count, delivery_status, delivery_result::text AS delivery_result
              FROM dispatch_outbox
              WHERE id = 42",
         )
@@ -7076,6 +7137,22 @@ mod tests {
         .expect("load imported outbox");
         assert_eq!(outbox_row.get::<String, _>("status"), "pending");
         assert_eq!(outbox_row.get::<i64, _>("retry_count"), 2);
+        assert_eq!(
+            outbox_row
+                .get::<Option<String>, _>("delivery_status")
+                .as_deref(),
+            Some("fallback")
+        );
+        let delivery_result = outbox_row
+            .get::<Option<String>, _>("delivery_result")
+            .expect("delivery result copied");
+        let delivery_result: serde_json::Value =
+            serde_json::from_str(&delivery_result).expect("delivery result json");
+        assert_eq!(delivery_result["status"], "fallback");
+        assert_eq!(
+            delivery_result["fallback_kind"],
+            "ThreadCreationParentChannel"
+        );
 
         let next_outbox_id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO dispatch_outbox (dispatch_id, action, status)
@@ -7351,6 +7428,27 @@ mod tests {
                 .as_deref(),
             Some("session-1")
         );
+
+        let dispatch_outbox = sqlx::query(
+            "SELECT delivery_status, delivery_result::text AS delivery_result
+             FROM dispatch_outbox
+             WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load imported dispatch_outbox row");
+        assert_eq!(
+            dispatch_outbox
+                .get::<Option<String>, _>("delivery_status")
+                .as_deref(),
+            Some("success")
+        );
+        let delivery_result = dispatch_outbox
+            .get::<Option<String>, _>("delivery_result")
+            .expect("delivery result copied");
+        let delivery_result: serde_json::Value =
+            serde_json::from_str(&delivery_result).expect("delivery result json");
+        assert_eq!(delivery_result["dispatch_id"], "dispatch-1");
 
         pool.close().await;
         pg_db.drop().await;
