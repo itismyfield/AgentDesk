@@ -66,7 +66,7 @@
 | `compat` | `src/compat/mod.rs` | 206 |  |
 | `compat::deprecated_alias` | `src/compat/deprecated_alias.rs` | 28 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 2210 | giant-file |
+| `config` | `src/config.rs` | 2218 | giant-file |
 | `crate` | `src/main.rs` | 43 |  |
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 244 |  |
@@ -132,8 +132,8 @@
 | `receipt` | `src/receipt.rs` | 2144 | giant-file |
 | `reconcile` | `src/reconcile.rs` | 925 |  |
 | `runtime` | `src/runtime.rs` | 115 |  |
-| `runtime_layout` | `src/runtime_layout/mod.rs` | 1368 | giant-file |
-| `runtime_layout::config_merge` | `src/runtime_layout/config_merge.rs` | 586 |  |
+| `runtime_layout` | `src/runtime_layout/mod.rs` | 1425 | giant-file |
+| `runtime_layout::config_merge` | `src/runtime_layout/config_merge.rs` | 595 |  |
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
