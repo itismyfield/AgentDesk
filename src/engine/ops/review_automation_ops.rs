@@ -1551,7 +1551,10 @@ mod tests {
             let test_db = TestDatabase::create().await;
             let pool = test_db.migrate().await;
 
-            let one: i64 = sqlx::query_scalar("SELECT 1")
+            // #1019: `SELECT 1` returns INT4 in postgres by default, so
+            // decode as i32. The value only exists to probe that the pool
+            // is alive after migration.
+            let one: i32 = sqlx::query_scalar("SELECT 1")
                 .fetch_one(&pool)
                 .await
                 .expect("test postgres pool should answer after migration");

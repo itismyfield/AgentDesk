@@ -2030,7 +2030,7 @@ mod tests {
     /// against a single Postgres instance using two independent `PgPool`s, which
     /// is what each machine would use in the multimachine deployment.
     #[tokio::test]
-    async fn policy_tick_advisory_lock_blocks_split_brain_across_pools() {
+    async fn policy_tick_pg_advisory_lock_blocks_split_brain_across_pools() {
         let _guard = server_test_lock();
         let pg_db = TestPostgresDb::create().await;
 
@@ -2085,7 +2085,7 @@ mod tests {
     /// distinct from `POLICY_TICK_ADVISORY_LOCK_ID` (7,801,001); each must
     /// singleton independently across machines that share the `agentdesk` PG.
     #[tokio::test]
-    async fn github_sync_advisory_lock_blocks_split_brain_across_pools() {
+    async fn github_sync_pg_advisory_lock_blocks_split_brain_across_pools() {
         let _guard = server_test_lock();
         let pg_db = TestPostgresDb::create().await;
 

@@ -267,8 +267,8 @@ running on *some* host; cross-reference `client_addr` to find which.
   and the integration tests
   `postgres_discord_gateway_lease_fails_over_across_separate_runtime_pools`
   (per-bot lease) and
-  `policy_tick_advisory_lock_blocks_split_brain_across_pools` /
-  `github_sync_advisory_lock_blocks_split_brain_across_pools` (singleton
+  `policy_tick_pg_advisory_lock_blocks_split_brain_across_pools` /
+  `github_sync_pg_advisory_lock_blocks_split_brain_across_pools` (singleton
   jobs) in `src/server/mod.rs`. Things still to validate by hand:
   - Mac Mini ↔ Mac Book gateway handover end-to-end timing.
   - Network-drop recovery time under realistic Postgres TCP keepalive

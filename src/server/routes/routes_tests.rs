@@ -10372,6 +10372,10 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         pg_pool.clone(),
     );
 
+    // #1097: pipeline_stages is now file-canonical (materialized from
+    // policies/default-pipeline.yaml), so PUT/DELETE must be rejected with
+    // HTTP 405. The test still asserts that the table is PG-only (no sqlite
+    // mirror writes happen) and that GET still works as before.
     let put_response = app
         .clone()
         .oneshot(
@@ -10398,22 +10402,35 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .unwrap();
     assert_eq!(
         put_status,
-        StatusCode::OK,
-        "pipeline stages PUT body={}",
+        StatusCode::METHOD_NOT_ALLOWED,
+        "pipeline stages PUT must be rejected as file-canonical; body={}",
         String::from_utf8_lossy(&put_body)
     );
     let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
-    assert_eq!(put_json["stages"].as_array().unwrap().len(), 2);
-    assert_eq!(put_json["stages"][0]["stage_name"], "Build");
-    assert_eq!(put_json["stages"][1]["parallel_with"], "lint");
+    assert_eq!(put_json["table"], "pipeline_stages");
+    assert_eq!(put_json["source_of_truth"], "file-canonical");
+    assert!(
+        put_json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("file-canonical"),
+        "expected file-canonical error message, got: {}",
+        put_json["error"]
+    );
 
+    // No rows should have been written by the rejected PUT. The PG table
+    // may still contain rows materialized from policies/default-pipeline.yaml
+    // for *other* repos, but nothing for this test's repo.
     let pg_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
             .bind("owner/pg-pipeline-stages")
             .fetch_one(&pg_pool)
             .await
             .unwrap();
-    assert_eq!(pg_count, 2);
+    assert_eq!(
+        pg_count, 0,
+        "rejected PUT must not insert rows for the test repo"
+    );
 
     let sqlite_count: i64 = db
         .read_conn()
@@ -10426,6 +10443,8 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .unwrap();
     assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
 
+    // GET still works; since the rejected PUT wrote nothing, the list is
+    // empty for this repo.
     let get_response = app
         .clone()
         .oneshot(
@@ -10441,29 +10460,13 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .await
         .unwrap();
     let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
-    assert_eq!(get_json["stages"].as_array().unwrap().len(), 2);
     assert_eq!(
-        get_json["stages"][0]["stage_order"],
-        json!(3_000_000_000_i64)
-    );
-    assert_eq!(
-        get_json["stages"][0]["timeout_minutes"],
-        json!(3_000_000_002_i64)
-    );
-    assert_eq!(
-        get_json["stages"][0]["max_retries"],
-        json!(3_000_000_003_i64)
-    );
-    assert_eq!(get_json["stages"][1]["stage_name"], "Review");
-    assert_eq!(
-        get_json["stages"][1]["stage_order"],
-        json!(3_000_000_001_i64)
-    );
-    assert_eq!(
-        get_json["stages"][1]["timeout_minutes"],
-        json!(3_000_000_004_i64)
+        get_json["stages"].as_array().unwrap().len(),
+        0,
+        "GET must return empty list for a repo with no materialized stages"
     );
 
+    // DELETE must also be rejected as file-canonical.
     let delete_response = app
         .oneshot(
             Request::builder()
@@ -10474,20 +10477,17 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         )
         .await
         .unwrap();
-    assert_eq!(delete_response.status(), StatusCode::OK);
+    assert_eq!(
+        delete_response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "pipeline stages DELETE must be rejected as file-canonical"
+    );
     let delete_body = axum::body::to_bytes(delete_response.into_body(), usize::MAX)
         .await
         .unwrap();
     let delete_json: serde_json::Value = serde_json::from_slice(&delete_body).unwrap();
-    assert_eq!(delete_json["count"], json!(2));
-
-    let pg_remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
-            .bind("owner/pg-pipeline-stages")
-            .fetch_one(&pg_pool)
-            .await
-            .unwrap();
-    assert_eq!(pg_remaining, 0);
+    assert_eq!(delete_json["table"], "pipeline_stages");
+    assert_eq!(delete_json["source_of_truth"], "file-canonical");
 
     pg_pool.close().await;
     pg_db.drop().await;
