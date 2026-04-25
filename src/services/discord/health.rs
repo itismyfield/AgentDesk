@@ -49,6 +49,11 @@ pub struct WatcherStateSnapshot {
     pub provider: String,
     pub attached: bool,
     pub tmux_session: Option<String>,
+    /// #1170: Channel that owns the tmux-keyed watcher slot. Usually this is
+    /// the requested channel; when a duplicate attach reuses an existing
+    /// watcher, diagnostics can still show which channel owns the live relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watcher_owner_channel_id: Option<u64>,
     pub last_relay_offset: u64,
     pub inflight_state_present: bool,
     pub last_relay_ts_ms: i64,
@@ -300,10 +305,17 @@ impl HealthRegistry {
         let providers = self.providers.lock().await;
         for entry in providers.iter() {
             let shared = entry.shared.clone();
-            let attached = shared.tmux_watchers.contains_key(&channel);
-            let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
+            let watcher_binding = shared.tmux_watchers.channel_binding(&channel);
             let inflight = ProviderKind::from_str(&entry.name)
                 .and_then(|pk| super::inflight::load_inflight_state(&pk, channel_id));
+            let inflight_tmux_session = inflight
+                .as_ref()
+                .and_then(|state| state.tmux_session_name.clone());
+            let inflight_owner_channel_id = inflight_tmux_session
+                .as_deref()
+                .and_then(|tmux| shared.tmux_watchers.owner_channel_for_tmux_session(tmux));
+            let attached = watcher_binding.is_some() || inflight_owner_channel_id.is_some();
+            let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
             let inflight_state_present = inflight.is_some();
             let mailbox_snapshot = super::mailbox_snapshot(&shared, channel).await;
             let mailbox_active_user_msg_id =
@@ -327,9 +339,14 @@ impl HealthRegistry {
                     )
                 })
                 .unwrap_or((0, 0));
-            let tmux_session = inflight
+            let watcher_owner_channel_id = watcher_binding
                 .as_ref()
-                .and_then(|state| state.tmux_session_name.clone());
+                .map(|binding| binding.owner_channel_id)
+                .or(inflight_owner_channel_id)
+                .map(|id| id.get());
+            let tmux_session = watcher_binding
+                .map(|binding| binding.tmux_session_name)
+                .or(inflight_tmux_session);
             let inflight_started_at = inflight.as_ref().map(|state| state.started_at.clone());
             let inflight_updated_at = inflight.as_ref().map(|state| state.updated_at.clone());
             let inflight_user_msg_id = inflight
@@ -356,6 +373,7 @@ impl HealthRegistry {
                 provider: entry.name.clone(),
                 attached,
                 tmux_session,
+                watcher_owner_channel_id,
                 last_relay_offset,
                 inflight_state_present,
                 last_relay_ts_ms,
@@ -1124,7 +1142,7 @@ impl TestHealthHarness {
             settings: tokio::sync::RwLock::new(settings),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
-            tmux_watchers: dashmap::DashMap::new(),
+            tmux_watchers: super::TmuxWatcherRegistry::new(),
             tmux_relay_coords: dashmap::DashMap::new(),
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3252,6 +3270,7 @@ mod tests {
 
         assert_eq!(snapshot.provider, "codex");
         assert!(snapshot.attached);
+        assert_eq!(snapshot.watcher_owner_channel_id, Some(channel_id));
         assert_eq!(snapshot.last_relay_offset, 2048);
         assert_eq!(snapshot.last_relay_ts_ms, 1_700_000_000_000);
         // No inflight JSON written to disk → field is false and #1133 inflight
@@ -3261,9 +3280,11 @@ mod tests {
         assert!(snapshot.inflight_updated_at.is_none());
         assert!(snapshot.inflight_user_msg_id.is_none());
         assert!(snapshot.inflight_current_msg_id.is_none());
-        // tmux_session unknown → liveness probe is skipped, not asserted false.
-        assert!(snapshot.tmux_session.is_none());
-        assert!(snapshot.tmux_session_alive.is_none());
+        assert_eq!(
+            snapshot.tmux_session.as_deref(),
+            Some("test-seeded-watcher-523456789012345678")
+        );
+        assert_eq!(snapshot.tmux_session_alive, Some(false));
         // Idle mailbox: no active turn, no queued interventions.
         assert!(!snapshot.has_pending_queue);
         assert!(snapshot.mailbox_active_user_msg_id.is_none());
@@ -3280,6 +3301,7 @@ mod tests {
             "inflight_state_present",
             "last_relay_ts_ms",
             "has_pending_queue",
+            "watcher_owner_channel_id",
         ] {
             assert!(
                 obj.contains_key(field),
@@ -3293,7 +3315,6 @@ mod tests {
             "inflight_updated_at",
             "inflight_user_msg_id",
             "inflight_current_msg_id",
-            "tmux_session_alive",
             "mailbox_active_user_msg_id",
         ] {
             assert!(
@@ -3315,6 +3336,56 @@ mod tests {
                 .is_none(),
             "unknown channel must return None so the HTTP handler can emit 404",
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_watcher_state_reports_tmux_owner_for_inflight_channel() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let owner_channel_id = 523_456_789_012_345_679;
+        let inflight_channel_id = 523_456_789_012_345_680;
+        let tmux_session_name = format!("test-seeded-watcher-{owner_channel_id}");
+        harness.seed_watcher(owner_channel_id);
+
+        let inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            inflight_channel_id,
+            Some("watcher-state-owner-diagnostic".to_string()),
+            /* request_owner_user_id */ 24,
+            /* user_msg_id */ 9_101,
+            /* current_msg_id */ 9_102,
+            /* user_text */ String::new(),
+            /* session_id */ Some("session-owner-diagnostic".to_string()),
+            Some(tmux_session_name.clone()),
+            /* output_path */ None,
+            /* input_fifo_path */ None,
+            /* last_offset */ 0,
+        );
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let snapshot = harness
+            .registry()
+            .snapshot_watcher_state(inflight_channel_id)
+            .await
+            .expect("inflight tmux owner should surface channel diagnostics");
+
+        assert!(snapshot.attached);
+        assert_eq!(snapshot.watcher_owner_channel_id, Some(owner_channel_id));
+        assert_eq!(
+            snapshot.tmux_session.as_deref(),
+            Some(tmux_session_name.as_str())
+        );
+        assert!(snapshot.inflight_state_present);
     }
 
     /// #1133: when the mailbox holds an active turn (no watcher attached,

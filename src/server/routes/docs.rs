@@ -2850,9 +2850,9 @@ fn all_endpoints() -> Vec<EndpointDoc> {
              inflight_state_present, last_relay_ts_ms, has_pending_queue. \
              #1133 enriched diagnostics (omitted when source is absent): \
              inflight_started_at, inflight_updated_at, inflight_user_msg_id, \
-             inflight_current_msg_id, tmux_session_alive (PID check via `tmux has-session`), \
-             mailbox_active_user_msg_id. Returns 404 when no watcher / inflight / \
-             mailbox engagement exists for the channel.",
+             inflight_current_msg_id, watcher_owner_channel_id, tmux_session_alive \
+             (PID check via `tmux has-session`), mailbox_active_user_msg_id. Returns \
+             404 when no watcher / inflight / mailbox engagement exists for the channel.",
         )
         .with_params([("id", path_param("Discord channel ID (numeric)"))])
         .with_example(
@@ -2861,6 +2861,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "provider": "codex",
                 "attached": true,
                 "tmux_session": "agentdesk-codex-channel-523456789012345678",
+                "watcher_owner_channel_id": 523456789012345678_u64,
                 "last_relay_offset": 2048,
                 "inflight_state_present": true,
                 "last_relay_ts_ms": 1_761_369_600_000_i64,

@@ -234,9 +234,10 @@ pub async fn cancel_turn(
 /// #1133 enriched read-only diagnostics (omitted when their source is
 /// absent): `inflight_started_at`, `inflight_updated_at`,
 /// `inflight_user_msg_id`, `inflight_current_msg_id`,
-/// `tmux_session_alive` (PID check via `tmux has-session`), and
-/// `mailbox_active_user_msg_id`. All fields are PII-free scalars so
-/// the response is safe for non-privileged operator dashboards.
+/// `watcher_owner_channel_id`, `tmux_session_alive` (PID check via
+/// `tmux has-session`), and `mailbox_active_user_msg_id`. All fields are
+/// PII-free scalars so the response is safe for non-privileged operator
+/// dashboards.
 ///
 /// Used by operators to diagnose "watcher detached silently while tmux
 /// still producing output" incidents and pre-watcher mailbox queueing.

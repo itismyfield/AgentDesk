@@ -644,7 +644,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(initial_skills),
-        tmux_watchers: dashmap::DashMap::new(),
+        tmux_watchers: super::TmuxWatcherRegistry::new(),
         tmux_relay_coords: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
