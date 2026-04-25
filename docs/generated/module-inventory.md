@@ -172,7 +172,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2345 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 676 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 961 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 968 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 202 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4772 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 453 |  |
@@ -344,7 +344,7 @@
 | `services::slo` | `src/services/slo/mod.rs` | 1033 | giant-file |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 450 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 652 |  |
-| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 380 |  |
+| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 386 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 320 |  |
