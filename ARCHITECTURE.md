@@ -256,7 +256,6 @@ src/
 │   │   ├── mod.rs
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
-│   │   ├── monitoring_detector.rs
 │   │   ├── monitoring_status.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
