@@ -34,6 +34,19 @@
 | `Handoff State` | `src/services/discord/handoff.rs`: `test_save_and_load_handoff`; `src/services/discord/recovery.rs`: `missing_session_recovery_saves_handoff_for_followup_turn`; `src/services/discord/mod.rs`: `handoff_routing_guard_rejects_wrong_agent_settings` | `handoff_dedup_prevents_double_execution`, `handoff_ttl_10min_auto_cleanup` |
 | `Turn Lifecycle` | `src/services/discord/channel_mailbox.rs`: `cancel_active_turn_marks_token_without_clearing_turn_state`, `recovery_kickoff_marks_recovery_until_finish_turn`; `src/integration_tests/tests/high_risk_recovery.rs`: `scenario_421_deadlock_recent_output_extends_watchdog`, `scenario_421_long_turn_alerts_start_at_30_minutes`; `src/services/discord/mod.rs`: `recovery_known_message_ids_include_active_turn_message` | `turn_creates_placeholder_in_discord`, `turn_edits_placeholder_with_final_response`, `turn_increments_global_active_counter`, `turn_decrements_counter_on_completion` |
 
+## Release gate 축 매핑
+
+`#1011` release gate hardening 감사로그에 따라 recovery lane 은 아래 4 축 중 하나라도 0 개 시나리오가 되면 release gate 자격을 잃는다. [`docs/ci/release-gates.md`](./ci/release-gates.md#3-high-risk-recovery-lane-test-axes) 의 요약과 동기화한다.
+
+| Axis | Module filter | Anchored scenarios |
+| --- | --- | --- |
+| Live turn 보존 | `high_risk_recovery::failure_recovery::` | `scenario_3_restart_recovery_reconciles_broken_state`, `scenario_667_restart_recovery_reconciles_duplicate_review_dispatches` |
+| Watcher reattach | `high_risk_recovery::delayed_worker::` | `scenario_421_deadlock_recent_output_extends_watchdog`, `scenario_421_deadlock_stale_output_only_marks_suspected_deadlock`, `scenario_421_long_turn_alerts_start_at_30_minutes` |
+| Dispatch/outbox idempotency | `high_risk_recovery::outbox_boundary::` | `scenario_160_1_outbox_batch_delivers_exactly_once`, `scenario_160_2_recovery_fallback_completes_dispatch`, `scenario_160_4_outbox_processes_all_entries_including_duplicates`, `scenario_160_6_notify_success_keeps_completed_dispatch_terminal` |
+| Queue loss 방지 | `high_risk_recovery::failure_recovery::` + `idle_session_cleanup::` | `scenario_251_boot_reconcile_backfills_missing_notify_outbox`, `scenario_251_boot_reconcile_refires_missing_review_dispatch`, `scenario_251_boot_reconcile_resets_broken_auto_queue_entries`, `scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl` |
+
+새 시나리오는 위 4 축 중 하나에 귀속시키고 표 + release-gates.md 를 동시 갱신.
+
 ## Notes
 
 - `cargo test --all-targets`는 여전히 전체 회귀 gate다. recovery lane은 이를 대체하지 않고, restart/reconcile/outbox 계열을 별도 required job으로 승격한다.

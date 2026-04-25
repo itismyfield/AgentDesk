@@ -67,7 +67,20 @@ high_risk_recovery:
 - `scripts/generate_inventory_docs.py --check` 은 `Script checks` job 마지막 단계에서 하드 블록 (ci-main `scripts` step, ci-pr `scripts` step).
 - 이 drift 검증이 red 면 Full/PG/High-risk 와 동일하게 release gate 위반으로 간주한다.
 
-## 3. Resource Contention Policy
+## 3. High-risk recovery lane test axes
+
+`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 각 축은 `src/integration_tests/tests/high_risk_recovery.rs` 의 `failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 모듈에 분산되어 있으며, 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 에 풀 매트릭스가 있다.
+
+| Axis | What it guards | Representative scenarios (cargo test filters) |
+| --- | --- | --- |
+| **Live turn 보존** | restart 직후 in-flight turn / dispatch 가 손실되거나 broken pointer 로 복원되지 않도록 | `high_risk_recovery::failure_recovery::scenario_3_restart_recovery_reconciles_broken_state`, `failure_recovery::scenario_667_restart_recovery_reconciles_duplicate_review_dispatches` |
+| **Watcher reattach** | tmux 출력 watcher / deadlock watchdog 가 재시작 후 정상 재부착되고 stale 입력에 잘못 알림 보내지 않도록 | `high_risk_recovery::delayed_worker::scenario_421_deadlock_recent_output_extends_watchdog`, `delayed_worker::scenario_421_deadlock_stale_output_only_marks_suspected_deadlock`, `delayed_worker::scenario_421_long_turn_alerts_start_at_30_minutes` |
+| **Dispatch/outbox idempotency** | notify outbox 가 정확히 1회 전달되고 fallback / duplicate / mixed action / completed 상태가 깨지지 않도록 | `high_risk_recovery::outbox_boundary::scenario_160_1_outbox_batch_delivers_exactly_once`, `outbox_boundary::scenario_160_2_recovery_fallback_completes_dispatch`, `outbox_boundary::scenario_160_4_outbox_processes_all_entries_including_duplicates`, `outbox_boundary::scenario_160_6_notify_success_keeps_completed_dispatch_terminal` |
+| **Queue loss 방지** | boot reconcile 이 누락된 review dispatch / notify outbox / 깨진 auto-queue entry 를 backfill 하고, idle 세션 정리가 active dispatch 를 잘라먹지 않도록 | `high_risk_recovery::failure_recovery::scenario_251_boot_reconcile_backfills_missing_notify_outbox`, `failure_recovery::scenario_251_boot_reconcile_refires_missing_review_dispatch`, `failure_recovery::scenario_251_boot_reconcile_resets_broken_auto_queue_entries`, `idle_session_cleanup::scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl` |
+
+이 4 축 중 하나라도 시나리오가 0 개로 줄어들면 lane 자체가 release gate 자격을 잃는다고 본다. 새 시나리오는 위 표 + `docs/high-risk-recovery-lane.md` 동시 갱신 후 PR 에 동봉.
+
+## 4. Resource Contention Policy
 
 `PostgreSQL tests` 와 `High-risk recovery` 는 공유 리소스(동일 Postgres 서비스 컨테이너)를 사용하므로 다음 정책을 조합한다.
 
@@ -87,7 +100,7 @@ high_risk_recovery:
 
 - Recovery test의 `pg_recovery_test_config` 는 `pool_max = 1` 로 설정. 단일 connection 으로 startup reconcile 이 runtime pool 을 점유하지 않고 completion 되는지 검증 (`scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs`).
 
-## 4. Triage 분류 규약
+## 5. Triage 분류 규약
 
 `scripts/main-ci-triage.sh` 는 `CI Main` 이 2회 연속 red일 때 test identifier 또는 `job::<name>` 단위로 ci-red 이슈를 생성/갱신한다. Release gate 별 분류 계약:
 
@@ -100,13 +113,13 @@ high_risk_recovery:
 
 Self-test (`bash scripts/main-ci-triage.sh --self-test`) 는 위 분류가 red → red 2회 연속, recovery, existing issue comment-only, cancelled run skip, skipped lane non-closure 등 엣지 케이스 모두에서 유지됨을 검증한다. 또한 `scenario_three_gate_failures_produce_distinct_identifiers` 가 Full / PG / High-risk recovery 3개 gate 동시 실패 시 서로 다른 식별자 + 서로 다른 issue 가 생성됨을 확인한다.
 
-## 5. 누가 소유하는가
+## 6. 누가 소유하는가
 
 - 3개 gate 의 red 신호 → `agent:project-agentdesk` label 로 자동 triage 배정.
 - Gate red 가 2회 연속 재현되면 `[ci-red] <identifier> 실패 (main)` 제목의 이슈가 `ci-red` + `agent:project-agentdesk` label 로 생성/업데이트된다.
 - 2회 연속 green 이면 자동 close.
 
-## 6. 변경 이력 힌트
+## 7. 변경 이력 힌트
 
 - #973 / #974: release gate B-12 도입.
-- #1011 (이 문서): path filter gap 보강 (`src/kanban.rs`, `src/services/auto_queue.rs`, `src/services/message_outbox.rs`), triage classifier self-test 확장.
+- #1011 (이 문서): path filter gap 보강 (`src/kanban.rs`, `src/services/auto_queue.rs`, `src/services/message_outbox.rs`), triage classifier self-test 확장, 4 축 (live turn / watcher reattach / dispatch-outbox idempotency / queue loss) 명시.
