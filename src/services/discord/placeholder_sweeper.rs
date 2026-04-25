@@ -273,17 +273,19 @@ impl StalledEditTracker {
 }
 
 /// Drop the per-channel mailbox active turn that the abandoned inflight was
-/// driving. Without this, the channel's `cancel_token` and `global_active`
-/// counter stay set, so subsequent user messages see an in-flight turn and
-/// get queued behind a placeholder that is already terminal.
+/// driving and reuse the regular turn-cancellation cleanup path. Without
+/// this:
+///   - the channel's `cancel_token` and `global_active` counter stay set,
+///     so subsequent user messages see an in-flight turn and get queued
+///     behind a placeholder that is already terminal,
+///   - the orphaned child process / tmux session keeps running outside the
+///     mailbox where no watchdog can reach it, and
+///   - any soft-queued user messages stay buffered with no dequeue
+///     trigger.
 ///
-/// Soft-queued interventions: `mailbox_finish_turn` returns `has_pending`
-/// when there are buffered queue items. The sweeper does not own a
-/// `TurnGateway` and so cannot dispatch the next queued turn inline the
-/// way `turn_bridge::run` does. Log the leftover so operators notice;
-/// the next user message on the channel (or any external dequeue
-/// trigger) will pick the queue back up because the active turn slot is
-/// now released.
+/// `cancel_active_token` handles (1)+(2) — sets the cancelled flag, kills
+/// the PID tree, and tears down the tmux session. The deferred idle queue
+/// kickoff covers (3): same hook that the normal cancellation path uses.
 async fn finalize_abandoned_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -292,14 +294,21 @@ async fn finalize_abandoned_mailbox(
     let channel = serenity::ChannelId::new(state.channel_id);
     let finish = super::mailbox_finish_turn(shared, provider, channel).await;
     if let Some(removed_token) = finish.removed_token {
-        removed_token.cancelled.store(true, Ordering::Relaxed);
+        super::turn_bridge::cancel_active_token(
+            &removed_token,
+            super::TmuxCleanupPolicy::CleanupSession {
+                termination_reason_code: Some("placeholder_sweeper_abandon"),
+            },
+            "placeholder_sweeper abandoned",
+        );
         shared.global_active.fetch_sub(1, Ordering::Relaxed);
     }
     if finish.has_pending {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] 🧹 placeholder sweeper: channel {} active slot released but ≥1 queued message(s) remain — next external trigger will resume dequeue",
-            state.channel_id
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel,
+            "placeholder_sweeper_abandon",
         );
     }
 }

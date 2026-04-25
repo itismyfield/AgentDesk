@@ -246,7 +246,7 @@
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 938 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::outbound` | `src/services/discord/outbound.rs` | 687 |  |
-| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 503 |  |
+| `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 512 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1876 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4659 | giant-file |
