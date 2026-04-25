@@ -737,6 +737,12 @@ pub(in crate::services::discord) async fn cmd_allowed(
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // Issue #1005: tool-grant tier — owner-only AND default-disabled. The
+    // ability to grant new tools (e.g. `+Bash`) escalates the model's
+    // capability surface and must not be reachable via `allow_all_users`.
+    if !super::enforce_slash_command_policy(&ctx, "/allowed").await? {
+        return Ok(());
+    }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] /allowed {action}");
@@ -928,9 +934,39 @@ pub(in crate::services::discord) async fn cmd_allowall(
         }
     };
 
-    ctx.say(&response).await?;
+    // Issue #1005: when toggling public access, remind the operator that
+    // high-risk commands (shell / tool grants / runtime control / credential
+    // surface) stay owner-only regardless of the flag. Surfacing the policy
+    // state here makes it clear that opening the chat to all users does NOT
+    // open the operational kill switches.
+    let policy_note = build_allowall_policy_note();
+    let combined = format!("{response}\n\n{policy_note}");
+    ctx.say(&combined).await?;
     tracing::info!("  [{ts}] ▶ {response}");
     Ok(())
+}
+
+/// Render the risk-policy reminder appended to `/allowall` responses.
+///
+/// Pulled out so it can be unit tested without standing up the slash-command
+/// machinery. Wording references both `!`-text and `/`-slash variants so the
+/// guarantee is unambiguous: enabling `allow_all_users` does not move any
+/// high-risk gate on either surface.
+pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
+    let high_risk_enabled = super::high_risk_enabled_via_env();
+    let shell_state = if high_risk_enabled {
+        "owner-only, ENABLED"
+    } else {
+        "owner-only, DISABLED (set AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1)"
+    };
+    format!(
+        "**Note (issue #1005):** `allow_all_users` only governs ordinary chat \
+         access. High-risk commands stay owner-only on BOTH the `!` text and \
+         `/` slash surfaces, regardless:\n\
+         • runtime-control (`!stop`/`!clear`/`!restart`/`!mcp_reload`, `/stop`/`/clear`/`/restart`/`/debug`/`/deletesession`) — owner-only\n\
+         • shell/tool-grant (`!shell`/`!allowed`, `/shell`/`/allowed`) — {shell_state}\n\
+         • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
+    )
 }
 
 #[cfg(test)]
@@ -1744,5 +1780,30 @@ agents:
         assert!(controls.contains(MODEL_PICKER_SUBMIT_LABEL));
         assert!(controls.contains(MODEL_PICKER_RESET_LABEL));
         assert!(controls.contains(MODEL_PICKER_CANCEL_LABEL));
+    }
+
+    /// Issue #1005: the `/allowall` and `!allowall` surfaces tack on a policy
+    /// reminder so operators do not assume `allow_all_users=true` opens the
+    /// shell or the runtime kill switch. Pin the wording so the message stays
+    /// consistent across renames.
+    ///
+    /// We assert structural properties (each high-risk family is mentioned,
+    /// the issue number is referenced) instead of the full string so harmless
+    /// copy edits do not break the test.
+    #[test]
+    fn allowall_policy_note_lists_every_high_risk_family() {
+        let note = build_allowall_policy_note();
+        assert!(note.contains("issue #1005"), "{note}");
+        assert!(note.contains("runtime-control"), "{note}");
+        assert!(note.contains("shell/tool-grant"), "{note}");
+        assert!(note.contains("credential/system"), "{note}");
+        // Every high-risk family must reference owner-only or its enable flag
+        // so the operator sees that toggling allow_all_users does not move
+        // these gates.
+        assert!(note.contains("owner-only"), "{note}");
+        assert!(
+            note.contains("AGENTDESK_DISCORD_HIGH_RISK_ENABLED") || note.contains("ENABLED"),
+            "{note}",
+        );
     }
 }

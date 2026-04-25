@@ -142,6 +142,14 @@ pub(in crate::services::discord) async fn cmd_cc(
             return Ok(());
         }
         "stop" => {
+            // Issue #1005: `/cc stop` is a runtime-control alias for `/stop`
+            // — it cancels the live turn — so it must obey the same
+            // owner-only policy as `/stop` itself. Without this gate a
+            // non-owner allowed in via `allow_all_users=true` could drop
+            // active turns by routing through `/cc stop`.
+            if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
+                return Ok(());
+            }
             let channel_id = ctx.channel_id();
             let result = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
             match result.token {

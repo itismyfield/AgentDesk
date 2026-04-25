@@ -430,6 +430,11 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // Issue #1005: runtime-control tier — owner-only regardless of
+    // `allow_all_users`. Mirrors the text-surface gate in `handle_text_command`.
+    if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
+        return Ok(());
+    }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] /stop");
@@ -475,6 +480,10 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+    // Issue #1005: runtime-control tier — owner-only.
+    if !super::enforce_slash_command_policy(&ctx, "/clear").await? {
         return Ok(());
     }
 
@@ -699,6 +708,11 @@ pub(in crate::services::discord) async fn cmd_shell(
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+    // Issue #1005: shell/tool-grant tier — owner-only AND default-disabled.
+    // Even `allow_all_users=true` must NOT unlock RCE.
+    if !super::enforce_slash_command_policy(&ctx, "/shell").await? {
         return Ok(());
     }
 

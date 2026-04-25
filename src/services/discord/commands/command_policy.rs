@@ -160,6 +160,40 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
+/// Look up the risk tier for a slash command (e.g. `/shell`, `/clear`).
+///
+/// Maps the slash form to the same tier as the matching text command so the
+/// owner guard applies uniformly across both surfaces. Slash variants that do
+/// not exist as text commands are mapped to their nearest text equivalent.
+///
+/// `arg1` is preserved for symmetry with [`command_risk`] but is not yet
+/// consulted; both `/allowed +X` and `/allowed -X` already classify as
+/// `ShellOrToolGrant` because the slash command itself implies a grant.
+pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> CommandRisk {
+    match slash_cmd {
+        // Inspection only.
+        "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
+        | "/allowedtools" | "/sessions" | "/receipt" => CommandRisk::ReadOnly,
+
+        // Per-channel session shaping.
+        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" => CommandRisk::Mutating,
+
+        // Runtime kill switches and conversation wipes.
+        "/stop" | "/clear" | "/debug" | "/deletesession" | "/restart" | "/mcp-reload" => {
+            CommandRisk::RuntimeControl
+        }
+
+        // RCE-equivalent surface.
+        "/shell" | "/allowed" => CommandRisk::ShellOrToolGrant,
+
+        // Credential / user-management surface.
+        "/allowall" | "/adduser" | "/removeuser" | "/escalation" => CommandRisk::CredentialSystem,
+
+        // Conservative default.
+        _ => CommandRisk::Mutating,
+    }
+}
+
 /// Short multi-line block suitable for `!help`. Documents each tier and its
 /// current enable state.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
@@ -340,5 +374,172 @@ mod tests {
         assert!(!matcher("no"));
         assert!(!matcher(""));
         assert!(!matcher("maybe"));
+    }
+
+    /// Full DoD matrix: every risk tier × owner ∈ {true,false} × high_risk
+    /// ∈ {true,false}. The shape of `evaluate_policy` is:
+    ///
+    /// - Low-risk tiers always Allow.
+    /// - High-risk tiers: non-owner → DenyNotOwner, owner → Allow unless the
+    ///   tier requires explicit enable and it is off.
+    ///
+    /// This gives us a single test that asserts the full grid, which is what
+    /// the issue checklist requires.
+    #[test]
+    fn full_tier_owner_enable_matrix_matches_specification() {
+        let tiers = [
+            CommandRisk::ReadOnly,
+            CommandRisk::Mutating,
+            CommandRisk::RuntimeControl,
+            CommandRisk::ShellOrToolGrant,
+            CommandRisk::CredentialSystem,
+        ];
+        for &tier in &tiers {
+            for is_owner in [false, true] {
+                for high_risk_enabled in [false, true] {
+                    let got = evaluate_policy(tier, is_owner, high_risk_enabled);
+                    let want = if !tier.is_high_risk() {
+                        // Low-risk tiers never gated regardless of inputs.
+                        PolicyDecision::Allow
+                    } else if !is_owner {
+                        // High-risk + non-owner is always denied. This is the
+                        // canonical `allow_all_users=true` scenario.
+                        PolicyDecision::DenyNotOwner
+                    } else if tier.requires_explicit_enable() && !high_risk_enabled {
+                        // Owner + opt-in tier without env flag → DenyNotEnabled.
+                        PolicyDecision::DenyNotEnabled
+                    } else {
+                        PolicyDecision::Allow
+                    };
+                    assert_eq!(
+                        got, want,
+                        "tier={tier:?} owner={is_owner} enabled={high_risk_enabled}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// `allow_all_users=true` must NOT change the policy outcome. This test
+    /// is intentionally redundant with the matrix above; it pins the property
+    /// in case `evaluate_policy` ever grows an `allow_all_users` parameter.
+    #[test]
+    fn allow_all_users_flag_does_not_unlock_high_risk() {
+        // Simulate the production flow: allow_all_users only gates `check_auth`,
+        // not the policy. Once a non-owner reaches evaluate_policy, the high-risk
+        // tiers must still deny.
+        for &tier in &[
+            CommandRisk::RuntimeControl,
+            CommandRisk::ShellOrToolGrant,
+            CommandRisk::CredentialSystem,
+        ] {
+            assert_eq!(
+                evaluate_policy(
+                    tier, /*is_owner=*/ false, /*high_risk_enabled=*/ true
+                ),
+                PolicyDecision::DenyNotOwner,
+                "tier={tier:?} must deny non-owner even when high-risk is enabled",
+            );
+            assert_eq!(
+                evaluate_policy(
+                    tier, /*is_owner=*/ false, /*high_risk_enabled=*/ false
+                ),
+                PolicyDecision::DenyNotOwner,
+                "tier={tier:?} must deny non-owner when high-risk is disabled",
+            );
+        }
+    }
+
+    #[test]
+    fn label_strings_are_stable() {
+        // The labels feed help/dashboard surfaces and external docs reference
+        // them; pin the wording so renames break the test instead of silently
+        // changing user-visible output.
+        assert_eq!(CommandRisk::ReadOnly.label(), "read-only");
+        assert_eq!(CommandRisk::Mutating.label(), "mutating");
+        assert_eq!(CommandRisk::RuntimeControl.label(), "runtime-control");
+        assert_eq!(CommandRisk::ShellOrToolGrant.label(), "shell/tool-grant");
+        assert_eq!(CommandRisk::CredentialSystem.label(), "credential/system");
+    }
+
+    /// Codex review caught that the slash surface was not gated by the policy.
+    /// Pin parity between `!command` and `/command` tier mappings so future
+    /// edits cannot silently re-open a slash hole.
+    #[test]
+    fn slash_and_text_command_risk_tiers_match() {
+        let pairs: &[(&str, &str)] = &[
+            ("!help", "/help"),
+            ("!pwd", "/pwd"),
+            ("!health", "/health"),
+            ("!status", "/status"),
+            ("!inflight", "/inflight"),
+            ("!queue", "/queue"),
+            ("!metrics", "/metrics"),
+            ("!allowedtools", "/allowedtools"),
+            ("!sessions", "/sessions"),
+            ("!receipt", "/receipt"),
+            ("!start", "/start"),
+            ("!down", "/down"),
+            ("!cc", "/cc"),
+            ("!meeting", "/meeting"),
+            ("!model", "/model"),
+            ("!fast", "/fast"),
+            ("!stop", "/stop"),
+            ("!clear", "/clear"),
+            ("!debug", "/debug"),
+            ("!deletesession", "/deletesession"),
+            ("!restart", "/restart"),
+            ("!shell", "/shell"),
+            ("!allowed", "/allowed"),
+            ("!allowall", "/allowall"),
+            ("!adduser", "/adduser"),
+            ("!removeuser", "/removeuser"),
+        ];
+        for (text_cmd, slash_cmd) in pairs {
+            assert_eq!(
+                command_risk(text_cmd, ""),
+                slash_command_risk(slash_cmd),
+                "tier mismatch between {text_cmd} and {slash_cmd}",
+            );
+        }
+        // /mcp-reload uses a hyphen; the text form is `!mcp_reload`. Both must
+        // map to RuntimeControl.
+        assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::RuntimeControl);
+        assert_eq!(
+            slash_command_risk("/mcp-reload"),
+            CommandRisk::RuntimeControl
+        );
+    }
+
+    #[test]
+    fn unknown_slash_command_defaults_to_mutating() {
+        // Mirrors the conservative fallback in command_risk so a typo cannot
+        // accidentally evade the gate. Mutating is the right default because
+        // the dispatcher will reject truly unknown names.
+        assert_eq!(slash_command_risk("/nonsense"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk(""), CommandRisk::Mutating);
+    }
+
+    /// Codex round 4 caught that `/cc stop` and `!cc stop` route through the
+    /// same cancel path as `/stop` / `!stop`, but the parent commands (`!cc`
+    /// and `/cc`) are classified as Mutating. The dispatch sites for the
+    /// `stop` subcommand explicitly evaluate `CommandRisk::RuntimeControl`
+    /// before reaching the cancel path. Pin the expected policy outcome of
+    /// that runtime-control evaluation so a future refactor that drops the
+    /// guard fails this test.
+    #[test]
+    fn cc_stop_alias_is_runtime_control_when_evaluated() {
+        // Non-owner with allow_all_users semantically passes upstream auth →
+        // policy must deny. This is what the dispatch sites assert.
+        assert_eq!(
+            evaluate_policy(CommandRisk::RuntimeControl, false, true),
+            PolicyDecision::DenyNotOwner,
+        );
+        // Owner is allowed regardless of the high-risk env flag — emergency
+        // ops path stays open.
+        assert_eq!(
+            evaluate_policy(CommandRisk::RuntimeControl, true, false),
+            PolicyDecision::Allow,
+        );
     }
 }

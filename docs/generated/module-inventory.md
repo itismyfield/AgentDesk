@@ -210,24 +210,24 @@
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1679 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 629 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 2647 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 2652 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1122 | giant-file |
-| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 54 |  |
-| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 344 |  |
-| `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1748 | giant-file |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 817 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1037 | giant-file |
+| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
+| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 545 |  |
+| `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1809 | giant-file |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 831 |  |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1047 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 147 |  |
-| `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 70 |  |
+| `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 126 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
-| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 357 |  |
+| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 363 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
-| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 376 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1224 | giant-file |
+| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 384 |  |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1251 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 541 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2632 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
@@ -272,7 +272,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 223 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 8351 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 8444 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
