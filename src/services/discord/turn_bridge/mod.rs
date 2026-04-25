@@ -745,6 +745,7 @@ pub(super) fn spawn_turn_bridge(
         let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
+        let mut watcher_owner_channel_id = channel_id;
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -1263,14 +1264,15 @@ pub(super) fn spawn_turn_bridge(
                                     // #1135: Reuse a live watcher for the same
                                     // tmux session; replace only stale or
                                     // different-session incumbents.
-                                    super::tmux::claim_or_reuse_watcher(
+                                    let claim = super::tmux::claim_or_reuse_watcher(
                                         &shared_owned.tmux_watchers,
                                         channel_id,
                                         handle,
                                         &provider,
                                         "turn_bridge_tmux_ready",
-                                    )
-                                    .should_spawn()
+                                    );
+                                    watcher_owner_channel_id = claim.owner_channel_id();
+                                    claim.should_spawn()
                                 }
                                 #[cfg(not(unix))]
                                 {
@@ -1750,7 +1752,7 @@ pub(super) fn spawn_turn_bridge(
             {
                 advance_tmux_relay_confirmed_end(
                     shared_owned.as_ref(),
-                    channel_id,
+                    watcher_owner_channel_id,
                     tmux_last_offset,
                 );
             }
@@ -1776,7 +1778,7 @@ pub(super) fn spawn_turn_bridge(
             {
                 advance_tmux_relay_confirmed_end(
                     shared_owned.as_ref(),
-                    channel_id,
+                    watcher_owner_channel_id,
                     tmux_last_offset,
                 );
             }
@@ -2050,7 +2052,7 @@ pub(super) fn spawn_turn_bridge(
                     {
                         advance_tmux_relay_confirmed_end(
                             shared_owned.as_ref(),
-                            channel_id,
+                            watcher_owner_channel_id,
                             tmux_last_offset,
                         );
                     }
@@ -2073,7 +2075,7 @@ pub(super) fn spawn_turn_bridge(
 
             // Signal the watcher that this turn's response was already delivered.
             // Prevents the watcher from relaying the same response when it resumes.
-            if let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id) {
+            if let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id) {
                 watcher.turn_delivered.store(true, Ordering::Relaxed);
             }
 
@@ -2093,7 +2095,7 @@ pub(super) fn spawn_turn_bridge(
             has_queued_turns,
             can_chain_locally,
         ) && let Some(offset) = tmux_last_offset
-            && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+            && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
         {
             if let Ok(mut guard) = watcher.resume_offset.lock() {
                 *guard = Some(offset);
@@ -2620,7 +2622,7 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
                 );
                 if let Some(offset) = tmux_last_offset
-                    && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+                    && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
                 {
                     if let Ok(mut guard) = watcher.resume_offset.lock() {
                         *guard = Some(offset);

@@ -186,7 +186,7 @@ loop Every ~1s while !done
   else StreamMessage::StatusUpdate
     TurnBridge -> TurnBridge : Track token counts
   else StreamMessage::TmuxReady
-    TurnBridge -> TmuxWatcher : Spawn tmux_output_watcher()\n(claim_or_reuse_watcher)
+    TurnBridge -> TmuxWatcher : claim_or_reuse_watcher()\nspawn or reuse owner
     activate TmuxWatcher
   else StreamMessage::Done
     TurnBridge -> TurnBridge : done = true

@@ -1012,6 +1012,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
     }
 
+    let mut watcher_owner_channel_id = channel_id;
     #[cfg(unix)]
     if let (Some(tmux_session_name), Some(output_path)) = (watcher_tmux_name, watcher_output_path) {
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1034,6 +1035,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
             &provider,
             "turn_start_headless",
         );
+        watcher_owner_channel_id = claim.owner_channel_id();
         if claim.should_spawn() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -1064,7 +1066,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
     let current_path_clone = current_path.clone();
     let cancel_token_clone = cancel_token.clone();
 
-    if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
+    if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) {
         watcher
             .pause_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

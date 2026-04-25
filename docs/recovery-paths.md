@@ -59,13 +59,19 @@ alias until the mechanical split lands):
 
 ## Watcher Ownership
 
-Watcher registration has one policy for all recovery paths: a tmux session has
-at most one live watcher. Duplicate attach attempts for the same
-`tmux_session_name` reuse the existing live handle and do not spawn a second
-watcher. A same-session handle is replaced only when the existing handle is
-already cancelled, which is the registry's provable stale marker. A different
-tmux session on the same Discord channel may still replace the channel slot so
-new-turn recovery is not blocked by an older session.
+Normal watcher registration has one policy for all recovery paths: a tmux
+session has at most one live watcher. Duplicate attach attempts for the same
+`tmux_session_name` reuse the existing live handle and return that handle's
+owning Discord channel; callers must pause, resume, or mark delivery on the
+owner slot, not necessarily the requested channel. A same-session handle is
+replaced only when the existing handle is already cancelled, which is the
+registry's provable stale marker. A different tmux session on the same Discord
+channel may still replace the channel slot so new-turn recovery is not blocked
+by an older session.
+
+The missing-inflight reattach fallback is the exception: it is triggered by an
+already-running watcher after relay ownership is broken, so it force-replaces
+the same-session handle and spawns a fresh watcher generation.
 
 ## Common Finalizer Shape
 
