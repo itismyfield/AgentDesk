@@ -1092,6 +1092,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     }
                 });
 
+                // #1115 placeholder stall sweeper: safety net for placeholders
+                // whose owning turn task is stuck or dead. Edits Discord
+                // messages into stalled / abandoned states based on the
+                // inflight state file mtime.
+                super::placeholder_sweeper::spawn_placeholder_sweeper(
+                    ctx.http.clone(),
+                    shared_clone.clone(),
+                    provider_for_setup.clone(),
+                );
+
                 // Background: periodic reaper for dead tmux sessions that
                 // still show as working in the DB (catches watcher gaps)
                 #[cfg(unix)]
