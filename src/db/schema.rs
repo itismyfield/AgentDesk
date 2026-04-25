@@ -108,6 +108,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     ensure_turns_schema(conn)?;
     ensure_observability_schema(conn)?;
     ensure_slo_schema(conn)?;
+    ensure_quality_regression_schema(conn)?;
     run_migration_once(
         conn,
         SESSION_AGENT_ID_BACKFILL_META_KEY,
@@ -2072,6 +2073,26 @@ fn ensure_slo_schema(conn: &Connection) -> Result<()> {
             last_value     REAL NOT NULL,
             PRIMARY KEY (metric, channel_id)
         );",
+    )?;
+    Ok(())
+}
+
+// #1104 (911-4) agent quality regression alert cooldown — sqlite parity for
+// migrations/postgres/0020_quality_regression_cooldowns.sql.
+fn ensure_quality_regression_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS quality_regression_cooldowns (
+            agent_id         TEXT NOT NULL,
+            metric           TEXT NOT NULL,
+            alerted_at_ms    INTEGER NOT NULL,
+            last_baseline    REAL NOT NULL,
+            last_current     REAL NOT NULL,
+            last_delta       REAL NOT NULL,
+            last_sample_size INTEGER NOT NULL,
+            PRIMARY KEY (agent_id, metric)
+        );
+        CREATE INDEX IF NOT EXISTS idx_quality_regression_cooldowns_alerted
+            ON quality_regression_cooldowns (alerted_at_ms DESC);",
     )?;
     Ok(())
 }
