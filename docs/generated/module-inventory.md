@@ -270,7 +270,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 14 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1217 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5645 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5658 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1960 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
@@ -315,7 +315,7 @@
 | `services::mcp_config` | `src/services/mcp_config.rs` | 632 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 372 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 115 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2433 | giant-file |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 2479 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
