@@ -238,7 +238,7 @@
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 645 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 356 |  |
-| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3514 | giant-file |
+| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3517 | giant-file |
 | `services::discord::meeting_state_machine` | `src/services/discord/meeting_state_machine.rs` | 302 |  |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1224 | giant-file |
@@ -264,7 +264,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 14 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1217 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5409 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5496 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1785 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
@@ -307,10 +307,10 @@
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 248 |  |
 | `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 276 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 632 |  |
-| `services::memory` | `src/services/memory/mod.rs` | 347 |  |
-| `services::memory::local` | `src/services/memory/local.rs` | 114 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2321 | giant-file |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 274 |  |
+| `services::memory` | `src/services/memory/mod.rs` | 372 |  |
+| `services::memory::local` | `src/services/memory/local.rs` | 115 |  |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 2433 | giant-file |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 4214 | giant-file |
