@@ -277,7 +277,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 223 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 8779 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 8931 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
@@ -315,7 +315,7 @@
 | `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 4214 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
-| `services::observability::metrics` | `src/services/observability/metrics.rs` | 344 |  |
+| `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 19 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 878 |  |
