@@ -454,6 +454,9 @@ impl Default for DiscordBotSettings {
 /// Shared state for the Discord bot (multi-channel: each channel has its own session)
 /// Handle for a background tmux output watcher
 pub(super) struct TmuxWatcherHandle {
+    /// Tmux session this watcher owns. Used to enforce the single-watcher
+    /// policy when the same session is reattached through another path.
+    pub(super) tmux_session_name: String,
     /// Signal to pause monitoring (while Discord handler reads its own turn)
     pub(super) paused: Arc<std::sync::atomic::AtomicBool>,
     /// After Discord handler finishes its turn, set this offset so watcher resumes from here
@@ -471,11 +474,10 @@ pub(super) struct TmuxWatcherHandle {
 /// Per-channel coordination for watcher-to-Discord relay emission.
 ///
 /// This state is **shared across watcher-handle replacements** (unlike
-/// `TmuxWatcherHandle`, which is recreated on `claim_or_replace_watcher`).
-/// Surviving replacement is the root-cause fix for duplicate terminal-response
-/// emission observed when an outgoing watcher and an incoming watcher both
-/// pass their per-instance dedupe guards and both send the same tmux range to
-/// Discord.
+/// `TmuxWatcherHandle`, which is recreated on watcher reattach). It keeps
+/// relay emission serialized if a stale outgoing watcher overlaps with its
+/// successor, and it exposes the confirmed-output watermark used by watcher
+/// stop checks.
 ///
 /// Scope: intra-process only. Persisted dedupe across dcserver restarts is
 /// still handled by `InflightTurnState::last_watcher_relayed_offset` in the
@@ -490,13 +492,10 @@ pub(super) struct TmuxRelayCoord {
     /// End offset (exclusive) of the last relay this process has confirmed
     /// delivery for. 0 = no confirmed delivery yet this process lifetime.
     ///
-    /// Dedupe invariant: a new relay candidate with
-    /// `data_start_offset < confirmed_end_offset` overlaps an already-delivered
-    /// range and must be skipped. Using the END offset (not the start) lets a
-    /// legitimate new turn that starts exactly at the previous turn's end
-    /// still be emitted, which is the intentional strict-`<` semantic the
-    /// watcher already relies on for Claude Code's `task_notification`
-    /// auto-trigger boundary.
+    /// This is telemetry/stop-state only. Relay dedupe is scoped to the
+    /// watcher instance via its local `last_relayed_offset`; cross-watcher
+    /// ownership is enforced at registration time so a valid owner is never
+    /// suppressed solely because another watcher advanced this watermark.
     pub(super) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
     /// Wall-clock timestamp (ms since epoch) of the most recent confirmed
     /// relay. 0 = no confirmed relay observed yet. Read by the
@@ -805,7 +804,7 @@ pub(crate) mod test_harness_exports {
 
     /// Opaque wrapper around an individual `TmuxWatcherHandle`. Construct
     /// via [`new_test_watcher_handle`]; hand it to [`try_claim_watcher`] /
-    /// [`claim_or_replace_watcher`] to register it.
+    /// [`claim_or_reuse_watcher`] to register it.
     pub(crate) struct WatcherHandle {
         inner: TmuxWatcherHandle,
     }
@@ -824,10 +823,13 @@ pub(crate) mod test_harness_exports {
     /// Build a fresh watcher handle plus inspection handles on the
     /// underlying atomic flags so the harness can observe stale-cancellation
     /// without importing the private `TmuxWatcherHandle` type.
-    pub(crate) fn new_test_watcher_handle() -> (WatcherHandle, WatcherHandleInspector) {
+    pub(crate) fn new_test_watcher_handle(
+        tmux_session_name: &str,
+    ) -> (WatcherHandle, WatcherHandleInspector) {
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let inner = TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
             paused: paused.clone(),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: cancel.clone(),
@@ -848,14 +850,14 @@ pub(crate) mod test_harness_exports {
     }
 
     #[cfg(unix)]
-    pub(crate) fn claim_or_replace_watcher(
+    pub(crate) fn claim_or_reuse_watcher(
         watchers: &WatcherRegistry,
         channel_id: ChannelId,
         handle: WatcherHandle,
         provider: &ProviderKind,
         source: &str,
-    ) -> bool {
-        super::tmux::claim_or_replace_watcher(
+    ) -> super::tmux::WatcherClaimOutcome {
+        super::tmux::claim_or_reuse_watcher(
             &watchers.inner,
             channel_id,
             handle.inner,

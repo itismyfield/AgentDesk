@@ -1384,6 +1384,7 @@ impl TestHealthHarness {
         self.shared.tmux_watchers.insert(
             ChannelId::new(channel_id),
             super::TmuxWatcherHandle {
+                tmux_session_name: format!("test-seeded-watcher-{channel_id}"),
                 paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 resume_offset: Arc::new(std::sync::Mutex::new(None)),
                 cancel: cancel.clone(),

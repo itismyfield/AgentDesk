@@ -206,46 +206,46 @@ async fn session_kill_with_ephemeral_pg() {
     pg_harness.teardown().await;
 }
 
-/// DoD #3: two claims race for the same channel via
-/// `claim_or_replace_watcher`. Exactly one watcher survives; the stale one
-/// is cancelled so its loop iteration exits quietly and cannot emit a
-/// duplicate terminal relay.
+/// DoD #3: duplicate attach for the same tmux session via
+/// `claim_or_reuse_watcher`. Exactly one watcher survives; the second attach
+/// reuses the incumbent instead of spawning another relayer.
 ///
-/// This is the exact invariant #964 added for `claim_or_replace_watcher`
-/// unit-tested in `services/discord/tmux.rs`. Re-asserting it here at the
-/// flow level pins the contract that the integration harness depends on:
-/// the dedupe seam lives *at* the watcher registry, not in the callers.
+/// This is the #1135 single-watcher policy unit-tested in
+/// `services/discord/tmux.rs`. Re-asserting it here at the flow level pins
+/// the contract that the dedupe boundary lives at watcher registration.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn cross_watcher_race_single_winner() {
     let _harness = TestHarness::new();
     let watchers = flow::new_watcher_registry();
-    let channel = ChannelId::new(SCENARIO_CHANNEL_ID);
+    let channel_a = ChannelId::new(SCENARIO_CHANNEL_ID);
+    let channel_b = ChannelId::new(SCENARIO_CHANNEL_ID + 1);
     let provider = ProviderKind::Codex;
+    let tmux_name = "AgentDesk-codex-adk-cdx-flow";
 
     // Watcher A claims the channel first.
-    let (handle_a, inspector_a) = flow::new_test_watcher_handle();
+    let (handle_a, inspector_a) = flow::new_test_watcher_handle(tmux_name);
     assert!(
-        flow::try_claim_watcher(&watchers, channel, handle_a),
+        flow::try_claim_watcher(&watchers, channel_a, handle_a),
         "initial claim must succeed on an empty registry"
     );
     assert_eq!(flow::watcher_slot_count(&watchers), 1);
     assert!(!inspector_a.cancel.load(Ordering::Relaxed));
 
-    // Watcher B races in via `claim_or_replace_watcher`. Use a paused
-    // handle so we can later assert the slot flipped to B's state.
-    let (handle_b, inspector_b) = flow::new_test_watcher_handle();
+    // Watcher B races in for the same tmux session. Use a paused handle so
+    // we can assert the slot did not flip to B's state.
+    let (handle_b, inspector_b) = flow::new_test_watcher_handle(tmux_name);
     inspector_b.paused.store(true, Ordering::Relaxed);
-    let fresh = flow::claim_or_replace_watcher(
+    let outcome = flow::claim_or_reuse_watcher(
         &watchers,
-        channel,
+        channel_b,
         handle_b,
         &provider,
         "discord_flow::cross_watcher_race",
     );
     assert!(
-        !fresh,
-        "replacement path must report `fresh=false` (slot already occupied)"
+        !outcome.should_spawn(),
+        "duplicate same-tmux attach must reuse the live incumbent"
     );
     assert_eq!(
         flow::watcher_slot_count(&watchers),
@@ -253,19 +253,18 @@ async fn cross_watcher_race_single_winner() {
         "exactly one watcher slot survives the race"
     );
 
-    // Stale watcher is cancelled; incoming watcher is live.
     assert!(
-        inspector_a.cancel.load(Ordering::Relaxed),
-        "stale watcher must be cancelled so it exits its loop quietly"
+        !inspector_a.cancel.load(Ordering::Relaxed),
+        "live incumbent must be reused, not cancelled"
     );
     assert!(
         !inspector_b.cancel.load(Ordering::Relaxed),
-        "incoming watcher must NOT be cancelled — it is the sole relayer"
+        "incoming handle was never spawned and should remain uncancelled"
     );
     assert_eq!(
-        flow::watcher_slot_paused(&watchers, channel),
-        Some(true),
-        "registry slot must hold incoming handle (paused=true)"
+        flow::watcher_slot_paused(&watchers, channel_a),
+        Some(false),
+        "registry slot must keep watcher A (paused=false)"
     );
 }
 
@@ -339,19 +338,23 @@ async fn dashmap_zombie_cleanup_preserves_live_watcher() {
     let channel = ChannelId::new(SCENARIO_CHANNEL_ID);
     let provider = ProviderKind::Claude;
 
-    // Register a watcher, then replace it via claim_or_replace_watcher.
-    let (handle_a, inspector_a) = flow::new_test_watcher_handle();
+    // Register a watcher, then replace it via claim_or_reuse_watcher with a
+    // different tmux session on the same channel.
+    let (handle_a, inspector_a) = flow::new_test_watcher_handle("AgentDesk-claude-old");
     assert!(flow::try_claim_watcher(&watchers, channel, handle_a));
 
-    let (handle_b, inspector_b) = flow::new_test_watcher_handle();
-    let fresh = flow::claim_or_replace_watcher(
+    let (handle_b, inspector_b) = flow::new_test_watcher_handle("AgentDesk-claude-new");
+    let outcome = flow::claim_or_reuse_watcher(
         &watchers,
         channel,
         handle_b,
         &provider,
         "discord_flow::dashmap_zombie_cleanup",
     );
-    assert!(!fresh, "replacement path must report fresh=false");
+    assert!(
+        outcome.should_spawn(),
+        "different-session replacement path must spawn"
+    );
 
     // After the replacement, watcher A's cancel flag is up. In the live
     // Discord loop, the stale entry is NOT the DashMap slot (that now holds
