@@ -341,6 +341,18 @@ pub(crate) enum Commands {
         /// Apply safe local repairs before running diagnostics
         #[arg(long)]
         fix: bool,
+        /// Allow doctor --fix to restart the dcserver service
+        #[arg(long)]
+        allow_restart: bool,
+        /// Allow doctor --fix to run SQLite schema repair and remove stale SQLite cache files
+        #[arg(long)]
+        repair_sqlite_cache: bool,
+        /// Allow sending configured auth tokens to a non-loopback AGENTDESK_API_URL
+        #[arg(long)]
+        allow_remote: bool,
+        /// Restrict checks to a profile
+        #[arg(long, value_enum)]
+        profile: Option<DoctorProfileArg>,
         /// Emit machine-readable JSON output for agent parsing
         #[arg(long)]
         json: bool,
@@ -356,6 +368,13 @@ pub(crate) enum Commands {
 pub(crate) enum LaunchdPlistFlavorArg {
     Release,
     Dev,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum DoctorProfileArg {
+    Quick,
+    Deep,
+    Security,
 }
 
 #[derive(Args, Clone, Debug)]

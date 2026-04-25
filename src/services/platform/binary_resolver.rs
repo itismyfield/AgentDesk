@@ -7,12 +7,15 @@
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
 const SHELL_ENV_DELIMITER: &str = "__AGENTDESK_SHELL_ENV__";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,6 +196,27 @@ pub fn prepare_provider_command(resolution: &BinaryResolution) -> Option<Command
     Some(command)
 }
 
+fn drain_limited_output<R>(mut reader: R) -> Vec<u8>
+where
+    R: Read + Send + 'static,
+{
+    let mut output = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = VERSION_PROBE_MAX_OUTPUT_BYTES.saturating_sub(output.len());
+                if remaining > 0 {
+                    output.extend_from_slice(&buf[..n.min(remaining)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    output
+}
+
 pub fn probe_resolved_binary_version(
     binary_path: impl AsRef<OsStr>,
     resolution: &BinaryResolution,
@@ -200,21 +224,62 @@ pub fn probe_resolved_binary_version(
     let mut command = Command::new(binary_path);
     apply_binary_resolution(&mut command, resolution);
     command.arg("--version");
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    match command.output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if stdout.is_empty() {
-                (None, Some("version_probe_empty".to_string()))
-            } else {
-                (Some(stdout), None)
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return (None, Some("permission_denied".to_string()));
+        }
+        Err(_) => return (None, Some("version_probe_spawn_failed".to_string())),
+    };
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_limited_output(reader)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|reader| std::thread::spawn(move || drain_limited_output(reader)));
+
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stderr_reader);
+                drop(stdout_reader);
+                return (None, Some("version_probe_timeout".to_string()));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stderr_reader);
+                drop(stdout_reader);
+                return (None, Some("version_probe_failed".to_string()));
             }
         }
-        Ok(_) => (None, Some("version_probe_failed".to_string())),
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            (None, Some("permission_denied".to_string()))
+    };
+
+    let stdout = stdout_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let _ = stderr_reader.and_then(|reader| reader.join().ok());
+
+    if status.success() {
+        let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
+        if stdout.is_empty() {
+            (None, Some("version_probe_empty".to_string()))
+        } else {
+            (Some(stdout), None)
         }
-        Err(_) => (None, Some("version_probe_spawn_failed".to_string())),
+    } else {
+        (None, Some("version_probe_failed".to_string()))
     }
 }
 
@@ -874,5 +939,33 @@ mod tests {
                 None => std::env::remove_var("PATH"),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_caps_large_stdout() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("codex");
+        write_executable_with_contents(
+            &provider,
+            "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt 1000 ]; do printf 'abcdefghijklmnopqrst'; i=$((i + 1)); done\n",
+        );
+        let resolution = BinaryResolution {
+            requested_binary: "codex".to_string(),
+            resolved_path: Some(provider.to_string_lossy().to_string()),
+            canonical_path: None,
+            source: Some("env_override".to_string()),
+            attempts: Vec::new(),
+            failure_kind: None,
+            exec_path: None,
+        };
+
+        let (version, error) = probe_resolved_binary_version(&provider, &resolution);
+
+        assert_eq!(error, None);
+        let version = version.expect("version stdout should be captured");
+        assert_eq!(version.len(), VERSION_PROBE_MAX_OUTPUT_BYTES);
+        assert!(version.starts_with("abcdefghijklmnopqrst"));
     }
 }

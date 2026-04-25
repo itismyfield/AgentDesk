@@ -42,6 +42,9 @@ pub(crate) struct RestartCompletionReport {
     /// Restart generation at time of report creation.
     #[serde(default)]
     pub generation: u64,
+    /// Startup doctor summary/artifact metadata captured after restart.
+    #[serde(default)]
+    pub doctor_summary: Option<serde_json::Value>,
 }
 
 impl RestartCompletionReport {
@@ -62,12 +65,31 @@ impl RestartCompletionReport {
             channel_name: None,
             user_msg_id: None,
             generation: super::runtime_store::load_generation(),
+            doctor_summary: latest_startup_doctor_summary(),
         }
     }
 
     pub(crate) fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
     }
+}
+
+fn latest_startup_doctor_summary() -> Option<serde_json::Value> {
+    let path = crate::cli::doctor::startup::latest_startup_artifact_path()?;
+    let mut summary = serde_json::json!({
+        "artifact_path": path.display().to_string(),
+        "followup_context": crate::cli::doctor::contract::RunContext::RestartFollowup.as_str()
+    });
+    if let Ok(content) = fs::read_to_string(&path)
+        && let Ok(report) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        for key in ["ok", "run_context", "boot_id", "summary", "error"] {
+            if let Some(value) = report.get(key) {
+                summary[key] = value.clone();
+            }
+        }
+    }
+    Some(summary)
 }
 
 pub(crate) fn restart_report_context_from_env() -> Option<RestartReportContext> {
@@ -424,6 +446,7 @@ mod tests {
             channel_name: None,
             user_msg_id: None,
             generation: 0,
+            doctor_summary: None,
         };
 
         save_restart_report_in_root(temp.path(), &report).unwrap();
@@ -450,6 +473,7 @@ mod tests {
                 channel_name: None,
                 user_msg_id: None,
                 generation: 0,
+                doctor_summary: None,
             },
         )
         .unwrap();
@@ -467,6 +491,7 @@ mod tests {
                 channel_name: None,
                 user_msg_id: None,
                 generation: 0,
+                doctor_summary: None,
             },
         )
         .unwrap();

@@ -36,6 +36,8 @@ pub async fn auth_middleware(
     let path = req.uri().path();
 
     if path == "/health"
+        || path == "/health/detail"
+        || path == "/doctor/stale-mailbox/repair"
         || path == "/auth/session"
         || path.starts_with("/hook/")
         || path == "/dispatched-sessions/webhook"

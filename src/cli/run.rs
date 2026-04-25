@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use super::args::{
-    AutoQueueAction, CardAction, Commands, ConfigAction, DispatchAction, MigrateAction,
-    MonitoringAction, ReportProvider,
+    AutoQueueAction, CardAction, Commands, ConfigAction, DispatchAction, DoctorProfileArg,
+    MigrateAction, MonitoringAction, ReportProvider,
 };
 
 fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
@@ -353,11 +353,38 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             session.as_deref(),
             limit,
         )),
-        Commands::Doctor { fix, json } => {
+        Commands::Doctor {
+            fix,
+            allow_restart,
+            repair_sqlite_cache,
+            allow_remote,
+            profile,
+            json,
+        } => {
+            let profile = match profile {
+                Some(DoctorProfileArg::Quick) => {
+                    Some(super::doctor::contract::DoctorProfile::Quick)
+                }
+                Some(DoctorProfileArg::Deep) => Some(super::doctor::contract::DoctorProfile::Deep),
+                Some(DoctorProfileArg::Security) => {
+                    Some(super::doctor::contract::DoctorProfile::Security)
+                }
+                None => None,
+            };
+            let options = super::doctor::DoctorOptions {
+                fix,
+                json,
+                allow_restart,
+                repair_sqlite_cache,
+                allow_remote,
+                profile,
+                run_context: super::doctor::contract::RunContext::ManualCli,
+                artifact_path: None,
+            };
             if json {
-                exit_for_json_cli(super::doctor::cmd_doctor(fix, json))
+                exit_for_json_cli(super::doctor::cmd_doctor(options))
             } else {
-                exit_for_cli(super::doctor::cmd_doctor(fix, json))
+                exit_for_cli(super::doctor::cmd_doctor(options))
             }
         }
         Commands::Migrate { action } => exit_for_cli(match action {

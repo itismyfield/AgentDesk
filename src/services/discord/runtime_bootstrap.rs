@@ -1065,6 +1065,32 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         );
                     }
 
+                    let startup_doctor = tokio::task::spawn_blocking(
+                        crate::cli::doctor::startup::run_startup_diagnostic_once,
+                    )
+                    .await;
+                    match startup_doctor {
+                        Ok(Ok(Some(path))) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ✓ startup_doctor wrote {}",
+                                path.display()
+                            );
+                        }
+                        Ok(Ok(None)) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!("  [{ts}] ✓ startup_doctor already recorded for this boot");
+                        }
+                        Ok(Err(error)) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
+                        }
+                        Err(error) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!("  [{ts}] ⚠ startup_doctor_failed: {error}");
+                        }
+                    }
+
                     // NOW flush restart reports (recovery is done, safe to delete them)
                     flush_restart_reports(
                         &http_for_restart_reports,
