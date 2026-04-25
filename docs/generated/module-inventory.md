@@ -232,7 +232,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2632 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 3219 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 3224 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 462 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1009 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
@@ -341,7 +341,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 380 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 318 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 320 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2034 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 1033 | giant-file |
 | `ui` | `src/ui/mod.rs` | 1 |  |
