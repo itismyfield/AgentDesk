@@ -331,36 +331,15 @@ fn inflight_state_still_same_turn(
     {
         return false;
     }
-    current_age + SLACK_SECS >= snapshot_age_secs
+    observed_age_still_stale(snapshot_age_secs, current_age, SLACK_SECS)
 }
 
-fn inflight_state_file_still_stale(
-    provider: &ProviderKind,
-    channel_id: u64,
+fn observed_age_still_stale(
     snapshot_age_secs: u64,
-) -> bool {
-    // After our edit completed, the worst case is a freshly written file
-    // ~ABANDON_THRESHOLD younger than the snapshot. Anything younger than
-    // (snapshot_age_secs - SLACK) means a new write occurred and we must
-    // not delete. Slack accommodates clock skew between the file mtime and
-    // our wall-clock measurement.
-    const SLACK_SECS: u64 = 5;
-    let states = load_inflight_states_for_sweep(provider);
-    let current_age = states
-        .into_iter()
-        .find(|(state, _)| state.channel_id == channel_id)
-        .map(|(_, age)| age);
-    observed_state_still_stale(snapshot_age_secs, current_age, SLACK_SECS)
-}
-
-fn observed_state_still_stale(
-    snapshot_age_secs: u64,
-    current_age_secs: Option<u64>,
+    current_age_secs: u64,
     slack_secs: u64,
 ) -> bool {
-    current_age_secs
-        .map(|current_age| current_age + slack_secs >= snapshot_age_secs)
-        .unwrap_or(false)
+    current_age_secs + slack_secs >= snapshot_age_secs
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -474,10 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_inflight_file_is_not_stale_equal() {
-        assert!(!observed_state_still_stale(120, None, 5));
-        assert!(!observed_state_still_stale(120, Some(100), 5));
-        assert!(observed_state_still_stale(120, Some(116), 5));
+    fn observed_age_slack_only_matches_when_within_slack() {
+        // Current age much smaller than snapshot age means a fresh write —
+        // not stale.
+        assert!(!observed_age_still_stale(120, 100, 5));
+        // Current age within slack of snapshot age — still stale.
+        assert!(observed_age_still_stale(120, 116, 5));
+        // Current age greater than snapshot age (no fresh write) — still
+        // stale.
+        assert!(observed_age_still_stale(120, 130, 5));
     }
 
     #[test]
