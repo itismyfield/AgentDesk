@@ -143,6 +143,19 @@ pub(super) async fn run_placeholder_sweep_pass(
         if state.restart_mode.is_some() {
             continue;
         }
+        // Only sweep messages that are still pure placeholders. Once any
+        // real response text has been streamed, `current_msg_id` points at
+        // a partially delivered response; overwriting it with a stalled or
+        // abandoned label would corrupt user-visible output for healthy
+        // long-running tools that simply haven't emitted a new event in a
+        // while.
+        //
+        // The "stalled after partial output" case is intentionally left for
+        // a follow-up: it requires an append (rather than replace) strategy
+        // so the partial response stays visible above the badge.
+        if !state.full_response.is_empty() || state.response_sent_offset > 0 {
+            continue;
+        }
         match classify_age(age_secs) {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
@@ -303,5 +316,23 @@ mod tests {
         assert!(state.restart_mode.is_none());
         state.set_restart_mode(super::super::InflightRestartMode::DrainRestart);
         assert!(state.restart_mode.is_some());
+    }
+
+    #[test]
+    fn placeholder_only_gating_excludes_partially_streamed_state() {
+        // The sweeper guards `!state.full_response.is_empty() ||
+        // state.response_sent_offset > 0` to avoid overwriting partially
+        // delivered responses. This test pins the data shape that the gate
+        // checks against.
+        let mut state = make_state(1234, 5678);
+        assert!(state.full_response.is_empty());
+        assert_eq!(state.response_sent_offset, 0);
+
+        state.full_response = "partial response so far".to_string();
+        assert!(!state.full_response.is_empty());
+
+        state.full_response.clear();
+        state.response_sent_offset = 64;
+        assert!(state.response_sent_offset > 0);
     }
 }
