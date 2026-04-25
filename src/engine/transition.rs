@@ -1615,4 +1615,143 @@ mod tests {
             allowed.intents
         );
     }
+
+    /// #1081: canonical-transition lint.
+    ///
+    /// The FSM is the single writer of `kanban_cards.status`. Only the FSM
+    /// executor (this file), its PG twin (`transition_executor_pg.rs`), the
+    /// JS-side pipeline-aware raw setter (`ops/kanban_ops.rs`), and tests
+    /// may issue a raw `UPDATE kanban_cards SET status`. Every other
+    /// production call site must route through
+    /// `kanban::transition_status_with_opts[_pg]` or
+    /// `engine::transition::execute_intent_on_conn` +
+    /// `transition_executor_pg::execute_pg_transition_intent`.
+    ///
+    /// This test scans the whole `src/` tree and fails if any file outside
+    /// the allowlist contains a raw `UPDATE kanban_cards SET status`
+    /// statement. Intended to be cheap (<50ms) and hermetic — no network,
+    /// no DB, just filesystem reads.
+    #[test]
+    fn lint_no_direct_kanban_status_update_in_production() {
+        use std::path::{Path, PathBuf};
+
+        // Canonical writers: the FSM executor itself, the PG twin, the
+        // JS-side pipeline-aware setter (which carries its own #839
+        // migration TODO), and the kanban module that owns this invariant
+        // (it declares the pattern in tests and docs).
+        //
+        // Test files are excluded via the `is_test_context` check below,
+        // which skips `tests.rs` / `*_tests.rs` / `integration_tests.rs`
+        // and any file that matches test fixture conventions.
+        const ALLOWED: &[&str] = &[
+            "src/engine/transition.rs",
+            "src/engine/transition_executor_pg.rs",
+            "src/engine/intent.rs",
+            "src/engine/ops/kanban_ops.rs",
+            "src/kanban.rs",
+        ];
+
+        fn is_test_context(path: &Path) -> bool {
+            let file_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if file_name == "tests.rs"
+                || file_name == "integration_tests.rs"
+                || file_name.ends_with("_tests.rs")
+                || file_name.ends_with("_test.rs")
+            {
+                return true;
+            }
+            path.components().any(|c| {
+                let seg = c.as_os_str().to_string_lossy();
+                seg == "tests" || seg == "__tests__" || seg == "test_support"
+            })
+        }
+
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(read) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src_root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "lint: found no .rs files under {src_root:?}"
+        );
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let needle_variants = ["UPDATE kanban_cards SET status"];
+
+        let mut offenders = Vec::new();
+        for file in &files {
+            let rel = file.strip_prefix(&manifest).unwrap_or(file);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if ALLOWED.iter().any(|a| rel_str == *a) {
+                continue;
+            }
+            if is_test_context(file) {
+                continue;
+            }
+
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            // Skip any #[cfg(test)] / #[test] gated sections by scanning
+            // line-wise: if a match sits inside a `#[cfg(test)]` mod or a
+            // `#[cfg(test)]` / `#[test]` annotated item we accept it.
+            let mut in_test_cfg = false;
+            let mut brace_depth: i32 = 0;
+            let mut test_cfg_depth: Option<i32> = None;
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]") {
+                    in_test_cfg = true;
+                }
+                // Track brace depth so we know when a test-gated block ends.
+                for ch in line.chars() {
+                    if ch == '{' {
+                        brace_depth += 1;
+                        if in_test_cfg && test_cfg_depth.is_none() {
+                            test_cfg_depth = Some(brace_depth);
+                            in_test_cfg = false;
+                        }
+                    } else if ch == '}' {
+                        brace_depth -= 1;
+                        if Some(brace_depth) < test_cfg_depth {
+                            test_cfg_depth = None;
+                        }
+                    }
+                }
+                if test_cfg_depth.is_some() {
+                    continue;
+                }
+                for needle in &needle_variants {
+                    if line.contains(needle) {
+                        offenders.push(format!("{}:{}: {}", rel_str, idx + 1, line.trim()));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "#1081 lint: production code must not issue raw \
+             `UPDATE kanban_cards SET status` — route through the FSM \
+             executor (`kanban::transition_status_with_opts[_pg]` or \
+             `execute_intent_on_conn`). Offenders:\n  {}",
+            offenders.join("\n  ")
+        );
+    }
 }
