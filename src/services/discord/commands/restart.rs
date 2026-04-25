@@ -178,6 +178,12 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // Issue #1005: runtime-control tier — owner-only. /restart and /mcp-reload
+    // can drop in-flight turns and re-bootstrap the provider session, so they
+    // must not be reachable through `allow_all_users`.
+    if !super::enforce_slash_command_policy(&ctx, command_name).await? {
+        return Ok(());
+    }
 
     if command_name == "/mcp-reload" {
         ctx.say(MCP_RELOAD_DEPRECATION_NOTICE).await?;

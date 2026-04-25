@@ -160,6 +160,40 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
+/// Look up the risk tier for a slash command (e.g. `/shell`, `/clear`).
+///
+/// Maps the slash form to the same tier as the matching text command so the
+/// owner guard applies uniformly across both surfaces. Slash variants that do
+/// not exist as text commands are mapped to their nearest text equivalent.
+///
+/// `arg1` is preserved for symmetry with [`command_risk`] but is not yet
+/// consulted; both `/allowed +X` and `/allowed -X` already classify as
+/// `ShellOrToolGrant` because the slash command itself implies a grant.
+pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> CommandRisk {
+    match slash_cmd {
+        // Inspection only.
+        "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
+        | "/allowedtools" | "/sessions" | "/receipt" => CommandRisk::ReadOnly,
+
+        // Per-channel session shaping.
+        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" => CommandRisk::Mutating,
+
+        // Runtime kill switches and conversation wipes.
+        "/stop" | "/clear" | "/debug" | "/deletesession" | "/restart" | "/mcp-reload" => {
+            CommandRisk::RuntimeControl
+        }
+
+        // RCE-equivalent surface.
+        "/shell" | "/allowed" => CommandRisk::ShellOrToolGrant,
+
+        // Credential / user-management surface.
+        "/allowall" | "/adduser" | "/removeuser" | "/escalation" => CommandRisk::CredentialSystem,
+
+        // Conservative default.
+        _ => CommandRisk::Mutating,
+    }
+}
+
 /// Short multi-line block suitable for `!help`. Documents each tier and its
 /// current enable state.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
@@ -426,5 +460,63 @@ mod tests {
         assert_eq!(CommandRisk::RuntimeControl.label(), "runtime-control");
         assert_eq!(CommandRisk::ShellOrToolGrant.label(), "shell/tool-grant");
         assert_eq!(CommandRisk::CredentialSystem.label(), "credential/system");
+    }
+
+    /// Codex review caught that the slash surface was not gated by the policy.
+    /// Pin parity between `!command` and `/command` tier mappings so future
+    /// edits cannot silently re-open a slash hole.
+    #[test]
+    fn slash_and_text_command_risk_tiers_match() {
+        let pairs: &[(&str, &str)] = &[
+            ("!help", "/help"),
+            ("!pwd", "/pwd"),
+            ("!health", "/health"),
+            ("!status", "/status"),
+            ("!inflight", "/inflight"),
+            ("!queue", "/queue"),
+            ("!metrics", "/metrics"),
+            ("!allowedtools", "/allowedtools"),
+            ("!sessions", "/sessions"),
+            ("!receipt", "/receipt"),
+            ("!start", "/start"),
+            ("!down", "/down"),
+            ("!cc", "/cc"),
+            ("!meeting", "/meeting"),
+            ("!model", "/model"),
+            ("!fast", "/fast"),
+            ("!stop", "/stop"),
+            ("!clear", "/clear"),
+            ("!debug", "/debug"),
+            ("!deletesession", "/deletesession"),
+            ("!restart", "/restart"),
+            ("!shell", "/shell"),
+            ("!allowed", "/allowed"),
+            ("!allowall", "/allowall"),
+            ("!adduser", "/adduser"),
+            ("!removeuser", "/removeuser"),
+        ];
+        for (text_cmd, slash_cmd) in pairs {
+            assert_eq!(
+                command_risk(text_cmd, ""),
+                slash_command_risk(slash_cmd),
+                "tier mismatch between {text_cmd} and {slash_cmd}",
+            );
+        }
+        // /mcp-reload uses a hyphen; the text form is `!mcp_reload`. Both must
+        // map to RuntimeControl.
+        assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::RuntimeControl);
+        assert_eq!(
+            slash_command_risk("/mcp-reload"),
+            CommandRisk::RuntimeControl
+        );
+    }
+
+    #[test]
+    fn unknown_slash_command_defaults_to_mutating() {
+        // Mirrors the conservative fallback in command_risk so a typo cannot
+        // accidentally evade the gate. Mutating is the right default because
+        // the dispatcher will reject truly unknown names.
+        assert_eq!(slash_command_risk("/nonsense"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk(""), CommandRisk::Mutating);
     }
 }

@@ -737,6 +737,12 @@ pub(in crate::services::discord) async fn cmd_allowed(
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // Issue #1005: tool-grant tier — owner-only AND default-disabled. The
+    // ability to grant new tools (e.g. `+Bash`) escalates the model's
+    // capability surface and must not be reachable via `allow_all_users`.
+    if !super::enforce_slash_command_policy(&ctx, "/allowed").await? {
+        return Ok(());
+    }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] /allowed {action}");
@@ -943,7 +949,9 @@ pub(in crate::services::discord) async fn cmd_allowall(
 /// Render the risk-policy reminder appended to `/allowall` responses.
 ///
 /// Pulled out so it can be unit tested without standing up the slash-command
-/// machinery.
+/// machinery. Wording references both `!`-text and `/`-slash variants so the
+/// guarantee is unambiguous: enabling `allow_all_users` does not move any
+/// high-risk gate on either surface.
 pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
     let high_risk_enabled = super::high_risk_enabled_via_env();
     let shell_state = if high_risk_enabled {
@@ -953,10 +961,11 @@ pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
     };
     format!(
         "**Note (issue #1005):** `allow_all_users` only governs ordinary chat \
-         access. High-risk commands stay owner-only regardless:\n\
-         • runtime-control (`!stop`/`!clear`/`!restart`/`!mcp_reload`) — owner-only\n\
-         • shell/tool-grant (`!shell`/`!allowed`) — {shell_state}\n\
-         • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`) — owner-only"
+         access. High-risk commands stay owner-only on BOTH the `!` text and \
+         `/` slash surfaces, regardless:\n\
+         • runtime-control (`!stop`/`!clear`/`!restart`/`!mcp_reload`, `/stop`/`/clear`/`/restart`/`/debug`/`/deletesession`) — owner-only\n\
+         • shell/tool-grant (`!shell`/`!allowed`, `/shell`/`/allowed`) — {shell_state}\n\
+         • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
     )
 }
 

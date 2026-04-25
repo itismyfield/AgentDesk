@@ -213,18 +213,18 @@
 | `services::discord` | `src/services/discord/mod.rs` | 2647 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1122 | giant-file |
-| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 54 |  |
-| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 430 |  |
-| `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1800 | giant-file |
-| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 817 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1037 | giant-file |
+| `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
+| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 519 |  |
+| `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1809 | giant-file |
+| `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 831 |  |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1047 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 147 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 126 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
-| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 357 |  |
+| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 363 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 376 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1229 | giant-file |

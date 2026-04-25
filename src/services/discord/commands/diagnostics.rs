@@ -817,6 +817,11 @@ pub(in crate::services::discord) async fn cmd_deletesession(
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
+    // Issue #1005: runtime-control tier — owner-only. Deleting a Gemini
+    // session is destructive and may interrupt live work.
+    if !super::enforce_slash_command_policy(&ctx, "/deletesession").await? {
+        return Ok(());
+    }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
@@ -940,6 +945,11 @@ pub(in crate::services::discord) async fn cmd_debug(ctx: Context<'_>) -> Result<
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+    // Issue #1005: runtime-control tier — owner-only. Toggling global debug
+    // logging changes runtime behavior and is owner-managed.
+    if !super::enforce_slash_command_policy(&ctx, "/debug").await? {
         return Ok(());
     }
 
