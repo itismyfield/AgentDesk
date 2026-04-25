@@ -64,6 +64,7 @@ async fn stop_turn_with_policy(
     let mut lifecycle_path = "direct-fallback";
     let mut queue_depth = None;
     let mut termination_recorded = false;
+    let mut runtime_had_active_turn = false;
     let tmux_was_alive = crate::services::platform::tmux::has_session(&target.tmux_name);
     let cleanup_tmux = cleanup_policy.should_cleanup_tmux();
 
@@ -100,6 +101,7 @@ async fn stop_turn_with_policy(
         };
         if let Some(runtime) = runtime {
             lifecycle_path = runtime.lifecycle_path;
+            runtime_had_active_turn = runtime.had_active_turn;
             queue_depth = Some(runtime.queue_depth);
             termination_recorded = runtime.termination_recorded;
         }
@@ -121,6 +123,7 @@ async fn stop_turn_with_policy(
         .await;
         if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
             lifecycle_path = hard_stop.cleanup_path;
+            runtime_had_active_turn = hard_stop.had_active_turn;
         }
     }
 
@@ -153,8 +156,7 @@ async fn stop_turn_with_policy(
         target.provider.as_ref().is_some_and(|provider| {
             clear_inflight_by_tmux_name(provider, &target.tmux_name)
                 || target.channel_id.is_some_and(|channel_id| {
-                    clear_inflight_by_channel(provider, channel_id);
-                    true
+                    clear_inflight_by_channel(provider, channel_id) || runtime_had_active_turn
                 })
         })
     } else {
@@ -182,7 +184,7 @@ pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
     crate::services::discord::clear_inflight_by_tmux_name(provider, tmux_name)
 }
 
-fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) {
+fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> bool {
     crate::services::discord::clear_inflight_state(provider, channel_id.get())
 }
 

@@ -1568,7 +1568,10 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
         .join("codex");
     std::fs::create_dir_all(&inflight_dir).unwrap();
 
-    let tmux_name = "AgentDesk-codex-adk-cdx";
+    let tmux_name = format!(
+        "AgentDesk-codex-adk-cdx-inflight-test-{}",
+        std::process::id()
+    );
     std::fs::write(
         inflight_dir.join("1485506232256168011.json"),
         serde_json::to_string(&json!({
@@ -1582,7 +1585,7 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
             "current_msg_len": 0,
             "user_text": "show me output",
             "session_id": null,
-            "tmux_session_name": tmux_name,
+            "tmux_session_name": tmux_name.clone(),
             "output_path": null,
             "input_fifo_path": null,
             "last_offset": 0u64,

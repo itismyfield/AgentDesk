@@ -1805,10 +1805,7 @@ mod tests {
         // Serialize against any other test that also mutates AGENTDESK_ROOT_DIR,
         // so the env var stays consistent across the save/load round-trip when
         // cargo test schedules tests on multiple threads in CI.
-        static AGENTDESK_ROOT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = AGENTDESK_ROOT_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = super::runtime_store::lock_test_env();
 
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("agentdesk-root");

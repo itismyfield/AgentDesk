@@ -366,6 +366,7 @@ impl HealthRegistry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
     pub lifecycle_path: &'static str,
+    pub had_active_turn: bool,
     pub queue_depth: usize,
     pub termination_recorded: bool,
 }
@@ -435,6 +436,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
             let snapshot = shared.mailbox(channel_id).snapshot().await;
             return Some(RuntimeTurnStopResult {
                 lifecycle_path: "canonical",
+                had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
                 termination_recorded,
             });
@@ -469,6 +471,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
 
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
+        had_active_turn: finish.removed_token.is_some(),
         queue_depth,
         termination_recorded,
     })
