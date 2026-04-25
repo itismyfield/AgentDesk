@@ -2018,6 +2018,133 @@ mod tests {
         pg_pool.close().await;
         pg_db.drop().await;
     }
+
+    /// #835 split-brain regression: when two machines share the same Postgres
+    /// `agentdesk` DB, the policy-tick singleton lock (`POLICY_TICK_ADVISORY_LOCK_ID`
+    /// = 7,801,001) must keep at most one tick loop active. The standby's
+    /// `pg_try_advisory_lock` call must observe `false` while the active holder
+    /// owns the lease, and must succeed once the holder releases (handover).
+    ///
+    /// Real two-machine verification is documented in
+    /// `docs/multimachine-failover.md`; this test exercises the same code path
+    /// against a single Postgres instance using two independent `PgPool`s, which
+    /// is what each machine would use in the multimachine deployment.
+    #[tokio::test]
+    async fn policy_tick_advisory_lock_blocks_split_brain_across_pools() {
+        let _guard = server_test_lock();
+        let pg_db = TestPostgresDb::create().await;
+
+        // Two independent pools simulate two machines (Mac Mini + Mac Book)
+        // pointing at the same `agentdesk` Postgres instance.
+        let active_pool = pg_db.connect_and_migrate().await;
+        let standby_pool = pg_db.connect_and_migrate().await;
+
+        let active_holder = try_acquire_pg_singleton_lock(
+            &active_pool,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick",
+        )
+        .await
+        .expect("active machine must be able to attempt the lock")
+        .expect("active machine must acquire the policy-tick singleton lease");
+
+        let standby_attempt = try_acquire_pg_singleton_lock(
+            &standby_pool,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick",
+        )
+        .await
+        .expect("standby probe must not error");
+        assert!(
+            standby_attempt.is_none(),
+            "standby must be fenced while active holds the policy-tick lease"
+        );
+
+        // Active machine releases (e.g. dcserver shutdown / failover).
+        release_pg_singleton_lock(active_holder, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick").await;
+
+        // Standby should now be able to acquire — handover within one probe.
+        let standby_holder = try_acquire_pg_singleton_lock(
+            &standby_pool,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick",
+        )
+        .await
+        .expect("standby probe after failover must not error")
+        .expect("standby must acquire the policy-tick lease after handover");
+        release_pg_singleton_lock(standby_holder, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick")
+            .await;
+
+        active_pool.close().await;
+        standby_pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #835 split-brain regression for the github-sync singleton (lock_id
+    /// `GITHUB_SYNC_ADVISORY_LOCK_ID` = 7,801,002). The github-sync lock is
+    /// distinct from `POLICY_TICK_ADVISORY_LOCK_ID` (7,801,001); each must
+    /// singleton independently across machines that share the `agentdesk` PG.
+    #[tokio::test]
+    async fn github_sync_advisory_lock_blocks_split_brain_across_pools() {
+        let _guard = server_test_lock();
+        let pg_db = TestPostgresDb::create().await;
+
+        let active_pool = pg_db.connect_and_migrate().await;
+        let standby_pool = pg_db.connect_and_migrate().await;
+
+        let active_holder = try_acquire_pg_singleton_lock(
+            &active_pool,
+            GITHUB_SYNC_ADVISORY_LOCK_ID,
+            "github-sync",
+        )
+        .await
+        .expect("active probe for github-sync lock must not error")
+        .expect("active machine must acquire github-sync lease");
+
+        let standby_attempt = try_acquire_pg_singleton_lock(
+            &standby_pool,
+            GITHUB_SYNC_ADVISORY_LOCK_ID,
+            "github-sync",
+        )
+        .await
+        .expect("standby github-sync probe must not error");
+        assert!(
+            standby_attempt.is_none(),
+            "standby must be fenced from github-sync while active holds it"
+        );
+
+        // The policy-tick singleton (7,801,001) must remain orthogonal to the
+        // github-sync singleton (7,801,002) — verify standby can still acquire
+        // policy-tick while github-sync is held by the active machine.
+        let standby_policy = try_acquire_pg_singleton_lock(
+            &standby_pool,
+            POLICY_TICK_ADVISORY_LOCK_ID,
+            "policy-tick",
+        )
+        .await
+        .expect("standby policy-tick probe must not error")
+        .expect("policy-tick must be acquirable while github-sync is held elsewhere");
+        release_pg_singleton_lock(standby_policy, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick")
+            .await;
+
+        // Active machine releases github-sync — handover to standby.
+        release_pg_singleton_lock(active_holder, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync").await;
+
+        let standby_holder = try_acquire_pg_singleton_lock(
+            &standby_pool,
+            GITHUB_SYNC_ADVISORY_LOCK_ID,
+            "github-sync",
+        )
+        .await
+        .expect("standby github-sync probe after release must not error")
+        .expect("standby must acquire github-sync after active release");
+        release_pg_singleton_lock(standby_holder, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
+            .await;
+
+        active_pool.close().await;
+        standby_pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 /// Fetch rate limits from the Anthropic API via the count_tokens endpoint (free, no token cost).
