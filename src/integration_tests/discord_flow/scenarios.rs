@@ -378,3 +378,95 @@ async fn dashmap_zombie_cleanup_preserves_live_watcher() {
         "live slot reflects watcher B (not paused)"
     );
 }
+
+// ============================================================================
+// #1137: watcher-stop strictness integration scenario
+// ============================================================================
+
+/// DoD #1 (#1137): replays the codex 2026-04-22T23:34:13Z incident at the
+/// flow-decision level. After terminal-success has been relayed, additional
+/// tmux output must NOT cause the watcher to stop — even though the legacy
+/// "exit on a single terminal-success event" rule would have torn it down.
+///
+/// Three transitions are exercised:
+///
+/// 1. terminal success seen, tmux alive, but new bytes have landed past the
+///    confirmed-end watermark. Decision: `PostTerminalSuccessContinuation`
+///    (watcher persists, caller logs the continuation banner).
+/// 2. continuation drains: confirmed_end catches up, but the idle window
+///    has not yet elapsed. Decision: still
+///    `PostTerminalSuccessContinuation` — strictness invariant (2) protects
+///    against premature teardown when tmux is briefly quiet.
+/// 3. idle window elapsed with confirmed_end == tail. Decision: `Stop`.
+///
+/// A final probe asserts that a dead tmux pane short-circuits the wait
+/// regardless of confirmed-end progress (the (terminal=Y, tmux=N) row of
+/// the four-bit matrix that the unit tests pin from the other side).
+#[tokio::test(flavor = "current_thread")]
+async fn watcher_stop_strictness_post_terminal_continuation() {
+    let _harness = TestHarness::new();
+    let idle_window = crate::services::discord::test_harness_exports::watcher_stop::WATCHER_POST_TERMINAL_IDLE_WINDOW;
+
+    use crate::services::discord::test_harness_exports::watcher_stop::{Decision, decide};
+
+    // (1) terminal success + tmux alive + new output past confirmed_end
+    //     -> watcher MUST persist (issue #1137 codex G4/G2/G3 case).
+    let initial = decide(
+        /* terminal_success_seen */ true,
+        /* tmux_alive */ true,
+        /* confirmed_end */ 1024,
+        /* tmux_tail_offset */ 2048, // 1KB landed after terminal success
+        /* idle_duration */ Some(std::time::Duration::from_secs(60)),
+        idle_window,
+    );
+    assert_eq!(
+        initial,
+        Decision::PostTerminalSuccessContinuation,
+        "terminal-success + alive tmux + new output must keep the watcher alive"
+    );
+
+    // (2) Continuation has been drained; confirmed_end caught up to tail
+    //     but the idle window has not yet elapsed. Still must persist.
+    let mid_drain = decide(
+        true,
+        true,
+        4096,
+        4096,
+        Some(std::time::Duration::from_millis(800)),
+        idle_window,
+    );
+    assert_eq!(
+        mid_drain,
+        Decision::PostTerminalSuccessContinuation,
+        "confirmed_end caught up but idle window not elapsed -> watcher persists"
+    );
+
+    // (3) Idle window has elapsed with confirmed_end still at tail
+    //     -> watcher may stop quietly.
+    let settled = decide(true, true, 4096, 4096, Some(idle_window), idle_window);
+    assert_eq!(
+        settled,
+        Decision::Stop,
+        "idle window elapsed + confirmed_end == tail -> watcher stops"
+    );
+
+    // (4) Dead tmux short-circuits: even if the strict invariants are not
+    //     satisfied (confirmed_end behind tail), no further output is
+    //     possible so the watcher must stop.
+    let dead = decide(true, false, 1024, 8192, None, idle_window);
+    assert_eq!(
+        dead,
+        Decision::Stop,
+        "dead tmux pane forces watcher stop regardless of confirmed_end progress"
+    );
+
+    // Pre-terminal-success traffic is unaffected: the watcher must keep
+    // reading until a result event lands, even if the strict invariants
+    // happen to be momentarily satisfied.
+    let pre_terminal = decide(false, true, 4096, 4096, Some(idle_window * 10), idle_window);
+    assert_eq!(
+        pre_terminal,
+        Decision::Continue,
+        "pre-terminal-success traffic must always Continue"
+    );
+}

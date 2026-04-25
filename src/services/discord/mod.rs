@@ -943,6 +943,53 @@ pub(crate) mod test_harness_exports {
     }
 
     pub(crate) use super::InflightRestartMode as RestartMode;
+
+    /// #1137: integration-flow access to the watcher-stop strictness check.
+    /// The internal `WatcherStopInput` / `WatcherStopDecision` types stay
+    /// `pub(super)` inside `services::discord`; this thin wrapper exposes
+    /// just the four-bit decision matrix the integration scenario asserts on.
+    pub(crate) mod watcher_stop {
+        use super::super::tmux as tmux_mod;
+        pub(crate) use tmux_mod::WATCHER_POST_TERMINAL_IDLE_WINDOW;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum Decision {
+            Continue,
+            PostTerminalSuccessContinuation,
+            Stop,
+        }
+
+        impl From<tmux_mod::WatcherStopDecision> for Decision {
+            fn from(value: tmux_mod::WatcherStopDecision) -> Self {
+                match value {
+                    tmux_mod::WatcherStopDecision::Continue => Self::Continue,
+                    tmux_mod::WatcherStopDecision::PostTerminalSuccessContinuation => {
+                        Self::PostTerminalSuccessContinuation
+                    }
+                    tmux_mod::WatcherStopDecision::Stop => Self::Stop,
+                }
+            }
+        }
+
+        pub(crate) fn decide(
+            terminal_success_seen: bool,
+            tmux_alive: bool,
+            confirmed_end: u64,
+            tmux_tail_offset: u64,
+            idle_duration: Option<std::time::Duration>,
+            idle_threshold: std::time::Duration,
+        ) -> Decision {
+            tmux_mod::watcher_stop_decision_after_terminal_success(tmux_mod::WatcherStopInput {
+                terminal_success_seen,
+                tmux_alive,
+                confirmed_end,
+                tmux_tail_offset,
+                idle_duration,
+                idle_threshold,
+            })
+            .into()
+        }
+    }
 }
 
 #[cfg(test)]
