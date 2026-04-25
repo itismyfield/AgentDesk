@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::{mpsc, oneshot};
@@ -570,6 +571,12 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) active_user_message_id: Option<MessageId>,
     pub(crate) intervention_queue: Vec<Intervention>,
     pub(crate) recovery_started_at: Option<Instant>,
+    /// #1031: wall-clock instant the current active turn began (UTC). Set by
+    /// the mailbox actor whenever `cancel_token` transitions from `None` to
+    /// `Some`; cleared on finalize / clear. Idle detector uses this as a
+    /// freshness anchor so the banner doesn't fire within the first poll of
+    /// a brand-new turn.
+    pub(crate) turn_started_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) struct FinishTurnResult {
@@ -1082,6 +1089,10 @@ struct ChannelMailboxState {
     intervention_queue: Vec<Intervention>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
+    /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
+    /// `cancel_token.is_some()` lifetime so the idle-detector freshness
+    /// anchor is always source-of-truth from the mailbox actor itself.
+    turn_started_at: Option<DateTime<Utc>>,
     watchdog_deadline_override_ms: Option<i64>,
 }
 
@@ -1108,6 +1119,7 @@ fn finalize_turn_state(
     state.active_request_owner = None;
     state.active_user_message_id = None;
     state.recovery_started_at = None;
+    state.turn_started_at = None;
     state.watchdog_deadline_override_ms = None;
     let previous_len = state.intervention_queue.len();
     let pending_result = has_soft_intervention(&mut state.intervention_queue);
@@ -1137,6 +1149,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         active_user_message_id: state.active_user_message_id,
                         intervention_queue: state.intervention_queue.clone(),
                         recovery_started_at: state.recovery_started_at,
+                        turn_started_at: state.turn_started_at,
                     });
                 }
                 ChannelMailboxMsg::HasActiveTurn { reply } => {
@@ -1175,6 +1188,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.active_request_owner = Some(request_owner);
                         state.active_user_message_id = Some(user_message_id);
                         state.recovery_started_at = None;
+                        state.turn_started_at = Some(Utc::now());
                         state.watchdog_deadline_override_ms = None;
                         true
                     };
@@ -1186,9 +1200,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     user_message_id,
                     reply,
                 } => {
+                    let was_idle = state.cancel_token.is_none();
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = Some(user_message_id);
+                    if was_idle || state.turn_started_at.is_none() {
+                        state.turn_started_at = Some(Utc::now());
+                    }
                     state.watchdog_deadline_override_ms = None;
                     let _ = reply.send(());
                 }
@@ -1203,6 +1221,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = Some(user_message_id);
                     state.recovery_started_at = Some(Instant::now());
+                    if activated_turn || state.turn_started_at.is_none() {
+                        state.turn_started_at = Some(Utc::now());
+                    }
                     state.watchdog_deadline_override_ms = None;
                     let _ = reply.send(RecoveryKickoffResult { activated_turn });
                 }
@@ -1288,6 +1309,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.active_request_owner = None;
                     state.active_user_message_id = None;
                     state.recovery_started_at = None;
+                    state.turn_started_at = None;
                     state.watchdog_deadline_override_ms = None;
                     let queue_exit_events = state
                         .intervention_queue

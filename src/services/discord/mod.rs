@@ -696,9 +696,12 @@ impl SharedData {
 
     /// #1031: snapshot every active mailbox for the idle-detector pass.
     /// Reduces the per-channel snapshot to the minimal fields the detector
-    /// actually consumes — `cancel_token` / `recovery_started_at` — so the
-    /// detector module never imports the private mailbox types.
-    pub(super) async fn mailbox_snapshots_for_idle_detector(&self) -> Vec<(ChannelId, bool, bool)> {
+    /// actually consumes — `cancel_token` / `recovery_started_at` /
+    /// `turn_started_at` — so the detector module never imports the private
+    /// mailbox types.
+    pub(super) async fn mailbox_snapshots_for_idle_detector(
+        &self,
+    ) -> Vec<(ChannelId, bool, bool, Option<chrono::DateTime<chrono::Utc>>)> {
         self.mailboxes
             .snapshot_all()
             .await
@@ -708,6 +711,7 @@ impl SharedData {
                     channel_id,
                     snapshot.cancel_token.is_some(),
                     snapshot.recovery_started_at.is_some(),
+                    snapshot.turn_started_at,
                 )
             })
             .collect()

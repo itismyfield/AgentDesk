@@ -211,17 +211,23 @@ async fn wait_if_shared(shared: Option<&Arc<SharedData>>, channel_id: ChannelId)
     }
 }
 
+/// Hint line appended to monitoring banners so users know which slash
+/// commands address the underlying turn. Kept as a constant so the
+/// single-entry and multi-entry branches stay in sync.
+const MONITORING_ACTION_HINT: &str = "   ⤷ /cancel 으로 턴 취소, /restart 로 에이전트 재시작";
+
 pub(crate) fn format_monitoring_message(entries: &[MonitoringEntry]) -> Option<String> {
     match entries {
         [] => None,
         [entry] => Some(format!(
-            "👁️ 모니터링 중: {} (시작 {})",
+            "👀 모니터링 중: {} (시작 {})\n{}",
             entry.description,
-            format_kst_hhmm(entry.started_at)
+            format_kst_hhmm(entry.started_at),
+            MONITORING_ACTION_HINT,
         )),
         entries => {
-            let mut lines = Vec::with_capacity(entries.len() + 1);
-            lines.push(format!("👁️ 모니터링 중 ({}건):", entries.len()));
+            let mut lines = Vec::with_capacity(entries.len() + 2);
+            lines.push(format!("👀 모니터링 중 ({}건):", entries.len()));
             lines.extend(entries.iter().map(|entry| {
                 format!(
                     "- {} ({})",
@@ -229,6 +235,7 @@ pub(crate) fn format_monitoring_message(entries: &[MonitoringEntry]) -> Option<S
                     format_kst_hhmm(entry.started_at)
                 )
             }));
+            lines.push(MONITORING_ACTION_HINT.to_string());
             Some(lines.join("\n"))
         }
     }
@@ -270,7 +277,10 @@ mod tests {
 
         assert_eq!(
             format_monitoring_message(&entries),
-            Some("👁️ 모니터링 중: 터미널 신호 대기 (시작 10:20)".to_string())
+            Some(
+                "👀 모니터링 중: 터미널 신호 대기 (시작 10:20)\n   ⤷ /cancel 으로 턴 취소, /restart 로 에이전트 재시작"
+                    .to_string()
+            )
         );
         Ok(())
     }
@@ -285,7 +295,7 @@ mod tests {
         assert_eq!(
             format_monitoring_message(&entries),
             Some(
-                "👁️ 모니터링 중 (2건):\n- 터미널 신호 대기 (10:20)\n- CI 완료 대기 (11:05)"
+                "👀 모니터링 중 (2건):\n- 터미널 신호 대기 (10:20)\n- CI 완료 대기 (11:05)\n   ⤷ /cancel 으로 턴 취소, /restart 로 에이전트 재시작"
                     .to_string()
             )
         );

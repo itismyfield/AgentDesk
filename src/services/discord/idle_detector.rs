@@ -2,18 +2,29 @@
 //!
 //! Background task that automatically registers a `system-detected:idle`
 //! monitoring entry on channels whose mailbox is in an active turn but whose
-//! corresponding `sessions.last_heartbeat` row has not advanced within the
-//! configured threshold.
+//! freshness anchor (the more recent of `sessions.last_heartbeat` and the
+//! mailbox-tracked `turn_started_at`) has not advanced within the configured
+//! threshold.
 //!
 //! Why this exists:
 //!   - The `/api/channels/:id/monitoring` surface introduced in #997 only
-//!     populates the "👁️ 모니터링 중: ..." banner when an agent explicitly
+//!     populates the "👀 모니터링 중: ..." banner when an agent explicitly
 //!     calls the API. If the agent forgets, a user observing the channel has
 //!     no way to tell whether the agent is still working or stuck.
 //!   - The watcher heartbeat throttle from #982 already records 30s-bucketed
 //!     `sessions.last_heartbeat` updates whenever a tmux watcher sees fresh
-//!     output. We piggy-back on that signal: an active turn whose heartbeat
-//!     is older than the threshold is treated as "에이전트 대기 중(추정)".
+//!     output. We piggy-back on that signal: an active turn whose freshness
+//!     anchor is older than 15 minutes is treated as "에이전트 15분 이상
+//!     응답 없음".
+//!
+//! Why turn-start-aware (#1031 follow-up):
+//!   - The original implementation only compared `last_heartbeat` to `now`.
+//!     If a channel was idle prior to the new turn, `last_heartbeat` was
+//!     already older than the threshold the moment the user kicked off a
+//!     fresh turn — producing a 3-second false-positive banner. The fix
+//!     plumbs `turn_started_at` from the mailbox actor so a brand-new turn
+//!     always counts as fresh until the threshold elapses, regardless of
+//!     stale prior-turn heartbeat data.
 //!
 //! Scope (per the issue):
 //!   - Option A only — turn-idle heuristic. Options B/C are deferred.
@@ -33,10 +44,13 @@ use super::monitoring_status;
 use crate::server::routes::state::global_monitoring_store;
 use crate::services::provider::ProviderKind;
 
-/// Heartbeat staleness threshold. Active turns whose `last_heartbeat` is older
-/// than this are treated as idle (推定). Picked to match the watcher
-/// heartbeat throttle (#982) so we trip exactly one bucket after activity stops.
-pub(crate) const IDLE_THRESHOLD: Duration = Duration::from_secs(30);
+/// Freshness threshold. Active turns whose freshness anchor (the later of
+/// `last_heartbeat` and `turn_started_at`) is older than this are treated as
+/// stuck. 15 minutes is high-confidence: real long-running agent steps (large
+/// builds, model-heavy reasoning) almost always emit watcher output more
+/// frequently than that, so the banner avoids false positives during normal
+/// operation while still surfacing genuinely hung sessions.
+pub(crate) const IDLE_THRESHOLD: Duration = Duration::from_secs(15 * 60);
 
 /// Initial delay before the first poll runs. Defers detection until startup
 /// reconcile / recovery has had a chance to refresh heartbeats so we don't
@@ -52,8 +66,10 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// referenced by post-mortem tooling — do not rename without a migration.
 pub(crate) const MONITORING_KEY: &str = "system-detected:idle";
 
-/// Default banner text shown when the detector flags a channel.
-const MONITORING_DESCRIPTION: &str = "에이전트 대기 중(추정)";
+/// Default banner text shown when the detector flags a channel. At a 15min
+/// threshold this is no longer a soft "추정" — it's a high-confidence stuck
+/// signal, so the wording is direct.
+const MONITORING_DESCRIPTION: &str = "에이전트 15분 이상 응답 없음";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdleClassification {
@@ -68,9 +84,20 @@ pub(crate) enum IdleClassification {
 }
 
 /// Pure classifier suitable for unit testing without DB or tokio runtime.
+///
+/// Freshness anchor = `max(last_heartbeat, turn_started_at)`:
+///   - Either signal alone is enough to keep the channel fresh.
+///   - `turn_started_at` defends against the "stale heartbeat from a prior
+///     turn" race that produced 3-second false positives.
+///   - If both anchors are absent (genuinely no evidence), we still classify
+///     as `ActiveAndFresh` rather than `Idle` so a brand-new turn that
+///     hasn't yet populated either signal does not flicker the banner —
+///     the next poll will pick up `turn_started_at` once the mailbox actor
+///     records it.
 pub(crate) fn classify(
     has_active_turn: bool,
     last_heartbeat: Option<DateTime<Utc>>,
+    turn_started_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     threshold: Duration,
 ) -> IdleClassification {
@@ -81,11 +108,22 @@ pub(crate) fn classify(
         Ok(value) => value,
         Err(_) => chrono::Duration::seconds(i64::from(threshold.as_secs() as i32)),
     };
-    match last_heartbeat {
+    let anchor = match (last_heartbeat, turn_started_at) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    match anchor {
         Some(value) if now.signed_duration_since(value) <= threshold_chrono => {
             IdleClassification::ActiveAndFresh
         }
-        _ => IdleClassification::Idle,
+        Some(_) => IdleClassification::Idle,
+        // No anchor at all: treat as fresh. We only escalate to `Idle` once
+        // we have positive evidence that the turn has been active for at
+        // least the threshold. This avoids penalizing the first poll after
+        // a turn just started.
+        None => IdleClassification::ActiveAndFresh,
     }
 }
 
@@ -137,7 +175,7 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
 
     let now = Utc::now();
     let health_registry = shared.health_registry_for_idle_detector();
-    for (channel_id, has_active_turn, in_recovery) in snapshots {
+    for (channel_id, has_active_turn, in_recovery, turn_started_at) in snapshots {
         let last_heartbeat = if has_active_turn {
             fetch_last_heartbeat(shared, provider, channel_id).await
         } else {
@@ -146,7 +184,13 @@ async fn run_pass(shared: &SharedData, provider: &ProviderKind) {
         let classification = if in_recovery {
             IdleClassification::ActiveAndFresh
         } else {
-            classify(has_active_turn, last_heartbeat, now, IDLE_THRESHOLD)
+            classify(
+                has_active_turn,
+                last_heartbeat,
+                turn_started_at,
+                now,
+                IDLE_THRESHOLD,
+            )
         };
         apply_classification(channel_id, classification, health_registry.as_ref()).await;
     }
@@ -290,15 +334,21 @@ mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
 
+    /// Helper: a heartbeat older than the 15-minute threshold.
+    fn stale_heartbeat(now: DateTime<Utc>) -> DateTime<Utc> {
+        now - ChronoDuration::from_std(IDLE_THRESHOLD).expect("threshold convert")
+            - ChronoDuration::seconds(1)
+    }
+
     #[test]
     fn classify_no_active_turn_returns_no_active_turn() {
         let now = Utc::now();
         assert_eq!(
-            classify(false, None, now, IDLE_THRESHOLD),
+            classify(false, None, None, now, IDLE_THRESHOLD),
             IdleClassification::NoActiveTurn
         );
         assert_eq!(
-            classify(false, Some(now), now, IDLE_THRESHOLD),
+            classify(false, Some(now), Some(now), now, IDLE_THRESHOLD),
             IdleClassification::NoActiveTurn
         );
     }
@@ -308,7 +358,7 @@ mod tests {
         let now = Utc::now();
         let recent = now - ChronoDuration::seconds(10);
         assert_eq!(
-            classify(true, Some(recent), now, IDLE_THRESHOLD),
+            classify(true, Some(recent), None, now, IDLE_THRESHOLD),
             IdleClassification::ActiveAndFresh
         );
     }
@@ -316,19 +366,24 @@ mod tests {
     #[test]
     fn classify_active_with_stale_heartbeat_is_idle() {
         let now = Utc::now();
-        let stale = now - ChronoDuration::seconds(120);
+        let stale = stale_heartbeat(now);
+        let stale_turn = stale - ChronoDuration::seconds(60);
+        // Both anchors stale → Idle.
         assert_eq!(
-            classify(true, Some(stale), now, IDLE_THRESHOLD),
+            classify(true, Some(stale), Some(stale_turn), now, IDLE_THRESHOLD),
             IdleClassification::Idle
         );
     }
 
     #[test]
-    fn classify_active_with_missing_heartbeat_is_idle() {
+    fn classify_active_with_missing_heartbeat_falls_back_to_fresh() {
+        // No heartbeat AND no turn_started_at → fall back to ActiveAndFresh.
+        // Previously this produced a false-positive Idle on the first poll
+        // after a brand-new turn (the #1031 UX bug).
         let now = Utc::now();
         assert_eq!(
-            classify(true, None, now, IDLE_THRESHOLD),
-            IdleClassification::Idle
+            classify(true, None, None, now, IDLE_THRESHOLD),
+            IdleClassification::ActiveAndFresh
         );
     }
 
@@ -337,7 +392,7 @@ mod tests {
         let now = Utc::now();
         let edge = now - ChronoDuration::from_std(IDLE_THRESHOLD).expect("threshold convert");
         assert_eq!(
-            classify(true, Some(edge), now, IDLE_THRESHOLD),
+            classify(true, Some(edge), None, now, IDLE_THRESHOLD),
             IdleClassification::ActiveAndFresh
         );
     }
@@ -345,11 +400,10 @@ mod tests {
     #[test]
     fn classify_active_just_past_threshold_is_idle() {
         let now = Utc::now();
-        let edge = now
-            - ChronoDuration::from_std(IDLE_THRESHOLD).expect("threshold convert")
-            - ChronoDuration::seconds(1);
+        let edge = stale_heartbeat(now);
+        let stale_turn = edge - ChronoDuration::seconds(60);
         assert_eq!(
-            classify(true, Some(edge), now, IDLE_THRESHOLD),
+            classify(true, Some(edge), Some(stale_turn), now, IDLE_THRESHOLD),
             IdleClassification::Idle
         );
     }
@@ -361,15 +415,85 @@ mod tests {
         // the next pass should classify as ActiveAndFresh so the auto entry
         // is cleared.
         let now = Utc::now();
-        let stale = now - ChronoDuration::seconds(120);
+        let stale = stale_heartbeat(now);
+        let stale_turn = stale - ChronoDuration::seconds(60);
         assert_eq!(
-            classify(true, Some(stale), now, IDLE_THRESHOLD),
+            classify(true, Some(stale), Some(stale_turn), now, IDLE_THRESHOLD),
             IdleClassification::Idle
         );
         let refreshed = now - ChronoDuration::seconds(2);
         assert_eq!(
-            classify(true, Some(refreshed), now, IDLE_THRESHOLD),
+            classify(true, Some(refreshed), Some(stale_turn), now, IDLE_THRESHOLD),
             IdleClassification::ActiveAndFresh
+        );
+    }
+
+    /// #1031 UX fix: a freshly-started turn whose `last_heartbeat` is from
+    /// the *prior* idle period must not flip to Idle on the very next poll.
+    /// `turn_started_at` (within threshold) wins.
+    #[test]
+    fn classify_fresh_turn_start_overrides_stale_heartbeat() {
+        let now = Utc::now();
+        let stale_hb = stale_heartbeat(now);
+        let fresh_turn = now - ChronoDuration::seconds(3);
+        assert_eq!(
+            classify(true, Some(stale_hb), Some(fresh_turn), now, IDLE_THRESHOLD),
+            IdleClassification::ActiveAndFresh
+        );
+    }
+
+    /// Both anchors exist and both are older than threshold → Idle.
+    #[test]
+    fn classify_old_turn_and_old_heartbeat_is_idle() {
+        let now = Utc::now();
+        let stale_hb = stale_heartbeat(now);
+        let stale_turn = stale_hb - ChronoDuration::seconds(60);
+        assert_eq!(
+            classify(true, Some(stale_hb), Some(stale_turn), now, IDLE_THRESHOLD),
+            IdleClassification::Idle
+        );
+    }
+
+    /// `last_heartbeat` is the more-recent anchor — wins over a very old
+    /// `turn_started_at` (long-running turn that's been steadily emitting
+    /// output).
+    #[test]
+    fn classify_fresh_heartbeat_overrides_old_turn_start() {
+        let now = Utc::now();
+        let very_old_turn = now - ChronoDuration::hours(2);
+        let fresh_hb = now - ChronoDuration::seconds(5);
+        assert_eq!(
+            classify(
+                true,
+                Some(fresh_hb),
+                Some(very_old_turn),
+                now,
+                IDLE_THRESHOLD
+            ),
+            IdleClassification::ActiveAndFresh
+        );
+    }
+
+    /// `turn_started_at` alone (no heartbeat yet) within threshold → fresh.
+    #[test]
+    fn classify_only_turn_started_at_within_threshold_is_fresh() {
+        let now = Utc::now();
+        let fresh_turn = now - ChronoDuration::seconds(30);
+        assert_eq!(
+            classify(true, None, Some(fresh_turn), now, IDLE_THRESHOLD),
+            IdleClassification::ActiveAndFresh
+        );
+    }
+
+    /// `turn_started_at` alone past threshold → Idle (positive evidence the
+    /// turn has been active long enough without any heartbeat refresh).
+    #[test]
+    fn classify_only_turn_started_at_past_threshold_is_idle() {
+        let now = Utc::now();
+        let stale_turn = stale_heartbeat(now);
+        assert_eq!(
+            classify(true, None, Some(stale_turn), now, IDLE_THRESHOLD),
+            IdleClassification::Idle
         );
     }
 
