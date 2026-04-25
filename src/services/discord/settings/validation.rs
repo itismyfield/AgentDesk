@@ -179,6 +179,13 @@ pub(crate) fn resolve_cache_ttl_minutes(
     agentdesk_config::resolve_cache_ttl_minutes(channel_id, channel_name)
 }
 
+pub(crate) fn resolve_dispatch_profile(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<super::super::DispatchProfile> {
+    agentdesk_config::resolve_dispatch_profile(channel_id, channel_name)
+}
+
 pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
     let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
 

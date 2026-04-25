@@ -72,7 +72,7 @@ fn build_memory_injection_plan<'a>(
         } else {
             None
         };
-    let external_recall_for_context = if dispatch_profile == DispatchProfile::Full {
+    let external_recall_for_context = if dispatch_profile != DispatchProfile::ReviewLite {
         memory_recall.external_recall.as_deref()
     } else {
         None
@@ -95,12 +95,36 @@ fn memento_recall_gate_decision(
     memory_settings: &settings::ResolvedMemorySettings,
     memento_context_loaded: bool,
     user_text: &str,
+    dispatch_profile: DispatchProfile,
 ) -> MementoRecallGateDecision {
     if memory_settings.backend != settings::MemoryBackendKind::Memento {
         return MementoRecallGateDecision {
             should_recall: true,
             mode: RecallMode::Full,
             reason: "non_memento_backend",
+        };
+    }
+
+    if dispatch_profile == DispatchProfile::ReviewLite {
+        return MementoRecallGateDecision {
+            should_recall: false,
+            mode: RecallMode::Full,
+            reason: "review_lite_profile",
+        };
+    }
+
+    if dispatch_profile == DispatchProfile::Lite {
+        if !memento_context_loaded {
+            return MementoRecallGateDecision {
+                should_recall: true,
+                mode: RecallMode::IdentityOnly,
+                reason: "lite_identity_only",
+            };
+        }
+        return MementoRecallGateDecision {
+            should_recall: false,
+            mode: RecallMode::Full,
+            reason: "lite_no_turn_signal",
         };
     }
 
@@ -182,6 +206,14 @@ fn memento_recall_gate_decision(
         should_recall: false,
         mode: RecallMode::Full,
         reason: "no_turn_signal",
+    }
+}
+
+fn dispatch_profile_label(dispatch_profile: DispatchProfile) -> &'static str {
+    match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::Lite => "lite",
+        DispatchProfile::ReviewLite => "review_lite",
     }
 }
 
@@ -510,7 +542,17 @@ pub(in crate::services::discord) async fn start_headless_turn(
         .as_ref()
         .and_then(|binding| binding.provider.clone())
         .unwrap_or(settings_provider);
-    let dispatch_profile = DispatchProfile::Full;
+    let dispatch_profile = {
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.as_deref());
+        DispatchProfile::for_turn(
+            None,
+            settings::resolve_dispatch_profile(channel_id, channel_name),
+        )
+    };
 
     let fast_mode_channel_id = effective_fast_mode_channel_id(
         channel_id,
@@ -609,8 +651,12 @@ pub(in crate::services::discord) async fn start_headless_turn(
         .insert(channel_id, std::time::Instant::now());
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memento_recall_gate =
-        memento_recall_gate_decision(&memory_settings, memento_context_loaded, prompt);
+    let memento_recall_gate = memento_recall_gate_decision(
+        &memory_settings,
+        memento_context_loaded,
+        prompt,
+        dispatch_profile,
+    );
     let memory_recall = if !memento_recall_gate.should_recall {
         RecallResponse::default()
     } else {
@@ -741,9 +787,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
-        "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch=full memory_backend={} reused_session={} duration_ms={}",
+        "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
+        dispatch_profile_label(dispatch_profile),
         memory_backend_label,
         session_id.is_some(),
         prompt_prep_duration_ms
@@ -2163,11 +2210,20 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     // Derive dispatch prompt profile before memory recall so ReviewLite can
     // skip heavy memory work consistently across supported backends.
-    let dispatch_profile = DispatchProfile::from_dispatch_type(
-        active_dispatch_id_for_prompt
+    let dispatch_profile = {
+        let dispatch_type = active_dispatch_id_for_prompt
             .as_ref()
-            .and_then(|_| dispatch_type_str.as_deref()),
-    );
+            .and_then(|_| dispatch_type_str.as_deref());
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.as_deref());
+        DispatchProfile::for_turn(
+            dispatch_type,
+            settings::resolve_dispatch_profile(channel_id, channel_name),
+        )
+    };
 
     if dispatch_reset_provider_state || dispatch_recreate_tmux {
         super::super::commands::reset_channel_provider_state(
@@ -2407,8 +2463,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         .insert(channel_id, std::time::Instant::now());
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
-    let memento_recall_gate =
-        memento_recall_gate_decision(&memory_settings, memento_context_loaded, user_text);
+    let memento_recall_gate = memento_recall_gate_decision(
+        &memory_settings,
+        memento_context_loaded,
+        user_text,
+        dispatch_profile,
+    );
     let memory_recall = if !memento_recall_gate.should_recall {
         RecallResponse::default()
     } else {
@@ -2561,10 +2621,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         ProviderKind::Qwen => "qwen",
         ProviderKind::Unsupported(_) => "unsupported",
     };
-    let dispatch_profile_label = match dispatch_profile {
-        DispatchProfile::Full => "full",
-        DispatchProfile::ReviewLite => "review_lite",
-    };
+    let dispatch_profile_label = dispatch_profile_label(dispatch_profile);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
@@ -4588,6 +4645,22 @@ mod tests {
     }
 
     #[test]
+    fn memory_injection_plan_keeps_lite_to_external_recall_only() {
+        let recall = sample_recall();
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            false,
+            DispatchProfile::Lite,
+            &recall,
+        );
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(plan.shared_knowledge_for_system_prompt, None);
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(plan.longterm_catalog_for_system_prompt, None);
+    }
+
+    #[test]
     fn memory_injection_plan_skips_shared_knowledge_when_session_exists() {
         let recall = sample_recall();
         let plan =
@@ -4739,42 +4812,98 @@ mod tests {
         // #1083: a fresh session (no memento context loaded yet) without any
         // turn signal should trigger the *identity-only* lite recall, not the
         // full session_start recall.
-        let identity = memento_recall_gate_decision(&memento, false, "평범한 요청");
+        let identity =
+            memento_recall_gate_decision(&memento, false, "평범한 요청", DispatchProfile::Full);
         assert_eq!(identity.reason, "identity_only_session_start");
         assert!(identity.should_recall);
         assert_eq!(identity.mode, RecallMode::IdentityOnly);
 
         // After identity is loaded, no trigger means no recall.
-        assert!(!memento_recall_gate_decision(&memento, true, "평범한 요청").should_recall);
+        assert!(
+            !memento_recall_gate_decision(&memento, true, "평범한 요청", DispatchProfile::Full)
+                .should_recall
+        );
 
         // Trigger keywords still upgrade to full recall regardless of whether
         // identity has been loaded yet.
-        let prev = memento_recall_gate_decision(&memento, true, "이전에 하던 거 이어서 해줘");
+        let prev = memento_recall_gate_decision(
+            &memento,
+            true,
+            "이전에 하던 거 이어서 해줘",
+            DispatchProfile::Full,
+        );
         assert_eq!(prev.reason, "previous_context_signal");
         assert_eq!(prev.mode, RecallMode::Full);
 
-        let err = memento_recall_gate_decision(&memento, true, "빌드 실패 원인 찾아줘");
+        let err = memento_recall_gate_decision(
+            &memento,
+            true,
+            "빌드 실패 원인 찾아줘",
+            DispatchProfile::Full,
+        );
         assert_eq!(err.reason, "error_context_signal");
         assert_eq!(err.mode, RecallMode::Full);
 
-        let cfg = memento_recall_gate_decision(&memento, true, "설정 변경 내용 기억나?");
+        let cfg = memento_recall_gate_decision(
+            &memento,
+            true,
+            "설정 변경 내용 기억나?",
+            DispatchProfile::Full,
+        );
         assert_eq!(cfg.reason, "setting_change_signal");
         assert_eq!(cfg.mode, RecallMode::Full);
 
-        let explicit = memento_recall_gate_decision(&memento, true, "/recall deploy note");
+        let explicit = memento_recall_gate_decision(
+            &memento,
+            true,
+            "/recall deploy note",
+            DispatchProfile::Full,
+        );
         assert_eq!(explicit.reason, "explicit_recall_signal");
         assert_eq!(explicit.mode, RecallMode::Full);
 
         // Trigger keywords on a fresh session also win over identity-only.
-        let fresh_trigger =
-            memento_recall_gate_decision(&memento, false, "이전에 하던 거 이어서 해줘");
+        let fresh_trigger = memento_recall_gate_decision(
+            &memento,
+            false,
+            "이전에 하던 거 이어서 해줘",
+            DispatchProfile::Full,
+        );
         assert_eq!(fresh_trigger.reason, "previous_context_signal");
         assert_eq!(fresh_trigger.mode, RecallMode::Full);
 
         // Non-memento backend always recalls in Full mode.
-        let non_memento = memento_recall_gate_decision(&file, true, "평범한 요청");
+        let non_memento =
+            memento_recall_gate_decision(&file, true, "평범한 요청", DispatchProfile::Full);
         assert!(non_memento.should_recall);
         assert_eq!(non_memento.mode, RecallMode::Full);
+    }
+
+    #[test]
+    fn memento_recall_gate_keeps_lite_profile_identity_only() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+
+        let first = memento_recall_gate_decision(
+            &memento,
+            false,
+            "이전에 하던 거 이어서 해줘",
+            DispatchProfile::Lite,
+        );
+        assert!(first.should_recall);
+        assert_eq!(first.reason, "lite_identity_only");
+        assert_eq!(first.mode, RecallMode::IdentityOnly);
+
+        let next = memento_recall_gate_decision(
+            &memento,
+            true,
+            "/recall deploy note",
+            DispatchProfile::Lite,
+        );
+        assert!(!next.should_recall);
+        assert_eq!(next.reason, "lite_no_turn_signal");
     }
 
     #[test]
@@ -4850,14 +4979,24 @@ mod tests {
         session.restore_provider_session(Some("session-1".to_string()));
         session.note_memento_context_loaded();
         assert!(
-            !memento_recall_gate_decision(&memento, session.memento_context_loaded, "평범한 요청",)
-                .should_recall
+            !memento_recall_gate_decision(
+                &memento,
+                session.memento_context_loaded,
+                "평범한 요청",
+                DispatchProfile::Full,
+            )
+            .should_recall
         );
 
         session.clear_provider_session();
         assert!(
-            memento_recall_gate_decision(&memento, session.memento_context_loaded, "평범한 요청",)
-                .should_recall
+            memento_recall_gate_decision(
+                &memento,
+                session.memento_context_loaded,
+                "평범한 요청",
+                DispatchProfile::Full,
+            )
+            .should_recall
         );
     }
 
@@ -4872,15 +5011,25 @@ mod tests {
         session.restore_provider_session(Some("session-1".to_string()));
         let mut memento_context_loaded = session.memento_context_loaded;
         assert!(
-            memento_recall_gate_decision(&memento, memento_context_loaded, "평범한 요청",)
-                .should_recall
+            memento_recall_gate_decision(
+                &memento,
+                memento_context_loaded,
+                "평범한 요청",
+                DispatchProfile::Full,
+            )
+            .should_recall
         );
 
         session.note_memento_context_loaded();
         memento_context_loaded = session.memento_context_loaded;
         assert!(
-            !memento_recall_gate_decision(&memento, memento_context_loaded, "평범한 요청")
-                .should_recall
+            !memento_recall_gate_decision(
+                &memento,
+                memento_context_loaded,
+                "평범한 요청",
+                DispatchProfile::Full,
+            )
+            .should_recall
         );
     }
 

@@ -382,6 +382,13 @@ impl AgentChannel {
         }
     }
 
+    pub fn dispatch_profile(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalize_dispatch_profile(config.dispatch_profile.clone()),
+        }
+    }
+
     /// Returns the configured prompt-cache TTL in minutes, but only if it is a
     /// supported bucket (5 or 60). Anything else maps to `None` so the default
     /// 5-minute TTL is used.
@@ -398,6 +405,14 @@ impl AgentChannel {
 pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
     match value {
         Some(5) | Some(60) => value,
+        _ => None,
+    }
+}
+
+pub fn normalize_dispatch_profile(value: Option<String>) -> Option<String> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "lite" => Some("lite".to_string()),
+        "full" | "off" | "default" => Some("full".to_string()),
         _ => None,
     }
 }
@@ -432,6 +447,12 @@ pub struct AgentChannelConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub quality_feedback_injection: Option<bool>,
+    #[serde(
+        default,
+        alias = "dispatchProfile",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub dispatch_profile: Option<String>,
     /// Anthropic prompt-cache TTL bucket (#1088). Only `5` (default) or `60`
     /// minutes are valid. Any other value is treated as `None` (default 5m).
     /// When set to `60`, the Claude CLI is invoked with the extended 1h
@@ -1396,7 +1417,7 @@ mod tests {
         EscalationMode, EscalationScheduleConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig,
         McpServerAuthConfig, McpServerAuthType, McpServerConfig, MemoryConfig, OnboardingConfig,
         ReviewConfig, RuntimeSettingsConfig, load_from_path, normalize_cache_ttl_minutes,
-        resolve_graceful_config_path, runtime_root, save_to_path,
+        normalize_dispatch_profile, resolve_graceful_config_path, runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -2051,6 +2072,57 @@ mod tests {
                 "minutes={invalid} must normalize to None"
             );
         }
+    }
+
+    #[test]
+    fn dispatch_profile_normalizes_supported_channel_values() {
+        assert_eq!(normalize_dispatch_profile(None), None);
+        assert_eq!(
+            normalize_dispatch_profile(Some(" lite ".to_string())).as_deref(),
+            Some("lite")
+        );
+        assert_eq!(
+            normalize_dispatch_profile(Some("FULL".to_string())).as_deref(),
+            Some("full")
+        );
+        assert_eq!(
+            normalize_dispatch_profile(Some("off".to_string())).as_deref(),
+            Some("full")
+        );
+        assert_eq!(normalize_dispatch_profile(Some("review".to_string())), None);
+    }
+
+    #[test]
+    fn dispatch_profile_round_trips_through_yaml() {
+        let config = AgentChannelConfig {
+            id: Some("123".to_string()),
+            dispatch_profile: Some("lite".to_string()),
+            ..AgentChannelConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        assert!(
+            yaml.contains("dispatch_profile: lite"),
+            "expected dispatch_profile: lite in: {yaml}"
+        );
+        let reloaded: AgentChannelConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reloaded.dispatch_profile.as_deref(), Some("lite"));
+        assert_eq!(
+            AgentChannel::Detailed(reloaded)
+                .dispatch_profile()
+                .as_deref(),
+            Some("lite")
+        );
+    }
+
+    #[test]
+    fn dispatch_profile_camel_case_alias_is_accepted() {
+        let yaml = "id: '123'\ndispatchProfile: lite\n";
+        let config: AgentChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.dispatch_profile.as_deref(), Some("lite"));
+        assert_eq!(
+            AgentChannel::Detailed(config).dispatch_profile().as_deref(),
+            Some("lite")
+        );
     }
 
     #[test]
