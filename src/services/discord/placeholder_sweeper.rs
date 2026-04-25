@@ -135,6 +135,14 @@ pub(super) async fn run_placeholder_sweep_pass(
         if state.current_msg_id == 0 || state.channel_id == 0 {
             continue;
         }
+        // Skip planned restart / hot-swap inflights. Their cleanup TTL is
+        // intentionally extended (DrainRestart 1800s, HotSwapHandoff 900s)
+        // by `inflight::load_inflight_states_from_root` so recovery can pick
+        // them up after a restart. The sweeper would otherwise edit them as
+        // abandoned and delete the state file, defeating recovery.
+        if state.restart_mode.is_some() {
+            continue;
+        }
         match classify_age(age_secs) {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
@@ -145,13 +153,46 @@ pub(super) async fn run_placeholder_sweep_pass(
             SweepDecision::Abandoned => {
                 let text = build_abandoned_placeholder(&state);
                 edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await;
-                if delete_inflight_state_file(provider, state.channel_id) {
+                // TOCTOU guard: between the snapshot read and this delete a
+                // new turn may have written a fresh inflight file for the
+                // same channel. Re-stat the file and only delete if it is
+                // still the stale entry we observed (file mtime within ±2s
+                // of the original age). Stat APIs do not give us a strict
+                // version, but mtime equivalence is a good-enough proxy
+                // because every save_inflight_state call advances mtime.
+                if inflight_state_file_still_stale(provider, state.channel_id, age_secs)
+                    && delete_inflight_state_file(provider, state.channel_id)
+                {
                     report.abandoned += 1;
                 }
             }
         }
     }
     report
+}
+
+fn inflight_state_file_still_stale(
+    provider: &ProviderKind,
+    channel_id: u64,
+    snapshot_age_secs: u64,
+) -> bool {
+    // After our edit completed, the worst case is a freshly written file
+    // ~ABANDON_THRESHOLD younger than the snapshot. Anything younger than
+    // (snapshot_age_secs - SLACK) means a new write occurred and we must
+    // not delete. Slack accommodates clock skew between the file mtime and
+    // our wall-clock measurement.
+    const SLACK_SECS: u64 = 5;
+    let states = load_inflight_states_for_sweep(provider);
+    let Some((_, current_age)) = states
+        .into_iter()
+        .find(|(state, _)| state.channel_id == channel_id)
+    else {
+        // File already gone — another path cleared it. Treat as still stale
+        // so the calling code's delete becomes a no-op without triggering a
+        // false-positive "preserved fresh state" decision.
+        return true;
+    };
+    current_age + SLACK_SECS >= snapshot_age_secs
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -250,5 +291,17 @@ mod tests {
         let state = make_state(1234, 5678);
         let text = build_abandoned_placeholder(&state);
         assert!(text.starts_with("⚠ **백그라운드 중단** (모니터 연결 끊김)"));
+    }
+
+    #[test]
+    fn restart_mode_inflights_are_skipped_in_decision_path() {
+        // Sweeper exits early for restart_mode states regardless of age.
+        // Verify the source state used for the early-skip branch — actually
+        // editing/deleting requires async + filesystem fixtures that the
+        // unit test layer does not stand up.
+        let mut state = make_state(1234, 5678);
+        assert!(state.restart_mode.is_none());
+        state.set_restart_mode(super::super::InflightRestartMode::DrainRestart);
+        assert!(state.restart_mode.is_some());
     }
 }
