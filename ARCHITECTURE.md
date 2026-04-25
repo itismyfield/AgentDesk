@@ -252,6 +252,7 @@ src/
 │   │   ├── gateway.rs
 │   │   ├── handoff.rs
 │   │   ├── health.rs
+│   │   ├── idle_detector.rs
 │   │   ├── inflight.rs
 │   │   ├── internal_api.rs
 │   │   ├── mcp_credential_watcher.rs

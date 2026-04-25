@@ -1102,6 +1102,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     provider_for_setup.clone(),
                 );
 
+                // #1031 server-level idle detection (Option A — turn idle
+                // heuristic). Periodically scans each provider's active
+                // mailboxes and registers `system-detected:idle` monitoring
+                // entries when watcher heartbeat (#982) has not advanced
+                // within the configured threshold.
+                super::idle_detector::spawn_idle_detector(
+                    shared_clone.clone(),
+                    provider_for_setup.clone(),
+                );
+
                 // Background: periodic reaper for dead tmux sessions that
                 // still show as working in the DB (catches watcher gaps)
                 #[cfg(unix)]
