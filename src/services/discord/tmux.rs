@@ -1529,6 +1529,102 @@ fn dead_session_cleanup_plan(dispatch_protected: bool) -> DeadSessionCleanupPlan
     }
 }
 
+/// Default idle window the post-terminal-success watcher waits before stopping
+/// when tmux is still alive and confirmed_end has caught up to the tail offset.
+/// See issue #1137: codex agents (G2/G3/G4) were observed emitting additional
+/// output for several seconds AFTER the terminal-success log, so a sub-second
+/// stop strictness check would still race the tail. 5s is large enough to
+/// catch the observed continuation bursts while staying small enough that an
+/// idle dispatch isn't held open meaningfully longer than today's behavior.
+pub(crate) const WATCHER_POST_TERMINAL_IDLE_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// Input snapshot for [`watcher_stop_decision_after_terminal_success`].
+/// Kept as a plain copyable struct so the helper is trivially unit-testable
+/// without mocking tokio time or tmux. See issue #1137 for the watcher
+/// strictness contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WatcherStopInput {
+    /// True once the watcher has relayed a terminal-success result to Discord
+    /// for the current dispatch (i.e. `turn_result_relayed`).
+    pub(crate) terminal_success_seen: bool,
+    /// Tmux pane liveness — `crate::services::platform::tmux::has_session`
+    /// (or the watcher's wrapper [`tmux_session_has_live_pane`]).
+    pub(crate) tmux_alive: bool,
+    /// Shared `confirmed_end_offset` watermark across all watcher replicas
+    /// for this channel.
+    pub(crate) confirmed_end: u64,
+    /// Current tmux jsonl tail offset (`std::fs::metadata(output).len()`).
+    pub(crate) tmux_tail_offset: u64,
+    /// Time since the last new-output observation. `None` means we have not
+    /// observed any output yet during this watcher iteration.
+    pub(crate) idle_duration: Option<std::time::Duration>,
+    /// Idle window required before stopping post-terminal-success.
+    pub(crate) idle_threshold: std::time::Duration,
+}
+
+/// Outcome of the watcher-stop strictness check (#1137).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatcherStopDecision {
+    /// Watcher should keep running. Either the dispatch hasn't reached
+    /// terminal-success yet, or new output is still arriving / the
+    /// confirmed-end watermark hasn't caught up.
+    Continue,
+    /// Terminal success was relayed but additional tmux output is still
+    /// being produced (or the idle window hasn't elapsed). The caller should
+    /// log "post-terminal-success continuation" exactly once when this
+    /// transitions in, then keep the watcher alive.
+    PostTerminalSuccessContinuation,
+    /// Watcher may stop quietly. Either the tmux pane died or all three
+    /// strictness invariants hold simultaneously:
+    /// (1) terminal success was relayed,
+    /// (2) confirmed_end has caught up to the tmux tail offset,
+    /// (3) the idle window has elapsed.
+    Stop,
+}
+
+/// Decide whether the tmux output watcher may stop after a terminal-success
+/// event. Issue #1137 widens the legacy "exit on terminal success" rule:
+///
+/// - dead tmux pane                                      -> Stop
+/// - terminal success seen + confirmed_end >= tail
+///   + idle_duration >= idle_threshold                   -> Stop
+/// - terminal success seen + tmux still alive + (tail
+///   has advanced past confirmed_end OR idle window has
+///   not elapsed yet)                                    -> PostTerminalSuccessContinuation
+/// - otherwise                                           -> Continue
+pub(crate) fn watcher_stop_decision_after_terminal_success(
+    input: WatcherStopInput,
+) -> WatcherStopDecision {
+    // Tmux death always wins — there's no further output possible, so the
+    // watcher must stop regardless of the confirmed-end / idle bookkeeping.
+    if !input.tmux_alive {
+        return WatcherStopDecision::Stop;
+    }
+
+    // Pre-terminal-success: keep the legacy semantics — the loop must
+    // continue reading output until it sees a result event.
+    if !input.terminal_success_seen {
+        return WatcherStopDecision::Continue;
+    }
+
+    // Strictness invariant (1): the confirmed-end watermark must reach the
+    // current tmux tail. If new bytes have landed past confirmed_end, the
+    // watcher cannot stop yet — those bytes still need to be relayed.
+    let confirmed_caught_up = input.confirmed_end >= input.tmux_tail_offset;
+    if !confirmed_caught_up {
+        return WatcherStopDecision::PostTerminalSuccessContinuation;
+    }
+
+    // Strictness invariant (2): the idle window must have elapsed without
+    // any further output. We require an explicit `Some(_)` reading so the
+    // very first iteration after relay never short-circuits the wait.
+    match input.idle_duration {
+        Some(idle) if idle >= input.idle_threshold => WatcherStopDecision::Stop,
+        _ => WatcherStopDecision::PostTerminalSuccessContinuation,
+    }
+}
+
 fn extract_result_error_text(value: &serde_json::Value) -> String {
     let errors = value
         .get("errors")
@@ -2815,6 +2911,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
+    // #1137: 1-shot guard so the "post-terminal-success continuation" log
+    // is emitted exactly once per dispatch. Real-world traces (codex
+    // G2/G3/G4 on 2026-04-22T23:34:13Z) showed multi-second continuation
+    // bursts; logging every chunk would spam the timeline.
+    let mut post_terminal_continuation_logged = false;
     let mut restored_turn = restored_turn;
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
@@ -3077,6 +3178,17 @@ pub(super) async fn tmux_output_watcher_with_restore(
         // We got new data while not paused — this means terminal input triggered a response
         let data_start_offset = current_offset; // offset where this read batch started
         current_offset = new_offset;
+        // #1137: surface a single warning when output keeps arriving after a
+        // terminal-success relay. The watcher will keep running (the legacy
+        // single-event exit was the bug); this log makes the continuation
+        // observable in the operational timeline.
+        if turn_result_relayed && !post_terminal_continuation_logged {
+            post_terminal_continuation_logged = true;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
+            );
+        }
         maybe_refresh_watcher_activity_heartbeat(
             shared.sqlite.as_ref(),
             shared.pg_pool.as_ref(),
@@ -6987,6 +7099,156 @@ mod tests {
                 preserve_tmux_session: false,
                 report_idle_status: true,
             }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #1137 watcher-stop strictness — 4 combinations of
+    // (terminal_success_seen yes/no) x (tmux_alive yes/no), plus the
+    // post-terminal-success continuation path that motivated the issue.
+    // -----------------------------------------------------------------
+
+    fn watcher_stop_input_default() -> super::WatcherStopInput {
+        super::WatcherStopInput {
+            terminal_success_seen: false,
+            tmux_alive: true,
+            confirmed_end: 0,
+            tmux_tail_offset: 0,
+            idle_duration: None,
+            idle_threshold: super::WATCHER_POST_TERMINAL_IDLE_WINDOW,
+        }
+    }
+
+    #[test]
+    fn watcher_stop_no_terminal_success_alive_keeps_watching() {
+        // (terminal=N, tmux_alive=Y) — pre-terminal-success traffic must
+        // never trigger the strict-stop path; the watcher just keeps reading.
+        let input = super::WatcherStopInput {
+            terminal_success_seen: false,
+            tmux_alive: true,
+            confirmed_end: 1024,
+            tmux_tail_offset: 1024,
+            idle_duration: Some(std::time::Duration::from_secs(60)),
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::Continue
+        );
+    }
+
+    #[test]
+    fn watcher_stop_no_terminal_success_dead_tmux_stops() {
+        // (terminal=N, tmux_alive=N) — even without a result event, a dead
+        // tmux pane means the watcher has nothing left to read; stop quietly.
+        let input = super::WatcherStopInput {
+            terminal_success_seen: false,
+            tmux_alive: false,
+            confirmed_end: 0,
+            tmux_tail_offset: 4096,
+            idle_duration: Some(std::time::Duration::from_millis(10)),
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::Stop
+        );
+    }
+
+    #[test]
+    fn watcher_stop_terminal_success_alive_with_new_output_continues() {
+        // (terminal=Y, tmux_alive=Y, confirmed_end < tail) — the codex
+        // G4/G2/G3 case from the 2026-04-22 incident. New output landed
+        // after the terminal-success log; watcher MUST persist and the
+        // caller logs "post-terminal-success continuation".
+        let input = super::WatcherStopInput {
+            terminal_success_seen: true,
+            tmux_alive: true,
+            confirmed_end: 1024,
+            tmux_tail_offset: 2048,
+            idle_duration: Some(std::time::Duration::from_secs(60)),
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::PostTerminalSuccessContinuation
+        );
+    }
+
+    #[test]
+    fn watcher_stop_terminal_success_alive_idle_window_elapsed_stops() {
+        // (terminal=Y, tmux_alive=Y, confirmed_end == tail, idle >= 5s) —
+        // both strictness invariants satisfied; watcher may stop. This is
+        // the "happy path" the existing single-event exit was approximating.
+        let input = super::WatcherStopInput {
+            terminal_success_seen: true,
+            tmux_alive: true,
+            confirmed_end: 4096,
+            tmux_tail_offset: 4096,
+            idle_duration: Some(super::WATCHER_POST_TERMINAL_IDLE_WINDOW),
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::Stop
+        );
+    }
+
+    #[test]
+    fn watcher_stop_terminal_success_dead_tmux_stops_immediately() {
+        // (terminal=Y, tmux_alive=N) — dead tmux dominates: stop without
+        // waiting for the idle window to elapse, even if confirmed_end
+        // hasn't caught up to the tail (no further output is possible).
+        let input = super::WatcherStopInput {
+            terminal_success_seen: true,
+            tmux_alive: false,
+            confirmed_end: 1024,
+            tmux_tail_offset: 8192,
+            idle_duration: None,
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::Stop
+        );
+    }
+
+    #[test]
+    fn watcher_stop_terminal_success_alive_caught_up_but_idle_too_short_continues() {
+        // (terminal=Y, tmux_alive=Y, confirmed_end == tail, idle < 5s) —
+        // confirmed_end caught up but the idle window hasn't elapsed; the
+        // watcher must keep waiting in case a continuation burst arrives.
+        let input = super::WatcherStopInput {
+            terminal_success_seen: true,
+            tmux_alive: true,
+            confirmed_end: 4096,
+            tmux_tail_offset: 4096,
+            idle_duration: Some(std::time::Duration::from_secs(2)),
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::PostTerminalSuccessContinuation
+        );
+    }
+
+    #[test]
+    fn watcher_stop_terminal_success_alive_no_idle_observation_yet_continues() {
+        // First poll after the relay has `idle_duration: None`. We require
+        // an explicit observation before the idle invariant can fire so the
+        // watcher never short-circuits its wait window on the very first
+        // iteration after terminal success.
+        let input = super::WatcherStopInput {
+            terminal_success_seen: true,
+            tmux_alive: true,
+            confirmed_end: 4096,
+            tmux_tail_offset: 4096,
+            idle_duration: None,
+            ..watcher_stop_input_default()
+        };
+        assert_eq!(
+            super::watcher_stop_decision_after_terminal_success(input),
+            super::WatcherStopDecision::PostTerminalSuccessContinuation
         );
     }
 
