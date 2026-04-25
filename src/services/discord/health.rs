@@ -197,6 +197,10 @@ impl HealthRegistry {
         providers.push(ProviderEntry { name, shared });
     }
 
+    pub(super) async fn registered_provider_count(&self) -> usize {
+        self.providers.lock().await.len()
+    }
+
     pub(super) async fn register_http(&self, provider: String, http: Arc<serenity::Http>) {
         self.discord_http.lock().await.push((provider, http));
     }

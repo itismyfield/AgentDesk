@@ -45,7 +45,7 @@
 | `cli` | `src/cli/mod.rs` | 19 |  |
 | `cli::args` | `src/cli/args.rs` | 871 |  |
 | `cli::client` | `src/cli/client.rs` | 1498 | giant-file |
-| `cli::dcserver` | `src/cli/dcserver.rs` | 1495 | giant-file |
+| `cli::dcserver` | `src/cli/dcserver.rs` | 1510 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1465 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
@@ -237,7 +237,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2632 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 3334 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 3338 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 462 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1016 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
@@ -271,7 +271,7 @@
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1217 | giant-file |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5496 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1811 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1934 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1862 | giant-file |
