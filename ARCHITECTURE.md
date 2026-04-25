@@ -39,6 +39,10 @@ src/
 │   ├── monitoring.rs
 │   ├── run.rs
 │   └── utils.rs
+├── compat/
+│   ├── deprecated_alias.rs
+│   ├── legacy_tmp_paths.rs
+│   └── mod.rs
 ├── db/
 │   ├── agents.rs
 │   ├── auto_queue.rs
@@ -49,6 +53,7 @@ src/
 │   ├── schema.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_transcripts.rs
+│   ├── table_metadata.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_channel.rs
@@ -61,6 +66,7 @@ src/
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
+│   │   ├── ci_recovery_ops.rs
 │   │   ├── config_ops.rs
 │   │   ├── db_ops.rs
 │   │   ├── dispatch_ops.rs
@@ -92,8 +98,14 @@ src/
 │   ├── sync.rs
 │   └── triage.rs
 ├── integration_tests/
-│   └── tests/
-│       └── high_risk_recovery.rs
+│   ├── discord_flow/
+│   │   ├── harness.rs
+│   │   ├── mock_discord.rs
+│   │   ├── mod.rs
+│   │   └── scenarios.rs
+│   ├── tests/
+│   │   └── high_risk_recovery.rs
+│   └── agents_setup_e2e.rs
 ├── runtime_layout/
 │   ├── config_merge.rs
 │   ├── legacy_migration.rs
@@ -147,6 +159,7 @@ src/
 │   │   ├── kanban_repos.rs
 │   │   ├── maintenance.rs
 │   │   ├── meetings.rs
+│   │   ├── memory_api.rs
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
@@ -175,11 +188,15 @@ src/
 │   ├── worker_registry.rs
 │   └── ws.rs
 ├── services/
+│   ├── agent_quality/
+│   │   ├── mod.rs
+│   │   └── regression_alerts.rs
 │   ├── auto_queue/
 │   │   ├── cancel_run.rs
 │   │   └── runtime.rs
 │   ├── discord/
 │   │   ├── commands/
+│   │   │   ├── command_policy.rs
 │   │   │   ├── config.rs
 │   │   │   ├── control.rs
 │   │   │   ├── diagnostics.rs
@@ -194,6 +211,9 @@ src/
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
 │   │   │   └── text_commands.rs
+│   │   ├── recovery_paths/
+│   │   │   ├── mod.rs
+│   │   │   └── shared.rs
 │   │   ├── router/
 │   │   │   ├── control_intent.rs
 │   │   │   ├── intake_gate.rs
@@ -229,14 +249,18 @@ src/
 │   │   ├── inflight.rs
 │   │   ├── internal_api.rs
 │   │   ├── mcp_credential_watcher.rs
+│   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
+│   │   ├── meeting_state_machine.rs
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
+│   │   ├── monitoring_detector.rs
 │   │   ├── monitoring_status.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
+│   │   ├── outbound.rs
 │   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
 │   │   ├── recovery_engine.rs
@@ -246,6 +270,7 @@ src/
 │   │   ├── role_map.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── session_identity.rs
 │   │   ├── session_runtime.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
@@ -255,18 +280,33 @@ src/
 │   │   ├── tmux_overload_retry.rs
 │   │   ├── tmux_reaper.rs
 │   │   └── tmux_restart_handoff.rs
+│   ├── maintenance/
+│   │   ├── jobs/
+│   │   │   ├── db_retention.rs
+│   │   │   ├── hang_dump_cleanup.rs
+│   │   │   ├── memento_consolidation.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── target_sweep.rs
+│   │   │   └── worktree_orphan_sweep.rs
+│   │   └── mod.rs
 │   ├── memory/
 │   │   ├── local.rs
 │   │   ├── memento.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
+│   ├── observability/
+│   │   ├── events.rs
+│   │   ├── metrics.rs
+│   │   └── mod.rs
 │   ├── platform/
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs
 │   │   ├── shell.rs
 │   │   └── tmux.rs
+│   ├── slo/
+│   │   └── mod.rs
 │   ├── agent_protocol.rs
 │   ├── api_friction.rs
 │   ├── auto_queue.rs
@@ -276,12 +316,12 @@ src/
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── dispatches.rs
+│   ├── dispatches_followup.rs
 │   ├── gemini.rs
 │   ├── kanban.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
-│   ├── observability.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs
@@ -298,6 +338,7 @@ src/
 │   ├── tmux_common.rs
 │   ├── tmux_diagnostics.rs
 │   ├── tmux_wrapper.rs
+│   ├── tool_output_guard.rs
 │   ├── turn_lifecycle.rs
 │   └── turn_orchestrator.rs
 ├── supervisor/
@@ -308,7 +349,8 @@ src/
 ├── utils/
 │   ├── async_bridge.rs
 │   ├── format.rs
-│   └── mod.rs
+│   ├── mod.rs
+│   └── wip_detect.rs
 ├── bootstrap.rs
 ├── config.rs
 ├── credential.rs
@@ -338,6 +380,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | Path | Purpose |
 | --- | --- |
 | `src/cli/` | Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers. |
+| `src/compat/` | Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven. |
 | `src/db/` | SQLite access layer and schema authority (`src/db/schema.rs`). |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
