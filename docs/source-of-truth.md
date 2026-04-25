@@ -61,6 +61,12 @@ Per-agent prompts are operator-private content and are deliberately excluded fro
 
 Shared prompt instructions are appended to every per-agent prompt at composition time. Two compatibility symlinks (`config/agents/_shared.md` and `config/_shared.md`) point back at the canonical Obsidian-sourced file via the release mirror; never replace these aliases with copied text or edit the alias path. Pitfall: a missing alias is a deploy-time symptom — recreate the link from the canonical mirror, do not introduce a second canonical file.
 
+The shared prompt also carries the in-prompt "정본 편집 경로 (Canonical Edit Path)" section (#1099) that points every agent back to this matrix and to the WIP commit discipline. When the matrix here changes, update that section in the Obsidian shared prompt as well so that agents see the new canonical path on their next turn.
+
+### WIP commit discipline (`src/utils/wip_detect.rs`)
+
+Uncommitted edits in an agent worktree are a known regression source: a fix that exists only on disk disappears as soon as the next dispatch wipes the worktree, and the cause becomes hard to recover. The runtime helper `check_wip_uncommitted_files()` in `src/utils/wip_detect.rs` reports staged/unstaged/untracked file counts for a given workspace and can be wired into the turn lifecycle to surface a warning before the agent yields. The shared prompt section above tells every agent to commit (or explicitly discard) WIP before ending a turn; the helper is the runtime-side check that the prompt rule is being honored. Pitfall: do not silence the warning by committing into the wrong worktree — verify the canonical path matrix first.
+
 ### Policies (`policies/*.js`) and default pipeline (`policies/default-pipeline.yaml`)
 
 Policy hooks are repo-tracked JS files in `policies/` plus the YAML pipeline manifest that wires them together. Both promote into `~/.adk/release/policies/` via the deploy script. Pitfall: examples under `policies/examples/` are reference snippets, not active configuration. Renaming a policy without updating `default-pipeline.yaml` will silently drop it from the active pipeline; verify with `git log -- policies/default-pipeline.yaml` after edits.
