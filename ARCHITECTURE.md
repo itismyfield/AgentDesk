@@ -21,6 +21,10 @@ This block is generated from the filesystem and is checked in CI for drift.
 ```text
 src/
 ├── cli/
+│   ├── doctor/
+│   │   ├── checks.rs
+│   │   ├── fix.rs
+│   │   └── types.rs
 │   ├── migrate/
 │   │   ├── apply.rs
 │   │   ├── plan.rs
