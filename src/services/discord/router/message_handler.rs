@@ -1125,6 +1125,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                         last_deadlock_prealert_deadline_ms = Some(current_deadline);
                     }
                 }
+                let now = chrono::Utc::now().timestamp_millis();
                 if now < current_deadline {
                     continue;
                 }
@@ -2984,6 +2985,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                 }
 
+                let now = chrono::Utc::now().timestamp_millis();
                 if now < current_deadline {
                     continue; // Not yet — deadline may have been extended
                 }
