@@ -368,6 +368,7 @@ pub struct RuntimeTurnStopResult {
     pub lifecycle_path: &'static str,
     pub had_active_turn: bool,
     pub queue_depth: usize,
+    pub persistent_inflight_cleared: bool,
     pub termination_recorded: bool,
 }
 
@@ -438,6 +439,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
                 lifecycle_path: "canonical",
                 had_active_turn: true,
                 queue_depth: snapshot.intervention_queue.len(),
+                persistent_inflight_cleared: false,
                 termination_recorded,
             });
         }
@@ -465,14 +467,17 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
         .intervention_queue
         .len();
     mailbox_clear_recovery_marker(&shared, channel_id).await;
-    if cleanup_policy.should_clear_inflight() {
-        clear_inflight_state(&provider, channel_id.get());
-    }
+    let persistent_inflight_cleared = if cleanup_policy.should_clear_inflight() {
+        clear_inflight_state(&provider, channel_id.get())
+    } else {
+        false
+    };
 
     Some(RuntimeTurnStopResult {
         lifecycle_path: "runtime-fallback",
         had_active_turn: finish.removed_token.is_some(),
         queue_depth,
+        persistent_inflight_cleared,
         termination_recorded,
     })
 }

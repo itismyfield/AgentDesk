@@ -2154,12 +2154,24 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
 
 #[tokio::test]
 async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
+    let _env_lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+
     let db = test_db();
     let engine = test_engine(&db);
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     let channel_id = "1485506232256168013";
     let channel_num = channel_id.parse::<u64>().unwrap();
     let session_key = "mac-mini:AgentDesk-claude-cancel-canonical";
+    let inflight_path = runtime_root
+        .path()
+        .join("runtime")
+        .join("discord_inflight")
+        .join("claude")
+        .join(format!("{channel_num}.json"));
+    fs::create_dir_all(inflight_path.parent().unwrap()).unwrap();
+    fs::write(&inflight_path, "{}").unwrap();
 
     {
         let conn = db.lock().unwrap();
@@ -2214,9 +2226,10 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["queue_preserved"], true);
-    assert_eq!(json["inflight_cleared"], false);
+    assert_eq!(json["inflight_cleared"], true);
     assert_eq!(json["exact_channel_match"], true);
     assert!(json["dispatch_cancelled"].is_null());
+    assert!(!inflight_path.exists());
 
     let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
     assert!(!has_active_turn);
