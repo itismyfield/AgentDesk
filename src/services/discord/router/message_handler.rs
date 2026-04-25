@@ -2262,7 +2262,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     .await;
     if !started {
         let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
-        let _ = super::super::mailbox_enqueue_intervention(
+        let enqueued = super::super::mailbox_enqueue_intervention(
             shared,
             &bot_owner_provider,
             channel_id,
@@ -2276,6 +2276,47 @@ pub(in crate::services::discord) async fn handle_text_message(
             ),
         )
         .await;
+        // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
+        // ✅ done. Restore 📬 on race-loss only after the intervention is
+        // actually published to the mailbox; pre-enqueue add was rejected
+        // because a fast active-turn finish during the reaction HTTP await
+        // could let `mailbox_finish_turn` skip the dequeue chain and strand
+        // the queued message (codex plugin review P1).
+        //
+        // Known residual race: if the active turn finishes between this
+        // enqueue and the `add_reaction` await below, the dequeue path's
+        // 📬 cleanup can run before our add lands and leave the icon stuck
+        // on a turn that has already started — strictly less severe than
+        // the pre-PR regression of never showing 📬 at all, and benign in
+        // the user-reported scenario (long-running tool-call hang, where
+        // the active turn does not finish for many seconds). Resolving the
+        // residual race requires moving the reaction add into the enqueue
+        // path itself or making the dequeue cleanup robust to a late add;
+        // tracked as follow-up.
+        //
+        // Restrict the 📬 add to non-thread dispatch routing: when
+        // `channel_id` was shadowed to a dispatch thread (line 1848),
+        // `user_msg_id` still references the parent-channel message and the
+        // intervention is queued under the thread mailbox — neither the
+        // thread channel nor the parent channel can host a 📬 that gets
+        // both rendered correctly *and* cleaned up by the dequeue/cancel
+        // paths. The user-reported regression scenario (parent channel,
+        // hung tool call, no dispatch routing) is handled here; the
+        // dispatch-thread case keeps the pre-PR behavior (no 📬) until the
+        // mailbox/reaction-channel mismatch is resolved as a separate
+        // follow-up (codex plugin review P2).
+        //
+        // The dedup/duplicate path inside `enqueue_intervention` returns
+        // `enqueued=false`; in that case the message is intentionally not
+        // queued, so showing 📬 would be a false promise (chatgpt-codex
+        // connector review P2).
+        let is_thread_routed = channel_id != original_channel_id;
+        if enqueued
+            && !is_thread_routed
+            && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+        {
+            add_reaction(ctx, channel_id, user_msg_id, '📬').await;
+        }
         // #796: Background-trigger turns (notify-bot driven, info-only) must
         // NOT have their placeholder deleted on race-loss. The placeholder is
         // the user-visible breadcrumb of the background notification (e.g.
