@@ -224,7 +224,7 @@
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
-| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 333 |  |
+| `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 357 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 376 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1224 | giant-file |

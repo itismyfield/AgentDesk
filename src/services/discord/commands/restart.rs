@@ -88,9 +88,9 @@ fn restart_tmux_note(tmux_name: Option<&str>) -> String {
 
 fn restart_seed_note(status: &RestartSeedStatus) -> String {
     match status {
-        RestartSeedStatus::Started => {
-            "새 provider 세션을 즉시 기동했고, 짧은 인사말을 전달합니다.".to_string()
-        }
+        // Successful seed turn needs no narration — the agent's own greeting
+        // turn follows immediately and speaks for itself.
+        RestartSeedStatus::Started => String::new(),
         RestartSeedStatus::Busy => {
             "기존 턴 정리가 아직 끝나지 않아 인사말 turn은 시작하지 못했습니다.".to_string()
         }
@@ -106,13 +106,22 @@ fn build_restart_response(
     tmux_name: Option<&str>,
     seed_status: &RestartSeedStatus,
 ) -> String {
-    format!(
-        "♻ 세션 재시작됨 (provider={}). 현재 인증된 MCP/설정이 부착됐습니다.\n{}\n{}\n{}",
-        provider.as_str(),
+    let header = format!(
+        "♻ 세션 재시작됨 (provider={}). 현재 인증된 MCP/설정이 부착됐습니다.",
+        provider.as_str()
+    );
+    let parts = [
+        header,
         restart_tmux_note(tmux_name),
         restart_resume_note(provider, action),
-        restart_seed_note(seed_status)
-    )
+        restart_seed_note(seed_status),
+    ];
+    parts
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn start_restart_seed_turn(ctx: &Context<'_>) -> RestartSeedStatus {
@@ -312,7 +321,11 @@ mod tests {
             );
             assert!(response.contains(provider.as_str()));
             assert!(response.contains("`--resume`"));
-            assert!(response.contains("즉시 기동"));
+            // Successful seed turn must not narrate its own greeting.
+            assert!(!response.contains("짧은 인사말을 전달합니다"));
+            assert!(!response.contains("즉시 기동"));
+            // No trailing blank line from the now-empty seed note.
+            assert!(!response.ends_with('\n'));
         }
     }
 
@@ -329,5 +342,16 @@ mod tests {
         assert!(response.contains("신규 세션"));
         assert!(response.contains("관리 중인 tmux 세션 없음"));
         assert!(response.contains("시작하지 못했습니다"));
+    }
+
+    #[test]
+    fn restart_response_surfaces_seed_failure_reason() {
+        let response = build_restart_response(
+            &ProviderKind::Claude,
+            &RestartAction::NoActiveSession,
+            Some("AgentDesk-test"),
+            &RestartSeedStatus::Failed("workspace not resolvable".to_string()),
+        );
+        assert!(response.contains("인사말 turn 시작 실패: workspace not resolvable"));
     }
 }
