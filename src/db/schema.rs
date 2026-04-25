@@ -693,7 +693,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             status       TEXT NOT NULL DEFAULT 'pending',
             created_at   DATETIME DEFAULT (datetime('now')),
             processed_at DATETIME,
-            error        TEXT
+            error        TEXT,
+            delivery_status TEXT,
+            delivery_result TEXT
         );",
     )?;
 
@@ -815,6 +817,29 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             .unwrap_or(false);
         if !has_next_attempt {
             conn.execute_batch("ALTER TABLE dispatch_outbox ADD COLUMN next_attempt_at DATETIME;")?;
+        }
+    }
+
+    // #1165: Persist shared Discord outbound delivery outcomes for operators.
+    for (column, ddl) in [
+        (
+            "delivery_status",
+            "ALTER TABLE dispatch_outbox ADD COLUMN delivery_status TEXT;",
+        ),
+        (
+            "delivery_result",
+            "ALTER TABLE dispatch_outbox ADD COLUMN delivery_result TEXT;",
+        ),
+    ] {
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('dispatch_outbox') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_column {
+            conn.execute_batch(ddl)?;
         }
     }
 

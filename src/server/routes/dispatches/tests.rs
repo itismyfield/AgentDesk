@@ -1,4 +1,6 @@
-use super::discord_delivery::{DispatchTransport, ReviewFollowupKind};
+use super::discord_delivery::{
+    DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
+};
 use super::outbox::{
     DispatchFollowupConfig, extract_review_verdict, format_dispatch_message,
     handle_completed_dispatch_followups, handle_completed_dispatch_followups_with_config,
@@ -68,15 +70,20 @@ impl DispatchTransport for MockDispatchTransport {
         _agent_id: String,
         _title: String,
         _card_id: String,
-        _dispatch_id: String,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<DispatchNotifyDeliveryResult, String>> + Send
+    {
         let state = self.state.clone();
         let error = self.send_dispatch_error.clone();
         async move {
             state.lock().unwrap().dispatch_calls += 1;
             match error {
                 Some(error) => Err(error),
-                None => Ok(()),
+                None => Ok(DispatchNotifyDeliveryResult::success(
+                    dispatch_id,
+                    "notify",
+                    "mock dispatch transport sent",
+                )),
             }
         }
     }

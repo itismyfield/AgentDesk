@@ -720,7 +720,13 @@ pub(super) async fn try_reuse_thread(
     card_id: &str,
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
-) -> Result<Option<bool>, super::discord_delivery::DispatchMessagePostError> {
+) -> Result<
+    Option<(
+        bool,
+        Option<super::discord_delivery::DispatchMessagePostOutcome>,
+    )>,
+    super::discord_delivery::DispatchMessagePostError,
+> {
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
     let thread_info_url = format!(
         "{}/channels/{}",
@@ -823,7 +829,7 @@ pub(super) async fn try_reuse_thread(
                 clear_thread_for_channel(&conn, card_id, expected_parent);
             }
         }
-        return Ok(Some(false));
+        return Ok(Some((false, None)));
     }
 
     // Unarchive if needed
@@ -862,17 +868,18 @@ pub(super) async fn try_reuse_thread(
             .await;
     }
 
-    match super::discord_delivery::post_dispatch_message_to_channel(
+    match super::discord_delivery::post_dispatch_message_to_channel_with_delivery(
         client,
         token,
         discord_api_base,
         thread_id,
         message,
         minimal_message,
+        Some(dispatch_id),
     )
     .await
     {
-        Ok(message_id) => {
+        Ok(outcome) => {
             // Update dispatch thread_id and mark as notified
             if let Some(pool) = pg_pool {
                 sqlx::query(
@@ -921,7 +928,7 @@ pub(super) async fn try_reuse_thread(
                     discord_api_base,
                     dispatch_id,
                     thread_id,
-                    &message_id,
+                    &outcome.message_id,
                     pg_pool,
                 )
                 .await
@@ -933,7 +940,7 @@ pub(super) async fn try_reuse_thread(
                 );
             }
             tracing::info!("[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}");
-            Ok(Some(true))
+            Ok(Some((true, Some(outcome))))
         }
         Err(error) => {
             tracing::warn!(

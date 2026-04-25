@@ -668,12 +668,21 @@ mod outbox_boundary {
             _title: String,
             _card_id: String,
             dispatch_id: String,
-        ) -> Result<(), String> {
+        ) -> Result<
+            crate::server::routes::dispatches::discord_delivery::DispatchNotifyDeliveryResult,
+            String,
+        > {
             self.calls.lock().unwrap().push(MockCall::Notify {
                 agent_id,
-                dispatch_id,
+                dispatch_id: dispatch_id.clone(),
             });
-            Ok(())
+            Ok(
+                crate::server::routes::dispatches::discord_delivery::DispatchNotifyDeliveryResult::success(
+                    dispatch_id,
+                    "notify",
+                    "mock notifier sent",
+                ),
+            )
         }
 
         async fn handle_followup(

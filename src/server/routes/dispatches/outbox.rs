@@ -1,6 +1,7 @@
 use super::{
     discord_delivery::{
-        DispatchTransport, HttpDispatchTransport, discord_api_base_url, discord_api_url,
+        DispatchNotifyDeliveryResult, DispatchTransport, HttpDispatchTransport,
+        discord_api_base_url, discord_api_url,
     },
     thread_reuse::clear_all_threads,
 };
@@ -71,7 +72,7 @@ pub(crate) trait OutboxNotifier: Send + Sync {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    ) -> impl std::future::Future<Output = Result<DispatchNotifyDeliveryResult, String>> + Send;
 
     fn handle_followup(
         &self,
@@ -105,8 +106,8 @@ impl OutboxNotifier for RealOutboxNotifier {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) -> Result<(), String> {
-        super::discord_delivery::send_dispatch_to_discord_with_pg(
+    ) -> Result<DispatchNotifyDeliveryResult, String> {
+        super::discord_delivery::send_dispatch_to_discord_with_pg_result(
             db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &agent_id,
@@ -182,6 +183,26 @@ fn check_dispatch_outbox_retry_count_in_bounds(
             }),
         },
     );
+}
+
+fn dispatch_delivery_result_json(result: &DispatchNotifyDeliveryResult) -> String {
+    serde_json::to_string(result).unwrap_or_else(|error| {
+        serde_json::json!({
+            "status": "serialization_failed",
+            "detail": error.to_string(),
+            "dispatch_id": result.dispatch_id,
+            "action": result.action,
+        })
+        .to_string()
+    })
+}
+
+fn generic_outbox_delivery_result(
+    dispatch_id: &str,
+    action: &str,
+    detail: impl Into<String>,
+) -> DispatchNotifyDeliveryResult {
+    DispatchNotifyDeliveryResult::success(dispatch_id, action, detail)
 }
 
 fn dispatch_notify_delivery_suppressed(
@@ -432,23 +453,43 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 false
             };
             if suppress_delivery {
+                let delivery_result = generic_outbox_delivery_result(
+                    &dispatch_id,
+                    "notify",
+                    "suppressed because dispatch is already terminal",
+                );
+                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                 if let Some(pool) = pg_pool {
                     sqlx::query(
                         "UPDATE dispatch_outbox
                             SET status = 'done',
                                 processed_at = NOW(),
-                                error = NULL
+                                error = NULL,
+                                delivery_status = $2,
+                                delivery_result = $3::jsonb
                           WHERE id = $1",
                     )
                     .bind(id)
+                    .bind(&delivery_result.status)
+                    .bind(&delivery_result_json)
                     .execute(pool)
                     .await
                     .ok();
                 } else if let Some(db) = db {
                     if let Ok(conn) = db.lock() {
                         conn.execute(
-                            "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now'), error = NULL WHERE id = ?1",
-                            [id],
+                            "UPDATE dispatch_outbox
+                                SET status = 'done',
+                                    processed_at = datetime('now'),
+                                    error = NULL,
+                                    delivery_status = ?2,
+                                    delivery_result = ?3
+                              WHERE id = ?1",
+                            libsql_rusqlite::params![
+                                id,
+                                delivery_result.status,
+                                delivery_result_json
+                            ],
                         )
                         .ok();
                     }
@@ -484,11 +525,16 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     Err("missing agent_id, card_id, or title for notify action".into())
                 }
             }
-            "followup" => {
-                notifier
-                    .handle_followup(db.cloned(), dispatch_id.clone())
-                    .await
-            }
+            "followup" => notifier
+                .handle_followup(db.cloned(), dispatch_id.clone())
+                .await
+                .map(|()| {
+                    generic_outbox_delivery_result(
+                        &dispatch_id,
+                        "followup",
+                        "followup handler completed",
+                    )
+                }),
             "status_reaction" => {
                 // #750: narrow-path sync — sync_dispatch_status_reaction only
                 // writes ❌ on failed/cancelled dispatches (command bot owns
@@ -497,6 +543,13 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 notifier
                     .sync_status_reaction(db.cloned(), dispatch_id.clone())
                     .await
+                    .map(|()| {
+                        generic_outbox_delivery_result(
+                            &dispatch_id,
+                            "status_reaction",
+                            "status reaction sync completed",
+                        )
+                    })
             }
             other => {
                 tracing::warn!("[dispatch-outbox] Unknown action: {other}");
@@ -505,16 +558,22 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
         };
 
         match result {
-            Ok(()) => {
+            Ok(delivery_result) => {
+                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                 // Mark done + transition dispatch pending → dispatched
                 if let Some(pool) = pg_pool {
                     sqlx::query(
                         "UPDATE dispatch_outbox
                             SET status = 'done',
-                                processed_at = NOW()
+                                processed_at = NOW(),
+                                error = NULL,
+                                delivery_status = $2,
+                                delivery_result = $3::jsonb
                           WHERE id = $1",
                     )
                     .bind(id)
+                    .bind(&delivery_result.status)
+                    .bind(&delivery_result_json)
                     .execute(pool)
                     .await
                     .ok();
@@ -524,8 +583,18 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 } else if let Some(db) = db {
                     if let Ok(conn) = db.lock() {
                         conn.execute(
-                            "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
-                            [id],
+                            "UPDATE dispatch_outbox
+                                SET status = 'done',
+                                    processed_at = datetime('now'),
+                                    error = NULL,
+                                    delivery_status = ?2,
+                                    delivery_result = ?3
+                              WHERE id = ?1",
+                            libsql_rusqlite::params![
+                                id,
+                                delivery_result.status,
+                                delivery_result_json
+                            ],
                         )
                         .ok();
                         if action == "notify" {
@@ -550,18 +619,28 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     tracing::error!(
                         "[dispatch-outbox] Permanent failure for entry {id} (dispatch={dispatch_id}, action={action}): {err}"
                     );
+                    let delivery_result = DispatchNotifyDeliveryResult::permanent_failure(
+                        &dispatch_id,
+                        &action,
+                        &err,
+                    );
+                    let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                     if let Some(pool) = pg_pool {
                         sqlx::query(
                             "UPDATE dispatch_outbox
                                 SET status = 'failed',
                                     error = $1,
                                     retry_count = $2,
-                                    processed_at = NOW()
+                                    processed_at = NOW(),
+                                    delivery_status = $4,
+                                    delivery_result = $5::jsonb
                               WHERE id = $3",
                         )
                         .bind(&err)
                         .bind(new_count)
                         .bind(id)
+                        .bind(&delivery_result.status)
+                        .bind(&delivery_result_json)
                         .execute(pool)
                         .await
                         .ok();
@@ -569,8 +648,15 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                         if let Ok(conn) = db.lock() {
                             conn.execute(
                                 "UPDATE dispatch_outbox SET status = 'failed', error = ?1, \
-                                 retry_count = ?2, processed_at = datetime('now') WHERE id = ?3",
-                                libsql_rusqlite::params![err, new_count, id],
+                                 retry_count = ?2, processed_at = datetime('now'), \
+                                 delivery_status = ?4, delivery_result = ?5 WHERE id = ?3",
+                                libsql_rusqlite::params![
+                                    err,
+                                    new_count,
+                                    id,
+                                    delivery_result.status,
+                                    delivery_result_json
+                                ],
                             )
                             .ok();
                         }
@@ -1751,7 +1837,9 @@ pub(crate) async fn requeue_dispatch_notify_pg(
                 retry_count = 0,
                 next_attempt_at = NULL,
                 processed_at = NULL,
-                error = NULL
+                error = NULL,
+                delivery_status = NULL,
+                delivery_result = NULL
           WHERE dispatch_id = $1
             AND action = 'notify'",
     )
@@ -1794,7 +1882,9 @@ pub(crate) async fn requeue_dispatch_notify_pg(
                 retry_count = 0,
                 next_attempt_at = NULL,
                 processed_at = NULL,
-                error = NULL
+                error = NULL,
+                delivery_status = NULL,
+                delivery_result = NULL
           WHERE dispatch_id = $1
             AND action = 'notify'",
     )
@@ -2030,6 +2120,12 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct DuplicateNotifyOutboxNotifier;
+
+    #[derive(Clone, Default)]
+    struct FailingNotifyOutboxNotifier;
+
     #[derive(Clone)]
     struct PgAwareTransport {
         pg_pool: PgPool,
@@ -2057,12 +2153,16 @@ mod tests {
             _title: String,
             _card_id: String,
             dispatch_id: String,
-        ) -> Result<(), String> {
+        ) -> Result<DispatchNotifyDeliveryResult, String> {
             self.dispatch_calls
                 .lock()
                 .unwrap()
                 .push(format!("{agent_id}:{dispatch_id}"));
-            Ok(())
+            Ok(DispatchNotifyDeliveryResult::success(
+                dispatch_id,
+                "notify",
+                "pg-aware mock transport sent",
+            ))
         }
 
         async fn send_review_followup(
@@ -2086,12 +2186,16 @@ mod tests {
             _title: String,
             _card_id: String,
             dispatch_id: String,
-        ) -> Result<(), String> {
+        ) -> Result<DispatchNotifyDeliveryResult, String> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("notify:{dispatch_id}"));
-            Ok(())
+            Ok(DispatchNotifyDeliveryResult::success(
+                dispatch_id,
+                "notify",
+                "mock outbox notifier sent",
+            ))
         }
 
         async fn handle_followup(
@@ -2115,6 +2219,67 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("status_reaction:{dispatch_id}"));
+            Ok(())
+        }
+    }
+
+    impl OutboxNotifier for DuplicateNotifyOutboxNotifier {
+        async fn notify_dispatch(
+            &self,
+            _db: Option<crate::db::Db>,
+            _agent_id: String,
+            _title: String,
+            _card_id: String,
+            dispatch_id: String,
+        ) -> Result<DispatchNotifyDeliveryResult, String> {
+            Ok(DispatchNotifyDeliveryResult::duplicate(
+                dispatch_id,
+                "mock delivery guard duplicate",
+            ))
+        }
+
+        async fn handle_followup(
+            &self,
+            _db: Option<crate::db::Db>,
+            _dispatch_id: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn sync_status_reaction(
+            &self,
+            _db: Option<crate::db::Db>,
+            _dispatch_id: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl OutboxNotifier for FailingNotifyOutboxNotifier {
+        async fn notify_dispatch(
+            &self,
+            _db: Option<crate::db::Db>,
+            _agent_id: String,
+            _title: String,
+            _card_id: String,
+            _dispatch_id: String,
+        ) -> Result<DispatchNotifyDeliveryResult, String> {
+            Err("mock permanent discord failure".to_string())
+        }
+
+        async fn handle_followup(
+            &self,
+            _db: Option<crate::db::Db>,
+            _dispatch_id: String,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn sync_status_reaction(
+            &self,
+            _db: Option<crate::db::Db>,
+            _dispatch_id: String,
+        ) -> Result<(), String> {
             Ok(())
         }
     }
@@ -2154,6 +2319,113 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "done");
         assert!(row.1.is_some());
+    }
+
+    #[tokio::test]
+    async fn process_outbox_batch_records_duplicate_notify_delivery_result() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-dup', 'Duplicate Agent')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+                 VALUES ('card-dup', 'Duplicate', 'ready', 'agent-dup', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at)
+                 VALUES ('dispatch-dup', 'card-dup', 'agent-dup', 'pending', 'Duplicate', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status)
+                 VALUES ('dispatch-dup', 'notify', 'agent-dup', 'card-dup', 'Duplicate', 'pending')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let processed = process_outbox_batch(&db, &DuplicateNotifyOutboxNotifier).await;
+        assert_eq!(processed, 1);
+
+        let conn = db.lock().unwrap();
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_status, delivery_result
+                   FROM dispatch_outbox
+                  WHERE dispatch_id = 'dispatch-dup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "done");
+        assert_eq!(row.1, "duplicate");
+        let delivery: serde_json::Value = serde_json::from_str(&row.2).unwrap();
+        assert_eq!(
+            delivery["semantic_event_id"],
+            "dispatch:dispatch-dup:notify"
+        );
+        assert_eq!(delivery["correlation_id"], "dispatch:dispatch-dup");
+    }
+
+    #[tokio::test]
+    async fn process_outbox_batch_records_permanent_failure_delivery_result() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-fail', 'Fail Agent')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+                 VALUES ('card-fail', 'Failure', 'ready', 'agent-fail', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at)
+                 VALUES ('dispatch-fail', 'card-fail', 'agent-fail', 'pending', 'Failure', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO dispatch_outbox (
+                    dispatch_id, action, agent_id, card_id, title, status, retry_count
+                 ) VALUES (
+                    'dispatch-fail', 'notify', 'agent-fail', 'card-fail', 'Failure', 'pending', 4
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let processed = process_outbox_batch(&db, &FailingNotifyOutboxNotifier).await;
+        assert_eq!(processed, 1);
+
+        let conn = db.lock().unwrap();
+        let row: (String, String, String, String) = conn
+            .query_row(
+                "SELECT status, error, delivery_status, delivery_result
+                   FROM dispatch_outbox
+                  WHERE dispatch_id = 'dispatch-fail'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, "mock permanent discord failure");
+        assert_eq!(row.2, "permanent_failure");
+        let delivery: serde_json::Value = serde_json::from_str(&row.3).unwrap();
+        assert_eq!(delivery["status"], "permanent_failure");
+        assert_eq!(delivery["detail"], "mock permanent discord failure");
     }
 
     #[tokio::test]

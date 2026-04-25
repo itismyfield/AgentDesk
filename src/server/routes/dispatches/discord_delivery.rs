@@ -292,6 +292,86 @@ impl std::fmt::Display for DispatchMessagePostError {
 
 impl std::error::Error for DispatchMessagePostError {}
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct DispatchNotifyDeliveryResult {
+    pub(crate) status: String,
+    pub(crate) dispatch_id: String,
+    pub(crate) action: String,
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) semantic_event_id: Option<String>,
+    pub(crate) target_channel_id: Option<String>,
+    pub(crate) message_id: Option<String>,
+    pub(crate) fallback_kind: Option<String>,
+    pub(crate) detail: Option<String>,
+}
+
+impl DispatchNotifyDeliveryResult {
+    pub(crate) fn success(
+        dispatch_id: impl Into<String>,
+        action: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: "success".to_string(),
+            dispatch_id: dispatch_id.into(),
+            action: action.into(),
+            correlation_id: None,
+            semantic_event_id: None,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn duplicate(dispatch_id: impl Into<String>, detail: impl Into<String>) -> Self {
+        let dispatch_id = dispatch_id.into();
+        Self {
+            status: "duplicate".to_string(),
+            action: "notify".to_string(),
+            correlation_id: Some(dispatch_delivery_correlation_id(&dispatch_id)),
+            semantic_event_id: Some(dispatch_delivery_semantic_event_id(&dispatch_id)),
+            dispatch_id,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn permanent_failure(
+        dispatch_id: impl Into<String>,
+        action: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: "permanent_failure".to_string(),
+            dispatch_id: dispatch_id.into(),
+            action: action.into(),
+            correlation_id: None,
+            semantic_event_id: None,
+            target_channel_id: None,
+            message_id: None,
+            fallback_kind: None,
+            detail: Some(detail.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DispatchMessagePostOutcome {
+    pub(super) message_id: String,
+    pub(super) delivery: DispatchNotifyDeliveryResult,
+}
+
+fn dispatch_delivery_correlation_id(dispatch_id: &str) -> String {
+    format!("dispatch:{dispatch_id}")
+}
+
+fn dispatch_delivery_semantic_event_id(dispatch_id: &str) -> String {
+    format!("dispatch:{dispatch_id}:notify")
+}
+
 /// Discord delivery side-effects boundary.
 /// Keep business rules local and swap transport behavior in tests.
 pub(crate) trait DispatchTransport: Send + Sync {
@@ -306,7 +386,7 @@ pub(crate) trait DispatchTransport: Send + Sync {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    ) -> impl std::future::Future<Output = Result<DispatchNotifyDeliveryResult, String>> + Send;
 
     fn send_review_followup(
         &self,
@@ -370,7 +450,8 @@ impl DispatchTransport for HttpDispatchTransport {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+    ) -> impl std::future::Future<Output = Result<DispatchNotifyDeliveryResult, String>> + Send
+    {
         let transport = self.clone();
         async move {
             let token = match transport.announce_bot_token.as_deref() {
@@ -651,10 +732,32 @@ pub(super) async fn post_dispatch_message_to_channel(
     message: &str,
     minimal_message: &str,
 ) -> Result<String, DispatchMessagePostError> {
+    post_dispatch_message_to_channel_with_delivery(
+        client,
+        token,
+        base_url,
+        channel_id,
+        message,
+        minimal_message,
+        None,
+    )
+    .await
+    .map(|outcome| outcome.message_id)
+}
+
+pub(super) async fn post_dispatch_message_to_channel_with_delivery(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message: &str,
+    minimal_message: &str,
+    dispatch_id: Option<&str>,
+) -> Result<DispatchMessagePostOutcome, DispatchMessagePostError> {
     // #1006: route through the unified outbound API. The API owns length
-    // truncation + minimal-fallback retry; the dispatch outbox correlation id
-    // is injected at the higher level where dispatch_id is known, so this
-    // helper uses anonymous delivery (no dedup key).
+    // truncation + minimal-fallback retry. Dispatch notify callsites pass a
+    // semantic delivery id so outbox operators can distinguish normal sends,
+    // degraded fallback sends, and duplicate guard skips.
     use crate::services::discord::outbound::{
         DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
         OutboundDeduper, deliver_outbound,
@@ -663,11 +766,31 @@ pub(super) async fn post_dispatch_message_to_channel(
     let outbound_client =
         HttpOutboundClient::new(client.clone(), token.to_string(), base_url.to_string());
     let dedup = OutboundDeduper::new();
-    let outbound_msg = DiscordOutboundMessage::new(channel_id, message);
+    let mut outbound_msg = DiscordOutboundMessage::new(channel_id, message);
+    let correlation_id = dispatch_id.map(dispatch_delivery_correlation_id);
+    let semantic_event_id = dispatch_id.map(dispatch_delivery_semantic_event_id);
+    if let (Some(correlation_id), Some(semantic_event_id)) =
+        (correlation_id.as_deref(), semantic_event_id.as_deref())
+    {
+        outbound_msg = outbound_msg.with_correlation(correlation_id, semantic_event_id);
+    }
     let policy = DiscordOutboundPolicy::dispatch_outbox(minimal_message.to_string());
 
     match deliver_outbound(&outbound_client, &dedup, outbound_msg, policy).await {
-        DeliveryResult::Success { message_id } => Ok(message_id),
+        DeliveryResult::Success { message_id } => Ok(DispatchMessagePostOutcome {
+            message_id: message_id.clone(),
+            delivery: DispatchNotifyDeliveryResult {
+                status: "success".to_string(),
+                dispatch_id: dispatch_id.unwrap_or("").to_string(),
+                action: "notify".to_string(),
+                correlation_id,
+                semantic_event_id,
+                target_channel_id: Some(channel_id.to_string()),
+                message_id: Some(message_id),
+                fallback_kind: None,
+                detail: None,
+            },
+        }),
         DeliveryResult::Fallback { message_id, kind } => {
             if matches!(
                 kind,
@@ -677,7 +800,20 @@ pub(super) async fn post_dispatch_message_to_channel(
                     "[dispatch] Message too long for channel {channel_id}; retried with minimal fallback"
                 );
             }
-            Ok(message_id)
+            Ok(DispatchMessagePostOutcome {
+                message_id: message_id.clone(),
+                delivery: DispatchNotifyDeliveryResult {
+                    status: "fallback".to_string(),
+                    dispatch_id: dispatch_id.unwrap_or("").to_string(),
+                    action: "notify".to_string(),
+                    correlation_id,
+                    semantic_event_id,
+                    target_channel_id: Some(channel_id.to_string()),
+                    message_id: Some(message_id),
+                    fallback_kind: Some(format!("{kind:?}")),
+                    detail: Some("shared outbound API used degraded delivery".to_string()),
+                },
+            })
         }
         DeliveryResult::Skipped { .. } => Err(DispatchMessagePostError::new(
             DispatchMessagePostErrorKind::Other,
@@ -2469,6 +2605,7 @@ pub(crate) async fn send_dispatch_to_discord(
         &transport,
     )
     .await
+    .map(|_| ())
 }
 
 pub(crate) async fn send_dispatch_to_discord_with_pg(
@@ -2479,6 +2616,28 @@ pub(crate) async fn send_dispatch_to_discord_with_pg(
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<(), String> {
+    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
+    send_dispatch_to_discord_guarded(
+        db,
+        pg_pool,
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        &transport,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn send_dispatch_to_discord_with_pg_result(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&PgPool>,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<DispatchNotifyDeliveryResult, String> {
     let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
     send_dispatch_to_discord_guarded(
         db,
@@ -2510,6 +2669,7 @@ pub(super) async fn send_dispatch_to_discord_with_transport<T: DispatchTransport
         transport,
     )
     .await
+    .map(|_| ())
 }
 
 async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
@@ -2520,10 +2680,13 @@ async fn send_dispatch_to_discord_guarded<T: DispatchTransport>(
     card_id: &str,
     dispatch_id: &str,
     transport: &T,
-) -> Result<(), String> {
+) -> Result<DispatchNotifyDeliveryResult, String> {
     let pg_pool = pg_pool.or_else(|| transport.pg_pool());
     if !claim_dispatch_delivery_guard(db, pg_pool, dispatch_id).await? {
-        return Ok(());
+        return Ok(DispatchNotifyDeliveryResult::duplicate(
+            dispatch_id,
+            "dispatch delivery guard already recorded this semantic notify event",
+        ));
     }
 
     let send_result = transport
@@ -2549,7 +2712,7 @@ async fn send_dispatch_to_discord_inner_with_context(
     token: &str,
     discord_api_base: &str,
     thread_owner_user_id: Option<u64>,
-) -> Result<(), String> {
+) -> Result<DispatchNotifyDeliveryResult, String> {
     send_dispatch_to_discord_inner_with_context_pg(
         Some(db),
         agent_id,
@@ -2574,7 +2737,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     discord_api_base: &str,
     thread_owner_user_id: Option<u64>,
     pg_pool: Option<&PgPool>,
-) -> Result<(), String> {
+) -> Result<DispatchNotifyDeliveryResult, String> {
     // Determine dispatch type + status before attempting Discord delivery.
     let (dispatch_type, dispatch_status, dispatch_context) =
         load_dispatch_delivery_metadata(db, pg_pool, dispatch_id).await?;
@@ -2588,7 +2751,11 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             dispatch_id,
             dispatch_status
         );
-        return Ok(());
+        return Ok(DispatchNotifyDeliveryResult::success(
+            dispatch_id,
+            "notify",
+            format!("skipped non-deliverable status {:?}", dispatch_status),
+        ));
     }
 
     // Look up agent's discord channel
@@ -2676,13 +2843,14 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     let client = reqwest::Client::new();
     if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type.as_deref()) {
         let channel_id_text = channel_id_num.to_string();
-        let message_id = post_dispatch_message_to_channel(
+        let outcome = post_dispatch_message_to_channel_with_delivery(
             &client,
             token,
             &discord_api_base,
             &channel_id_text,
             &message,
             &minimal_message,
+            Some(dispatch_id),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -2693,14 +2861,14 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             &discord_api_base,
             dispatch_id,
             &channel_id_text,
-            &message_id,
+            &outcome.message_id,
             pg_pool,
         )
         .await?;
         tracing::info!(
             "[dispatch] Sent primary-channel dispatch {dispatch_id} to {agent_id} (channel {channel_id_text})"
         );
-        return Ok(());
+        return Ok(outcome.delivery);
     }
     let mut slot_binding = if let Some(pool) = pg_pool {
         resolve_slot_thread_binding_pg(
@@ -2863,7 +3031,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         )
         .await
         {
-            Ok(Some(reused)) => {
+            Ok(Some((reused, delivery_outcome))) => {
                 if reused {
                     if let Some(pool) = pg_pool {
                         set_thread_for_channel_pg(pool, card_id, channel_id_num, existing_tid)
@@ -2910,7 +3078,15 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                         thread_owner_user_id,
                     )
                     .await;
-                    return Ok(());
+                    return Ok(delivery_outcome
+                        .map(|outcome| outcome.delivery)
+                        .unwrap_or_else(|| {
+                            DispatchNotifyDeliveryResult::success(
+                                dispatch_id,
+                                "notify",
+                                format!("reused thread {existing_tid}"),
+                            )
+                        }));
                 }
             }
             Ok(None) => {}
@@ -2958,17 +3134,18 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                     // If the POST fails, we don't save thread_id so that
                     // [I-0] recovery sends to the channel and future dispatches won't
                     // reuse an empty thread.
-                    match post_dispatch_message_to_channel(
+                    match post_dispatch_message_to_channel_with_delivery(
                         &client,
                         token,
                         &discord_api_base,
                         thread_id,
                         &message,
                         &minimal_message,
+                        Some(dispatch_id),
                     )
                     .await
                     {
-                        Ok(message_id) => {
+                        Ok(outcome) => {
                             // Persist thread_id on success
                             if let Some(pool) = pg_pool {
                                 sqlx::query(
@@ -3027,7 +3204,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                                 &discord_api_base,
                                 dispatch_id,
                                 thread_id,
-                                &message_id,
+                                &outcome.message_id,
                                 pg_pool,
                             )
                             .await?;
@@ -3052,7 +3229,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                             tracing::info!(
                                 "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
                             );
-                            return Ok(());
+                            return Ok(outcome.delivery);
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -3080,17 +3257,18 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                 "[dispatch] Thread creation failed ({status}), falling back to channel message"
             );
             let channel_id_text = channel_id_num.to_string();
-            match post_dispatch_message_to_channel(
+            match post_dispatch_message_to_channel_with_delivery(
                 &client,
                 token,
                 &discord_api_base,
                 &channel_id_text,
                 &message,
                 &minimal_message,
+                Some(dispatch_id),
             )
             .await
             {
-                Ok(message_id) => {
+                Ok(outcome) => {
                     persist_dispatch_message_target_and_add_pending_reaction_with_pg(
                         db,
                         &client,
@@ -3098,14 +3276,14 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                         &discord_api_base,
                         dispatch_id,
                         &channel_id_text,
-                        &message_id,
+                        &outcome.message_id,
                         pg_pool,
                     )
                     .await?;
                     tracing::info!(
                         "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
                     );
-                    return Ok(());
+                    return Ok(outcome.delivery);
                 }
                 Err(e) => {
                     tracing::warn!("[dispatch] Fallback dispatch message failed: {e}");
@@ -4188,19 +4366,26 @@ mod tests {
         let primary_message = "A".repeat(180);
         let minimal_message = "minimal fallback message";
 
-        let message_id = post_dispatch_message_to_channel(
+        let outcome = post_dispatch_message_to_channel_with_delivery(
             &client,
             "announce-token",
             &base_url,
             "123",
             &primary_message,
             minimal_message,
+            Some("dispatch-length-fallback"),
         )
         .await
         .unwrap();
 
         server_handle.abort();
-        assert_eq!(message_id, "message-123");
+        assert_eq!(outcome.message_id, "message-123");
+        assert_eq!(outcome.delivery.status, "fallback");
+        assert_eq!(
+            outcome.delivery.semantic_event_id.as_deref(),
+            Some("dispatch:dispatch-length-fallback:notify")
+        );
+        assert_eq!(outcome.delivery.target_channel_id.as_deref(), Some("123"));
 
         let state = state.lock().unwrap();
         assert_eq!(
