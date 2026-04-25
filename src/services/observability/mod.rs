@@ -16,8 +16,10 @@ use crate::db::Db;
 // Foundation observability layer introduced by #1070 (Epic #905 Phase 1).
 // `metrics` → lightweight channel/provider atomic counters for hot paths.
 // `events`  → bounded in-memory structured event log + periodic JSONL flush.
+// `watcher_latency` → #1134 attach→first-relay latency histogram + counters.
 pub mod events;
 pub mod metrics;
+pub mod watcher_latency;
 
 const EVENT_BATCH_SIZE: usize = 64;
 const EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);

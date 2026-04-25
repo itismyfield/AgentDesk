@@ -140,9 +140,13 @@ pub async fn observability(
     let limit = params.recent_limit.unwrap_or(100).min(1000);
     let counters = crate::services::observability::metrics::snapshot();
     let recent_events = crate::services::observability::events::recent(limit);
+    // #1134: surface watcher attach→first-relay latency alongside the existing
+    // counters/events so a single GET can answer "is recovery healthy?".
+    let watcher_first_relay = crate::services::observability::watcher_latency::snapshot();
     let body = json!({
         "counters": counters,
         "recent_events": recent_events,
+        "watcher_first_relay": watcher_first_relay,
         "generated_at_ms": chrono::Utc::now().timestamp_millis(),
     });
     (StatusCode::OK, Json(body))

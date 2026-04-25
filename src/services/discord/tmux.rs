@@ -2798,6 +2798,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
         "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
     );
 
+    // #1134: mark the attach moment so `record_first_relay` (below) can compute
+    // attach→first-relay latency. Single instrumentation point covers all
+    // spawn sites (recovery_engine, turn_bridge, tmux self-recovery).
+    crate::services::observability::watcher_latency::record_attach(channel_id.get());
+
     let (watcher_provider, watcher_channel_name) =
         parse_provider_and_channel_from_tmux_name(&tmux_session_name).unwrap_or((
             crate::services::provider::ProviderKind::Claude,
@@ -4351,6 +4356,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
             if relay_ok {
                 if direct_send_delivered || !has_current_response {
                     last_relayed_offset = Some(data_start_offset);
+                    // #1134: first successful relay for this attach. The
+                    // watcher_latency module is idempotent — only the first
+                    // call after `record_attach` actually observes a sample,
+                    // so the unconditional call here is safe and cheap.
+                    crate::services::observability::watcher_latency::record_first_relay(
+                        channel_id.get(),
+                    );
                     if let Some((pk, _)) =
                         parse_provider_and_channel_from_tmux_name(&tmux_session_name)
                     {
