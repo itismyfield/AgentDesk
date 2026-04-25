@@ -1250,6 +1250,7 @@ pub(super) fn spawn_turn_bridge(
                             let turn_delivered =
                                 Arc::new(std::sync::atomic::AtomicBool::new(false));
                             let handle = TmuxWatcherHandle {
+                                tmux_session_name: tmux_session_name.clone(),
                                 paused: paused.clone(),
                                 resume_offset: resume_offset.clone(),
                                 cancel: cancel.clone(),
@@ -1259,16 +1260,17 @@ pub(super) fn spawn_turn_bridge(
                             let watcher_claimed = {
                                 #[cfg(unix)]
                                 {
-                                    // #243: Use claim_or_replace to avoid races where
-                                    // a stale watcher blocks the new turn's watcher.
-                                    super::tmux::claim_or_replace_watcher(
+                                    // #1135: Reuse a live watcher for the same
+                                    // tmux session; replace only stale or
+                                    // different-session incumbents.
+                                    super::tmux::claim_or_reuse_watcher(
                                         &shared_owned.tmux_watchers,
                                         channel_id,
                                         handle,
                                         &provider,
                                         "turn_bridge_tmux_ready",
-                                    );
-                                    true
+                                    )
+                                    .should_spawn()
                                 }
                                 #[cfg(not(unix))]
                                 {

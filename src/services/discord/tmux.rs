@@ -2426,6 +2426,9 @@ pub(crate) enum MissingInflightReattachOutcome {
     /// over. Tagged with `rebind_origin = true` on the inflight state so that
     /// the new attach does NOT itself trigger another DB-fallback reattach.
     Spawned { replaced_existing: bool },
+    /// A live watcher was already registered for the same tmux session, so
+    /// the reattach path reused it instead of spawning a duplicate.
+    ReusedExisting,
     /// The tmux pane is not live — re-attach was skipped. Operators should
     /// investigate whether the session needs to be respawned manually.
     SessionDead,
@@ -2547,45 +2550,104 @@ fn trigger_missing_inflight_reattach(
     let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = TmuxWatcherHandle {
+        tmux_session_name: tmux_session_name.to_string(),
         paused: paused.clone(),
         resume_offset: resume_offset.clone(),
         cancel: cancel.clone(),
         pause_epoch: pause_epoch.clone(),
         turn_delivered: turn_delivered.clone(),
     };
-    let fresh = claim_or_replace_watcher(
+    let claim = claim_or_reuse_watcher(
         &shared.tmux_watchers,
         channel_id,
         handle,
         provider,
         "watcher_missing_inflight_fallback",
     );
-    record_recent_watcher_reattach_offset(channel_id, tmux_session_name, initial_offset);
-    tokio::spawn(tmux_output_watcher(
-        channel_id,
-        http.clone(),
-        shared.clone(),
-        output_path,
-        tmux_session_name.to_string(),
-        initial_offset,
-        cancel,
-        paused,
-        resume_offset,
-        pause_epoch,
-        turn_delivered,
-    ));
+    if claim.should_spawn() {
+        record_recent_watcher_reattach_offset(channel_id, tmux_session_name, initial_offset);
+        tokio::spawn(tmux_output_watcher(
+            channel_id,
+            http.clone(),
+            shared.clone(),
+            output_path,
+            tmux_session_name.to_string(),
+            initial_offset,
+            cancel,
+            paused,
+            resume_offset,
+            pause_epoch,
+            turn_delivered,
+        ));
+    }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] ↻ watcher: reattach triggered for channel {} (tmux={}, offset={}, replaced={})",
+        "  [{ts}] ↻ watcher: reattach triggered for channel {} (tmux={}, offset={}, outcome={})",
         channel_id.get(),
         tmux_session_name,
         initial_offset,
-        !fresh
+        claim.as_str()
     );
-    MissingInflightReattachOutcome::Spawned {
-        replaced_existing: !fresh,
+    if claim.should_spawn() {
+        MissingInflightReattachOutcome::Spawned {
+            replaced_existing: claim.replaced_existing(),
+        }
+    } else {
+        MissingInflightReattachOutcome::ReusedExisting
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatcherClaimOutcome {
+    SpawnFresh,
+    SpawnReplacedStale,
+    SpawnReplacedDifferentSession,
+    ReuseExisting,
+}
+
+impl WatcherClaimOutcome {
+    pub(crate) fn should_spawn(self) -> bool {
+        matches!(
+            self,
+            Self::SpawnFresh | Self::SpawnReplacedStale | Self::SpawnReplacedDifferentSession
+        )
+    }
+
+    pub(crate) fn replaced_existing(self) -> bool {
+        matches!(
+            self,
+            Self::SpawnReplacedStale | Self::SpawnReplacedDifferentSession
+        )
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnFresh => "spawn_fresh",
+            Self::SpawnReplacedStale => "spawn_replaced_stale",
+            Self::SpawnReplacedDifferentSession => "spawn_replaced_different_session",
+            Self::ReuseExisting => "reuse_existing",
+        }
+    }
+}
+
+static WATCHER_CLAIM_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+fn watcher_handle_is_stale(handle: &TmuxWatcherHandle) -> bool {
+    handle.cancel.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn find_watcher_by_tmux_session(
+    watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    tmux_session_name: &str,
+) -> Option<(ChannelId, bool)> {
+    for entry in watchers.iter() {
+        if entry.tmux_session_name == tmux_session_name {
+            return Some((*entry.key(), watcher_handle_is_stale(entry.value())));
+        }
+    }
+    None
 }
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
@@ -2597,6 +2659,28 @@ pub(super) fn try_claim_watcher(
     handle: TmuxWatcherHandle,
 ) -> bool {
     use dashmap::mapref::entry::Entry;
+    let _guard = WATCHER_CLAIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let requested_tmux = handle.tmux_session_name.clone();
+    if let Some(existing) = find_watcher_by_tmux_session(watchers, &requested_tmux) {
+        if existing.1 {
+            watchers.remove(&existing.0);
+        } else {
+            record_watcher_invariant(
+                true,
+                None,
+                channel_id,
+                "watcher_one_per_tmux_session",
+                "src/services/discord/tmux.rs:try_claim_watcher",
+                "same tmux session must reuse the live watcher slot",
+                serde_json::json!({
+                    "existing_channel_id": existing.0.get(),
+                    "tmux_session_name": requested_tmux,
+                    "watcher_slots": watchers.len(),
+                }),
+            );
+            return false;
+        }
+    }
     let claimed = match watchers.entry(channel_id) {
         Entry::Occupied(_) => false,
         Entry::Vacant(entry) => {
@@ -2624,22 +2708,63 @@ pub(super) fn try_claim_watcher(
     claimed
 }
 
-/// #243: Claim a channel for watcher creation, cancelling any existing watcher.
-/// Unlike try_claim_watcher (which skips if occupied), this always succeeds:
-/// if a watcher already exists, it is cancelled and replaced.
-/// Returns true if a fresh slot was created, false if an existing watcher was replaced.
-pub(super) fn claim_or_replace_watcher(
+/// Claim a channel for watcher creation with the #1135 single-watcher policy.
+///
+/// Same tmux session:
+/// - live incumbent: reuse it and do not spawn another watcher;
+/// - cancelled incumbent: remove it and spawn the requested watcher.
+///
+/// Same channel but a different tmux session still replaces the incumbent. That
+/// preserves the existing new-turn recovery behavior without allowing two
+/// owners for one tmux session.
+pub(super) fn claim_or_reuse_watcher(
     watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
     provider: &ProviderKind,
     source: &str,
-) -> bool {
+) -> WatcherClaimOutcome {
     use dashmap::mapref::entry::Entry;
-    let fresh = match watchers.entry(channel_id) {
+    let _guard = WATCHER_CLAIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let requested_tmux = handle.tmux_session_name.clone();
+    let mut removed_stale_same_tmux = false;
+
+    if let Some((existing_channel_id, existing_cancelled)) =
+        find_watcher_by_tmux_session(watchers, &requested_tmux)
+    {
+        if existing_cancelled {
+            watchers.remove(&existing_channel_id);
+            removed_stale_same_tmux = true;
+        } else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏭ watcher reuse for channel {} — tmux {} is already watched by channel {}",
+                channel_id,
+                requested_tmux,
+                existing_channel_id
+            );
+            record_watcher_invariant(
+                true,
+                Some(provider),
+                channel_id,
+                "watcher_one_per_tmux_session",
+                "src/services/discord/tmux.rs:claim_or_reuse_watcher",
+                "same tmux session must reuse the live watcher slot",
+                serde_json::json!({
+                    "source": source,
+                    "existing_channel_id": existing_channel_id.get(),
+                    "tmux_session_name": requested_tmux,
+                    "watcher_slots": watchers.len(),
+                }),
+            );
+            return WatcherClaimOutcome::ReuseExisting;
+        }
+    }
+
+    let outcome = match watchers.entry(channel_id) {
         Entry::Occupied(mut entry) => {
-            // Cancel the existing watcher — it will exit on its next loop iteration
-            // and skip DashMap removal (since cancel is set).
+            let previous_tmux = entry.get().tmux_session_name.clone();
+            let same_tmux = previous_tmux == requested_tmux;
             entry
                 .get()
                 .cancel
@@ -2653,10 +2778,13 @@ pub(super) fn claim_or_replace_watcher(
                 Some(provider),
                 channel_id,
                 "watcher_replacement_cancels_stale",
-                "src/services/discord/tmux.rs:claim_or_replace_watcher",
+                "src/services/discord/tmux.rs:claim_or_reuse_watcher",
                 "replacing a watcher must cancel the stale watcher before installing the new handle",
                 serde_json::json!({
                     "source": source,
+                    "same_tmux": same_tmux,
+                    "previous_tmux_session_name": previous_tmux,
+                    "tmux_session_name": requested_tmux.as_str(),
                 }),
             );
             debug_assert!(
@@ -2674,11 +2802,19 @@ pub(super) fn claim_or_replace_watcher(
                 channel_id.get(),
                 source,
             );
-            false
+            if same_tmux {
+                WatcherClaimOutcome::SpawnReplacedStale
+            } else {
+                WatcherClaimOutcome::SpawnReplacedDifferentSession
+            }
         }
         Entry::Vacant(entry) => {
             entry.insert(handle);
-            true
+            if removed_stale_same_tmux {
+                WatcherClaimOutcome::SpawnReplacedStale
+            } else {
+                WatcherClaimOutcome::SpawnFresh
+            }
         }
     };
     let slot_present = watchers.contains_key(&channel_id);
@@ -2687,10 +2823,10 @@ pub(super) fn claim_or_replace_watcher(
         Some(provider),
         channel_id,
         "watcher_one_per_channel",
-        "src/services/discord/tmux.rs:claim_or_replace_watcher",
+        "src/services/discord/tmux.rs:claim_or_reuse_watcher",
         "watcher replacement must leave exactly one channel-owned watcher slot",
         serde_json::json!({
-            "fresh": fresh,
+            "outcome": outcome.as_str(),
             "source": source,
             "watcher_slots": watchers.len(),
         }),
@@ -2699,7 +2835,7 @@ pub(super) fn claim_or_replace_watcher(
         slot_present,
         "watcher replacement must leave a channel-owned watcher slot"
     );
-    fresh
+    outcome
 }
 
 use crate::services::tmux_common::{current_tmux_owner_marker, tmux_owner_path};
@@ -4319,17 +4455,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let has_current_response = !current_response.trim().is_empty();
 
-        // Cross-watcher relay coordination (root-cause fix for duplicate
-        // terminal-response emission observed when `claim_or_replace_watcher`
-        // replaces a watcher mid-flight and both the outgoing and incoming
-        // instance pass their per-instance dedupe guards for the same tmux
-        // range). `TmuxRelayCoord` is shared across all watcher instances for
-        // the channel (survives handle replacement), so the two atomics below
-        // serialize concurrent emissions and carry the confirmed-delivery
-        // watermark between instances without touching disk.
-        // The local `last_relayed_offset` guard above handles the
-        // single-instance case; this coord layer closes the multi-instance
-        // duplicate-relay hole.
+        // Relay coordination is limited to serialization plus telemetry. The
+        // local `last_relayed_offset` guard handles self-duplicate relays, and
+        // watcher registration enforces one live owner per tmux session. Do
+        // not suppress a valid owner solely because another watcher advanced
+        // the shared confirmed_end watermark.
         let relay_coord = shared.tmux_relay_coord(channel_id);
         if let Ok(meta) = std::fs::metadata(&output_path) {
             reset_stale_relay_watermark_if_output_regressed(
@@ -4339,34 +4469,6 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 meta.len(),
                 "pre_relay",
             );
-        }
-        let confirmed_end_pre_claim = relay_coord
-            .confirmed_end_offset
-            .load(std::sync::atomic::Ordering::Acquire);
-        // Strict `<` preserves the same "exact boundary = new turn" semantic
-        // the local dedupe above uses (see comment at line ~2125 about the
-        // `task_notification` auto-trigger writing its tmux output starting
-        // at the previous turn's end offset).
-        if confirmed_end_pre_claim != 0 && data_start_offset < confirmed_end_pre_claim {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] 👁 Cross-watcher dedupe: skipped relay for {} (data_start={}, confirmed_end={})",
-                tmux_session_name,
-                data_start_offset,
-                confirmed_end_pre_claim
-            );
-            if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(&http, msg_id).await;
-            }
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-            )
-            .await;
-            continue;
         }
         // CAS the emission slot. `0` = free; any non-zero value = a watcher
         // is mid-emission with that start offset. `.max(1)` guarantees the
@@ -4388,28 +4490,6 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 tmux_session_name,
                 data_start_offset
             );
-            if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(&http, msg_id).await;
-            }
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut monitor_auto_turn_claimed,
-                &mut monitor_auto_turn_finished,
-            )
-            .await;
-            continue;
-        }
-        // Re-check confirmed_end inside the slot in case another watcher
-        // advanced it between our first load and the CAS above.
-        let confirmed_end_in_slot = relay_coord
-            .confirmed_end_offset
-            .load(std::sync::atomic::Ordering::Acquire);
-        if confirmed_end_in_slot != 0 && data_start_offset < confirmed_end_in_slot {
-            relay_coord
-                .relay_slot
-                .store(0, std::sync::atomic::Ordering::Release);
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
@@ -5046,6 +5126,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             channel_id.get(),
                             tmux_session_name,
                             replaced_existing
+                        );
+                    }
+                    MissingInflightReattachOutcome::ReusedExisting => {
+                        tracing::info!(
+                            "  [{ts}] ↻ watcher: 재부착 재사용 for channel {} (tmux={})",
+                            channel_id.get(),
+                            tmux_session_name
                         );
                     }
                     MissingInflightReattachOutcome::SessionDead => {
@@ -6164,6 +6251,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let handle = TmuxWatcherHandle {
+            tmux_session_name: pw.session_name.clone(),
             paused: paused.clone(),
             resume_offset: resume_offset.clone(),
             cancel: cancel.clone(),
@@ -6422,8 +6510,8 @@ mod tests {
         MissingInflightReattachOutcome, OffsetAdvanceDecision, PlaceholderSuppressContext,
         PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
         SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
-        TmuxWatcherHandle, WatcherToolState, build_bg_trigger_session_key,
-        claim_or_replace_watcher, clear_recent_turn_stops_for_tests,
+        TmuxWatcherHandle, WatcherClaimOutcome, WatcherToolState, build_bg_trigger_session_key,
+        claim_or_reuse_watcher, clear_recent_turn_stops_for_tests,
         clear_recent_watcher_reattach_offsets_for_tests, consume_monitor_auto_turn_preamble_once,
         dead_session_cleanup_plan, decide_placeholder_suppression,
         enqueue_background_trigger_response_to_notify_outbox,
@@ -6453,8 +6541,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
-    fn test_watcher_handle() -> TmuxWatcherHandle {
+    fn test_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
         TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
             paused: Arc::new(AtomicBool::new(true)),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -6578,43 +6667,160 @@ mod tests {
     }
 
     #[test]
-    fn claim_or_replace_watcher_keeps_one_entry_per_channel() {
+    fn claim_or_reuse_watcher_replaces_different_tmux_on_same_channel() {
         let watchers = dashmap::DashMap::new();
         let channel_id = ChannelId::new(1485506232256168123);
 
         assert!(super::try_claim_watcher(
             &watchers,
             channel_id,
-            test_watcher_handle()
+            test_watcher_handle("AgentDesk-codex-adk-cdx-a")
         ));
         assert_eq!(watchers.len(), 1);
 
-        assert!(!claim_or_replace_watcher(
-            &watchers,
-            channel_id,
-            test_watcher_handle(),
-            &ProviderKind::Codex,
-            "unit-test"
-        ));
+        assert_eq!(
+            claim_or_reuse_watcher(
+                &watchers,
+                channel_id,
+                test_watcher_handle("AgentDesk-codex-adk-cdx-b"),
+                &ProviderKind::Codex,
+                "unit-test"
+            ),
+            WatcherClaimOutcome::SpawnReplacedDifferentSession
+        );
         assert_eq!(watchers.len(), 1);
 
         let watcher = watchers.get(&channel_id).expect("watcher should exist");
+        assert_eq!(watcher.tmux_session_name, "AgentDesk-codex-adk-cdx-b");
         assert!(watcher.paused.load(Ordering::Relaxed));
     }
 
-    // #964: dedupe single-winner invariant. When two watchers try to register
-    // for the same channel, `claim_or_replace_watcher` must cancel the stale
-    // handle and install the fresh one — only the new watcher relays. The old
-    // cross-watcher path that let both exist and "skip each other" would leave
-    // the channel without any watcher when the incoming loop iteration also
-    // saw its sibling's confirmed_end and skipped relay. This test pins the
-    // replace-not-skip behavior for the registry.
     #[test]
-    fn claim_or_replace_watcher_dedupes_to_single_winner_and_cancels_stale() {
+    fn claim_or_reuse_watcher_reuses_live_same_tmux_session() {
         let watchers = dashmap::DashMap::new();
-        let channel_id = ChannelId::new(1485506232256168124);
+        let channel_a = ChannelId::new(1485506232256168124);
+        let channel_b = ChannelId::new(1485506232256168125);
+        let tmux_name = "AgentDesk-codex-adk-cdx";
 
-        let initial = test_watcher_handle();
+        let initial = test_watcher_handle(tmux_name);
+        let initial_cancel = initial.cancel.clone();
+        let initial_paused = initial.paused.clone();
+        initial_paused.store(false, Ordering::Relaxed);
+
+        assert!(super::try_claim_watcher(&watchers, channel_a, initial));
+        assert_eq!(
+            claim_or_reuse_watcher(
+                &watchers,
+                channel_b,
+                test_watcher_handle(tmux_name),
+                &ProviderKind::Codex,
+                "unit-test-reuse",
+            ),
+            WatcherClaimOutcome::ReuseExisting
+        );
+        assert_eq!(watchers.len(), 1, "same tmux must have one owner");
+        assert!(
+            !initial_cancel.load(Ordering::Relaxed),
+            "live incumbent must be reused, not cancelled"
+        );
+        assert!(watchers.contains_key(&channel_a));
+        assert!(!watchers.contains_key(&channel_b));
+    }
+
+    #[test]
+    fn claim_or_reuse_watcher_replaces_cancelled_same_tmux_session() {
+        let watchers = dashmap::DashMap::new();
+        let channel_a = ChannelId::new(1485506232256168126);
+        let channel_b = ChannelId::new(1485506232256168127);
+        let tmux_name = "AgentDesk-codex-adk-cdx";
+
+        let initial = test_watcher_handle(tmux_name);
+        initial.cancel.store(true, Ordering::Relaxed);
+        assert!(super::try_claim_watcher(&watchers, channel_a, initial));
+
+        let incoming = test_watcher_handle(tmux_name);
+        let incoming_cancel = incoming.cancel.clone();
+        assert_eq!(
+            claim_or_reuse_watcher(
+                &watchers,
+                channel_b,
+                incoming,
+                &ProviderKind::Codex,
+                "unit-test-replace-stale",
+            ),
+            WatcherClaimOutcome::SpawnReplacedStale
+        );
+        assert_eq!(watchers.len(), 1, "stale same-tmux owner is replaced");
+        assert!(!watchers.contains_key(&channel_a));
+        assert!(watchers.contains_key(&channel_b));
+        assert!(!incoming_cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn concurrent_same_tmux_attach_attempts_leave_one_live_watcher() {
+        let watchers = Arc::new(dashmap::DashMap::new());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let tmux_name = "AgentDesk-codex-adk-cdx-race";
+
+        let mut joins = Vec::new();
+        for channel in [
+            ChannelId::new(1485506232256168128),
+            ChannelId::new(1485506232256168129),
+        ] {
+            let watchers = watchers.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                let handle = test_watcher_handle(tmux_name);
+                barrier.wait();
+                claim_or_reuse_watcher(
+                    &watchers,
+                    channel,
+                    handle,
+                    &ProviderKind::Codex,
+                    "unit-test-race",
+                )
+            }));
+        }
+
+        let outcomes = joins
+            .into_iter()
+            .map(|join| join.join().expect("race worker should not panic"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome.should_spawn())
+                .count(),
+            1,
+            "exactly one attach attempt should spawn a watcher"
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == WatcherClaimOutcome::ReuseExisting)
+                .count(),
+            1,
+            "the losing attach attempt should reuse the winner"
+        );
+        assert_eq!(watchers.len(), 1, "same tmux must end with one slot");
+        assert_eq!(
+            watchers
+                .iter()
+                .filter(|entry| entry.tmux_session_name == tmux_name)
+                .count(),
+            1
+        );
+    }
+
+    // Same channel but a different tmux session still cancels the incumbent so
+    // a new turn is not blocked by a stale slot from an older session.
+    #[test]
+    fn claim_or_reuse_watcher_dedupes_to_single_winner_and_cancels_different_session() {
+        let watchers = dashmap::DashMap::new();
+        let channel_id = ChannelId::new(1485506232256130);
+
+        let initial = test_watcher_handle("AgentDesk-codex-adk-cdx-old");
         let initial_cancel = initial.cancel.clone();
         let initial_paused = initial.paused.clone();
         initial_paused.store(false, Ordering::Relaxed);
@@ -6622,27 +6828,22 @@ mod tests {
         assert!(super::try_claim_watcher(&watchers, channel_id, initial));
         assert!(!initial_cancel.load(Ordering::Relaxed));
 
-        let incoming = test_watcher_handle();
+        let incoming = test_watcher_handle("AgentDesk-codex-adk-cdx-new");
         let incoming_cancel = incoming.cancel.clone();
         let incoming_paused = incoming.paused.clone();
-        // Mark the incoming as distinct from initial to verify the slot
-        // actually swapped to the new handle (not just kept the old one).
         incoming_paused.store(true, Ordering::Relaxed);
 
-        let fresh = claim_or_replace_watcher(
+        let outcome = claim_or_reuse_watcher(
             &watchers,
             channel_id,
             incoming,
             &ProviderKind::Codex,
-            "unit-test-dedupe",
+            "unit-test-different-session",
         );
-        assert!(!fresh, "replacement must return false (not a fresh slot)");
+        assert_eq!(outcome, WatcherClaimOutcome::SpawnReplacedDifferentSession);
         assert_eq!(watchers.len(), 1, "exactly one watcher entry survives");
 
-        // Stale handle was cancelled so its loop iteration exits quietly
-        // rather than continuing alongside the new watcher.
         assert!(initial_cancel.load(Ordering::Relaxed));
-        // New handle is NOT cancelled — it relays.
         assert!(!incoming_cancel.load(Ordering::Relaxed));
 
         let surviving = watchers.get(&channel_id).expect("watcher should exist");

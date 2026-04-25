@@ -1020,39 +1020,43 @@ pub(in crate::services::discord) async fn start_headless_turn(
         let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.clone(),
             paused: paused.clone(),
             resume_offset: resume_offset.clone(),
             cancel: cancel.clone(),
             pause_epoch: pause_epoch.clone(),
             turn_delivered: turn_delivered.clone(),
         };
-        let fresh = super::super::tmux::claim_or_replace_watcher(
+        let claim = super::super::tmux::claim_or_reuse_watcher(
             &shared.tmux_watchers,
             channel_id,
             handle,
             &provider,
             "turn_start_headless",
         );
-        if fresh {
+        if claim.should_spawn() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ↻ Attaching tmux watcher for headless turn on channel {}",
-                channel_id
+                "  [{ts}] ↻ Attaching tmux watcher for headless turn on channel {} ({})",
+                channel_id,
+                claim.as_str()
             );
         }
-        tokio::spawn(super::super::tmux::tmux_output_watcher(
-            channel_id,
-            ctx.http.clone(),
-            shared.clone(),
-            output_path,
-            tmux_session_name,
-            inflight_offset,
-            cancel,
-            paused,
-            resume_offset,
-            pause_epoch,
-            turn_delivered,
-        ));
+        if claim.should_spawn() {
+            tokio::spawn(super::super::tmux::tmux_output_watcher(
+                channel_id,
+                ctx.http.clone(),
+                shared.clone(),
+                output_path,
+                tmux_session_name,
+                inflight_offset,
+                cancel,
+                paused,
+                resume_offset,
+                pause_epoch,
+                turn_delivered,
+            ));
+        }
     }
 
     let (tx, rx) = mpsc::channel();

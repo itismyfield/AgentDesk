@@ -57,6 +57,16 @@ alias until the mechanical split lands):
 | Mutates channel mailbox state  | yes     | yes     | yes           |
 | Spawns new watcher             | yes     | yes     | yes           |
 
+## Watcher Ownership
+
+Watcher registration has one policy for all recovery paths: a tmux session has
+at most one live watcher. Duplicate attach attempts for the same
+`tmux_session_name` reuse the existing live handle and do not spawn a second
+watcher. A same-session handle is replaced only when the existing handle is
+already cancelled, which is the registry's provable stale marker. A different
+tmux session on the same Discord channel may still replace the channel slot so
+new-turn recovery is not blocked by an older session.
+
 ## Common Finalizer Shape
 
 All three paths funnel into the mailbox "finish turn" sequence. The common

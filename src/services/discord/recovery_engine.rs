@@ -1388,6 +1388,7 @@ pub(super) async fn restore_inflight_turns(
                             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         // #226: Atomic claim via try_claim_watcher
                         let handle = TmuxWatcherHandle {
+                            tmux_session_name: tmux_session_name.clone(),
                             paused: paused.clone(),
                             resume_offset: resume_offset.clone(),
                             cancel: cancel.clone(),
@@ -2268,6 +2269,7 @@ pub(super) async fn restore_inflight_turns(
                 let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 // #226: Atomic claim via try_claim_watcher
                 let handle = TmuxWatcherHandle {
+                    tmux_session_name: tmux_session_name.clone(),
                     paused: paused.clone(),
                     resume_offset: resume_offset.clone(),
                     cancel: cancel.clone(),
@@ -2942,15 +2944,10 @@ pub(crate) async fn rebind_inflight_for_channel(
         restore_recovered_session_worktree(session, &recovered_state_for_session);
     }
 
-    // #897 P2 #2: use `claim_or_replace_watcher` instead of
-    // `try_claim_watcher`. The counter-model review flagged that the old
-    // path returned `watcher_spawned=false` whenever the DashMap entry was
-    // occupied — but occupancy does NOT imply liveness. The common zombie
-    // scenario (a previous watcher that exited without removing its handle)
-    // is exactly what makes `/api/inflight/rebind` necessary in the first
-    // place. `claim_or_replace` cancels any incumbent and always installs
-    // our handle, so the post-condition is "a watcher owned by THIS rebind
-    // is running" rather than the weaker "some watcher might be."
+    // #1135: claim with the single-watcher policy. A live watcher for this
+    // same tmux session is reused; a cancelled same-session handle or a
+    // different-session channel incumbent is replaced so recovery is not
+    // blocked by stale registry state.
     let (watcher_spawned, watcher_replaced) = {
         #[cfg(unix)]
         {
@@ -2960,36 +2957,39 @@ pub(crate) async fn rebind_inflight_for_channel(
             let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let handle = TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.clone(),
                 paused: paused.clone(),
                 resume_offset: resume_offset.clone(),
                 cancel: cancel.clone(),
                 pause_epoch: pause_epoch.clone(),
                 turn_delivered: turn_delivered.clone(),
             };
-            // `claim_or_replace_watcher` returns `true` when the slot was
-            // vacant (fresh claim) and `false` when an incumbent was
-            // cancelled + replaced. Invert for `watcher_replaced`.
-            let fresh = super::tmux::claim_or_replace_watcher(
+            // `claim_or_reuse_watcher` reuses a live watcher for the same
+            // tmux session and only spawns when it claimed or replaced a
+            // stale/different-session slot.
+            let claim = super::tmux::claim_or_reuse_watcher(
                 &shared.tmux_watchers,
                 discord_channel_id,
                 handle,
                 provider,
                 "recovery_restore_inflight",
             );
-            tokio::spawn(super::tmux::tmux_output_watcher(
-                discord_channel_id,
-                http.clone(),
-                shared.clone(),
-                output_path.clone(),
-                tmux_session_name.clone(),
-                initial_offset,
-                cancel,
-                paused,
-                resume_offset,
-                pause_epoch,
-                turn_delivered,
-            ));
-            (true, !fresh)
+            if claim.should_spawn() {
+                tokio::spawn(super::tmux::tmux_output_watcher(
+                    discord_channel_id,
+                    http.clone(),
+                    shared.clone(),
+                    output_path.clone(),
+                    tmux_session_name.clone(),
+                    initial_offset,
+                    cancel,
+                    paused,
+                    resume_offset,
+                    pause_epoch,
+                    turn_delivered,
+                ));
+            }
+            (claim.should_spawn(), claim.replaced_existing())
         }
         #[cfg(not(unix))]
         {
