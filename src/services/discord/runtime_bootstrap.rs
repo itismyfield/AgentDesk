@@ -616,6 +616,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     let provider_for_shutdown = provider.clone();
     let provider_for_error = provider.clone();
     let provider_for_framework = provider.clone();
+    let startup_reconcile_remaining_for_client_start = startup_reconcile_remaining.clone();
+    let startup_doctor_started_for_client_start = startup_doctor_started.clone();
+    let health_registry_for_client_start = health_registry.clone();
 
     let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
         .channel_model_overrides
@@ -1475,6 +1478,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     if let Err(e) = client.start().await {
         tracing::warn!("  ✗ {} bot error: {e}", provider_for_error.display_name());
+        run_startup_diagnostic_after_reconcile_barrier(
+            startup_reconcile_remaining_for_client_start,
+            startup_doctor_started_for_client_start,
+            health_registry_for_client_start,
+        )
+        .await;
     }
 
     if let Some(handle) = gateway_lease_task {
@@ -1607,6 +1616,23 @@ mod tests {
             StartupDoctorBarrier::AlreadyReleased
         );
         assert_eq!(remaining.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn startup_doctor_barrier_releases_when_failed_startup_arrives_last() {
+        let remaining = std::sync::atomic::AtomicUsize::new(2);
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Waiting(1)
+        );
+        assert_eq!(
+            startup_doctor_barrier_arrive(&remaining, &started),
+            StartupDoctorBarrier::Released
+        );
+        assert_eq!(remaining.load(Ordering::Acquire), 0);
+        assert!(started.load(Ordering::Acquire));
     }
 
     struct PgTestDatabase {

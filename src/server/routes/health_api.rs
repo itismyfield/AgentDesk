@@ -236,6 +236,14 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn stale_mailbox_repair_applied(
+    removed_token: bool,
+    inflight_cleared: bool,
+    session_disconnected_count: usize,
+) -> bool {
+    removed_token || inflight_cleared || session_disconnected_count > 0
+}
+
 async fn load_channel_session_state(
     sqlite: &Db,
     pg_pool: Option<&PgPool>,
@@ -582,7 +590,11 @@ pub async fn stale_mailbox_repair_handler(
         Json(serde_json::json!({
             "ok": status == "applied",
             "status": status,
-            "applied": repair.removed_token.is_some() || inflight_cleared,
+            "applied": stale_mailbox_repair_applied(
+                repair.removed_token.is_some(),
+                inflight_cleared,
+                session_disconnected_count
+            ),
             "skipped": false,
             "fix_safety": "safe_local_repair",
             "safety_gate": "no_live_work_evidence",
@@ -750,7 +762,9 @@ pub async fn senddm_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{discord_control_endpoints_allowed, public_health_json};
+    use super::{
+        discord_control_endpoints_allowed, public_health_json, stale_mailbox_repair_applied,
+    };
     use serde_json::json;
 
     #[test]
@@ -804,6 +818,14 @@ mod tests {
         assert!(public.get("mailboxes").is_none());
         assert!(public.get("config_audit").is_none());
         assert!(public.get("degraded_reasons").is_none());
+    }
+
+    #[test]
+    fn stale_mailbox_repair_applied_includes_session_only_disconnect() {
+        assert!(stale_mailbox_repair_applied(false, false, 1));
+        assert!(stale_mailbox_repair_applied(true, false, 0));
+        assert!(stale_mailbox_repair_applied(false, true, 0));
+        assert!(!stale_mailbox_repair_applied(false, false, 0));
     }
 }
 

@@ -172,7 +172,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2345 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 676 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 939 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 961 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 202 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4772 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 453 |  |
@@ -271,7 +271,7 @@
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1217 | giant-file |
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 5496 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
-| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1934 | giant-file |
+| `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 1960 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 185 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1862 | giant-file |
