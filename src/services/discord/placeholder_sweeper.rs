@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 
+use std::sync::atomic::Ordering;
+
 use super::SharedData;
 use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
@@ -105,15 +107,16 @@ async fn edit_placeholder_safe(
     channel_id: u64,
     message_id: u64,
     content: &str,
-) {
+) -> bool {
     if channel_id == 0 || message_id == 0 {
-        return;
+        return false;
     }
     let channel = serenity::ChannelId::new(channel_id);
     let message = serenity::MessageId::new(message_id);
-    let _ = channel
+    channel
         .edit_message(http, message, serenity::EditMessage::new().content(content))
-        .await;
+        .await
+        .is_ok()
 }
 
 /// Run a single sweep pass for the given provider. Public for testability —
@@ -121,7 +124,7 @@ async fn edit_placeholder_safe(
 /// `spawn_placeholder_sweeper`.
 pub(super) async fn run_placeholder_sweep_pass(
     http: &Arc<serenity::Http>,
-    _shared: &Arc<SharedData>,
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> SweepPassReport {
     let mut report = SweepPassReport::default();
@@ -156,32 +159,61 @@ pub(super) async fn run_placeholder_sweep_pass(
         if !state.full_response.is_empty() || state.response_sent_offset > 0 {
             continue;
         }
+        // Re-stat guard for the EDIT path: between
+        // `load_inflight_states_for_sweep` and the awaited Discord edit, the
+        // owning turn may write a fresh inflight state or stream the first
+        // response chunk. Skip the edit (and the abandoned-branch evict) if
+        // the file mtime advanced past our snapshot.
+        if !inflight_state_file_still_stale(provider, state.channel_id, age_secs) {
+            continue;
+        }
         match classify_age(age_secs) {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
                 let text = build_stalled_placeholder(&state, age_secs);
-                edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await;
-                report.stalled += 1;
+                if edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await
+                {
+                    report.stalled += 1;
+                }
             }
             SweepDecision::Abandoned => {
                 let text = build_abandoned_placeholder(&state);
-                edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await;
-                // TOCTOU guard: between the snapshot read and this delete a
-                // new turn may have written a fresh inflight file for the
-                // same channel. Re-stat the file and only delete if it is
-                // still the stale entry we observed (file mtime within ±2s
-                // of the original age). Stat APIs do not give us a strict
-                // version, but mtime equivalence is a good-enough proxy
-                // because every save_inflight_state call advances mtime.
-                if inflight_state_file_still_stale(provider, state.channel_id, age_secs)
-                    && delete_inflight_state_file(provider, state.channel_id)
-                {
-                    report.abandoned += 1;
+                let edited =
+                    edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text)
+                        .await;
+                // Skip eviction when the terminal Discord edit failed (rate
+                // limit / transient outage). Leaving the state in place lets
+                // the next sweep pass retry. The recheck after the await
+                // also defends against a fresh turn writing state during
+                // the edit itself — only evict if the file is still the
+                // same stale entry we saw and the edit succeeded.
+                if edited && inflight_state_file_still_stale(provider, state.channel_id, age_secs) {
+                    finalize_abandoned_mailbox(shared, provider, state.channel_id).await;
+                    if delete_inflight_state_file(provider, state.channel_id) {
+                        report.abandoned += 1;
+                    }
                 }
             }
         }
     }
     report
+}
+
+/// Drop the per-channel mailbox active turn that the abandoned inflight was
+/// driving. Without this, the channel's `cancel_token` and `global_active`
+/// counter stay set, so subsequent user messages see an in-flight turn and
+/// get queued behind a placeholder that is already terminal.
+async fn finalize_abandoned_mailbox(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) {
+    let channel = serenity::ChannelId::new(channel_id);
+    let finish = super::mailbox_finish_turn(shared, provider, channel).await;
+    if let Some(removed_token) = finish.removed_token {
+        removed_token.cancelled.store(true, Ordering::Relaxed);
+        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn inflight_state_file_still_stale(
