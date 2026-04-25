@@ -2507,7 +2507,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
     // 1. Kill tmux session (or confirm the runtime path already stopped it).
     let tmux_killed = lifecycle.tmux_killed;
 
-    // 2. Clear inflight state by scanning provider directory for matching tmux_session_name.
+    // 2. Clear persistent inflight state by matching tmux_session_name/channel_id.
     let inflight_cleared = lifecycle.inflight_cleared;
 
     // 3. Update session → disconnected, clear active fields
@@ -3559,6 +3559,10 @@ mod tests {
 
     #[tokio::test]
     async fn force_kill_session_skips_notify_and_audit_when_tmux_is_already_gone() {
+        let _env_lock = env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState::test_state(db.clone(), engine);

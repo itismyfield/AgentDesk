@@ -2214,7 +2214,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["queue_preserved"], true);
-    assert_eq!(json["inflight_cleared"], true);
+    assert_eq!(json["inflight_cleared"], false);
     assert_eq!(json["exact_channel_match"], true);
     assert!(json["dispatch_cancelled"].is_null());
 
