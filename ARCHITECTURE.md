@@ -303,7 +303,8 @@ src/
 │   ├── observability/
 │   │   ├── events.rs
 │   │   ├── metrics.rs
-│   │   └── mod.rs
+│   │   ├── mod.rs
+│   │   └── watcher_latency.rs
 │   ├── platform/
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
