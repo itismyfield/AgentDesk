@@ -52,6 +52,76 @@ enum SessionResetReason {
     AssistantTurnCap,
 }
 
+fn attach_paused_turn_watcher(
+    shared: &Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: Option<String>,
+    output_path: Option<String>,
+    initial_offset: u64,
+    source: &'static str,
+) -> serenity::ChannelId {
+    let mut watcher_owner_channel_id = channel_id;
+
+    #[cfg(unix)]
+    if let (Some(tmux_session_name), Some(output_path)) = (tmux_session_name, output_path) {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.clone(),
+            paused: paused.clone(),
+            resume_offset: resume_offset.clone(),
+            cancel: cancel.clone(),
+            pause_epoch: pause_epoch.clone(),
+            turn_delivered: turn_delivered.clone(),
+        };
+        let claim = super::super::tmux::claim_or_reuse_watcher(
+            &shared.tmux_watchers,
+            channel_id,
+            handle,
+            provider,
+            source,
+        );
+        watcher_owner_channel_id = claim.owner_channel_id();
+        if claim.should_spawn() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Attaching tmux watcher for turn on channel {} ({})",
+                channel_id,
+                claim.as_str()
+            );
+            tokio::spawn(super::super::tmux::tmux_output_watcher(
+                channel_id,
+                http,
+                shared.clone(),
+                output_path,
+                tmux_session_name,
+                initial_offset,
+                cancel,
+                paused,
+                resume_offset,
+                pause_epoch,
+                turn_delivered,
+            ));
+        }
+    }
+
+    if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) {
+        watcher
+            .pause_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        watcher
+            .paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    watcher_owner_channel_id
+}
+
 fn build_memory_injection_plan<'a>(
     provider: &ProviderKind,
     has_session_id: bool,
@@ -1012,68 +1082,21 @@ pub(in crate::services::discord) async fn start_headless_turn(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
     }
 
-    let mut watcher_owner_channel_id = channel_id;
-    #[cfg(unix)]
-    if let (Some(tmux_session_name), Some(output_path)) = (watcher_tmux_name, watcher_output_path) {
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
-        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle = TmuxWatcherHandle {
-            tmux_session_name: tmux_session_name.clone(),
-            paused: paused.clone(),
-            resume_offset: resume_offset.clone(),
-            cancel: cancel.clone(),
-            pause_epoch: pause_epoch.clone(),
-            turn_delivered: turn_delivered.clone(),
-        };
-        let claim = super::super::tmux::claim_or_reuse_watcher(
-            &shared.tmux_watchers,
-            channel_id,
-            handle,
-            &provider,
-            "turn_start_headless",
-        );
-        watcher_owner_channel_id = claim.owner_channel_id();
-        if claim.should_spawn() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ↻ Attaching tmux watcher for headless turn on channel {} ({})",
-                channel_id,
-                claim.as_str()
-            );
-        }
-        if claim.should_spawn() {
-            tokio::spawn(super::super::tmux::tmux_output_watcher(
-                channel_id,
-                ctx.http.clone(),
-                shared.clone(),
-                output_path,
-                tmux_session_name,
-                inflight_offset,
-                cancel,
-                paused,
-                resume_offset,
-                pause_epoch,
-                turn_delivered,
-            ));
-        }
-    }
+    let _watcher_owner_channel_id = attach_paused_turn_watcher(
+        shared,
+        ctx.http.clone(),
+        &provider,
+        channel_id,
+        watcher_tmux_name,
+        watcher_output_path,
+        inflight_offset,
+        "turn_start_headless",
+    );
 
     let (tx, rx) = mpsc::channel();
     let session_id_clone = session_id.clone();
     let current_path_clone = current_path.clone();
     let cancel_token_clone = cancel_token.clone();
-
-    if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) {
-        watcher
-            .pause_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        watcher
-            .paused
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
 
     {
         let script = super::super::runtime_store::agentdesk_root()
@@ -2885,6 +2908,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             (None, None, None, 0u64)
         }
     };
+    let watcher_tmux_name = inflight_tmux_name.clone();
+    let watcher_output_path = inflight_output_path.clone();
 
     let (logical_channel_id, thread_id, thread_title) = if let Some((parent_id, _parent_name)) =
         thread_parent
@@ -2948,15 +2973,19 @@ pub(in crate::services::discord) async fn handle_text_message(
     let current_path_clone = current_path.clone();
     let cancel_token_clone = cancel_token.clone();
 
-    // Pause tmux watcher if one exists (so it doesn't read our turn's output)
-    if let Some(watcher) = shared.tmux_watchers.get(&channel_id) {
-        watcher
-            .pause_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        watcher
-            .paused
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    // Pause the tmux-session owner watcher before writing to the provider
+    // FIFO. In thread follow-ups, the watcher may be owned by the parent
+    // channel rather than the requested thread channel.
+    let _watcher_owner_channel_id = attach_paused_turn_watcher(
+        shared,
+        ctx.http.clone(),
+        &provider,
+        channel_id,
+        watcher_tmux_name,
+        watcher_output_path,
+        inflight_offset,
+        "turn_start_message",
+    );
 
     // Auto-sync worktree before sending message to session
     {
@@ -5606,6 +5635,52 @@ mod tests {
 
         let roster = shared.channel_roster(channel_id, UserId::new(999), "Fallback");
         assert_eq!(roster, vec![UserRecord::new(UserId::new(101), "Alice")]);
+    }
+
+    #[test]
+    fn attach_paused_turn_watcher_pauses_existing_tmux_owner_channel() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let owner_channel = ChannelId::new(1485506232256168136);
+        let thread_channel = ChannelId::new(1485506232256168137);
+        let tmux_name = "AgentDesk-codex-adk-cdx-owner".to_string();
+        let owner_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner_pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        shared.tmux_watchers.insert(
+            owner_channel,
+            TmuxWatcherHandle {
+                tmux_session_name: tmux_name.clone(),
+                paused: owner_paused.clone(),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pause_epoch: owner_pause_epoch.clone(),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+
+        let owner = attach_paused_turn_watcher(
+            &shared,
+            Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+            &ProviderKind::Codex,
+            thread_channel,
+            Some(tmux_name),
+            Some("/tmp/agentdesk-test-output.jsonl".to_string()),
+            0,
+            "unit-test-turn-start",
+        );
+
+        assert_eq!(owner, owner_channel);
+        assert!(
+            owner_paused.load(std::sync::atomic::Ordering::Relaxed),
+            "turn start must pause the live owner watcher, not the requested thread slot"
+        );
+        assert_eq!(
+            owner_pause_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(
+            !shared.tmux_watchers.contains_key(&thread_channel),
+            "reusing an owner watcher must not install a duplicate thread watcher"
+        );
     }
 
     #[test]

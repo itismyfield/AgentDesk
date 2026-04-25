@@ -1386,7 +1386,6 @@ pub(super) async fn restore_inflight_turns(
                         let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                         let turn_delivered =
                             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        // #226: Atomic claim via try_claim_watcher
                         let handle = TmuxWatcherHandle {
                             tmux_session_name: tmux_session_name.clone(),
                             paused: paused.clone(),
@@ -1398,11 +1397,14 @@ pub(super) async fn restore_inflight_turns(
                         let watcher_claimed = {
                             #[cfg(unix)]
                             {
-                                super::tmux::try_claim_watcher(
+                                let claim = super::tmux::claim_or_reuse_watcher(
                                     &shared.tmux_watchers,
                                     channel_id,
                                     handle,
-                                )
+                                    provider,
+                                    "restart_report_recovery",
+                                );
+                                claim.should_spawn()
                             }
                             #[cfg(not(unix))]
                             {
@@ -2267,7 +2269,6 @@ pub(super) async fn restore_inflight_turns(
                 let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
                 let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                // #226: Atomic claim via try_claim_watcher
                 let handle = TmuxWatcherHandle {
                     tmux_session_name: tmux_session_name.clone(),
                     paused: paused.clone(),
@@ -2279,7 +2280,14 @@ pub(super) async fn restore_inflight_turns(
                 let watcher_claimed = {
                     #[cfg(unix)]
                     {
-                        super::tmux::try_claim_watcher(&shared.tmux_watchers, channel_id, handle)
+                        let claim = super::tmux::claim_or_reuse_watcher(
+                            &shared.tmux_watchers,
+                            channel_id,
+                            handle,
+                            provider,
+                            "inflight_recovery",
+                        );
+                        claim.should_spawn()
                     }
                     #[cfg(not(unix))]
                     {
@@ -2692,11 +2700,11 @@ impl std::fmt::Display for RebindError {
 ///   watcher only picks up output produced *after* this call. Retroactive
 ///   emission of already-dropped output is intentionally out of scope.
 /// * Registers / refreshes the `DiscordSession` entry in `shared.core.sessions`.
-/// * Spawns a `tmux_output_watcher` via `try_claim_watcher`. If a watcher
-///   already owns the channel (e.g. a prior recovery round), the claim is
-///   declined and `watcher_spawned=false` is returned — the inflight we
-///   just created will still be picked up by the existing watcher, so this
-///   is not an error.
+/// * Spawns a `tmux_output_watcher` via the single-watcher claim policy. If
+///   a live watcher already owns the tmux session, the existing owner is
+///   reused and `watcher_spawned=false` is returned — the inflight we just
+///   created will still be picked up by the existing watcher, so this is not
+///   an error.
 pub(crate) async fn rebind_inflight_for_channel(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
