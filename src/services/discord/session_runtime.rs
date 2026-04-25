@@ -1805,24 +1805,25 @@ mod tests {
         // Serialize against any other test that also mutates AGENTDESK_ROOT_DIR,
         // so the env var stays consistent across the save/load round-trip when
         // cargo test schedules tests on multiple threads in CI.
-        static AGENTDESK_ROOT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = AGENTDESK_ROOT_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = super::runtime_store::lock_test_env();
 
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime").join("state").join("discord")).unwrap();
 
-        struct EnvReset;
+        struct EnvReset(Option<std::ffi::OsString>);
         impl Drop for EnvReset {
             fn drop(&mut self) {
-                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
             }
         }
 
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
-        let _reset = EnvReset;
+        let _reset = EnvReset(previous_root);
 
         let provider = crate::services::provider::ProviderKind::Codex;
         let inflight = crate::services::discord::inflight::InflightTurnState::new(

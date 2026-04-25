@@ -500,12 +500,19 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
     atomic_write(&path, &json)
 }
 
-pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) {
+pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> bool {
     let Some(root) = inflight_runtime_root() else {
-        return;
+        return false;
     };
     let path = inflight_state_path(&root, provider, channel_id);
-    let _ = fs::remove_file(path);
+    fs::remove_file(path).is_ok()
+}
+
+pub(super) fn inflight_state_file_exists(provider: &ProviderKind, channel_id: u64) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    inflight_state_path(&root, provider, channel_id).exists()
 }
 
 pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
