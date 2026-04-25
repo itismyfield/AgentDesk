@@ -15,7 +15,6 @@ pub(crate) mod meeting_state_machine;
 mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
-pub(crate) mod monitoring_detector;
 pub(crate) mod monitoring_status;
 mod org_schema;
 pub(crate) mod org_writer;
