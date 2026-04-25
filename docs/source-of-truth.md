@@ -42,7 +42,7 @@ The runtime and operator paths in this index were verified on 2026-04-24 with `l
 | Workspace CLAUDE.md per agent | `~/.adk/release/config/workspace-claude-md/<agent>.md` | Operator-managed file copied/symlinked into each agent's workspace as the agent-facing `CLAUDE.md`. Not git-tracked in this repo. | Edit the runtime file in place; it propagates on next workspace bootstrap. Do not hand-edit per-workspace `CLAUDE.md` copies. | `ls ~/.adk/release/config/workspace-claude-md/` |
 | Workspace MEMORY.md per agent | `~/.adk/release/config/workspace-memory-md/<agent>.md` | Per-agent memory anchor consumed by the `memory-merge` workflow alongside SAM/SAK/LTM tiers. Workspace copies are derived; agent-managed memory entries live in `config/memories/` and the Obsidian Long-Term tree. | Edit the runtime file or use the `memory-write` / `memory-merge` skills. Avoid editing derived per-workspace copies. | `ls ~/.adk/release/config/workspace-memory-md/` |
 | LaunchAgent operator env overlay | `~/.adk/release/config/launchd.env` | Loaded by the LaunchAgent generator (`agentdesk emit-launchd-plist`) and by `scripts/install.sh` / `scripts/deploy-release.sh`. Do not duplicate values into the plist directly. | Edit the runtime file. Reload via `launchctl bootout`/`bootstrap` or the deploy script. | `cat ~/.adk/release/config/launchd.env` |
-| Memento workspace memory | Memento MCP-managed store on disk (operator-private; binding documented separately under issue 910-6) | Permanent vs workspace scope policy and the canonical write paths are out of scope for this index until 910-6 lands. Until then, treat Memento data as authoritative for what its tools return and do not mirror its content into the repo. | Use the Memento tool surface (`remember`, `amend`, `forget`, `memory_consolidate`). Avoid file-level edits to its store. | `mcp__memento__memory_stats` and `mcp__memento__context` |
+| Memento workspace memory | Memento MCP-managed store on disk (operator-private). Scope contract: [`docs/memory-scope.md`](memory-scope.md) (#1100). | `permanent` is for user identity, preferences, long-term decisions, and resolved procedures. `workspace`/`session` is for project/turn-local state. File-canonical content (prompts, runtime config, policies, skills, memory tiers listed in this matrix) MUST NOT be mirrored into Memento. When unsure, write `workspace`. | Use the Memento tool surface (`remember`, `amend`, `forget`, `memory_consolidate`). Avoid file-level edits to its store. Promote `workspace` → `permanent` only via explicit `amend` after multi-session validation. | `mcp__memento__memory_stats` and `mcp__memento__context` |
 | Archived config snapshots | `~/.adk/release/config/.backups/YYYY-MM-DD/` | None. This is the only allowed home for `*.pre-*`, `*.bak`, and `*.migrated` snapshots. | Never edit in place. Restore or diff explicitly if needed. | `find ~/.adk/release/config/.backups -maxdepth 2 -type f | sort` |
 
 ## Per-Vector Detail
@@ -97,7 +97,7 @@ Per-agent workspace anchors at `config/workspace-claude-md/<agent>.md` and `conf
 
 ### Memento workspace memory
 
-Memento data is stored under the operator-private MCP server and accessed through the `mcp__memento__*` tool surface. The permanent-vs-workspace scope contract and canonical write paths are still under design; issue 910-6 will own that documentation. Until then, the Memento tool responses are themselves the authoritative source — do not mirror Memento content into repo files or treat any file dump as canonical.
+Memento data is stored under the operator-private MCP server and accessed through the `mcp__memento__*` tool surface. The permanent-vs-workspace scope contract is owned by [`docs/memory-scope.md`](memory-scope.md) (issue #1100). Permanent scope is reserved for user identity, preferences, long-term decisions, and resolved procedures; everything else is `workspace`. Any content that has a canonical home in another row of this matrix (prompts, runtime config, policy files, skills, memory tiers) MUST NOT be mirrored into Memento. The Memento tool responses are authoritative for what they return — do not mirror Memento content back into repo files either.
 
 ### Archived config snapshots
 
@@ -109,7 +109,7 @@ Backups and migration residues (`*.pre-*`, `*.bak`, `*.migrated`, plus the one-s
 - The settings precedence contract for YAML vs `kv_meta` runtime overrides lives in [docs/adr-settings-precedence.md](adr-settings-precedence.md).
 - If `agentdesk.yaml` and a legacy file disagree, follow the current code rule: `agentdesk.yaml` wins and legacy files are migration inputs or stale snapshots.
 - Current verified prompt files are flat `<role>.prompt.md` files. Do not document or edit `config/agents/<role>/IDENTITY.md` as canonical until those files actually exist and a dedicated migration changes the prompt layout.
-- Memento scope (permanent vs workspace) and its file-level layout are intentionally underspecified here; issue 910-6 will replace the placeholder row above with concrete paths.
+- Memento scope (permanent vs workspace) is owned by [`docs/memory-scope.md`](memory-scope.md). Config-domain split (runtime-config / dashboard / bot-settings) is owned by [`docs/config-domains.md`](config-domains.md).
 
 ## Symlink Rules
 
