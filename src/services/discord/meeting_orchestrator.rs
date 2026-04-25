@@ -2131,6 +2131,9 @@ async fn participant_memory_recall(
             session_id: format!("meeting:{meeting_id}:round:{round}:{}", participant.role_id),
             dispatch_profile: DispatchProfile::Full,
             user_text: format!("{agenda}\n\n{transcript}"),
+            // Meetings always need full context — agenda + transcript drives
+            // the agent's response and there is no per-channel session state.
+            mode: crate::services::memory::RecallMode::Full,
         })
         .await;
 

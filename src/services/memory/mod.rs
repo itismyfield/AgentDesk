@@ -12,12 +12,16 @@ use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
 use crate::services::provider::ProviderKind;
 
+// `RecallMode` is exposed in this module's public surface via the struct field;
+// keep the type itself crate-visible so callers can build `RecallRequest`s.
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use memento::{
     MementoBackend, MementoRememberRequest, MementoToolFeedbackRequest, resolve_memento_agent_id,
     resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
-pub(crate) use memento_throttle::memento_call_metrics_snapshot;
+pub(crate) use memento_throttle::{
+    RecallSizeBucket, memento_call_metrics_snapshot, note_recall_context_size,
+};
 #[cfg(test)]
 pub(crate) use memento_throttle::{
     note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_request,
@@ -50,6 +54,24 @@ impl TokenUsage {
     }
 }
 
+/// Controls how much memento payload the backend should fetch and emit.
+///
+/// #1083: Memento recall throttling — by default a turn no longer auto-injects
+/// the full memento `context` payload. The first turn of a fresh session
+/// requests `IdentityOnly` (lightweight identity + working session) while
+/// trigger-based turns request `Full`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RecallMode {
+    /// Full memento context payload — identity, working memory, ranked
+    /// memories, anchors, etc. Reserved for trigger-driven turns.
+    #[default]
+    Full,
+    /// Lightweight identity-only payload. Used on default session-start turns
+    /// so the model still knows who it is talking to without paying the full
+    /// context cost.
+    IdentityOnly,
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub(crate) struct RecallRequest {
@@ -59,6 +81,9 @@ pub(crate) struct RecallRequest {
     pub session_id: String,
     pub dispatch_profile: DispatchProfile,
     pub user_text: String,
+    /// #1083: how much memento context to fetch. Defaults to `Full` so legacy
+    /// callers retain their existing behaviour.
+    pub mode: RecallMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

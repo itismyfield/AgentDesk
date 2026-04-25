@@ -1,8 +1,8 @@
 use super::super::gateway::{DiscordGateway, HeadlessGateway, LiveDiscordTurnContext};
 use super::super::*;
 use crate::services::memory::{
-    RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
-    resolve_memory_session_id,
+    RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
+    note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
 use poise::serenity_prelude::CreateMessage;
@@ -17,9 +17,32 @@ struct MemoryInjectionPlan<'a> {
     longterm_catalog_for_system_prompt: Option<&'a str>,
 }
 
+/// #1083: Memento recall gate decision.
+///
+/// Trigger conditions for full memento context injection:
+/// 1. The user prompt contains a "previous-context" keyword
+///    (e.g. "이전에", "저번에", "전에").
+/// 2. The user prompt contains an "error/failure" keyword
+///    (e.g. "에러", "실패", "오류", "안 됨", "안됨").
+/// 3. The user prompt contains a "settings change" keyword
+///    (e.g. "설정 변경", "config change", ...).
+/// 4. The user prompt is an explicit recall command — `/recall`,
+///    `/memento`, `/memory-read`, or carries `[memento:recall]` /
+///    `<memento:recall>` / `memento_recall` / `@memento recall` markers.
+///
+/// Outcome:
+/// * Any trigger above → `recall: true`, `mode: Full`.
+/// * Otherwise, on a fresh session (no memento context yet) → `recall: true`,
+///   `mode: IdentityOnly`. The backend returns the identity-only payload so
+///   the model still has the lightweight identity context.
+/// * Otherwise → `recall: false` (the in-context memento payload is reused).
+///
+/// Non-memento backends always recall in `Full` mode for backwards
+/// compatibility — they pay nothing for the trigger logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MementoRecallGateDecision {
     should_recall: bool,
+    mode: RecallMode,
     reason: &'static str,
 }
 
@@ -76,14 +99,8 @@ fn memento_recall_gate_decision(
     if memory_settings.backend != settings::MemoryBackendKind::Memento {
         return MementoRecallGateDecision {
             should_recall: true,
+            mode: RecallMode::Full,
             reason: "non_memento_backend",
-        };
-    }
-
-    if !memento_context_loaded {
-        return MementoRecallGateDecision {
-            should_recall: true,
-            reason: "session_start_context",
         };
     }
 
@@ -97,6 +114,7 @@ fn memento_recall_gate_decision(
     {
         return MementoRecallGateDecision {
             should_recall: true,
+            mode: RecallMode::Full,
             reason: "previous_context_signal",
         };
     }
@@ -107,6 +125,7 @@ fn memento_recall_gate_decision(
     {
         return MementoRecallGateDecision {
             should_recall: true,
+            mode: RecallMode::Full,
             reason: "error_context_signal",
         };
     }
@@ -124,6 +143,7 @@ fn memento_recall_gate_decision(
     {
         return MementoRecallGateDecision {
             should_recall: true,
+            mode: RecallMode::Full,
             reason: "setting_change_signal",
         };
     }
@@ -139,12 +159,28 @@ fn memento_recall_gate_decision(
     {
         return MementoRecallGateDecision {
             should_recall: true,
+            mode: RecallMode::Full,
             reason: "explicit_recall_signal",
+        };
+    }
+
+    // #1083: No trigger signal. Default behaviour:
+    // * If memento context has not been loaded for this session yet, fetch a
+    //   *lightweight identity-only* payload so the model still gets the
+    //   identity context, but skip the heavy ranked / core memory sections.
+    // * If the identity context was already loaded this session, skip the
+    //   memento call entirely and reuse the in-context payload.
+    if !memento_context_loaded {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::IdentityOnly,
+            reason: "identity_only_session_start",
         };
     }
 
     MementoRecallGateDecision {
         should_recall: false,
+        mode: RecallMode::Full,
         reason: "no_turn_signal",
     }
 }
@@ -586,21 +622,38 @@ pub(in crate::services::discord) async fn start_headless_turn(
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: prompt.to_string(),
+                mode: memento_recall_gate.mode,
             })
             .await
     };
     if memory_settings.backend == settings::MemoryBackendKind::Memento {
         let ts = chrono::Local::now().format("%H:%M:%S");
+        let recall_bytes = memory_recall
+            .external_recall
+            .as_deref()
+            .map(str::len)
+            .unwrap_or(0);
+        let bucket = if !memento_recall_gate.should_recall {
+            RecallSizeBucket::Skipped
+        } else {
+            match memento_recall_gate.mode {
+                RecallMode::Full => RecallSizeBucket::Full,
+                RecallMode::IdentityOnly => RecallSizeBucket::IdentityOnly,
+            }
+        };
+        note_recall_context_size(bucket, recall_bytes);
         tracing::info!(
-            "  [{ts}] [memory] memento recall gate for headless channel {}: decision={} reason={} context_loaded={} input_tokens={} output_tokens={}",
+            "  [{ts}] [memory] memento recall gate for headless channel {}: decision={} mode={:?} reason={} context_loaded={} recall_bytes={} input_tokens={} output_tokens={}",
             channel_id.get(),
             if memento_recall_gate.should_recall {
                 "inject"
             } else {
                 "skip"
             },
+            memento_recall_gate.mode,
             memento_recall_gate.reason,
             memento_context_loaded,
+            recall_bytes,
             memory_recall.token_usage.input_tokens,
             memory_recall.token_usage.output_tokens
         );
@@ -2367,21 +2420,38 @@ pub(in crate::services::discord) async fn handle_text_message(
                 session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
                 dispatch_profile,
                 user_text: user_text.to_string(),
+                mode: memento_recall_gate.mode,
             })
             .await
     };
     if memory_settings.backend == settings::MemoryBackendKind::Memento {
         let ts = chrono::Local::now().format("%H:%M:%S");
+        let recall_bytes = memory_recall
+            .external_recall
+            .as_deref()
+            .map(str::len)
+            .unwrap_or(0);
+        let bucket = if !memento_recall_gate.should_recall {
+            RecallSizeBucket::Skipped
+        } else {
+            match memento_recall_gate.mode {
+                RecallMode::Full => RecallSizeBucket::Full,
+                RecallMode::IdentityOnly => RecallSizeBucket::IdentityOnly,
+            }
+        };
+        note_recall_context_size(bucket, recall_bytes);
         tracing::info!(
-            "  [{ts}] [memory] memento recall gate for channel {}: decision={} reason={} context_loaded={} input_tokens={} output_tokens={}",
+            "  [{ts}] [memory] memento recall gate for channel {}: decision={} mode={:?} reason={} context_loaded={} recall_bytes={} input_tokens={} output_tokens={}",
             channel_id.get(),
             if memento_recall_gate.should_recall {
                 "inject"
             } else {
                 "skip"
             },
+            memento_recall_gate.mode,
             memento_recall_gate.reason,
             memento_context_loaded,
+            recall_bytes,
             memory_recall.token_usage.input_tokens,
             memory_recall.token_usage.output_tokens
         );
@@ -4666,28 +4736,45 @@ mod tests {
         };
         let file = settings::ResolvedMemorySettings::default();
 
-        assert_eq!(
-            memento_recall_gate_decision(&memento, false, "평범한 요청").reason,
-            "session_start_context"
-        );
+        // #1083: a fresh session (no memento context loaded yet) without any
+        // turn signal should trigger the *identity-only* lite recall, not the
+        // full session_start recall.
+        let identity = memento_recall_gate_decision(&memento, false, "평범한 요청");
+        assert_eq!(identity.reason, "identity_only_session_start");
+        assert!(identity.should_recall);
+        assert_eq!(identity.mode, RecallMode::IdentityOnly);
+
+        // After identity is loaded, no trigger means no recall.
         assert!(!memento_recall_gate_decision(&memento, true, "평범한 요청").should_recall);
-        assert_eq!(
-            memento_recall_gate_decision(&memento, true, "이전에 하던 거 이어서 해줘").reason,
-            "previous_context_signal"
-        );
-        assert_eq!(
-            memento_recall_gate_decision(&memento, true, "빌드 실패 원인 찾아줘").reason,
-            "error_context_signal"
-        );
-        assert_eq!(
-            memento_recall_gate_decision(&memento, true, "설정 변경 내용 기억나?").reason,
-            "setting_change_signal"
-        );
-        assert_eq!(
-            memento_recall_gate_decision(&memento, true, "/recall deploy note").reason,
-            "explicit_recall_signal"
-        );
-        assert!(memento_recall_gate_decision(&file, true, "평범한 요청").should_recall);
+
+        // Trigger keywords still upgrade to full recall regardless of whether
+        // identity has been loaded yet.
+        let prev = memento_recall_gate_decision(&memento, true, "이전에 하던 거 이어서 해줘");
+        assert_eq!(prev.reason, "previous_context_signal");
+        assert_eq!(prev.mode, RecallMode::Full);
+
+        let err = memento_recall_gate_decision(&memento, true, "빌드 실패 원인 찾아줘");
+        assert_eq!(err.reason, "error_context_signal");
+        assert_eq!(err.mode, RecallMode::Full);
+
+        let cfg = memento_recall_gate_decision(&memento, true, "설정 변경 내용 기억나?");
+        assert_eq!(cfg.reason, "setting_change_signal");
+        assert_eq!(cfg.mode, RecallMode::Full);
+
+        let explicit = memento_recall_gate_decision(&memento, true, "/recall deploy note");
+        assert_eq!(explicit.reason, "explicit_recall_signal");
+        assert_eq!(explicit.mode, RecallMode::Full);
+
+        // Trigger keywords on a fresh session also win over identity-only.
+        let fresh_trigger =
+            memento_recall_gate_decision(&memento, false, "이전에 하던 거 이어서 해줘");
+        assert_eq!(fresh_trigger.reason, "previous_context_signal");
+        assert_eq!(fresh_trigger.mode, RecallMode::Full);
+
+        // Non-memento backend always recalls in Full mode.
+        let non_memento = memento_recall_gate_decision(&file, true, "평범한 요청");
+        assert!(non_memento.should_recall);
+        assert_eq!(non_memento.mode, RecallMode::Full);
     }
 
     #[test]

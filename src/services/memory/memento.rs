@@ -6,8 +6,9 @@ use std::{
 use serde_json::{Map, Value, json};
 
 use super::{
-    CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
-    RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
+    CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallMode,
+    RecallRequest, RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID,
+    extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
         note_memento_tool_request, should_dedup_remember, store_recall_response,
@@ -348,8 +349,14 @@ impl MementoBackend {
         let result = self
             .call_tool(config, "context", Value::Object(args))
             .await?;
+        // #1083: Different formatter per mode — `Full` keeps every section,
+        // `IdentityOnly` strips down to the identity + current session lines.
+        let external_recall = match request.mode {
+            RecallMode::Full => format_context_payload_for_external_recall(&result.payload),
+            RecallMode::IdentityOnly => format_context_payload_for_identity_only(&result.payload),
+        };
         Ok(ContextFetchResult {
-            external_recall: format_context_payload_for_external_recall(&result.payload),
+            external_recall,
             token_usage: result.token_usage,
         })
     }
@@ -979,6 +986,51 @@ fn format_skip_line(item: &Map<String, Value>) -> Option<(String, String)> {
     Some((skip_item, line))
 }
 
+/// #1083: Identity-only memento payload — emitted on default session-start
+/// turns when no recall trigger fires. Only the `identity` and the active
+/// `current_session` lines are kept so the model still knows who it is talking
+/// to without paying the full context cost.
+fn format_context_payload_for_identity_only(payload: &Value) -> Option<String> {
+    let mut sections = vec!["[External Recall — Identity Lite]".to_string()];
+
+    if let Some(identity) = payload
+        .get("identity")
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Identity from Memento:\n{identity}"));
+    }
+
+    let working_session_lines = payload
+        .get("working")
+        .and_then(Value::as_object)
+        .and_then(|working| working.get("current_session"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            dedup_lines(
+                items
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .filter_map(|item| format_core_memory_line("session", item)),
+                MAX_WORKING_MEMORY_LINES,
+            )
+        })
+        .unwrap_or_default();
+    if !working_session_lines.is_empty() {
+        sections.push(format!(
+            "Current session context from Memento:\n- {}",
+            working_session_lines.join("\n- ")
+        ));
+    }
+
+    if sections.len() == 1 {
+        None
+    } else {
+        Some(sections.join("\n"))
+    }
+}
+
 fn format_context_payload_for_external_recall(payload: &Value) -> Option<String> {
     let mut sections = vec!["[External Recall]".to_string()];
 
@@ -1574,6 +1626,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What do we know about #344?".to_string(),
+                mode: crate::services::memory::RecallMode::Full,
             })
             .await;
 
@@ -1678,6 +1731,7 @@ mod tests {
             session_id: "session-1".to_string(),
             dispatch_profile: DispatchProfile::Full,
             user_text: "What do we know about #344?".to_string(),
+            mode: crate::services::memory::RecallMode::Full,
         };
 
         let first = backend.recall(request.clone()).await;
@@ -1762,6 +1816,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "What is empty?".to_string(),
+                mode: crate::services::memory::RecallMode::Full,
             })
             .await;
 
@@ -1794,6 +1849,7 @@ mod tests {
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::Full,
                 user_text: "Need previous context".to_string(),
+                mode: crate::services::memory::RecallMode::Full,
             })
             .await;
 
@@ -1822,12 +1878,68 @@ mod tests {
                 session_id: "session-1".to_string(),
                 dispatch_profile: DispatchProfile::ReviewLite,
                 user_text: "Review this quickly".to_string(),
+                mode: crate::services::memory::RecallMode::Full,
             })
             .await;
 
         assert!(recall.external_recall.is_none());
         assert!(!recall.memento_context_loaded);
         assert!(recall.warnings.is_empty());
+    }
+
+    // #1083: identity-only formatter keeps just the identity + active session
+    // sections so default-turn recalls stay small.
+    #[test]
+    fn identity_only_formatter_keeps_identity_and_session_drops_memories() {
+        let payload = json!({
+            "identity": "AgentDesk Discord control plane",
+            "working": {
+                "current_session": [
+                    {"content": "User asked about #1083", "topic": "1083"},
+                ]
+            },
+            "memories": {
+                "matches": [
+                    {"content": "DROP ME — full context only", "type": "fact"},
+                ]
+            },
+            "rankedInjection": {
+                "items": [
+                    {"content": "DROP ME — ranked memory", "type": "fact", "score": 0.9}
+                ]
+            },
+            "core": {
+                "decisions": [
+                    {"content": "DROP ME — decision", "topic": "drop"}
+                ]
+            }
+        });
+
+        let identity = format_context_payload_for_identity_only(&payload).expect("payload");
+        assert!(identity.contains("Identity Lite"));
+        assert!(identity.contains("AgentDesk Discord control plane"));
+        assert!(identity.contains("User asked about #1083"));
+        assert!(!identity.contains("Ranked context from Memento"));
+        assert!(!identity.contains("Relevant memories from Memento"));
+        assert!(!identity.contains("Core memory from Memento"));
+
+        let full = format_context_payload_for_external_recall(&payload).expect("full payload");
+        assert!(full.contains("Ranked context from Memento") || full.contains("DROP ME"));
+        // Identity-only payload must be smaller than full payload — proves the
+        // throttling actually saves bytes.
+        assert!(identity.len() < full.len());
+    }
+
+    #[test]
+    fn identity_only_formatter_returns_none_when_payload_lacks_identity_and_session() {
+        let payload = json!({
+            "memories": {
+                "matches": [
+                    {"content": "Only memories here", "type": "fact"}
+                ]
+            }
+        });
+        assert!(format_context_payload_for_identity_only(&payload).is_none());
     }
 
     #[tokio::test]
