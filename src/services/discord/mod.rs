@@ -19,6 +19,7 @@ pub(crate) mod monitoring_status;
 mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
+mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
 // #1074: landing zone for the future recovery-engine module split

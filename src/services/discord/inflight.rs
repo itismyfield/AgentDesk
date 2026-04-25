@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chrono::TimeZone;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightRestartMode;
@@ -210,6 +211,58 @@ pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
     discord_inflight_root()
 }
 
+/// Load all inflight states for a provider WITHOUT the eviction side-effect
+/// that `load_inflight_states_from_root` performs. Returns each state paired
+/// with its file-mtime age in seconds. Used by `placeholder_sweeper` so the
+/// sweeper can read-then-act-then-evict in one pass instead of racing the
+/// regular load path's auto-deletion on stale entries.
+pub(super) fn load_inflight_states_for_sweep(
+    provider: &ProviderKind,
+) -> Vec<(InflightTurnState, u64)> {
+    let Some(root) = inflight_runtime_root() else {
+        return Vec::new();
+    };
+    let dir = inflight_provider_dir(&root, provider);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+            continue;
+        };
+        if state.provider_kind().as_ref() != Some(provider) {
+            continue;
+        }
+        let age_secs = fs::metadata(&path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        out.push((state, age_secs));
+    }
+    out
+}
+
+/// Delete the inflight state file for a (provider, channel_id) pair if it
+/// still exists. Used by `placeholder_sweeper` to evict abandoned states
+/// after a final placeholder edit. Idempotent.
+pub(super) fn delete_inflight_state_file(provider: &ProviderKind, channel_id: u64) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    let path = inflight_state_path(&root, provider, channel_id);
+    fs::remove_file(path).is_ok()
+}
+
 fn inflight_provider_dir(root: &Path, provider: &ProviderKind) -> PathBuf {
     root.join(provider.as_str())
 }
@@ -220,6 +273,17 @@ fn inflight_state_path(root: &Path, provider: &ProviderKind, channel_id: u64) ->
 
 fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Parse the persisted `started_at` (`now_string` localtime form) back into
+/// a Unix timestamp. Returns `None` for unparseable values so callers can
+/// fall back to a wall-clock derived approximation.
+pub(super) fn parse_started_at_unix(started_at: &str) -> Option<i64> {
+    let naive = chrono::NaiveDateTime::parse_from_str(started_at, "%Y-%m-%d %H:%M:%S").ok()?;
+    chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|local| local.timestamp())
 }
 
 fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {

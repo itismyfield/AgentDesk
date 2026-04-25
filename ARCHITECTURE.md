@@ -260,6 +260,7 @@ src/
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
 │   │   ├── outbound.rs
+│   │   ├── placeholder_sweeper.rs
 │   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
 │   │   ├── recovery_engine.rs
