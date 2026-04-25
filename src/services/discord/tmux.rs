@@ -741,8 +741,19 @@ fn monitor_auto_turn_session_key(channel_id: ChannelId, data_start_offset: u64) 
     )
 }
 
-fn monitor_auto_turn_completion_notice(label: &str, event_count: usize) -> String {
-    format!("🔔 Monitor 완료: {label} (events={event_count})")
+/// #1009: Lifecycle-notice variant of the shared monitor summary line. Calls
+/// `format_monitor_suppressed_label` for the trailing summary so the
+/// suppressed-placeholder edit body and the lifecycle notify-outbox row use
+/// identical copy (DRY enforcement). The `label` (channel/tmux session name)
+/// stays as the human-readable scope prefix; `entry_keys` come from the
+/// channel's `MonitoringStore` snapshot.
+fn monitor_auto_turn_completion_notice(
+    label: &str,
+    event_count: usize,
+    entry_keys: &[String],
+) -> String {
+    let summary = format_monitor_suppressed_label(event_count, entry_keys);
+    format!("{summary} · 대상: {label}")
 }
 
 /// #1009: Shared formatter for the monitor auto-turn suppressed-placeholder
@@ -803,11 +814,12 @@ fn enqueue_monitor_auto_turn_suppressed_notification(
     tmux_session_name: &str,
     data_start_offset: u64,
     event_count: usize,
+    entry_keys: &[String],
 ) -> bool {
     let target = format!("channel:{}", channel_id.get());
     let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
     let label = monitor_auto_turn_label(tmux_session_name);
-    let content = monitor_auto_turn_completion_notice(&label, event_count);
+    let content = monitor_auto_turn_completion_notice(&label, event_count, entry_keys);
     enqueue_lifecycle_notification_best_effort(
         db,
         pg_pool,
@@ -4355,6 +4367,23 @@ pub(super) async fn tmux_output_watcher_with_restore(
             relay_ok
         } else if relay_decision.suppressed {
             let monitor_event_count = tool_state.transcript_events.len();
+            // #1009: Snapshot the channel's MonitoringStore entry keys ONCE so
+            // both the lifecycle notify-outbox row and the suppressed-placeholder
+            // edit body share an identical summary (DRY enforcement).
+            let monitor_entry_keys: Vec<String> = if matches!(
+                task_notification_kind,
+                Some(TaskNotificationKind::MonitorAutoTurn)
+            ) {
+                let store_arc = crate::server::routes::state::global_monitoring_store();
+                let store = store_arc.lock().await;
+                store
+                    .list(channel_id.get())
+                    .into_iter()
+                    .map(|entry| entry.key)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if matches!(
                 task_notification_kind,
                 Some(TaskNotificationKind::MonitorAutoTurn)
@@ -4366,6 +4395,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     &tmux_session_name,
                     data_start_offset,
                     monitor_event_count,
+                    &monitor_entry_keys,
                 );
             }
             let task_notification_detail = format!(
@@ -4396,19 +4426,10 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 Some(TaskNotificationKind::MonitorAutoTurn)
             ) {
                 if let PlaceholderSuppressDecision::Edit(_) = &decision {
-                    let entry_keys: Vec<String> = {
-                        let store_arc = crate::server::routes::state::global_monitoring_store();
-                        let store = store_arc.lock().await;
-                        store
-                            .list(channel_id.get())
-                            .into_iter()
-                            .map(|entry| entry.key)
-                            .collect()
-                    };
                     let body = format_monitor_suppressed_body(
                         &last_edit_text,
                         monitor_event_count,
-                        &entry_keys,
+                        &monitor_entry_keys,
                     );
                     decision = PlaceholderSuppressDecision::Edit(body);
                 }
@@ -8031,6 +8052,7 @@ mod tests {
         let db = crate::db::test_db();
         let channel = ChannelId::new(987_000_111);
 
+        let entry_keys = vec!["ci-build".to_string(), "pr-review".to_string()];
         let enqueued = enqueue_monitor_auto_turn_suppressed_notification(
             None,
             Some(&db),
@@ -8038,6 +8060,7 @@ mod tests {
             "monitor-session",
             14_900,
             7,
+            &entry_keys,
         );
         assert!(enqueued);
 
@@ -8064,17 +8087,55 @@ mod tests {
             }
         };
 
+        // #1009: lifecycle notice now reuses `format_monitor_suppressed_label`
+        // so suppressed placeholder + notify-outbox row share identical copy.
+        let expected_content = format!(
+            "{} · 대상: monitor-session",
+            format_monitor_suppressed_label(7, &entry_keys)
+        );
         assert_eq!(
             row,
             Some((
                 format!("channel:{}", channel.get()),
-                "🔔 Monitor 완료: monitor-session (events=7)".to_string(),
+                expected_content,
                 "notify".to_string(),
                 "system".to_string(),
                 Some(MONITOR_AUTO_TURN_REASON_CODE.to_string()),
                 Some(format!("monitor_auto_turn:ch:{}:off:14900", channel.get())),
             ))
         );
+    }
+
+    #[test]
+    fn monitor_auto_turn_completion_notice_shares_formatter_with_suppressed_body() {
+        // #1009 DRY enforcement: the lifecycle notice content and the
+        // suppressed-placeholder body both end with the SAME label produced
+        // by `format_monitor_suppressed_label`.
+        let entry_keys = vec!["ci-build".to_string(), "release".to_string()];
+        let event_count = 4;
+        let label = format_monitor_suppressed_label(event_count, &entry_keys);
+        let notice =
+            super::monitor_auto_turn_completion_notice("foo-channel", event_count, &entry_keys);
+        assert!(
+            notice.starts_with(&label),
+            "lifecycle notice must lead with the shared formatter output: {notice}"
+        );
+        assert!(
+            notice.contains("foo-channel"),
+            "lifecycle notice must still scope by channel/tmux name: {notice}"
+        );
+        let body = format_monitor_suppressed_body("placeholder body", event_count, &entry_keys);
+        assert!(
+            body.contains(&label),
+            "suppressed body must also embed the shared label: {body}"
+        );
+    }
+
+    #[test]
+    fn monitor_auto_turn_completion_notice_shows_empty_marker_with_no_entries() {
+        let notice = super::monitor_auto_turn_completion_notice("foo-channel", 2, &[]);
+        assert!(notice.starts_with("🔔 Monitor 2회 처리 · (등록된 모니터 없음)"));
+        assert!(notice.ends_with("· 대상: foo-channel"));
     }
 
     #[tokio::test]
