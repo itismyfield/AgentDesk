@@ -1551,7 +1551,7 @@ mod tests {
             let test_db = TestDatabase::create().await;
             let pool = test_db.migrate().await;
 
-            let one: i64 = sqlx::query_scalar("SELECT 1")
+            let one: i64 = sqlx::query_scalar("SELECT 1::BIGINT")
                 .fetch_one(&pool)
                 .await
                 .expect("test postgres pool should answer after migration");

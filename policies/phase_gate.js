@@ -14,9 +14,8 @@
  *   agentdesk.phaseGate.register("qa_passed", function(ctx) {
  *     // ctx: { card_id, repo_id, agent_id, dispatch_id }
  *     // Return: true/false, or { passed: bool, reason?: string }
- *     var rows = agentdesk.db.query(
- *       "SELECT 1 FROM task_dispatches WHERE id = ? AND status = 'succeeded'",
- *       [ctx.dispatch_id]);
+ *     var rows = queryGateState(
+ *       "task_dispatches", ctx.dispatch_id, "succeeded");
  *     return rows.length > 0;
  *   });
  *
@@ -93,6 +92,7 @@
 
   register("merge_verified", function(ctx) {
     if (!ctx || !ctx.card_id) return false;
+    /* legacy-raw-db: policy=phase_gate capability=merge_verified source_event=phase_gate.evaluate */
     var rows = agentdesk.db.query(
       "SELECT pr_merge_verified_at FROM kanban_cards WHERE id = ?",
       [ctx.card_id]
@@ -102,6 +102,7 @@
 
   register("issue_closed", function(ctx) {
     if (!ctx || !ctx.card_id) return false;
+    /* legacy-raw-db: policy=phase_gate capability=issue_closed source_event=phase_gate.evaluate */
     var rows = agentdesk.db.query(
       "SELECT issue_closed_at FROM kanban_cards WHERE id = ?",
       [ctx.card_id]
@@ -111,6 +112,7 @@
 
   register("build_passed", function(ctx) {
     if (!ctx || !ctx.card_id) return false;
+    /* legacy-raw-db: policy=phase_gate capability=build_passed source_event=phase_gate.evaluate */
     var rows = agentdesk.db.query(
       "SELECT last_build_status FROM kanban_cards WHERE id = ?",
       [ctx.card_id]

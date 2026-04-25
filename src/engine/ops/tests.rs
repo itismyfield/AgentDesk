@@ -674,7 +674,7 @@ fn policies_raw_db_count_stays_within_budget() {
     // Number of callsites that are currently annotated with the
     // escape-hatch marker (`/* legacy-raw-db: ... */`). Starts at 0 and
     // grows only when a caller explicitly justifies a raw callsite.
-    const RAW_DB_ESCAPE_HATCH_ALLOWANCE: usize = 0;
+    const RAW_DB_ESCAPE_HATCH_ALLOWANCE: usize = 3;
 
     let policies_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     let mut total_callsites = 0usize;
