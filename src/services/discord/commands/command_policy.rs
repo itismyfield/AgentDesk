@@ -519,4 +519,27 @@ mod tests {
         assert_eq!(slash_command_risk("/nonsense"), CommandRisk::Mutating);
         assert_eq!(slash_command_risk(""), CommandRisk::Mutating);
     }
+
+    /// Codex round 4 caught that `/cc stop` and `!cc stop` route through the
+    /// same cancel path as `/stop` / `!stop`, but the parent commands (`!cc`
+    /// and `/cc`) are classified as Mutating. The dispatch sites for the
+    /// `stop` subcommand explicitly evaluate `CommandRisk::RuntimeControl`
+    /// before reaching the cancel path. Pin the expected policy outcome of
+    /// that runtime-control evaluation so a future refactor that drops the
+    /// guard fails this test.
+    #[test]
+    fn cc_stop_alias_is_runtime_control_when_evaluated() {
+        // Non-owner with allow_all_users semantically passes upstream auth →
+        // policy must deny. This is what the dispatch sites assert.
+        assert_eq!(
+            evaluate_policy(CommandRisk::RuntimeControl, false, true),
+            PolicyDecision::DenyNotOwner,
+        );
+        // Owner is allowed regardless of the high-risk env flag — emergency
+        // ops path stays open.
+        assert_eq!(
+            evaluate_policy(CommandRisk::RuntimeControl, true, false),
+            PolicyDecision::Allow,
+        );
+    }
 }

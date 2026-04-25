@@ -1085,6 +1085,28 @@ Any other message is sent to {p}.
                     return Ok(true);
                 }
                 "stop" => {
+                    // Issue #1005: `!cc stop` is a runtime-control alias for
+                    // `!stop` — same cancel path. Apply the same owner-only
+                    // policy we run at the top of `handle_text_command` for
+                    // `!stop` so non-owners on `allow_all_users=true` cannot
+                    // bypass the gate via this alias.
+                    let is_owner = check_owner(msg.author.id, &data.shared).await;
+                    let high_risk_enabled = super::high_risk_enabled_via_env();
+                    let alias_decision = super::evaluate_policy(
+                        super::CommandRisk::RuntimeControl,
+                        is_owner,
+                        high_risk_enabled,
+                    );
+                    if let Some(reply) = alias_decision.denial_message("!cc stop") {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⛔ CommandPolicy denied !cc stop for {} (id:{})",
+                            msg.author.name,
+                            msg.author.id.get(),
+                        );
+                        let _ = msg.reply(&ctx.http, reply).await;
+                        return Ok(true);
+                    }
                     let stop_lookup =
                         cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                     match stop_lookup {

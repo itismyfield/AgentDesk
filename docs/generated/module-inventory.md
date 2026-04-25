@@ -214,7 +214,7 @@
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1122 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
-| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 522 |  |
+| `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 545 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1809 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 831 |  |
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1047 | giant-file |
@@ -226,8 +226,8 @@
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 363 |  |
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
-| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 376 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1229 | giant-file |
+| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 384 |  |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1251 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 541 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2181 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
