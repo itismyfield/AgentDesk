@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn agent_quality_rollup_job_runs_one_tick() -> Result<(), String> {
+    async fn agent_quality_rollup_pg_job_runs_one_tick() -> Result<(), String> {
         let pg_db = TestPostgresDb::create().await?;
         let pg_pool = pg_db.connect_and_migrate().await?;
         for event_type in [

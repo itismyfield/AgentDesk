@@ -10372,6 +10372,10 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         pg_pool.clone(),
     );
 
+    // #1097: pipeline_stages is now file-canonical (materialized from
+    // policies/default-pipeline.yaml), so PUT/DELETE must be rejected with
+    // HTTP 405. The test still asserts that the table is PG-only (no sqlite
+    // mirror writes happen) and that GET still works as before.
     let put_response = app
         .clone()
         .oneshot(
@@ -10398,22 +10402,35 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .unwrap();
     assert_eq!(
         put_status,
-        StatusCode::OK,
-        "pipeline stages PUT body={}",
+        StatusCode::METHOD_NOT_ALLOWED,
+        "pipeline stages PUT must be rejected as file-canonical; body={}",
         String::from_utf8_lossy(&put_body)
     );
     let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
-    assert_eq!(put_json["stages"].as_array().unwrap().len(), 2);
-    assert_eq!(put_json["stages"][0]["stage_name"], "Build");
-    assert_eq!(put_json["stages"][1]["parallel_with"], "lint");
+    assert_eq!(put_json["table"], "pipeline_stages");
+    assert_eq!(put_json["source_of_truth"], "file-canonical");
+    assert!(
+        put_json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("file-canonical"),
+        "expected file-canonical error message, got: {}",
+        put_json["error"]
+    );
 
+    // No rows should have been written by the rejected PUT. The PG table
+    // may still contain rows materialized from policies/default-pipeline.yaml
+    // for *other* repos, but nothing for this test's repo.
     let pg_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
             .bind("owner/pg-pipeline-stages")
             .fetch_one(&pg_pool)
             .await
             .unwrap();
-    assert_eq!(pg_count, 2);
+    assert_eq!(
+        pg_count, 0,
+        "rejected PUT must not insert rows for the test repo"
+    );
 
     let sqlite_count: i64 = db
         .read_conn()
@@ -10426,6 +10443,8 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .unwrap();
     assert_eq!(sqlite_count, 0, "sqlite mirror should stay empty");
 
+    // GET still works; since the rejected PUT wrote nothing, the list is
+    // empty for this repo.
     let get_response = app
         .clone()
         .oneshot(
@@ -10441,29 +10460,13 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         .await
         .unwrap();
     let get_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
-    assert_eq!(get_json["stages"].as_array().unwrap().len(), 2);
     assert_eq!(
-        get_json["stages"][0]["stage_order"],
-        json!(3_000_000_000_i64)
-    );
-    assert_eq!(
-        get_json["stages"][0]["timeout_minutes"],
-        json!(3_000_000_002_i64)
-    );
-    assert_eq!(
-        get_json["stages"][0]["max_retries"],
-        json!(3_000_000_003_i64)
-    );
-    assert_eq!(get_json["stages"][1]["stage_name"], "Review");
-    assert_eq!(
-        get_json["stages"][1]["stage_order"],
-        json!(3_000_000_001_i64)
-    );
-    assert_eq!(
-        get_json["stages"][1]["timeout_minutes"],
-        json!(3_000_000_004_i64)
+        get_json["stages"].as_array().unwrap().len(),
+        0,
+        "GET must return empty list for a repo with no materialized stages"
     );
 
+    // DELETE must also be rejected as file-canonical.
     let delete_response = app
         .oneshot(
             Request::builder()
@@ -10474,20 +10477,17 @@ async fn pipeline_stages_pg_only_without_sqlite_mirror() {
         )
         .await
         .unwrap();
-    assert_eq!(delete_response.status(), StatusCode::OK);
+    assert_eq!(
+        delete_response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "pipeline stages DELETE must be rejected as file-canonical"
+    );
     let delete_body = axum::body::to_bytes(delete_response.into_body(), usize::MAX)
         .await
         .unwrap();
     let delete_json: serde_json::Value = serde_json::from_slice(&delete_body).unwrap();
-    assert_eq!(delete_json["count"], json!(2));
-
-    let pg_remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM pipeline_stages WHERE repo_id = $1")
-            .bind("owner/pg-pipeline-stages")
-            .fetch_one(&pg_pool)
-            .await
-            .unwrap();
-    assert_eq!(pg_remaining, 0);
+    assert_eq!(delete_json["table"], "pipeline_stages");
+    assert_eq!(delete_json["source_of_truth"], "file-canonical");
 
     pg_pool.close().await;
     pg_db.drop().await;
@@ -26617,4 +26617,128 @@ async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
 
     pg_pool.close().await;
     pg_db.drop().await;
+}
+
+/// #1069 / 904-7 — callsite migration smoke test.
+///
+/// Scans the dashboard frontend, policies (JS), shell scripts, skills (Markdown),
+/// and the example config for references to API paths that were renamed in
+/// #1064 / #1065. Server-side route handler files and auto-generated docs are
+/// excluded — they legitimately reference the old paths as deprecated aliases
+/// or history. The test fails when a new callsite re-introduces a legacy path.
+#[test]
+fn callsites_migrated_off_legacy_api_paths_1069() {
+    use std::path::Path;
+
+    // Banned substrings — these are the paths fully removed in #1064/#1065.
+    // /api/hook/session is not banned: the parameterized DELETE
+    // (`/api/hook/session/{sessionKey}`) and auth.rs prefix bypass legitimately
+    // keep the prefix alive. Callsites should still hit
+    // /api/dispatched-sessions/webhook for the unparameterized POST/DELETE.
+    let banned: &[&str] = &[
+        "/api/re-review",
+        "/api/auto-queue/activate",
+        "/api/discord-bindings",
+    ];
+
+    // Roots that frontend / policy / script / skill / config callsites live in.
+    let roots = [
+        "dashboard/src",
+        "policies",
+        "scripts",
+        "skills",
+        "agentdesk.example.yaml",
+        "FEATURES.md",
+        "README.md",
+        "CLAUDE.md",
+    ];
+
+    fn walk(p: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if p.is_file() {
+            out.push(p.to_path_buf());
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(p) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(
+                name,
+                "node_modules" | "dist" | "build" | ".git" | "generated" | "target"
+            ) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for r in roots {
+        walk(&repo_root.join(r), &mut files);
+    }
+
+    let mut hits: Vec<String> = Vec::new();
+    for file in &files {
+        let ext = file
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            ext.as_str(),
+            "ts" | "tsx" | "js" | "jsx" | "mjs" | "json" | "yaml" | "yml" | "sh" | "md"
+        ) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let path_str = file.to_string_lossy();
+        for needle in banned {
+            if !content.contains(needle) {
+                continue;
+            }
+            for line in content.lines() {
+                if !line.contains(needle) {
+                    continue;
+                }
+                let trimmed = line.trim_start();
+                // Allow comment / doc lines that explicitly call out the
+                // historical migration. A live callsite (fetch URL string,
+                // bash curl, etc.) will not match these markers.
+                let is_comment_like = trimmed.starts_with("//")
+                    || trimmed.starts_with("#")
+                    || trimmed.starts_with("*")
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with("|") // markdown table row
+                    || trimmed.starts_with(">"); // markdown blockquote
+                let mentions_history = trimmed.contains("#1064")
+                    || trimmed.contains("#1065")
+                    || trimmed.contains("#1069")
+                    || trimmed.contains("removed")
+                    || trimmed.contains("legacy")
+                    || trimmed.contains("formerly")
+                    || trimmed.contains("deprecated")
+                    || trimmed.contains("→")
+                    || trimmed.contains("->");
+                if is_comment_like && mentions_history {
+                    continue;
+                }
+                hits.push(format!("{path_str}: {trimmed}"));
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "#1069 callsite audit: legacy API paths still referenced outside server route handlers / generated docs:\n  {}",
+        hits.join("\n  ")
+    );
 }

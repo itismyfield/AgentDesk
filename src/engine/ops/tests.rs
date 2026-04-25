@@ -670,6 +670,8 @@ fn policies_raw_db_ci_recovery_slice_stays_typed() {
 fn policies_raw_db_count_stays_within_budget() {
     // Captured after ci-recovery migration (#1007 first slice). See
     // docs/generated/policy-db-inventory.md for the classified listing.
+    // #1012 R4 CI-red recovery: keep unmarked callsites at the post
+    // ci-recovery baseline; phase_gate built-ins are explicit escape hatches.
     const RAW_DB_BUDGET: usize = 189;
     // Number of callsites that are currently annotated with the
     // escape-hatch marker (`/* legacy-raw-db: ... */`). Starts at 0 and

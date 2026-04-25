@@ -21,6 +21,8 @@ mod tests {
     use crate::server::routes::AppState;
     use serde_json::json;
 
+    #[path = "../agents_setup_e2e.rs"]
+    mod agents_setup_e2e;
     #[path = "../discord_flow/mod.rs"]
     mod discord_flow;
     mod high_risk_recovery;

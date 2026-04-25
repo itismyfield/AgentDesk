@@ -6,9 +6,14 @@ import { buildSpriteMap } from "../AgentAvatar";
 import { pickRandomSpritePair } from "./utils";
 import { BLANK, ICON_SPRITE_POOL } from "./constants";
 import type { FormData } from "./types";
+import {
+  filterAndSortAgents,
+  type AgentSortMode,
+} from "./agent-list-controls";
+
+export type { AgentSortMode };
 
 export type AgentManagerTab = "agents" | "departments" | "backlog" | "dispatch";
-export type AgentSortMode = "status" | "name" | "xp" | "created" | "archived";
 
 interface UseAgentManagerControllerParams {
   agents: Agent[];
@@ -104,51 +109,11 @@ export function useAgentManagerController({
     [],
   );
 
-  const sortedAgents = useMemo(() => {
-    let filtered = agents;
-    if (deptTab !== "all") {
-      filtered = filtered.filter((agent) => agent.department_id === deptTab);
-    }
-    if (statusFilter !== "all") {
-      filtered = filtered.filter((agent) => agent.status === statusFilter);
-    }
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      filtered = filtered.filter(
-        (agent) =>
-          agent.name.toLowerCase().includes(q) ||
-          agent.name_ko.toLowerCase().includes(q) ||
-          (agent.alias && agent.alias.toLowerCase().includes(q)) ||
-          agent.avatar_emoji.includes(q),
-      );
-    }
-
-    return [...filtered].sort((left, right) => {
-      const statusOrder: Record<string, number> = {
-        working: 0,
-        idle: 1,
-        break: 2,
-        offline: 3,
-        archived: 4,
-      };
-      if (sortMode === "name") {
-        return left.name.localeCompare(right.name);
-      }
-      if (sortMode === "xp") {
-        return (right.stats_xp ?? 0) - (left.stats_xp ?? 0);
-      }
-      if (sortMode === "created") {
-        return (right.created_at ?? 0) - (left.created_at ?? 0);
-      }
-      if (sortMode === "archived") {
-        return (right.archived_at ?? 0) - (left.archived_at ?? 0);
-      }
-      const leftStatus = statusOrder[left.status] ?? 5;
-      const rightStatus = statusOrder[right.status] ?? 5;
-      if (leftStatus !== rightStatus) return leftStatus - rightStatus;
-      return left.name.localeCompare(right.name);
-    });
-  }, [agents, deptTab, search, sortMode, statusFilter]);
+  const sortedAgents = useMemo(
+    () =>
+      filterAndSortAgents(agents, { deptTab, statusFilter, search }, sortMode),
+    [agents, deptTab, search, sortMode, statusFilter],
+  );
 
   const openCreateAgent = useCallback(() => {
     setSetupWizard({ open: true, mode: "create", sourceAgent: null });
