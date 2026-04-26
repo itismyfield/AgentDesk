@@ -310,6 +310,9 @@ async fn handle_reaction_remove(
 
     match action {
         RemovedControlReaction::CancelQueuedTurn => {
+            // The 🚫 reaction added by `apply_queue_exit_feedback`
+            // (see `mod.rs:queue_exit_feedback_emoji`) is the only feedback
+            // we surface here — no extra reply, per operator preference.
             let removed = mailbox_cancel_soft_intervention(
                 &data.shared,
                 &data.provider,
@@ -324,14 +327,6 @@ async fn handle_reaction_remove(
                     removed_reaction.message_id,
                     channel_id
                 );
-                send_reaction_control_reply(
-                    ctx,
-                    &data.shared,
-                    channel_id,
-                    removed_reaction.message_id,
-                    "📭 Queued turn cancelled.",
-                )
-                .await;
             }
         }
         RemovedControlReaction::StopActiveTurn => {
