@@ -994,7 +994,7 @@ fn base_exec_args(
     args
 }
 
-fn codex_reasoning_summary(item: &Value) -> Option<String> {
+pub(crate) fn codex_reasoning_summary(item: &Value) -> Option<String> {
     item.get("summary")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.first())

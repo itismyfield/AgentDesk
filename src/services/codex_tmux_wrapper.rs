@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::services::codex::{
     CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-    codex_background_event_summary,
+    codex_background_event_summary, codex_reasoning_summary,
 };
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
@@ -571,6 +571,27 @@ fn handle_item_completed(
                     }
                 }),
             )?;
+        }
+        "reasoning" => {
+            // #1199 follow-up: surface codex reasoning to the unified
+            // turn_bridge consumer by re-emitting it as a Claude-style
+            // assistant + thinking content block. Without this the codex
+            // tmux wrapper silently drops the reasoning event and CoT never
+            // reaches the body code-fence path patched in #1199.
+            if let Some(summary) = codex_reasoning_summary(item) {
+                emit_json_line(
+                    output,
+                    serde_json::json!({
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "thinking",
+                                "thinking": summary,
+                            }]
+                        }
+                    }),
+                )?;
+            }
         }
         _ => {}
     }
