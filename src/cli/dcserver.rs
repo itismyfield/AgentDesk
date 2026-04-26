@@ -1279,6 +1279,30 @@ pub fn handle_dcserver(token: Option<String>) {
 
                 match crate::db::postgres::connect_and_migrate(&ad_config).await {
                     Ok(Some(pool)) => {
+                        if let Some(root) = runtime_root.as_ref() {
+                            match crate::services::discord_config_audit::load_runtime_config(root)
+                                .and_then(|loaded| {
+                                    crate::services::discord_config_audit::audit_and_reconcile_config_only(
+                                        root,
+                                        loaded.config,
+                                        loaded.path,
+                                        loaded.existed,
+                                        &legacy_scan,
+                                        false,
+                                    )
+                                })
+                            {
+                                Ok(outcome) => {
+                                    ad_config = outcome.config;
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "  ✖ Config audit after PostgreSQL migration failed: {error}"
+                                    );
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
                         let startup_pg_pool =
                             match crate::db::postgres::connect_for_startup(&ad_config).await {
                                 Ok(pool) => pool,
