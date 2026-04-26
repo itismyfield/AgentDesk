@@ -7,15 +7,42 @@ use crate::utils::format::expand_tilde_path;
 
 mod apply;
 mod plan;
-mod postgres_cutover;
 mod source;
 #[cfg(test)]
 mod tests;
 
 use apply::apply_import_plan;
 use plan::build_import_plan;
-pub use postgres_cutover::{PostgresCutoverArgs, cmd_migrate_postgres_cutover};
 use source::resolve_source_root;
+
+#[derive(Clone, Debug, Args)]
+pub struct PostgresCutoverArgs {
+    /// Preview counts and blockers without writing files or importing into PostgreSQL
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Optional directory for JSONL archive snapshots
+    #[arg(long = "archive-dir", value_name = "PATH")]
+    pub archive_dir: Option<String>,
+    /// Skip PostgreSQL import and only report/export the SQLite history.
+    #[arg(long)]
+    pub skip_pg_import: bool,
+    /// Acknowledge and proceed even when SQLite still has unsent message_outbox rows.
+    #[arg(long = "allow-unsent-messages")]
+    pub allow_unsent_messages: bool,
+    /// Override the runtime-active safety check for archive-only cutover.
+    #[arg(long = "allow-runtime-active")]
+    pub allow_runtime_active: bool,
+}
+
+#[deprecated(
+    note = "production cutover completed on 2026-04-19; the legacy SQLite-to-PostgreSQL cutover implementation is intentionally retired from normal builds."
+)]
+pub async fn cmd_migrate_postgres_cutover(_args: PostgresCutoverArgs) -> Result<(), String> {
+    Err(
+        "postgres-cutover is retired: production cutover completed on 2026-04-19, and the legacy SQLite-to-PostgreSQL importer is no longer compiled into AgentDesk. Restore src/cli/migrate/postgres_cutover.rs from history for an explicitly approved emergency re-cutover."
+            .to_string(),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolPolicyMode {

@@ -1208,7 +1208,8 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
     assert_eq!(history[3]["item_type"], "Assistant");
 
     let db_path = runtime.path().join("data").join("agentdesk.sqlite");
-    let conn = libsql_rusqlite::Connection::open(&db_path).unwrap();
+    let conn = crate::db::open_read_only_connection(&db_path).unwrap();
+    let session_key = session_map[0]["db_session_key"].as_str().unwrap();
     let (agent_id, provider, status, model, cwd, session_info, last_heartbeat): (
         String,
         String,
@@ -1220,7 +1221,7 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
     ) =
         conn.query_row(
             "SELECT agent_id, provider, status, model, cwd, session_info, last_heartbeat FROM sessions WHERE session_key = ?1",
-            libsql_rusqlite::params![session_map[0]["db_session_key"].as_str().unwrap()],
+            [session_key],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -1300,7 +1301,8 @@ fn session_import_keeps_claude_runtime_session_id_null_for_running_source_sessio
     let audit_root = audit_root(&plan);
     let session_map = read_json_value(&audit_root.join("session-map.json"));
     let db_path = runtime.path().join("data").join("agentdesk.sqlite");
-    let conn = libsql_rusqlite::Connection::open(&db_path).unwrap();
+    let conn = crate::db::open_read_only_connection(&db_path).unwrap();
+    let session_key = session_map[0]["db_session_key"].as_str().unwrap();
     let (status, claude_session_id, session_info, last_heartbeat): (
         String,
         Option<String>,
@@ -1309,7 +1311,7 @@ fn session_import_keeps_claude_runtime_session_id_null_for_running_source_sessio
     ) = conn
         .query_row(
             "SELECT status, claude_session_id, session_info, last_heartbeat FROM sessions WHERE session_key = ?1",
-            libsql_rusqlite::params![session_map[0]["db_session_key"].as_str().unwrap()],
+            [session_key],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
