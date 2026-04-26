@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 
 use crate::db::Db;
 use crate::services::discord::health;
+use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
 
 use super::AppState;
@@ -75,6 +76,13 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
+    // #1203: surface free disk on the runtime partition. ENOSPC silently
+    // breaks inflight state writes and tool buffers; a numeric signal lets
+    // the dashboard / `agentdesk doctor` warn before we hit the cliff.
+    let disk_probe_path =
+        crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let disk_snapshot = disk_monitor::probe(&disk_probe_path);
+
     let outbox_stats = load_dispatch_outbox_stats(state.sqlite_db(), state.pg_pool_ref()).await;
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
@@ -128,6 +136,15 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
                 outbox_age
             )));
         }
+        if let Some(snapshot) = disk_snapshot
+            && snapshot.is_low()
+        {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!(format!(
+                "disk_low_free_bytes:{}",
+                snapshot.free_bytes
+            )));
+        }
         let pipeline_override_warnings = pipeline_override_report
             .as_ref()
             .and_then(|value| value["warnings_count"].as_u64())
@@ -147,6 +164,12 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         json["dashboard"] = serde_json::json!(dashboard_ok);
         json["server_up"] = serde_json::json!(server_up);
         json["outbox_age"] = serde_json::json!(outbox_age);
+        if let Some(snapshot) = disk_snapshot {
+            json["disk_free_bytes"] = serde_json::json!(snapshot.free_bytes);
+            json["disk_total_bytes"] = serde_json::json!(snapshot.total_bytes);
+            json["disk_used_pct"] = serde_json::json!(snapshot.used_pct());
+            json["disk_low"] = serde_json::json!(snapshot.is_low());
+        }
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
@@ -190,6 +213,12 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             "watcher_count": 0,
             "recovery_duration": 0.0
         });
+        if let Some(snapshot) = disk_snapshot {
+            json["disk_free_bytes"] = serde_json::json!(snapshot.free_bytes);
+            json["disk_total_bytes"] = serde_json::json!(snapshot.total_bytes);
+            json["disk_used_pct"] = serde_json::json!(snapshot.used_pct());
+            json["disk_low"] = serde_json::json!(snapshot.is_low());
+        }
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
