@@ -58,7 +58,7 @@
 | `cli::migrate` | `src/cli/migrate.rs` | 321 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
-| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7571 | giant-file |
+| `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7669 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::monitoring` | `src/cli/monitoring.rs` | 141 |  |
 | `cli::run` | `src/cli/run.rs` | 433 |  |
@@ -75,7 +75,7 @@
 | `db::kanban` | `src/db/kanban.rs` | 487 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1421 | giant-file |
-| `db::schema` | `src/db/schema.rs` | 3170 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 3195 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1246 | giant-file |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 291 |  |
@@ -123,7 +123,7 @@
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 475 |  |
-| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1441 | giant-file |
+| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1450 | giant-file |
 | `kanban` | `src/kanban.rs` | 3794 | giant-file |
 | `launch` | `src/launch.rs` | 60 |  |
 | `logging` | `src/logging.rs` | 160 |  |
@@ -155,9 +155,9 @@
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 5291 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 97 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5792 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2610 | giant-file |
-| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1499 | giant-file |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 6094 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2882 | giant-file |
+| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1506 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 3535 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |

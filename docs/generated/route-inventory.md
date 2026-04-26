@@ -106,10 +106,10 @@
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:112` | `src/server/routes/domains/ops.rs:99` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:62` | `src/server/routes/domains/ops.rs:98` |
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:674` | `src/server/routes/domains/access.rs:29` |
-| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1304` | `src/server/routes/domains/ops.rs:37` |
+| `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1311` | `src/server/routes/domains/ops.rs:37` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1896` | `src/server/routes/domains/admin.rs:64` |
-| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:1244` | `src/server/routes/domains/ops.rs:33` |
-| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:1443` | `src/server/routes/domains/ops.rs:38` |
+| `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:1251` | `src/server/routes/domains/ops.rs:33` |
+| `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:1450` | `src/server/routes/domains/ops.rs:38` |
 | `POST` | `/api/issues` | `deprecated_create_issue` | `src/server/routes/domains/integrations.rs:73` | `src/server/routes/domains/integrations.rs:20` |
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:356` | `src/server/routes/domains/kanban.rs:13` |
 | `POST` | `/api/kanban-cards` | `kanban::create_card` | `src/server/routes/kanban.rs:419` | `src/server/routes/domains/kanban.rs:13` |
