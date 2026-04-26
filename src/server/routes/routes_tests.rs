@@ -1159,6 +1159,69 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery_pg() {
 }
 
 #[tokio::test]
+async fn health_wait_script_rejects_non_reconcile_degraded_server_up_response() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router(db.clone(), engine, Some(harness.registry())),
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
+             VALUES (?1, 'notify', 'pending', datetime('now', '-5 minutes'))",
+            ["dispatch-degraded"],
+        )
+        .unwrap();
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let public_json: serde_json::Value = reqwest::get(format!("http://{addr}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(public_json["status"], "degraded");
+    assert_eq!(public_json["server_up"], true);
+    assert_eq!(public_json["fully_recovered"], true);
+
+    let defaults_path = format!("{}/scripts/_defaults.sh", env!("CARGO_MANIFEST_DIR"));
+    let port = addr.port();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new("bash")
+            .arg("-lc")
+            .arg(format!(
+                ". \"{defaults_path}\"; wait_for_http_service_health test-health {port} 1 0 0 1",
+            ))
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected wait_for_http_service_health to reject non-reconcile degraded server_up=true; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
 async fn health_wait_script_rejects_unhealthy_server_up_response_pg() {
     let db = test_db();
     let pg_db = TestPostgresDb::create().await;
