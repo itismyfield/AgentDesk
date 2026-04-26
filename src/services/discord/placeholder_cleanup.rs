@@ -1,19 +1,27 @@
 use poise::serenity_prelude::{ChannelId, MessageId};
+use std::time::{Duration, Instant};
 
 use crate::services::provider::ProviderKind;
 
+const PLACEHOLDER_CLEANUP_TTL: Duration = Duration::from_secs(60 * 60);
+const PLACEHOLDER_CLEANUP_CAPACITY: usize = 512;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlaceholderCleanupOperation {
-    Delete,
+    DeleteTerminal,
+    DeleteNonterminal,
     EditTerminal,
+    EditPreserve,
     EditHandoff,
 }
 
 impl PlaceholderCleanupOperation {
     pub(super) fn as_str(self) -> &'static str {
         match self {
-            Self::Delete => "delete",
+            Self::DeleteTerminal => "delete_terminal",
+            Self::DeleteNonterminal => "delete_nonterminal",
             Self::EditTerminal => "edit_terminal",
+            Self::EditPreserve => "edit_preserve",
             Self::EditHandoff => "edit_handoff",
         }
     }
@@ -76,19 +84,33 @@ struct PlaceholderCleanupKey {
     message_id: MessageId,
 }
 
+#[derive(Debug, Clone)]
+struct StoredPlaceholderCleanupRecord {
+    record: PlaceholderCleanupRecord,
+    recorded_at: Instant,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderCleanupRegistry {
-    records: dashmap::DashMap<PlaceholderCleanupKey, PlaceholderCleanupRecord>,
+    records: dashmap::DashMap<PlaceholderCleanupKey, StoredPlaceholderCleanupRecord>,
 }
 
 impl PlaceholderCleanupRegistry {
     pub(super) fn record(&self, record: PlaceholderCleanupRecord) {
+        self.prune_expired();
         let key = PlaceholderCleanupKey {
             provider: record.provider.as_str().to_string(),
             channel_id: record.channel_id,
             message_id: record.message_id,
         };
-        self.records.insert(key, record);
+        self.records.insert(
+            key,
+            StoredPlaceholderCleanupRecord {
+                record,
+                recorded_at: Instant::now(),
+            },
+        );
+        self.prune_capacity();
     }
 
     pub(super) fn terminal_cleanup_committed(
@@ -97,17 +119,45 @@ impl PlaceholderCleanupRegistry {
         channel_id: ChannelId,
         message_id: MessageId,
     ) -> bool {
+        self.prune_expired();
         let key = PlaceholderCleanupKey {
             provider: provider.as_str().to_string(),
             channel_id,
             message_id,
         };
-        self.records.get(&key).is_some_and(|record| {
+        self.records.get(&key).is_some_and(|stored| {
             matches!(
-                record.operation,
-                PlaceholderCleanupOperation::Delete | PlaceholderCleanupOperation::EditTerminal
-            ) && record.outcome.is_committed()
+                stored.record.operation,
+                PlaceholderCleanupOperation::DeleteTerminal
+                    | PlaceholderCleanupOperation::EditTerminal
+            ) && stored.record.outcome.is_committed()
         })
+    }
+
+    fn prune_expired(&self) {
+        let now = Instant::now();
+        self.records
+            .retain(|_, stored| now.duration_since(stored.recorded_at) <= PLACEHOLDER_CLEANUP_TTL);
+    }
+
+    fn prune_capacity(&self) {
+        let excess = self
+            .records
+            .len()
+            .saturating_sub(PLACEHOLDER_CLEANUP_CAPACITY);
+        if excess == 0 {
+            return;
+        }
+
+        let mut oldest: Vec<_> = self
+            .records
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().recorded_at))
+            .collect();
+        oldest.sort_by_key(|(_, recorded_at)| *recorded_at);
+        for (key, _) in oldest.into_iter().take(excess) {
+            self.records.remove(&key);
+        }
     }
 
     #[cfg(test)]
@@ -122,7 +172,30 @@ impl PlaceholderCleanupRegistry {
             channel_id,
             message_id,
         };
-        self.records.get(&key).map(|record| record.clone())
+        self.records.get(&key).map(|stored| stored.record.clone())
+    }
+
+    #[cfg(test)]
+    fn force_age_for_test(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        age: Duration,
+    ) {
+        let key = PlaceholderCleanupKey {
+            provider: provider.as_str().to_string(),
+            channel_id,
+            message_id,
+        };
+        if let Some(mut stored) = self.records.get_mut(&key) {
+            stored.recorded_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+        }
+    }
+
+    #[cfg(test)]
+    fn len_for_test(&self) -> usize {
+        self.records.len()
     }
 }
 
@@ -191,7 +264,7 @@ mod tests {
             channel_id,
             message_id,
             tmux_session_name: Some("AgentDesk-codex-test".to_string()),
-            operation: PlaceholderCleanupOperation::Delete,
+            operation: PlaceholderCleanupOperation::DeleteTerminal,
             outcome: PlaceholderCleanupOutcome::Succeeded,
             source: "test",
         });
@@ -202,7 +275,7 @@ mod tests {
                 .latest(&provider, channel_id, message_id)
                 .expect("recorded")
                 .operation,
-            PlaceholderCleanupOperation::Delete
+            PlaceholderCleanupOperation::DeleteTerminal
         );
     }
 
@@ -223,5 +296,85 @@ mod tests {
         });
 
         assert!(!registry.terminal_cleanup_committed(&provider, channel_id, message_id));
+    }
+
+    #[test]
+    fn preserve_edit_and_nonterminal_delete_do_not_count_as_terminal_cleanup() {
+        let registry = PlaceholderCleanupRegistry::default();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(10);
+
+        for (message_id, operation) in [
+            (
+                MessageId::new(21),
+                PlaceholderCleanupOperation::EditPreserve,
+            ),
+            (
+                MessageId::new(22),
+                PlaceholderCleanupOperation::DeleteNonterminal,
+            ),
+        ] {
+            registry.record(PlaceholderCleanupRecord {
+                provider: provider.clone(),
+                channel_id,
+                message_id,
+                tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+                operation,
+                outcome: PlaceholderCleanupOutcome::Succeeded,
+                source: "test",
+            });
+
+            assert!(!registry.terminal_cleanup_committed(&provider, channel_id, message_id));
+        }
+    }
+
+    #[test]
+    fn registry_prunes_expired_and_capacity_records() {
+        let registry = PlaceholderCleanupRegistry::default();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(10);
+        let expired_message_id = MessageId::new(20);
+        registry.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id: expired_message_id,
+            tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+            operation: PlaceholderCleanupOperation::DeleteTerminal,
+            outcome: PlaceholderCleanupOutcome::Succeeded,
+            source: "test",
+        });
+        registry.force_age_for_test(
+            &provider,
+            channel_id,
+            expired_message_id,
+            PLACEHOLDER_CLEANUP_TTL + Duration::from_secs(1),
+        );
+        registry.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id: MessageId::new(21),
+            tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+            operation: PlaceholderCleanupOperation::DeleteTerminal,
+            outcome: PlaceholderCleanupOutcome::Succeeded,
+            source: "test",
+        });
+        assert!(
+            registry
+                .latest(&provider, channel_id, expired_message_id)
+                .is_none()
+        );
+
+        for offset in 0..(PLACEHOLDER_CLEANUP_CAPACITY + 10) {
+            registry.record(PlaceholderCleanupRecord {
+                provider: provider.clone(),
+                channel_id,
+                message_id: MessageId::new(1_000 + offset as u64),
+                tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+                operation: PlaceholderCleanupOperation::DeleteTerminal,
+                outcome: PlaceholderCleanupOutcome::Succeeded,
+                source: "test",
+            });
+        }
+        assert!(registry.len_for_test() <= PLACEHOLDER_CLEANUP_CAPACITY);
     }
 }

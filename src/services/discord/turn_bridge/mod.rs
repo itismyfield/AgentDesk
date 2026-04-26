@@ -1853,6 +1853,7 @@ pub(super) fn spawn_turn_bridge(
                     detail
                 );
             }
+            let handoff_committed = handoff_outcome.is_committed();
             shared_owned.placeholder_cleanup.record(
                 super::placeholder_cleanup::PlaceholderCleanupRecord {
                     provider: provider.clone(),
@@ -1865,10 +1866,17 @@ pub(super) fn spawn_turn_bridge(
                 },
             );
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ✓ tmux handoff complete, placeholder cleaned up, watcher handles response (channel {})",
-                channel_id
-            );
+            if handoff_committed {
+                tracing::warn!(
+                    "  [{ts}] ✓ tmux handoff complete, placeholder updated, watcher handles response (channel {})",
+                    channel_id
+                );
+            } else {
+                tracing::warn!(
+                    "  [{ts}] ⚠ tmux handoff complete, but placeholder update failed; watcher still handles response (channel {})",
+                    channel_id
+                );
+            }
         } else {
             // Check for stale resume failure BEFORE any other response handling.
             // This path is driven by explicit error/result events, not assistant text.
