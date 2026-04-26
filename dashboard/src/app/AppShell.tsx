@@ -761,7 +761,7 @@ export default function AppShell({
             backdropFilter: "blur(14px)",
           }}
         >
-          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:flex-nowrap">
             <div className="min-w-0 basis-full sm:flex-1">
               <div
                 data-testid="topbar-breadcrumb"
