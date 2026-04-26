@@ -378,7 +378,14 @@ pub async fn catalog(
         }
     };
     let include_stale = params.include_stale.unwrap_or(false);
-    let metadata = match load_skill_metadata_pg(pool).await {
+    // Same pattern as the ranking endpoint: metadata + usage are independent
+    // PG queries, so awaiting them concurrently keeps the catalog endpoint
+    // bounded by the slower of the two instead of their sum.
+    let (metadata_result, usage_result) = tokio::join!(
+        load_skill_metadata_pg(pool),
+        collect_skill_usage_pg(pool, None),
+    );
+    let metadata = match metadata_result {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -387,7 +394,7 @@ pub async fn catalog(
             );
         }
     };
-    let usage = match collect_skill_usage_pg(pool, None).await {
+    let usage = match usage_result {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -492,7 +499,15 @@ pub async fn ranking(
     let window = params.window.as_deref().unwrap_or("7d");
     let limit = params.limit.unwrap_or(20);
     let include_stale = params.include_stale.unwrap_or(false);
-    let metadata = match load_skill_metadata_pg(pool).await {
+    // metadata + usage queries don't depend on each other and are the bulk of
+    // the endpoint latency. Run them concurrently so the wall-clock time is
+    // max(metadata, usage) instead of metadata + usage. Disk sync stays
+    // sequential because metadata reads the skills table this writes to.
+    let (metadata_result, usage_result) = tokio::join!(
+        load_skill_metadata_pg(pool),
+        collect_skill_usage_pg(pool, ranking_days(window)),
+    );
+    let metadata = match metadata_result {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -501,7 +516,7 @@ pub async fn ranking(
             );
         }
     };
-    let usage = match collect_skill_usage_pg(pool, ranking_days(window)).await {
+    let usage = match usage_result {
         Ok(data) => data,
         Err(e) => {
             return (

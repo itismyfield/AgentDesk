@@ -933,8 +933,13 @@ export default function StatsPageView({
       setAnalyticsError(null);
       setSkillError(null);
 
+      // The Refresh button increments `reloadKey`. When it's > 0 we treat
+      // the fetch as user-initiated and bypass the browser cache (the
+      // backend now ships SWR Cache-Control on the analytics endpoint, so
+      // a default re-entry would otherwise be served by the browser cache).
+      const forceRefresh = reloadKey > 0;
       const [analyticsResult, skillResult] = await Promise.allSettled([
-        getTokenAnalytics(period, { signal: controller.signal }),
+        getTokenAnalytics(period, { signal: controller.signal, forceRefresh }),
         getSkillRanking(period, 16),
       ]);
       if (!active) return;

@@ -634,11 +634,18 @@ export async function getStats(officeId?: string): Promise<DashboardStats> {
 
 export async function getTokenAnalytics(
   period: "7d" | "30d" | "90d" = "30d",
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; forceRefresh?: boolean },
 ): Promise<TokenAnalyticsResponse> {
+  // The endpoint now ships with `Cache-Control: max-age=15, swr=300` so a
+  // background re-entry to /stats can paint instantly. The Refresh button
+  // and any other "user explicitly asked for fresh data" caller passes
+  // forceRefresh=true so we bypass the browser cache via fetch's
+  // `cache: "reload"` directive — restores the explicit-refresh contract
+  // Codex flagged on PR #1258.
   return request(`/api/token-analytics?period=${period}`, {
     signal: opts?.signal,
     timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
+    cache: opts?.forceRefresh ? "reload" : "default",
   });
 }
 
