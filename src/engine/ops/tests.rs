@@ -9,11 +9,14 @@ use super::{
     review_state_sync_on_conn,
 };
 
+macro_rules! sqlite_params {
+    ($($param:expr),* $(,)?) => {
+        ($(&$param,)*)
+    };
+}
+
 fn test_db() -> Db {
-    let conn = libsql_rusqlite::Connection::open_in_memory().unwrap(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-    crate::db::schema::migrate(&conn).unwrap();
-    crate::db::wrap_conn(conn)
+    crate::db::test_db()
 }
 
 fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -367,9 +370,9 @@ fn test_agents_facade_get_and_primary_channel() {
 #[test]
 fn test_review_get_verdict_facade() {
     let db = test_db();
+    seed_card_for_review(&db, "card-review-facade");
     {
         let conn = db.separate_conn().unwrap();
-        seed_card_for_review(&conn, "card-review-facade");
         conn.execute(
             "INSERT INTO card_review_state (card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision, decided_by, decided_at, review_entered_at, updated_at) \
              VALUES ('card-review-facade', 2, 'suggestion_pending', 'dispatch-1', 'improve', 'accept', 'pmd', datetime('now'), datetime('now'), datetime('now'))",
@@ -870,7 +873,7 @@ fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
              VALUES (?1, ?2, ?3, 'implementation', 'dispatched', 'Queue Dispatch', ?4, datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![ // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+            sqlite_params![
                 "dispatch-log",
                 "card-log",
                 "ag-queue",
@@ -1062,8 +1065,8 @@ fn js_set_status_warns_when_bypassing_active_dispatch_gate() {
 }
 
 /// Seed a minimal kanban_cards row for FK satisfaction in review state tests.
-fn seed_card_for_review(conn: &libsql_rusqlite::Connection, card_id: &str) {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+fn seed_card_for_review(db: &Db, card_id: &str) {
+    let conn = db.separate_conn().unwrap();
     conn.execute(
         "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) \
          VALUES ('agent-t', 'Test', '0', '0')",
@@ -1082,8 +1085,8 @@ fn seed_card_for_review(conn: &libsql_rusqlite::Connection, card_id: &str) {
 #[test]
 fn test_review_state_sync_idle() {
     let db = test_db();
+    seed_card_for_review(&db, "rs-1");
     let conn = db.separate_conn().unwrap();
-    seed_card_for_review(&conn, "rs-1");
     // Seed existing review state with pending_dispatch_id
     conn.execute(
         "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
@@ -1116,8 +1119,8 @@ fn test_review_state_sync_idle() {
 #[test]
 fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
     let db = test_db();
+    seed_card_for_review(&db, "rs-1b");
     let conn = db.separate_conn().unwrap();
-    seed_card_for_review(&conn, "rs-1b");
     conn.execute(
         "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
          VALUES ('rs-1b', 'suggestion_pending', 'disp-2', datetime('now'))",
@@ -1157,8 +1160,8 @@ fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
 #[test]
 fn test_review_state_sync_reviewing() {
     let db = test_db();
+    seed_card_for_review(&db, "rs-2");
     let conn = db.separate_conn().unwrap();
-    seed_card_for_review(&conn, "rs-2");
 
     let result = review_state_sync_on_conn(
         &conn,
@@ -1186,8 +1189,8 @@ fn test_review_state_sync_reviewing() {
 #[test]
 fn test_review_state_sync_clear_verdict() {
     let db = test_db();
+    seed_card_for_review(&db, "rs-3");
     let conn = db.separate_conn().unwrap();
-    seed_card_for_review(&conn, "rs-3");
     conn.execute(
         "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) \
          VALUES ('rs-3', 'reviewing', 'improve', datetime('now'))",
@@ -1219,10 +1222,7 @@ fn test_review_state_sync_clear_verdict() {
 #[test]
 fn test_review_state_sync_json_wrapper() {
     let db = test_db();
-    {
-        let conn = db.separate_conn().unwrap();
-        seed_card_for_review(&conn, "rs-4");
-    }
+    seed_card_for_review(&db, "rs-4");
     let result = review_state_sync(
         &db,
         r#"{"card_id":"rs-4","state":"suggestion_pending","last_verdict":"improve","pending_dispatch_id":"d-99"}"#,

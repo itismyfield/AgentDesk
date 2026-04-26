@@ -1,7 +1,6 @@
 use super::*;
 use axum::body::{Body, HttpBody as _};
 use axum::http::{Request, StatusCode};
-use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::Row;
 use std::ffi::OsString;
@@ -13,6 +12,12 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use tower::ServiceExt;
+
+macro_rules! sqlite_params {
+    ($($param:expr),* $(,)?) => {
+        ($(&$param,)*)
+    };
+}
 
 fn test_db() -> Db {
     crate::db::test_db()
@@ -4731,7 +4736,7 @@ async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns
                 ?1, 'agent-manual-backlog', 'codex', 'working', 'dispatch-manual-backlog',
                 datetime('now', '-9 minutes'), datetime('now', '-9 minutes')
             )",
-            libsql_rusqlite::params![session_key],
+            sqlite_params![session_key],
         )
         .unwrap();
         conn.execute(
@@ -4882,7 +4887,7 @@ async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns
             "SELECT status, active_dispatch_id
              FROM sessions
              WHERE session_key = ?1",
-            libsql_rusqlite::params![session_key],
+            sqlite_params![session_key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -7534,7 +7539,7 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
         .unwrap()
         .execute(
             "INSERT INTO agents (id, name) VALUES (?1, ?2)",
-            libsql_rusqlite::params!["adk-backend", "ADK Backend"],
+            sqlite_params!["adk-backend", "ADK Backend"],
         )
         .unwrap();
     let app = test_api_router(db.clone(), engine, None);
@@ -7799,7 +7804,7 @@ async fn github_issues_create_canonical_path_returns_created_issue() {
         .unwrap()
         .execute(
             "INSERT INTO agents (id, name) VALUES (?1, ?2)",
-            libsql_rusqlite::params!["adk-backend", "ADK Backend"],
+            sqlite_params!["adk-backend", "ADK Backend"],
         )
         .unwrap();
     let app = test_api_router(db, engine, None);
@@ -7872,7 +7877,7 @@ async fn sessions_tmux_output_http_route_returns_shape_for_seeded_session() {
             "INSERT INTO sessions
              (session_key, agent_id, provider, status, last_heartbeat, created_at)
              VALUES (?1, 'agent-1067-http', 'codex', 'working', datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![session_key.clone()],
+            sqlite_params![session_key.clone()],
         )
         .unwrap();
         session_id = conn
@@ -8488,7 +8493,7 @@ async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
         conn.execute(
             "INSERT INTO skills (id, name, description, source_path, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            libsql_rusqlite::params![
+            sqlite_params![
                 "stale-skill",
                 "stale-skill",
                 "Stale skill description",
@@ -8504,13 +8509,13 @@ async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
         conn.execute(
             "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
              VALUES (?1, ?2, ?3, datetime('now'))",
-            libsql_rusqlite::params!["stale-skill", "agent-stale", "session-stale"],
+            sqlite_params!["stale-skill", "agent-stale", "session-stale"],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
              VALUES (?1, ?2, ?3, datetime('now'))",
-            libsql_rusqlite::params!["live-skill", "agent-live", "session-live"],
+            sqlite_params!["live-skill", "agent-live", "session-live"],
         )
         .unwrap();
     }
@@ -8593,7 +8598,7 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         conn.execute(
             "INSERT INTO skills (id, name, description, source_path, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            libsql_rusqlite::params![
+            sqlite_params![
                 "stale-skill",
                 "stale-skill",
                 "Stale skill description",
@@ -8609,7 +8614,7 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         conn.execute(
             "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
              VALUES (?1, ?2, ?3, datetime('now'))",
-            libsql_rusqlite::params!["stale-skill", "agent-stale", "session-stale"],
+            sqlite_params!["stale-skill", "agent-stale", "session-stale"],
         )
         .unwrap();
     }
@@ -9463,7 +9468,7 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
         let conn = db.lock()?;
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![
+            sqlite_params![
                 "maintenance_job:maintenance.noop_heartbeat:next_run_ms",
                 "1700000000000"
             ],
@@ -9853,7 +9858,7 @@ async fn agent_quality_api_event_fallback_mini_rollup() -> Result<(), Box<dyn st
                     source_event_id, correlation_id, agent_id, provider, channel_id,
                     card_id, dispatch_id, event_type, payload_json, created_at
                  ) VALUES (?1, NULL, 'agent-1', 'codex', '555', NULL, NULL, ?2, '{}', datetime('now'))",
-                libsql_rusqlite::params![format!("evt-{i}"), etype],
+                sqlite_params![format!("evt-{i}"), etype],
             )?;
         }
     }
@@ -11260,7 +11265,7 @@ fn seed_card_with_status(db: &Db, card_id: &str, status: &str) {
     conn.execute(
         "INSERT OR REPLACE INTO kanban_cards (id, title, status, priority, created_at, updated_at) \
              VALUES (?1, 'test', ?2, 'medium', datetime('now'), datetime('now'))",
-        libsql_rusqlite::params![card_id, status],
+        sqlite_params![card_id, status],
     )
     .unwrap();
 }
@@ -11361,7 +11366,7 @@ fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str,
         ) VALUES (
             ?1, ?2, ?3, 'medium', ?4, 'test-repo', ?5, datetime('now'), datetime('now')
         )",
-        libsql_rusqlite::params![
+        sqlite_params![
             card_id,
             format!("Issue #{issue_number}"),
             status,
@@ -11374,7 +11379,8 @@ fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str,
 
 #[test]
 fn auto_queue_schema_migration_drops_legacy_max_concurrent_per_agent_column() {
-    let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+    let db = test_db();
+    let conn = db.separate_conn().unwrap();
     conn.execute_batch(
         "PRAGMA foreign_keys=ON;
          CREATE TABLE kanban_cards (id TEXT PRIMARY KEY);
@@ -11474,7 +11480,7 @@ fn seed_in_progress_stall_case(
             ?1, ?2, 'in_progress', 'medium', ?3, 'test-repo',
             datetime('now', ?4), datetime('now', ?4), datetime('now', ?5)
         )",
-        libsql_rusqlite::params![card_id, title, agent_id, started_offset, updated_offset,],
+        sqlite_params![card_id, title, agent_id, started_offset, updated_offset,],
     )
     .unwrap();
 
@@ -11485,12 +11491,12 @@ fn seed_in_progress_stall_case(
             ) VALUES (
                 ?1, ?2, ?3, 'implementation', 'dispatched', ?4, datetime('now', ?5), datetime('now', ?5)
             )",
-            libsql_rusqlite::params![dispatch_id, card_id, agent_id, format!("{title} Dispatch"), dispatch_offset],
+            sqlite_params![dispatch_id, card_id, agent_id, format!("{title} Dispatch"), dispatch_offset],
         )
         .unwrap();
         conn.execute(
             "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = ?2",
-            libsql_rusqlite::params![dispatch_id, card_id],
+            sqlite_params![dispatch_id, card_id],
         )
         .unwrap();
     }
@@ -11515,7 +11521,7 @@ fn seed_review_e2e_case(
             ?1, ?2, 'review', 'medium', ?3, 'test-repo',
             datetime('now', ?4), datetime('now', ?4), datetime('now', ?4)
         )",
-        libsql_rusqlite::params![card_id, title, agent_id, review_offset],
+        sqlite_params![card_id, title, agent_id, review_offset],
     )
     .unwrap();
     conn.execute(
@@ -11524,7 +11530,7 @@ fn seed_review_e2e_case(
         ) VALUES (
             ?1, ?2, ?3, 'e2e-test', ?4, ?5, datetime('now', ?6), datetime('now', ?6)
         )",
-        libsql_rusqlite::params![
+        sqlite_params![
             dispatch_id,
             card_id,
             agent_id,
@@ -11536,7 +11542,7 @@ fn seed_review_e2e_case(
     .unwrap();
     conn.execute(
         "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = ?2",
-        libsql_rusqlite::params![dispatch_id, card_id],
+        sqlite_params![dispatch_id, card_id],
     )
     .unwrap();
 }
@@ -11789,16 +11795,15 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             |row| row.get(0),
         )
         .unwrap();
-    let first_confirm_marker: Option<String> = conn
+    let first_confirm_marker_count: i64 = conn
         .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
+            "SELECT COUNT(*) FROM kv_meta WHERE key = ?1",
             [format!(
                 "runtime_supervisor:orphan_confirm:{}",
                 "dispatch-orphan-330"
             )],
             |row| row.get(0),
         )
-        .optional()
         .unwrap();
     let (first_action, first_note): (String, Option<String>) = conn
         .query_row(
@@ -11822,7 +11827,7 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
         "first orphan tick must keep the dispatch pending until confirm succeeds"
     );
     assert!(
-        first_confirm_marker.is_some(),
+        first_confirm_marker_count > 0,
         "first orphan tick must persist a confirm marker"
     );
     assert_eq!(first_action, "Probe");
@@ -11871,16 +11876,15 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             |row| row.get(0),
         )
         .unwrap();
-    let remaining_confirm_marker: Option<String> = conn
+    let remaining_confirm_marker_count: i64 = conn
         .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
+            "SELECT COUNT(*) FROM kv_meta WHERE key = ?1",
             [format!(
                 "runtime_supervisor:orphan_confirm:{}",
                 "dispatch-orphan-330"
             )],
             |row| row.get(0),
         )
-        .optional()
         .unwrap();
 
     assert_eq!(
@@ -11910,7 +11914,7 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
     assert_eq!(chosen_action, "Resume");
     assert_eq!(audit_dispatch_id.as_deref(), Some("dispatch-orphan-330"));
     assert!(
-        remaining_confirm_marker.is_none(),
+        remaining_confirm_marker_count == 0,
         "confirmed orphan recovery must clear the confirm marker"
     );
 }
@@ -11974,16 +11978,15 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
             |row| row.get(0),
         )
         .unwrap();
-    let first_confirm_marker: Option<String> = conn
+    let first_confirm_marker_count: i64 = conn
         .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
+            "SELECT COUNT(*) FROM kv_meta WHERE key = ?1",
             [format!(
                 "runtime_supervisor:orphan_confirm:{}",
                 "dispatch-race-330"
             )],
             |row| row.get(0),
         )
-        .optional()
         .unwrap();
     let (first_action, first_note): (String, Option<String>) = conn
         .query_row(
@@ -12000,7 +12003,7 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
 
     assert_eq!(first_card_status, "in_progress");
     assert_eq!(first_dispatch_status, "pending");
-    assert!(first_confirm_marker.is_some());
+    assert!(first_confirm_marker_count > 0);
     assert_eq!(first_action, "Probe");
     assert!(
         first_note
@@ -12047,16 +12050,15 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let remaining_confirm_marker: Option<String> = conn
+    let remaining_confirm_marker_count: i64 = conn
         .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
+            "SELECT COUNT(*) FROM kv_meta WHERE key = ?1",
             [format!(
                 "runtime_supervisor:orphan_confirm:{}",
                 "dispatch-race-330"
             )],
             |row| row.get(0),
         )
-        .optional()
         .unwrap();
 
     assert_eq!(
@@ -12083,7 +12085,7 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
         "runtime_decisions audit must explain why the resume transition was skipped"
     );
     assert!(
-        remaining_confirm_marker.is_none(),
+        remaining_confirm_marker_count == 0,
         "race-guarded orphan recovery must clear the confirm marker after confirm completes"
     );
 }
@@ -13780,7 +13782,7 @@ async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
                 'completed', 'impl', ?1, ?2, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'),
                 datetime('now', '-10 minutes')
             )",
-            libsql_rusqlite::params![
+            sqlite_params![
                 serde_json::json!({
                     "worktree_path": worktree_path,
                     "branch": "wt/472-poison"
@@ -18454,7 +18456,7 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
             conn.execute(
                 "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
                  VALUES (?1, ?2, '{}')",
-                libsql_rusqlite::params!["agent-slot-expand", slot_index],
+                sqlite_params!["agent-slot-expand", slot_index],
             )
             .unwrap();
         }
@@ -18473,7 +18475,7 @@ async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
                 "INSERT INTO auto_queue_entries (
                     id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
                 ) VALUES (?1, 'run-slot-expand', ?2, 'agent-slot-expand', 'pending', ?3, ?4)",
-                libsql_rusqlite::params![
+                sqlite_params![
                     format!("entry-slot-expand-{thread_group}"),
                     format!("card-slot-expand-{thread_group}"),
                     priority_rank as i64,
@@ -19123,7 +19125,7 @@ fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
             "INSERT INTO kanban_cards (
                 id, repo_id, title, description, status, priority, assigned_agent_id, github_issue_number
              ) VALUES (?1, 'test-repo', ?2, ?3, 'ready', 'medium', ?4, ?5)",
-            libsql_rusqlite::params![card_id, title, description, agent_id, issue_num],
+            sqlite_params![card_id, title, description, agent_id, issue_num],
         )
         .unwrap();
         ids.push(card_id.to_string());
@@ -23948,7 +23950,7 @@ async fn activate_run_id_blocks_phase_gate_paused_runs() {
             "INSERT INTO auto_queue_phase_gates (
                 run_id, phase, status, dispatch_id, pass_verdict
              ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
-            libsql_rusqlite::params!["run-phase-gate-paused", 1, "pending",],
+            sqlite_params!["run-phase-gate-paused", 1, "pending",],
         )
         .unwrap();
     }
@@ -24042,7 +24044,7 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
             "INSERT INTO auto_queue_phase_gates (
                 run_id, phase, status, dispatch_id, pass_verdict
              ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
-            libsql_rusqlite::params!["run-resume-gate", 1, "failed",],
+            sqlite_params!["run-resume-gate", 1, "failed",],
         )
         .unwrap();
     }
@@ -24606,7 +24608,7 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
                  ELSE thread_group
              END
              WHERE run_id = ?3",
-            libsql_rusqlite::params![
+            sqlite_params![
                 generated_json["entries"][0]["id"].as_str().unwrap(),
                 generated_json["entries"][1]["id"].as_str().unwrap(),
                 run_id
@@ -24950,7 +24952,7 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
             conn.execute(
                 "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
                  VALUES (?1, 'test-repo', 'agent-terminal-recovery', ?2)",
-                libsql_rusqlite::params![run_id, status],
+                sqlite_params![run_id, status],
             )
             .unwrap();
         }
@@ -24980,7 +24982,7 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
             conn.execute(
                 "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) \
                  VALUES (?1, ?2, ?3, 'agent-terminal-recovery', 'pending')",
-                libsql_rusqlite::params![entry_id, run_id, card_id],
+                sqlite_params![entry_id, run_id, card_id],
             )
             .unwrap();
         }
@@ -25238,7 +25240,7 @@ fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolve
             "INSERT INTO auto_queue_phase_gates (
                 run_id, phase, status, dispatch_id, pass_verdict
              ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
-            libsql_rusqlite::params!["run-finished-gate", 1, "pending",],
+            sqlite_params!["run-finished-gate", 1, "pending",],
         )
         .unwrap();
     }
