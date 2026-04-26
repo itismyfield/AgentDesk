@@ -1138,33 +1138,27 @@ async fn health_detail_and_latest_endpoint_share_same_artifact_contract() {
     .unwrap();
 
     assert_eq!(
-        health_json["latest_startup_doctor"]["artifact_path"],
-        artifact_path_str,
+        health_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,
         "public health must report correct artifact_path"
     );
     assert_eq!(
-        detail_json["latest_startup_doctor"]["artifact_path"],
-        artifact_path_str,
+        detail_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,
         "detail health must report correct artifact_path"
     );
     assert_eq!(
-        latest_json["artifact_path"],
-        artifact_path_str,
+        latest_json["artifact_path"], artifact_path_str,
         "latest endpoint must report correct artifact_path"
     );
     assert_eq!(
-        health_json["latest_startup_doctor"]["detail_endpoint"],
-        "/api/doctor/startup/latest",
+        health_json["latest_startup_doctor"]["detail_endpoint"], "/api/doctor/startup/latest",
         "public health must expose detail_endpoint"
     );
     assert_eq!(
-        detail_json["latest_startup_doctor"]["detail_endpoint"],
-        "/api/doctor/startup/latest",
+        detail_json["latest_startup_doctor"]["detail_endpoint"], "/api/doctor/startup/latest",
         "detail health must expose detail_endpoint"
     );
     assert_eq!(
-        detail_json["latest_startup_doctor"]["followup_context"],
-        latest_json["followup_context"],
+        detail_json["latest_startup_doctor"]["followup_context"], latest_json["followup_context"],
         "followup_context must be consistent between detail and latest endpoint"
     );
 }
