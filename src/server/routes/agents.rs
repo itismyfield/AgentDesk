@@ -851,12 +851,24 @@ pub async fn agent_dispatched_sessions(
                 model, tokens, cwd, last_heartbeat, thread_channel_id
          FROM sessions
          WHERE agent_id = $1
-         -- Codex review (PR #1258, 4th pass): brand-new sessions have NULL
-         -- last_heartbeat. NULLS LAST sent them to the back, and the dedupe
-         -- below kept the older row for the same (channel, provider), so
-         -- live sessions could be hidden until their first heartbeat. Match
-         -- the rest of the codebase by ranking on COALESCE(heartbeat, created_at).
-         ORDER BY COALESCE(last_heartbeat, created_at) DESC NULLS LAST, id DESC",
+         -- Codex review (PR #1258, 4th + 8th pass): the dedupe below picks
+         -- the first row per (thread_channel_id, provider). Earlier we
+         -- ordered by COALESCE(last_heartbeat, created_at) so brand-new
+         -- rows weren't punished for a NULL heartbeat. The 8th-pass note
+         -- adds the 'working trumps everything' rule: a stale/disconnected
+         -- row that happens to be the newest for a thread shouldn't hide
+         -- a working dispatch. We emulate the SessionActivityResolver's
+         -- intent in SQL by ranking working/active rows first, then
+         -- falling back to recency. Approximate match — full effective
+         -- status still happens via SessionActivityResolver below.
+         ORDER BY
+             CASE
+                 WHEN status = 'working' THEN 0
+                 WHEN active_dispatch_id IS NOT NULL THEN 1
+                 ELSE 2
+             END,
+             COALESCE(last_heartbeat, created_at) DESC NULLS LAST,
+             id DESC",
     )
     .bind(&id)
     .fetch_all(pool)
