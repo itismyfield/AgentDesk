@@ -6,7 +6,7 @@ pub(crate) fn run(state: crate::bootstrap::BootstrapState) -> Result<()> {
 }
 
 async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
-    let crate::bootstrap::BootstrapState { config } = state;
+    let crate::bootstrap::BootstrapState { mut config } = state;
 
     let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
     if pipeline_path.exists() {
@@ -20,6 +20,26 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         .await
         .map_err(anyhow::Error::msg)
         .context("Failed to init PostgreSQL")?;
+
+    if let Some(root) = crate::config::runtime_root().as_ref() {
+        let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(root);
+        let loaded =
+            crate::services::discord_config_audit::load_runtime_config(root).map_err(|error| {
+                anyhow::anyhow!("Failed to reload config after PG migration: {error}")
+            })?;
+        config = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+            root,
+            loaded.config,
+            loaded.path,
+            loaded.existed,
+            &legacy_scan,
+            false,
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("Failed to persist config audit after PG migration: {error}")
+        })?
+        .config;
+    }
 
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .context("Failed to init policy engine")?;

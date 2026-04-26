@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
+use libsql_rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -1063,7 +1064,7 @@ pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRo
 }
 
 pub async fn query_agent_quality_summary(
-    _db: &Db,
+    db: &Db,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     days: i64,
@@ -1071,23 +1072,52 @@ pub async fn query_agent_quality_summary(
 ) -> Result<AgentQualitySummary> {
     let days = normalized_quality_days(days);
     let limit = normalized_quality_daily_limit(limit);
-    let Some(pool) = pg_pool else {
-        return Err(anyhow!(
-            "postgres pool unavailable for agent quality summary"
-        ));
+    let daily = if let Some(pool) = pg_pool {
+        match query_agent_quality_daily_pg(pool, Some(agent_id), days, limit).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!("[quality] postgres daily query failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
     };
-    let daily = query_agent_quality_daily_pg(pool, Some(agent_id), days, limit).await?;
+
+    let daily = if pg_pool.is_some() {
+        daily
+    } else {
+        let conn = db
+            .read_conn()
+            .map_err(|error| anyhow!("db read connection for agent quality daily: {error}"))?;
+        query_agent_quality_daily_sqlite(&conn, Some(agent_id), days, limit)?
+    };
 
     // #1102 fallback: when the daily rollup is empty (e.g. the rollup job
     // from #1101 hasn't run yet in this environment), synthesize a mini
     // rollup directly from `agent_quality_event`.
     let (daily, fallback_from_events) = if daily.is_empty() {
-        let synthetic = synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
-                Vec::new()
-            });
+        let synthetic = match pg_pool {
+            Some(pool) => synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
+                    Vec::new()
+                }),
+            None => match db.read_conn() {
+                Ok(conn) => synth_agent_quality_daily_from_events_sqlite(&conn, agent_id, 30)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            "[quality] sqlite event-fallback mini-rollup failed: {error}"
+                        );
+                        Vec::new()
+                    }),
+                Err(error) => {
+                    tracing::warn!("[quality] event-fallback sqlite conn failed: {error}");
+                    Vec::new()
+                }
+            },
+        };
         let fallback = !synthetic.is_empty();
         (synthetic, fallback)
     } else {
@@ -1134,7 +1164,7 @@ pub async fn query_agent_quality_ranking(
 }
 
 pub async fn query_agent_quality_ranking_with(
-    _db: &Db,
+    db: &Db,
     pg_pool: Option<&PgPool>,
     limit: usize,
     metric: QualityRankingMetric,
@@ -1143,12 +1173,26 @@ pub async fn query_agent_quality_ranking_with(
 ) -> Result<AgentQualityRankingResponse> {
     let limit = normalized_quality_ranking_limit(limit);
     let min_sample_size = min_sample_size.max(0);
-    let Some(pool) = pg_pool else {
-        return Err(anyhow!(
-            "postgres pool unavailable for agent quality ranking"
-        ));
+    let agents = if let Some(pool) = pg_pool {
+        match query_agent_quality_ranking_pg(pool, limit).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!("[quality] postgres ranking query failed: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
     };
-    let agents = query_agent_quality_ranking_pg(pool, limit).await?;
+
+    let agents = if pg_pool.is_some() {
+        agents
+    } else {
+        let conn = db
+            .read_conn()
+            .map_err(|error| anyhow!("db read connection for agent quality ranking: {error}"))?;
+        query_agent_quality_ranking_sqlite(&conn, limit)?
+    };
 
     // Filter by sample_size >= min_sample_size (#1102 DoD), then attach
     // metric_value and re-rank by the requested (metric, window) pair.
@@ -1831,6 +1875,44 @@ async fn synth_agent_quality_daily_from_events_pg(
     Ok(buckets_to_synth_records(agent_id, buckets))
 }
 
+/// #1102 event-based fallback (sqlite): same as the pg variant but uses
+/// SQLite's date() on a localtime-shifted timestamp.
+fn synth_agent_quality_daily_from_events_sqlite(
+    conn: &Connection,
+    agent_id: &str,
+    days: i64,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let days = days.clamp(1, MAX_QUALITY_DAYS);
+    let mut stmt = conn.prepare(
+        "SELECT date(created_at, '+9 hours') AS day_text,
+                MAX(provider) AS provider,
+                MAX(channel_id) AS channel_id,
+                SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END) AS turn_success_count,
+                SUM(CASE WHEN event_type = 'turn_error' THEN 1 ELSE 0 END) AS turn_error_count,
+                SUM(CASE WHEN event_type = 'review_pass' THEN 1 ELSE 0 END) AS review_pass_count,
+                SUM(CASE WHEN event_type = 'review_fail' THEN 1 ELSE 0 END) AS review_fail_count
+         FROM agent_quality_event
+         WHERE agent_id = ?1
+           AND created_at >= datetime('now', ?2)
+         GROUP BY day_text
+         ORDER BY day_text DESC",
+    )?;
+    let interval = format!("-{days} days");
+    let rows = stmt.query_map(libsql_rusqlite::params![agent_id, interval], |row| {
+        Ok(SynthDailyBucket {
+            day: row.get::<_, String>(0)?,
+            provider: row.get::<_, Option<String>>(1)?,
+            channel_id: row.get::<_, Option<String>>(2)?,
+            turn_success: row.get::<_, i64>(3).unwrap_or(0).max(0),
+            turn_error: row.get::<_, i64>(4).unwrap_or(0).max(0),
+            review_pass: row.get::<_, i64>(5).unwrap_or(0).max(0),
+            review_fail: row.get::<_, i64>(6).unwrap_or(0).max(0),
+        })
+    })?;
+    let buckets = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
+    Ok(buckets_to_synth_records(agent_id, buckets))
+}
+
 #[derive(Debug, Clone)]
 struct SynthDailyBucket {
     day: String,
@@ -1962,6 +2044,47 @@ fn quality_window(
     }
 }
 
+fn quality_daily_record_from_sqlite_row(
+    row: &libsql_rusqlite::Row<'_>,
+) -> libsql_rusqlite::Result<AgentQualityDailyRecord> {
+    let measurement_unavailable_7d = row.get::<_, i64>(18)? != 0;
+    let measurement_unavailable_30d = row.get::<_, i64>(24)? != 0;
+    Ok(AgentQualityDailyRecord {
+        agent_id: row.get(0)?,
+        day: row.get(1)?,
+        provider: row.get(2)?,
+        channel_id: row.get(3)?,
+        turn_success_count: row.get::<_, i64>(4)?.max(0),
+        turn_error_count: row.get::<_, i64>(5)?.max(0),
+        review_pass_count: row.get::<_, i64>(6)?.max(0),
+        review_fail_count: row.get::<_, i64>(7)?.max(0),
+        turn_sample_size: row.get::<_, i64>(8)?.max(0),
+        review_sample_size: row.get::<_, i64>(9)?.max(0),
+        sample_size: row.get::<_, i64>(10)?.max(0),
+        turn_success_rate: row.get(11)?,
+        review_pass_rate: row.get(12)?,
+        rolling_7d: quality_window(
+            7,
+            row.get(14)?,
+            measurement_unavailable_7d,
+            row.get(13)?,
+            row.get(15)?,
+            row.get(16)?,
+            row.get(17)?,
+        ),
+        rolling_30d: quality_window(
+            30,
+            row.get(20)?,
+            measurement_unavailable_30d,
+            row.get(19)?,
+            row.get(21)?,
+            row.get(22)?,
+            row.get(23)?,
+        ),
+        computed_at: row.get::<_, Option<String>>(25)?.unwrap_or_default(),
+    })
+}
+
 fn quality_daily_record_from_pg_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<AgentQualityDailyRecord> {
@@ -2052,6 +2175,36 @@ fn quality_daily_record_from_pg_row(
     })
 }
 
+fn agent_quality_daily_select_sqlite() -> &'static str {
+    "SELECT agent_id,
+            day,
+            provider,
+            channel_id,
+            turn_success_count,
+            turn_error_count,
+            review_pass_count,
+            review_fail_count,
+            turn_sample_size,
+            review_sample_size,
+            sample_size,
+            turn_success_rate,
+            review_pass_rate,
+            turn_sample_size_7d,
+            sample_size_7d,
+            turn_success_rate_7d,
+            review_sample_size_7d,
+            review_pass_rate_7d,
+            measurement_unavailable_7d,
+            turn_sample_size_30d,
+            sample_size_30d,
+            turn_success_rate_30d,
+            review_sample_size_30d,
+            review_pass_rate_30d,
+            measurement_unavailable_30d,
+            datetime(computed_at, '+9 hours') AS computed_at_kst
+     FROM agent_quality_daily"
+}
+
 fn agent_quality_daily_select_pg() -> &'static str {
     "SELECT agent_id,
             to_char(day, 'YYYY-MM-DD') AS day_text,
@@ -2080,6 +2233,27 @@ fn agent_quality_daily_select_pg() -> &'static str {
             measurement_unavailable_30d,
             to_char(computed_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS computed_at_kst
      FROM agent_quality_daily"
+}
+
+fn query_agent_quality_daily_sqlite(
+    conn: &Connection,
+    agent_id: Option<&str>,
+    days: i64,
+    limit: usize,
+) -> Result<Vec<AgentQualityDailyRecord>> {
+    let sql = format!(
+        "{} WHERE (?1 IS NULL OR agent_id = ?1)
+              AND day >= date('now', '-' || ?2 || ' days')
+            ORDER BY day DESC, agent_id ASC
+            LIMIT ?3",
+        agent_quality_daily_select_sqlite()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        libsql_rusqlite::params![agent_id, days, limit as i64],
+        quality_daily_record_from_sqlite_row,
+    )?;
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 async fn query_agent_quality_daily_pg(
@@ -2154,6 +2328,74 @@ fn ranking_window_sample_size(
         QualityRankingWindow::Seven => entry.rolling_7d.sample_size,
         QualityRankingWindow::Thirty => entry.rolling_30d.sample_size,
     }
+}
+
+fn query_agent_quality_ranking_sqlite(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<AgentQualityRankingEntry>> {
+    let sql = format!(
+        "WITH latest_day AS (
+             SELECT agent_id, MAX(day) AS day
+             FROM agent_quality_daily
+             GROUP BY agent_id
+         )
+         SELECT d.agent_id,
+                d.day,
+                d.provider,
+                d.channel_id,
+                d.turn_success_count,
+                d.turn_error_count,
+                d.review_pass_count,
+                d.review_fail_count,
+                d.turn_sample_size,
+                d.review_sample_size,
+                d.sample_size,
+                d.turn_success_rate,
+                d.review_pass_rate,
+                d.turn_sample_size_7d,
+                d.sample_size_7d,
+                d.turn_success_rate_7d,
+                d.review_sample_size_7d,
+                d.review_pass_rate_7d,
+                d.measurement_unavailable_7d,
+                d.turn_sample_size_30d,
+                d.sample_size_30d,
+                d.turn_success_rate_30d,
+                d.review_sample_size_30d,
+                d.review_pass_rate_30d,
+                d.measurement_unavailable_30d,
+                datetime(d.computed_at, '+9 hours') AS computed_at_kst,
+                COALESCE(a.name_ko, a.name) AS agent_name
+         FROM agent_quality_daily d
+         JOIN latest_day latest
+           ON latest.agent_id = d.agent_id
+          AND latest.day = d.day
+         LEFT JOIN agents a
+           ON a.id = d.agent_id
+         ORDER BY d.measurement_unavailable_7d ASC,
+                  d.turn_success_rate_7d IS NULL ASC,
+                  d.turn_success_rate_7d DESC,
+                  d.review_pass_rate_7d IS NULL ASC,
+                  d.review_pass_rate_7d DESC,
+                  d.sample_size_7d DESC,
+                  d.agent_id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], |row| {
+        let record = quality_daily_record_from_sqlite_row(row)?;
+        let agent_name = row.get::<_, Option<String>>(26)?;
+        Ok((record, agent_name))
+    })?;
+    let records = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
+    Ok(records
+        .into_iter()
+        .enumerate()
+        .map(|(index, (record, agent_name))| {
+            quality_ranking_entry_from_daily((index + 1) as i64, record, agent_name)
+        })
+        .collect())
 }
 
 async fn query_agent_quality_ranking_pg(

@@ -176,7 +176,14 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     }
 
     let pg_pool = crate::db::postgres::connect_and_migrate(&config).await?;
-    let legacy_db = crate::server::routes::legacy_sqlite_shim();
+    if let Some(pool) = pg_pool.as_ref() {
+        crate::db::postgres::startup_reseed(pool, &config)
+            .await
+            .map_err(|e| format!("startup reseed: {e}"))?;
+    }
+    let legacy_db =
+        crate::db::init(&config).map_err(|e| format!("init legacy compatibility db: {e}"))?;
+    crate::pipeline::refresh_override_health_report(&legacy_db, pg_pool.as_ref()).await;
     crate::services::termination_audit::init_audit_db(legacy_db.clone(), pg_pool.clone());
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
