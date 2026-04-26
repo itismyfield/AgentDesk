@@ -3736,6 +3736,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
         super::adk_session::parse_thread_channel_id_from_name(&watcher_channel_name);
     let mut current_offset = initial_offset;
     let input_fifo_path = super::turn_bridge::tmux_runtime_paths(&tmux_session_name).1;
+    // #1216: leftover JSONL bytes from a buffer that contained more than one
+    // turn-terminating event. `process_watcher_lines` now stops at the first
+    // `result`/auth/overload event and leaves the rest in the buffer; this
+    // outer-scope `all_data` carries that leftover into the next watcher loop
+    // iteration so the next turn does not need to wait for fresh disk reads.
+    let mut all_data = String::new();
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
@@ -4017,8 +4023,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
             &mut last_activity_heartbeat_at,
         );
 
-        // Collect the full turn: keep reading until we see a "result" event
-        let mut all_data = String::from_utf8_lossy(&data).to_string();
+        // Collect the full turn: keep reading until we see a "result" event.
+        // #1216: append to the outer-scope `all_data` so any leftover from a
+        // previous iteration (multi-turn buffer split at the first `result`)
+        // is processed before the new disk read.
+        all_data.push_str(&String::from_utf8_lossy(&data));
         let mut state = StreamLineState::new();
         let stream_seed = watcher_stream_seed(restored_turn.take());
         let mut full_response = stream_seed.full_response;
@@ -6705,6 +6714,12 @@ pub(super) fn process_watcher_lines(
 
                     state.final_result = Some(String::new());
                     outcome.found_result = true;
+                    // #1216: stop after the first turn-terminating event so a
+                    // buffer containing multiple completed turns (post-deploy
+                    // backlog, paused watcher resume) does not merge their
+                    // `assistant` text into a single `full_response`. The
+                    // unprocessed tail stays in `buffer` for the next call.
+                    break;
                 }
                 "system" => {
                     if val.get("subtype").and_then(|s| s.as_str()) == Some("init")
@@ -6762,6 +6777,8 @@ pub(super) fn process_watcher_lines(
                 },
             );
             state.final_result = Some(String::new());
+            // #1216: see `result` arm — stop after a turn-terminating event.
+            break;
         } else if let Some(message) = detect_provider_overload_message(trimmed) {
             outcome.found_result = true;
             outcome.is_provider_overloaded = true;
@@ -6778,6 +6795,8 @@ pub(super) fn process_watcher_lines(
                 },
             );
             state.final_result = Some(String::new());
+            // #1216: see `result` arm — stop after a turn-terminating event.
+            break;
         }
     }
 
@@ -9038,6 +9057,57 @@ mod tests {
         assert!(!outcome.is_provider_overloaded);
         assert!(!outcome.stale_resume_detected);
         assert_eq!(full_response, "Here is the answer.");
+    }
+
+    /// #1216: when the buffer holds two completed turns back-to-back (typical
+    /// post-deploy/restart drain), `process_watcher_lines` must stop after the
+    /// first `result` and leave the second turn untouched in the buffer for
+    /// the next call. Otherwise both turns' `assistant` text gets concatenated
+    /// into one `full_response`, then sliced into multi-message Discord bursts
+    /// at the 2000-char cap.
+    #[test]
+    fn process_watcher_lines_stops_at_first_result_in_multi_turn_buffer() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first turn body\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done-1\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second turn body\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done-2\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result, "first result must be recognised");
+        assert_eq!(
+            full_response, "first turn body",
+            "second turn must not bleed into the first turn's body"
+        );
+        assert!(
+            buffer.contains("second turn body"),
+            "second turn must remain in the buffer for the next call"
+        );
+        assert!(
+            buffer.contains("done-2"),
+            "second turn's result line must remain in the buffer"
+        );
+
+        let mut full_response2 = String::new();
+        let outcome2 = process_watcher_lines(
+            &mut buffer,
+            &mut state,
+            &mut full_response2,
+            &mut tool_state,
+        );
+        assert!(outcome2.found_result, "second result is consumed next");
+        assert_eq!(full_response2, "second turn body");
+        assert!(
+            buffer.trim().is_empty(),
+            "buffer should be drained after both turns are consumed"
+        );
     }
 
     #[test]
