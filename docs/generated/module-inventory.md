@@ -53,7 +53,7 @@
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 182 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4362 | giant-file |
-| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 353 |  |
+| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 357 |  |
 | `cli::init` | `src/cli/init.rs` | 1597 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |

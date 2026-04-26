@@ -905,15 +905,22 @@ async fn health_surfaces_latest_startup_doctor_summary_without_raw_checks() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SQLite-only test harness has no PostgreSQL server signal, but the health body must still surface startup doctor context"
+    );
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let doctor = &json["latest_startup_doctor"];
     assert_eq!(doctor["available"], true);
-    assert_eq!(doctor["status"], "failed");
-    assert_eq!(doctor["artifact_path"], artifact_path.display().to_string());
+    assert_eq!(doctor["doctor_status"], "failed");
+    assert!(
+        doctor["artifact_path"].is_null(),
+        "artifact_path must not be exposed on the public /api/health endpoint"
+    );
     assert_eq!(doctor["failed_count"], 1);
     assert_eq!(doctor["warned_count"], 1);
     assert_eq!(doctor["detail_endpoint"], "/api/doctor/startup/latest");
@@ -1055,7 +1062,11 @@ async fn health_detail_includes_latest_startup_doctor_detailed_fields() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "SQLite-only test harness has no PostgreSQL server signal, but detail health must still surface startup doctor context"
+    );
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1142,9 +1153,9 @@ async fn health_detail_and_latest_endpoint_share_same_artifact_contract() {
     )
     .unwrap();
 
-    assert_eq!(
-        health_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,
-        "public health must report correct artifact_path"
+    assert!(
+        health_json["latest_startup_doctor"]["artifact_path"].is_null(),
+        "artifact_path must not appear in the public /api/health summary"
     );
     assert_eq!(
         detail_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,

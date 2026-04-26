@@ -157,13 +157,13 @@ fn followup_context() -> &'static str {
 fn startup_doctor_summary_json(path: &PathBuf, report: &Value, detailed: bool) -> Value {
     let failed_count = summary_count(report, "failed", "fail");
     let warned_count = summary_count(report, "warned", "warn");
+    // Use "doctor_status" (not "status") to avoid conflicting with the top-level
+    // "status" field in /api/health when the no-jq regex fallback takes the first match.
     let mut summary = json!({
         "available": true,
-        "status": startup_doctor_status(failed_count, warned_count),
-        "artifact_path": path.display().to_string(),
+        "doctor_status": startup_doctor_status(failed_count, warned_count),
         "started_at": report.get("started_at").cloned().unwrap_or(Value::Null),
         "completed_at": report.get("completed_at").cloned().unwrap_or(Value::Null),
-        "boot_id": report.get("boot_id").cloned().unwrap_or(Value::Null),
         "summary": report.get("summary").cloned().unwrap_or(Value::Null),
         "failed_count": failed_count,
         "warned_count": warned_count,
@@ -171,6 +171,9 @@ fn startup_doctor_summary_json(path: &PathBuf, report: &Value, detailed: bool) -
     });
 
     if detailed {
+        // artifact_path and boot_id are internal metadata; expose only on protected paths.
+        summary["artifact_path"] = Value::String(path.display().to_string());
+        summary["boot_id"] = report.get("boot_id").cloned().unwrap_or(Value::Null);
         summary["run_context"] = report.get("run_context").cloned().unwrap_or(Value::Null);
         summary["non_fatal"] = report.get("non_fatal").cloned().unwrap_or(Value::Null);
         summary["failed_checks"] = filtered_checks(report, "fail");
@@ -188,13 +191,14 @@ pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
         }
         LatestStartupDoctorArtifact::Missing { path, reason } => json!({
             "available": false,
-            "status": "missing",
-            "artifact_path": path_json(path.as_ref()),
+            "doctor_status": "missing",
             "summary": Value::Null,
             "failed_count": 0,
             "warned_count": 0,
             "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
             "reason": reason,
+            // artifact_path only on detailed paths to avoid leaking internal filesystem layout
+            "artifact_path": if detailed { path_json(path.as_ref()) } else { Value::Null },
         }),
         LatestStartupDoctorArtifact::Error {
             path,
@@ -202,13 +206,13 @@ pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
             detail: _,
         } => json!({
             "available": false,
-            "status": "error",
-            "artifact_path": path_json(path.as_ref()),
+            "doctor_status": "error",
             "summary": Value::Null,
             "failed_count": 0,
             "warned_count": 0,
             "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
             "error": error,
+            "artifact_path": if detailed { path_json(path.as_ref()) } else { Value::Null },
         }),
     }
 }
