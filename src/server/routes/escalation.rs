@@ -1925,8 +1925,11 @@ mod tests {
     #[tokio::test]
     async fn put_and_get_escalation_settings_round_trip() {
         let db = test_db();
-        let state =
-            AppState::test_state_with_config(test_engine(&db), crate::config::Config::default());
+        let state = AppState::test_state_with_config(
+            db.clone(),
+            test_engine(&db),
+            crate::config::Config::default(),
+        );
 
         let (status, Json(body)) = put_escalation_settings(
             State(state.clone()),
@@ -2061,7 +2064,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.owner_user_id = Some(343742347365974026);
-        let state = AppState::test_state_with_config(test_engine(&db), config);
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let body = EmitEscalationBody {
             card_id: "card-1".to_string(),
@@ -2173,7 +2176,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.pm_channel_id = Some("222".to_string());
-        let state = AppState::test_state_with_config(test_engine(&db), config);
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let (status, Json(body)) = emit_escalation_with_base_url(
             &state,

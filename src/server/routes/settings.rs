@@ -755,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn get_config_entries_includes_merge_automation_and_omits_retired_keys() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -804,7 +804,7 @@ mod tests {
             .unwrap();
         }
 
-        let state = AppState::test_state_with_config(test_engine(&db), config);
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
 
@@ -860,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn patch_config_entries_accepts_merge_automation_and_provider_specific_keys() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state.clone()),
@@ -907,7 +907,7 @@ mod tests {
     #[tokio::test]
     async fn patch_config_entries_rejects_read_only_server_port() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state),
@@ -1145,7 +1145,7 @@ mod tests {
             Some("cancelled,failed,expired".to_string());
         config.runtime.stale_dispatched_recover_null_dispatch = Some(false);
         config.runtime.stale_dispatched_recover_missing_dispatch = Some(false);
-        let state = AppState::test_state_with_config(test_engine(&db), config);
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -1178,7 +1178,7 @@ mod tests {
     #[tokio::test]
     async fn put_runtime_config_mirrors_scalar_keys_for_runtime_consumers() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = put_runtime_config(
             State(state),
@@ -1241,7 +1241,7 @@ mod tests {
     #[tokio::test]
     async fn put_settings_is_full_replace_and_strips_retired_company_keys() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (first_status, _) = put_settings(
             State(state.clone()),

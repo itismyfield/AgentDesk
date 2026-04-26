@@ -1218,7 +1218,7 @@ mod tests {
     async fn get_card_transcripts_returns_linked_turns() {
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(engine);
+        let state = AppState::test_state(db.clone(), engine);
 
         {
             let mut conn = db.lock().unwrap();
@@ -1302,7 +1302,7 @@ mod tests {
     async fn put_stages_rejected_when_db_source_of_truth_is_file() {
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(engine);
+        let state = AppState::test_state(db.clone(), engine);
 
         // pipeline_stages is seeded as file-canonical by the schema migrator.
         let body = PutStagesBody {

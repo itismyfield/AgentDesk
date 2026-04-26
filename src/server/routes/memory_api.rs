@@ -515,7 +515,7 @@ mod tests {
     fn test_state() -> AppState {
         let db = test_db();
         let engine = test_engine(&db);
-        AppState::test_state(engine)
+        AppState::test_state(db.clone(), engine)
     }
 
     #[tokio::test]

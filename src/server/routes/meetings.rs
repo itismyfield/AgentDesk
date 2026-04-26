@@ -1795,7 +1795,7 @@ mod tests {
     #[tokio::test]
     async fn start_meeting_rejects_unregistered_channel_without_primary_provider() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = start_meeting(
             State(state),
@@ -1819,7 +1819,7 @@ mod tests {
     #[tokio::test]
     async fn start_meeting_rejects_unregistered_channel_even_when_primary_provider_is_supplied() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = start_meeting(
             State(state),
@@ -1872,7 +1872,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_meeting_preserves_existing_metadata_when_optional_fields_omitted() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = upsert_meeting(
             State(state.clone()),
@@ -1959,7 +1959,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_meeting_persists_query_hashes_and_returns_them() {
         let db = test_db();
-        let state = AppState::test_state(test_engine(&db));
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = upsert_meeting(
             State(state.clone()),

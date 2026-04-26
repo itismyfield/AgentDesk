@@ -233,10 +233,11 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
-    fn test_state_with_pg(_db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> AppState {
+    fn test_state_with_pg(db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> AppState {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         AppState {
+            db,
             pg_pool: Some(pg_pool),
             engine,
             config: Arc::new(crate::config::Config::default()),
