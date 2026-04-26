@@ -672,12 +672,13 @@ pub async fn send_handler(
             .into_response();
     };
 
-    let _ = (registry, body);
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"ok": false, "error": "send API requires PostgreSQL routing support"})),
-    )
-        .into_response()
+    let body_str = String::from_utf8_lossy(&body);
+    let (status_str, response_body) =
+        health::handle_send(registry, state.sqlite_db(), &body_str).await;
+    let status = parse_status_code(status_str);
+    let json: serde_json::Value =
+        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
+    (status, Json(json)).into_response()
 }
 
 /// POST /api/inflight/rebind — #896 orphan recovery endpoint.
@@ -744,12 +745,13 @@ pub async fn send_to_agent_handler(
             .into_response();
     };
 
-    let _ = (registry, body);
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"ok": false, "error": "send_to_agent API requires PostgreSQL routing support"})),
-    )
-        .into_response()
+    let body_str = String::from_utf8_lossy(&body);
+    let (status_str, response_body) =
+        health::handle_send_to_agent(registry, state.sqlite_db(), &body_str).await;
+    let status = parse_status_code(status_str);
+    let json: serde_json::Value =
+        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
+    (status, Json(json)).into_response()
 }
 
 /// POST /api/senddm — send a DM to a Discord user.
