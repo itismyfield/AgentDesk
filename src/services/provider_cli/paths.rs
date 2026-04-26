@@ -15,10 +15,13 @@ pub fn migration_state_path(root: &Path, provider: &str) -> PathBuf {
 }
 
 /// `~/.adk/{env}/runtime/provider-cli-launch/{session_key}.json`
+pub fn launch_artifacts_dir(root: &Path) -> PathBuf {
+    root.join("runtime").join("provider-cli-launch")
+}
+
+/// `~/.adk/{env}/runtime/provider-cli-launch/{session_key}.json`
 pub fn launch_artifact_path(root: &Path, session_key: &str) -> PathBuf {
-    root.join("runtime")
-        .join("provider-cli-launch")
-        .join(format!("{}.json", session_key_file_stem(session_key)))
+    launch_artifacts_dir(root).join(format!("{}.json", session_key_file_stem(session_key)))
 }
 
 /// `~/.adk/{env}/runtime/provider-cli-diagnostics/{timestamp}.json`

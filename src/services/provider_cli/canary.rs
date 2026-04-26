@@ -1,5 +1,9 @@
 use std::collections::HashMap;
+use std::path::Path;
 
+use chrono::{DateTime, Utc};
+
+use super::io::load_launch_artifacts;
 use super::registry::{LaunchArtifact, ProviderCliChannel};
 
 /// Preference order when selecting a canary agent:
@@ -52,6 +56,40 @@ pub fn canary_evidence(agent_id: &str, channel: &ProviderCliChannel) -> HashMap<
     m.insert("candidate_path".to_string(), channel.path.clone());
     m.insert("candidate_version".to_string(), channel.version.clone());
     m
+}
+
+pub fn verified_candidate_launch_artifact(
+    root: &Path,
+    provider: &str,
+    agent_id: &str,
+    candidate: &ProviderCliChannel,
+    not_before: DateTime<Utc>,
+) -> Result<LaunchArtifact, String> {
+    let mut artifacts = load_launch_artifacts(root, provider)
+        .into_iter()
+        .filter(|artifact| {
+            artifact.agent_id.as_deref() == Some(agent_id)
+                && artifact.channel == "candidate"
+                && artifact.launched_at >= not_before
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_by_key(|artifact| artifact.launched_at);
+
+    let Some(artifact) = artifacts.pop() else {
+        return Err(format!(
+            "no candidate launch artifact recorded for {provider}/{agent_id} after canary activation; run a canary turn before promotion"
+        ));
+    };
+
+    if artifact.canonical_path != candidate.canonical_path
+        || artifact.cli_version != candidate.version
+    {
+        return Err(format!(
+            "candidate launch artifact for {provider}/{agent_id} does not match registered candidate channel"
+        ));
+    }
+
+    Ok(artifact)
 }
 
 #[cfg(test)]

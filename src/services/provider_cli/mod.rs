@@ -2,9 +2,11 @@ pub mod canary;
 pub mod context;
 pub mod diagnostics;
 pub mod io;
+pub mod orchestration;
 pub mod paths;
 pub mod registry;
 pub mod retention;
+pub mod session_guard;
 pub mod smoke;
 pub mod snapshot;
 pub mod upgrade;
@@ -14,6 +16,7 @@ pub use context::ProviderExecutionContext;
 pub use diagnostics::{
     DiagnosticsSnapshot, MigrationDiagnostics, ProviderCliActionRequest, ProviderCliStatusResponse,
     ProviderDiagnostics, RuntimeConsistency, SessionDiagnostics, build_snapshot,
+    migration_state_wire_value,
 };
 pub use registry::{
     LaunchArtifact, MigrationHistoryEntry, MigrationState, PROVIDER_UPDATE_STRATEGIES,

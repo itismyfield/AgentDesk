@@ -481,6 +481,30 @@ pub fn transition(
     Ok(())
 }
 
+pub fn migration_state_rank(state: &MigrationState) -> Option<u8> {
+    use MigrationState::*;
+    Some(match state {
+        Planned => 0,
+        CurrentSnapshotted => 1,
+        SmokeCurrentPassed => 2,
+        PreviousPreserved => 3,
+        UpgradePlanned => 4,
+        UpgradeSucceeded => 5,
+        CandidateDiscovered => 6,
+        SmokeCandidatePassed => 7,
+        CanarySelected => 8,
+        CanarySessionSafeEnding => 9,
+        CanarySessionRecreated => 10,
+        CanaryActive => 11,
+        CanaryPassed => 12,
+        AwaitingOperatorPromote => 13,
+        ProviderSessionsSafeEnding => 14,
+        ProviderSessionsRecreated => 15,
+        ProviderAgentsMigrated => 16,
+        RolledBack | Failed => return None,
+    })
+}
+
 fn is_valid_transition(from: &MigrationState, to: &MigrationState) -> bool {
     use MigrationState::*;
     if matches!(from, RolledBack) {

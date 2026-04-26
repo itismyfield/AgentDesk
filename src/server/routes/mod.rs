@@ -28,6 +28,7 @@ pub mod monitoring;
 pub mod offices;
 pub mod onboarding;
 pub mod pipeline;
+pub mod provider_cli_api;
 mod queue_api;
 pub mod receipt;
 pub mod resume;

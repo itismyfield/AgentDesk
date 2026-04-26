@@ -25,14 +25,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::platform::with_provider_execution_context;
 use crate::services::process::kill_pid_tree;
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || execute_simple_blocking(provider, prompt, None))
+    tokio::task::spawn_blocking(move || execute_simple_blocking(provider, prompt, None, None))
         .await
         .map_err(|e| format!("Task join error: {}", e))?
+}
+
+pub async fn execute_simple_with_context(
+    provider: ProviderKind,
+    prompt: String,
+    context: ProviderExecutionContext,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        execute_simple_blocking(provider, prompt, None, Some(context))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 pub async fn execute_simple_with_timeout(
@@ -41,10 +55,20 @@ pub async fn execute_simple_with_timeout(
     timeout: Duration,
     stage_label: String,
 ) -> Result<String, String> {
+    execute_simple_with_timeout_and_context(provider, prompt, timeout, stage_label, None).await
+}
+
+pub async fn execute_simple_with_timeout_and_context(
+    provider: ProviderKind,
+    prompt: String,
+    timeout: Duration,
+    stage_label: String,
+    context: Option<ProviderExecutionContext>,
+) -> Result<String, String> {
     let cancel_for_timeout = Arc::new(CancelToken::new());
     let cancel_for_exec = Arc::clone(&cancel_for_timeout);
     let mut handle = tokio::task::spawn_blocking(move || {
-        execute_simple_blocking(provider, prompt, Some(cancel_for_exec))
+        execute_simple_blocking(provider, prompt, Some(cancel_for_exec), context)
     });
 
     tokio::select! {
@@ -69,6 +93,20 @@ pub async fn execute_simple_with_timeout(
 }
 
 fn execute_simple_blocking(
+    provider: ProviderKind,
+    prompt: String,
+    cancel_token: Option<Arc<CancelToken>>,
+    context: Option<ProviderExecutionContext>,
+) -> Result<String, String> {
+    let run = || execute_simple_blocking_inner(provider, prompt, cancel_token);
+    if let Some(context) = context {
+        with_provider_execution_context(context, run)
+    } else {
+        run()
+    }
+}
+
+fn execute_simple_blocking_inner(
     provider: ProviderKind,
     prompt: String,
     cancel_token: Option<Arc<CancelToken>>,
@@ -104,96 +142,131 @@ pub async fn execute_structured(
     timeout_secs: u64,
     stage_label: &'static str,
 ) -> Result<String, String> {
+    execute_structured_with_context(
+        provider,
+        prompt,
+        working_dir,
+        system_prompt,
+        allowed_tools,
+        model,
+        timeout_secs,
+        stage_label,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_structured_with_context(
+    provider: ProviderKind,
+    prompt: String,
+    working_dir: String,
+    system_prompt: Option<String>,
+    allowed_tools: Vec<String>,
+    model: Option<String>,
+    timeout_secs: u64,
+    stage_label: &'static str,
+    context: Option<ProviderExecutionContext>,
+) -> Result<String, String> {
     let cancel_token = Arc::new(CancelToken::new());
     let cancel_for_timeout = Arc::clone(&cancel_token);
     let mut handle = tokio::task::spawn_blocking(move || {
-        let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
-        let system_prompt_ref = system_prompt.as_deref();
-        let allowed_tools_ref = (!allowed_tools.is_empty()).then_some(allowed_tools.as_slice());
-        let model_ref = model.as_deref();
-        let result = match provider {
-            ProviderKind::Claude => claude::execute_command_streaming(
-                &prompt,
-                None,
-                &working_dir,
-                sender.clone(),
-                system_prompt_ref,
-                allowed_tools_ref,
-                Some(Arc::clone(&cancel_token)),
-                None,
-                None,
-                None,
-                None,
-                model_ref,
-                None,
-                None,
-                None,
-            ),
-            ProviderKind::Codex => codex::execute_command_streaming(
-                &prompt,
-                None,
-                &working_dir,
-                sender.clone(),
-                system_prompt_ref,
-                allowed_tools_ref,
-                Some(Arc::clone(&cancel_token)),
-                None,
-                None,
-                None,
-                None,
-                model_ref,
-                None,
-                None,
-            ),
-            ProviderKind::Gemini => gemini::execute_command_streaming(
-                &prompt,
-                None,
-                &working_dir,
-                sender.clone(),
-                system_prompt_ref,
-                allowed_tools_ref,
-                Some(Arc::clone(&cancel_token)),
-                None,
-                None,
-                None,
-                None,
-                model_ref,
-                None,
-            ),
-            ProviderKind::OpenCode => opencode::execute_command_streaming(
-                &prompt,
-                None,
-                &working_dir,
-                sender.clone(),
-                system_prompt_ref,
-                allowed_tools_ref,
-                Some(Arc::clone(&cancel_token)),
-                None,
-                None,
-                None,
-                None,
-                model_ref,
-                None,
-            ),
-            ProviderKind::Qwen => qwen::execute_command_streaming(
-                &prompt,
-                None,
-                &working_dir,
-                sender.clone(),
-                system_prompt_ref,
-                allowed_tools_ref,
-                Some(Arc::clone(&cancel_token)),
-                None,
-                None,
-                None,
-                None,
-                model_ref,
-                None,
-            ),
-            ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
+        let run = || {
+            let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
+            let system_prompt_ref = system_prompt.as_deref();
+            let allowed_tools_ref = (!allowed_tools.is_empty()).then_some(allowed_tools.as_slice());
+            let model_ref = model.as_deref();
+            let result = match provider {
+                ProviderKind::Claude => claude::execute_command_streaming(
+                    &prompt,
+                    None,
+                    &working_dir,
+                    sender.clone(),
+                    system_prompt_ref,
+                    allowed_tools_ref,
+                    Some(Arc::clone(&cancel_token)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    model_ref,
+                    None,
+                    None,
+                    None,
+                ),
+                ProviderKind::Codex => codex::execute_command_streaming(
+                    &prompt,
+                    None,
+                    &working_dir,
+                    sender.clone(),
+                    system_prompt_ref,
+                    allowed_tools_ref,
+                    Some(Arc::clone(&cancel_token)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    model_ref,
+                    None,
+                    None,
+                ),
+                ProviderKind::Gemini => gemini::execute_command_streaming(
+                    &prompt,
+                    None,
+                    &working_dir,
+                    sender.clone(),
+                    system_prompt_ref,
+                    allowed_tools_ref,
+                    Some(Arc::clone(&cancel_token)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    model_ref,
+                    None,
+                ),
+                ProviderKind::OpenCode => opencode::execute_command_streaming(
+                    &prompt,
+                    None,
+                    &working_dir,
+                    sender.clone(),
+                    system_prompt_ref,
+                    allowed_tools_ref,
+                    Some(Arc::clone(&cancel_token)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    model_ref,
+                    None,
+                ),
+                ProviderKind::Qwen => qwen::execute_command_streaming(
+                    &prompt,
+                    None,
+                    &working_dir,
+                    sender.clone(),
+                    system_prompt_ref,
+                    allowed_tools_ref,
+                    Some(Arc::clone(&cancel_token)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    model_ref,
+                    None,
+                ),
+                ProviderKind::Unsupported(name) => {
+                    Err(format!("Provider '{}' is not installed", name))
+                }
+            };
+            drop(sender);
+            collect_stream_result(result, receiver)
         };
-        drop(sender);
-        collect_stream_result(result, receiver)
+        if let Some(context) = context {
+            with_provider_execution_context(context, run)
+        } else {
+            run()
+        }
     });
 
     tokio::select! {
