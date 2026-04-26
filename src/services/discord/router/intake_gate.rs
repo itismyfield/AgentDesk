@@ -361,19 +361,19 @@ async fn handle_reaction_remove(
                     .await;
             match stop_lookup {
                 super::message_handler::TextStopLookup::Stop(token) => {
-                    super::super::turn_bridge::cancel_active_token(
-                        &token,
-                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "reaction remove ⏳",
-                    );
-                    // #1117 cancel_active_token only flips the cooperative flag
-                    // and kills the tracked child PID (often `None` for a
-                    // restarted/handoff run). To halt Codex/Qwen TUIs (stdin
-                    // null — ESC bytes ignored), also send the provider-
-                    // specific abort key + SIGINT fallback.
-                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                    // #1218: stop_active_turn sends the provider abort key
+                    // (C-c) FIRST so the CLI sees the interrupt while its
+                    // tmux pane is still alive, then flips the cooperative
+                    // flag and SIGKILLs the wrapper. The previous order
+                    // killed the tmux-wrapper first — tearing down the
+                    // tmux session — which made the follow-up send-keys
+                    // fail with "can't find pane". For Codex/Qwen TUIs and
+                    // resumed runs (`child_pid = None`) the C-c is the
+                    // only mechanism that actually stops the provider.
+                    super::super::turn_bridge::stop_active_turn(
                         &data.provider,
                         &token,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "reaction remove ⏳",
                     )
                     .await;

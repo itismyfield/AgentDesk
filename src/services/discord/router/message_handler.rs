@@ -1182,11 +1182,15 @@ pub(in crate::services::discord) async fn start_headless_turn(
                     return;
                 }
 
-                super::super::turn_bridge::cancel_active_token(
+                // #1218: send abort key first, then SIGKILL — see
+                // `stop_active_turn` doc comment.
+                super::super::turn_bridge::stop_active_turn(
+                    &watchdog_provider,
                     &watchdog_token,
                     super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                     "watchdog timeout",
-                );
+                )
+                .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⏰ Headless watchdog timeout fired for channel {}",
@@ -3070,13 +3074,17 @@ pub(in crate::services::discord) async fn handle_text_message(
                         "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
                         channel_id
                     );
-                    // #441: cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                    // #441: stop_active_turn → token.cancelled triggers turn_bridge loop exit
                     // → mailbox_finish_turn canonical cleanup
-                    super::super::turn_bridge::cancel_active_token(
+                    // #1218: send abort key first, then SIGKILL — see
+                    // `stop_active_turn` doc comment.
+                    super::super::turn_bridge::stop_active_turn(
+                        &watchdog_provider,
                         &watchdog_token,
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "watchdog timeout",
-                    );
+                    )
+                    .await;
 
                     // Notify Discord
                     let has_queued = super::super::mailbox_has_pending_soft_queue(
@@ -3934,16 +3942,23 @@ pub(super) async fn handle_text_command(
 
             "!stop" => {
                 // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
-                // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
-                // → mailbox_finish_turn canonical cleanup
+                // → stop_active_turn → token.cancelled triggers turn_bridge loop exit
+                // → mailbox_finish_turn canonical cleanup.
+                // #1218: stop_active_turn ensures the provider abort key
+                // (C-c) is sent before SIGKILL, which is required for any
+                // turn whose `child_pid` is `None` (handoff/restart/Codex
+                // TUI). The previous code only called `cancel_active_token`
+                // here, so those runs never received an abort key.
                 let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                 match stop_lookup {
                     TextStopLookup::Stop(token) => {
-                        super::super::turn_bridge::cancel_active_token(
+                        super::super::turn_bridge::stop_active_turn(
+                            &data.provider,
                             &token,
                             super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                             "!stop",
-                        );
+                        )
+                        .await;
                         super::super::commands::notify_turn_stop(
                             &ctx.http,
                             &data.shared,

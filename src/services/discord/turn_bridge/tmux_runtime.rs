@@ -211,6 +211,33 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
     }
 }
 
+/// Standard turn-stop sequence: send the provider abort key (e.g. C-c) FIRST,
+/// give the CLI ~750ms to settle / send SIGINT fallback, and THEN flip the
+/// cooperative cancel flag + SIGKILL the wrapper PID.
+///
+/// #1218: When `cancel_active_token` runs first, `kill_pid_tree(child_pid)`
+/// kills the agentdesk tmux-wrapper, which is the foreground process of the
+/// tmux session. The session then dies, and the subsequent
+/// `tmux send-keys -t =name C-c` fails with "can't find pane". For Claude
+/// streaming this is masked because the session teardown also stops claude;
+/// but for handoff/restart turns where `child_pid` is `None` (Codex/Qwen TUI,
+/// resumed runs) the SIGKILL is a no-op and only the C-c can stop the CLI.
+/// In that case the wrong order leaves the provider running and the user
+/// sees stop "fail".
+///
+/// All user-initiated stop paths (⏳ reaction removal, `/stop`, `!stop`,
+/// `/clear`, watchdog timeouts) MUST call this helper instead of pairing
+/// the two primitives by hand.
+pub(in crate::services::discord) async fn stop_active_turn(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    cleanup_policy: TmuxCleanupPolicy,
+    reason: &str,
+) -> bool {
+    interrupt_provider_cli_turn(provider, token, reason).await;
+    cancel_active_token(token, cleanup_policy, reason)
+}
+
 pub(in crate::services::discord) fn cancel_active_token(
     token: &Arc<CancelToken>,
     cleanup_policy: TmuxCleanupPolicy,
@@ -610,6 +637,63 @@ mod tests {
             token.tmux_session.lock().unwrap().as_deref(),
             Some("AgentDesk-codex-test")
         );
+    }
+
+    /// #1218 regression: `stop_active_turn` must invoke
+    /// `interrupt_provider_cli_turn` (provider abort key + SIGINT fallback)
+    /// BEFORE `cancel_active_token` flips the cancel flag. The previous
+    /// pair-by-hand pattern (cancel first, interrupt second) caused
+    /// `tmux send-keys` to fail with "can't find pane" once the wrapper
+    /// SIGKILL collapsed the tmux session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_active_turn_runs_interrupt_before_cancel() {
+        let token = Arc::new(CancelToken::new());
+        *token.tmux_session.lock().unwrap() =
+            Some("AgentDesk-claude-stop-order-regression-1218-does-not-exist".to_string());
+
+        assert!(
+            !token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            "fresh token must start uncancelled"
+        );
+
+        // child_pid stays None so kill_pid_tree is a no-op even though the
+        // helper would normally SIGKILL. The fake tmux session also doesn't
+        // exist, so send-keys will fail internally, but the helper must not
+        // panic and must still flip the cancel flag.
+        super::stop_active_turn(
+            &ProviderKind::Claude,
+            &token,
+            TmuxCleanupPolicy::PreserveSession,
+            "test stop_active_turn ordering",
+        )
+        .await;
+
+        assert!(
+            token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            "cancel flag must be set after stop_active_turn returns"
+        );
+        // PreserveSession leaves the tmux_session field intact for any
+        // follow-up cleanup that needs the session name.
+        assert_eq!(
+            token.tmux_session.lock().unwrap().as_deref(),
+            Some("AgentDesk-claude-stop-order-regression-1218-does-not-exist")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_active_turn_is_noop_for_provider_without_interrupt_plan() {
+        let token = Arc::new(CancelToken::new());
+        // Gemini has no provider_turn_interrupt_plan, so stop_active_turn
+        // must skip the send-keys path entirely and still flip the cancel
+        // flag via cancel_active_token.
+        super::stop_active_turn(
+            &ProviderKind::Gemini,
+            &token,
+            TmuxCleanupPolicy::PreserveSession,
+            "test stop_active_turn gemini",
+        )
+        .await;
+        assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[cfg(unix)]

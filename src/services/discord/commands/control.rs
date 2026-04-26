@@ -8,7 +8,7 @@ use crate::services::provider::ProviderKind;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::{cancel_active_token, interrupt_provider_cli_turn};
+use super::super::turn_bridge::stop_active_turn;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
 };
@@ -356,12 +356,16 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     clear_all_fast_mode_reset_markers(shared, channel_id).await;
 
     if let Some(token) = cleared.removed_token {
-        interrupt_provider_cli_turn(provider, &token, clear_source).await;
-        cancel_active_token(
+        // #1218: keep all stop sites converging on `stop_active_turn` so the
+        // abort-key-then-SIGKILL ordering can never regress to the legacy
+        // pair-by-hand pattern.
+        stop_active_turn(
+            provider,
             &token,
             super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
             clear_source,
-        );
+        )
+        .await;
     }
 
     let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider).await;
@@ -451,12 +455,15 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
 
             ctx.say("Stopping...").await?;
 
-            interrupt_provider_cli_turn(&ctx.data().provider, &token, "/stop").await;
-            cancel_active_token(
+            // #1218: stop_active_turn keeps the abort-key-then-SIGKILL order
+            // identical across every stop entrypoint.
+            stop_active_turn(
+                &ctx.data().provider,
                 &token,
                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                 "/stop",
-            );
+            )
+            .await;
             notify_turn_stop(
                 &ctx.serenity_context().http,
                 &ctx.data().shared,
