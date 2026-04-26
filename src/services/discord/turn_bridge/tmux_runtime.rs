@@ -49,7 +49,16 @@ pub(in crate::services::discord) struct ProviderTurnInterruptOutcome {
 
 fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnInterruptPlan> {
     match provider {
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Qwen => {
+        // Claude runs as a child of `agentdesk tmux-wrapper`, with stdin
+        // *piped* from the wrapper rather than wired to the PTY. A
+        // `tmux send-keys C-c` on the pane therefore delivers SIGINT to the
+        // wrapper (the PTY foreground), not to claude — and the wrapper has
+        // no SIGINT handler, so it dies and tears the pane down with it
+        // (#1260). We send SIGINT directly to claude's PID via the fallback
+        // path instead; the empty key list signals "skip send-keys, go
+        // straight to the SIGINT fallback".
+        ProviderKind::Claude => Some(ProviderTurnInterruptPlan { keys: &[] }),
+        ProviderKind::Codex | ProviderKind::Qwen => {
             Some(ProviderTurnInterruptPlan { keys: &["C-c"] })
         }
         ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
@@ -58,18 +67,16 @@ fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnI
 
 fn fallback_sigint_pid_for_provider(
     provider: &ProviderKind,
-    ready_for_input: bool,
+    _ready_for_input: bool,
     provider_pid: Option<u32>,
 ) -> Option<u32> {
     match provider {
-        ProviderKind::Claude => {
-            if ready_for_input {
-                None
-            } else {
-                provider_pid
-            }
-        }
-        ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
+        // #1260: claude only gets the interrupt via direct SIGINT (no C-c on
+        // the pane), so always deliver it when we have the PID. The previous
+        // `ready_for_input` branch was meant to avoid double-delivery when
+        // C-c had already gone to the pane — irrelevant now that the C-c
+        // path is removed for claude.
+        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
         ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
     }
 }
@@ -100,46 +107,55 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         };
     };
 
-    let session_for_send = tmux_session_name.to_string();
-    let keys = plan.keys.to_vec();
-    let send_result = tokio::task::spawn_blocking(move || {
-        crate::services::platform::tmux::send_keys(&session_for_send, &keys)
-    })
-    .await;
+    // #1260: an empty key list means "no keys to send; go straight to the
+    // SIGINT fallback". Used by claude, where C-c on the pane targets the
+    // wrapper PID and would tear the session down. We treat the empty-key
+    // path as an unconditional success so the SIGINT-fallback section below
+    // still runs.
+    let sent_keys = if plan.keys.is_empty() {
+        true
+    } else {
+        let session_for_send = tmux_session_name.to_string();
+        let keys = plan.keys.to_vec();
+        let send_result = tokio::task::spawn_blocking(move || {
+            crate::services::platform::tmux::send_keys(&session_for_send, &keys)
+        })
+        .await;
 
-    let sent_keys = match send_result {
-        Ok(Ok(output)) if output.status.success() => true,
-        Ok(Ok(output)) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            tracing::warn!(
-                "provider turn interrupt send-keys failed: provider={} session={} reason={} status={} stderr={}",
-                provider.as_str(),
-                tmux_session_name,
-                reason,
-                output.status,
-                stderr
-            );
-            false
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                "provider turn interrupt send-keys error: provider={} session={} reason={} error={}",
-                provider.as_str(),
-                tmux_session_name,
-                reason,
-                error
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                "provider turn interrupt send-keys join error: provider={} session={} reason={} error={}",
-                provider.as_str(),
-                tmux_session_name,
-                reason,
-                error
-            );
-            false
+        match send_result {
+            Ok(Ok(output)) if output.status.success() => true,
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                tracing::warn!(
+                    "provider turn interrupt send-keys failed: provider={} session={} reason={} status={} stderr={}",
+                    provider.as_str(),
+                    tmux_session_name,
+                    reason,
+                    output.status,
+                    stderr
+                );
+                false
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "provider turn interrupt send-keys error: provider={} session={} reason={} error={}",
+                    provider.as_str(),
+                    tmux_session_name,
+                    reason,
+                    error
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "provider turn interrupt send-keys join error: provider={} session={} reason={} error={}",
+                    provider.as_str(),
+                    tmux_session_name,
+                    reason,
+                    error
+                );
+                false
+            }
         }
     };
 
@@ -600,11 +616,19 @@ mod tests {
         assert!(!text.contains("이어붙이지 못했습니다"));
     }
 
+    // #1260: Claude's PTY foreground is `agentdesk tmux-wrapper`, not the
+    // claude CLI (whose stdin is piped from the wrapper). A `tmux send-keys
+    // C-c` therefore SIGINTs the wrapper and tears the session down. The
+    // empty key list signals to `interrupt_provider_cli_turn` that it must
+    // skip send-keys and proceed straight to the direct-SIGINT fallback.
+    // Codex/Qwen run as the PTY foreground themselves, so C-c via send-keys
+    // is still the correct primary interrupt.
     #[test]
-    fn provider_interrupt_plan_covers_managed_tmux_providers_only() {
+    fn provider_interrupt_plan_skips_send_keys_for_claude_only() {
         assert_eq!(
             super::provider_turn_interrupt_plan(&ProviderKind::Claude).map(|plan| plan.keys),
-            Some(&["C-c"][..])
+            Some(&[][..]),
+            "claude must skip send-keys C-c — wrapper is the PTY foreground (#1260)"
         );
         assert_eq!(
             super::provider_turn_interrupt_plan(&ProviderKind::Codex).map(|plan| plan.keys),
@@ -617,15 +641,26 @@ mod tests {
         assert!(super::provider_turn_interrupt_plan(&ProviderKind::Gemini).is_none());
     }
 
+    // #1260: with C-c via send-keys removed for claude, the SIGINT fallback
+    // is now the *only* interrupt delivery path. It must fire whenever we
+    // know claude's PID, regardless of `ready_for_input`. The previous
+    // ready-for-input gate was meant to avoid double-delivery on top of the
+    // (now-removed) C-c.
     #[test]
-    fn provider_interrupt_fallback_respects_provider_idle_semantics() {
+    fn provider_interrupt_fallback_always_fires_for_claude_when_pid_known() {
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, true, Some(42)),
-            None
+            Some(42),
+            "claude SIGINT fallback must fire even when ready_for_input=true (#1260)"
         );
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, false, Some(42)),
             Some(42)
+        );
+        assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Claude, false, None),
+            None,
+            "no PID = no SIGINT (still skip the fallback cleanly)"
         );
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Codex, true, Some(42)),
@@ -634,6 +669,10 @@ mod tests {
         assert_eq!(
             super::fallback_sigint_pid_for_provider(&ProviderKind::Qwen, false, Some(42)),
             Some(42)
+        );
+        assert_eq!(
+            super::fallback_sigint_pid_for_provider(&ProviderKind::Gemini, false, Some(42)),
+            None
         );
     }
 
