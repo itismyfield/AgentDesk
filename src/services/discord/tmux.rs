@@ -3958,7 +3958,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             }
         };
 
-        let poll_decision = if data.is_empty() {
+        let poll_decision = if data.is_empty() && all_data.is_empty() {
             watcher_output_poll_decision(
                 data.len(),
                 Some(tmux_liveness_decision(
@@ -4080,6 +4080,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             monitor_auto_turn_claimed = start.acquired;
             monitor_auto_turn_deferred = monitor_auto_turn_deferred || start.deferred;
             if !start.acquired {
+                all_data.clear();
                 continue;
             }
             ensure_monitor_auto_turn_inflight(
@@ -4110,6 +4111,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let mut was_paused = paused.load(Ordering::Relaxed) || epoch_changed;
         if was_paused && !monitor_auto_turn_deferred {
             // A Discord turn took over — discard what we read
+            all_data.clear();
             continue;
         }
         if !found_result {
@@ -4673,6 +4675,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 &mut monitor_auto_turn_finished,
             )
             .await;
+            all_data.clear();
             continue;
         }
 

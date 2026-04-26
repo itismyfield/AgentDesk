@@ -220,7 +220,7 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
     ProviderCliUpdateStrategy {
         provider: "qwen",
         install_source: "pip-user",
-        command_argv: &["pip", "install", "--upgrade", "qwen-cli"],
+        command_argv: &["pip", "install", "--user", "--upgrade", "qwen-cli"],
         expected_binary_name: "qwen",
         mutates_in_place: true,
     },
