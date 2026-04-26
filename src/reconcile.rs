@@ -114,7 +114,11 @@ pub(crate) async fn reconcile_boot_runtime(
         reconcile_boot_db(&conn)?
     };
 
-    stats.missing_review_dispatches_refired = refire_missing_review_dispatches(db, engine)?;
+    stats.missing_review_dispatches_refired = if let Some(pool) = pg_pool {
+        refire_missing_review_dispatches_pg(pool, db, engine).await?
+    } else {
+        refire_missing_review_dispatches(db, engine)?
+    };
 
     if stats.touched() {
         tracing::info!(
@@ -476,6 +480,88 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
                 )
                 .unwrap_or(false)
         };
+        if has_review_dispatch {
+            refired += 1;
+        } else {
+            tracing::warn!(
+                "[boot-reconcile] OnReviewEnter re-fired for card {} but no active review dispatch was created",
+                card_id
+            );
+        }
+    }
+
+    Ok(refired)
+}
+
+async fn refire_missing_review_dispatches_pg(
+    pool: &PgPool,
+    db: &Db,
+    engine: &PolicyEngine,
+) -> Result<usize> {
+    crate::pipeline::ensure_loaded();
+
+    let cards: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, status, repo_id, assigned_agent_id
+         FROM kanban_cards
+         WHERE status NOT IN ('done', 'backlog', 'ready')",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut candidates = Vec::new();
+    for (card_id, status, repo_id, agent_id) in cards {
+        let effective =
+            crate::pipeline::resolve_for_card_pg(pool, repo_id.as_deref(), agent_id.as_deref())
+                .await;
+        let is_review_state = effective.hooks_for_state(&status).map_or(false, |hooks| {
+            hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
+        });
+        if !is_review_state {
+            continue;
+        }
+
+        let has_review_dispatch = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM task_dispatches
+                WHERE kanban_card_id = $1
+                  AND dispatch_type IN ('review', 'review-decision')
+                  AND status IN ('pending', 'dispatched')
+            )",
+        )
+        .bind(&card_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if !has_review_dispatch {
+            candidates.push(card_id);
+        }
+    }
+
+    let mut refired = 0usize;
+    for card_id in candidates {
+        if let Err(e) =
+            engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": card_id }))
+        {
+            tracing::warn!(
+                "[boot-reconcile] failed to re-fire OnReviewEnter for card {}: {e}",
+                card_id
+            );
+            continue;
+        }
+        crate::kanban::drain_hook_side_effects(db, engine);
+
+        let has_review_dispatch = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM task_dispatches
+                WHERE kanban_card_id = $1
+                  AND dispatch_type IN ('review', 'review-decision')
+                  AND status IN ('pending', 'dispatched')
+            )",
+        )
+        .bind(&card_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
         if has_review_dispatch {
             refired += 1;
         } else {

@@ -332,6 +332,46 @@ fn db_execute_raw(
     format!(r#"{{"changes":{changes}}}"#)
 }
 
+pub(crate) fn execute_policy_sql(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<u64, String> {
+    emit_raw_db_audit("intent.execute_sql", sql);
+    if let Some(violation) = detect_core_table_write(sql) {
+        tracing::warn!("{}", violation.warning_message("ExecuteSQL intent", sql));
+        return Err(violation.error_message().to_string());
+    }
+
+    if let Some(pg_pool) = pg_pool {
+        let prepared_sql = prepare_policy_sql_for_pg(sql, params)?;
+        let pool = pg_pool.clone();
+        return run_async_bridge_pg(&pool, move |pool| async move {
+            sqlx::query(&prepared_sql)
+                .execute(&pool)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(|error| format!("execute postgres policy SQL: {error}"))
+        });
+    }
+
+    let Some(db) = db else {
+        return Err("sqlite backend is unavailable".to_string());
+    };
+    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
+    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind
+        .iter()
+        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
+        .collect();
+    let conn = db
+        .separate_conn()
+        .map_err(|error| format!("db conn: {error}"))?;
+    conn.execute(sql, params_ref.as_slice())
+        .map(|changes| changes as u64)
+        .map_err(|error| format!("execute sqlite policy SQL: {error}"))
+}
+
 fn db_execute_raw_pg(
     pg_pool: &PgPool,
     sql: &str,

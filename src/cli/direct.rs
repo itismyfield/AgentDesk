@@ -5,6 +5,7 @@ use axum::{
 };
 use regex::Regex;
 use serde_json::{Value, json};
+use sqlx::Row as _;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::process::Command;
@@ -135,6 +136,19 @@ fn repo_default_agent_id(db: &crate::db::Db, repo: &str) -> Option<String> {
         .flatten()
         .filter(|agent_id| !agent_id.trim().is_empty())
     })
+}
+
+async fn repo_default_agent_id_pg(pool: &sqlx::PgPool, repo: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT default_agent_id FROM github_repos WHERE id = $1",
+    )
+    .bind(repo)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|agent_id| !agent_id.trim().is_empty())
 }
 
 fn resolve_repo_dir(repo_id: Option<&str>) -> Result<Option<String>, String> {
@@ -548,12 +562,11 @@ fn infer_issue_priority(labels: &[crate::github::sync::GhLabel]) -> &'static str
     "medium"
 }
 
-fn upsert_backlog_card_from_issue(
-    db: &crate::db::Db,
+async fn upsert_backlog_card_from_issue_pg(
+    pool: &sqlx::PgPool,
     repo: &str,
     issue: &crate::github::IssueView,
 ) -> Result<String, String> {
-    let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
     let metadata = {
         let labels: Vec<&str> = issue
             .labels
@@ -567,44 +580,54 @@ fn upsert_backlog_card_from_issue(
         }
     };
 
-    if let Ok(existing_id) = conn.query_row(
-        "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-        libsql_rusqlite::params![issue.number, repo],
-        |row| row.get::<_, String>(0),
-    ) {
-        conn.execute(
+    if let Some(existing_id) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM kanban_cards WHERE github_issue_number = $1 AND repo_id = $2",
+    )
+    .bind(issue.number)
+    .bind(repo)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("query existing postgres card: {e}"))?
+    {
+        sqlx::query(
             "UPDATE kanban_cards
-             SET title = ?1,
-                 github_issue_url = ?2,
-                 description = ?3,
-                 metadata = COALESCE(?4, metadata),
-                 updated_at = datetime('now')
-             WHERE id = ?5",
-            libsql_rusqlite::params![issue.title, issue.url, issue.body, metadata, existing_id],
+             SET title = $1,
+                 github_issue_url = $2,
+                 description = $3,
+                 metadata = COALESCE($4, metadata),
+                 updated_at = NOW()
+             WHERE id = $5",
         )
-        .map_err(|e| format!("update existing card: {e}"))?;
+        .bind(&issue.title)
+        .bind(&issue.url)
+        .bind(&issue.body)
+        .bind(&metadata)
+        .bind(&existing_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("update existing postgres card: {e}"))?;
         return Ok(existing_id);
     }
 
     let card_id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
+    sqlx::query(
         "INSERT INTO kanban_cards (
              id, repo_id, title, status, priority, github_issue_url, github_issue_number,
              description, metadata, created_at, updated_at
          )
-         VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-        libsql_rusqlite::params![
-            card_id,
-            repo,
-            issue.title,
-            infer_issue_priority(&issue.labels),
-            issue.url,
-            issue.number,
-            issue.body,
-            metadata,
-        ],
+         VALUES ($1, $2, $3, 'backlog', $4, $5, $6, $7, $8, NOW(), NOW())",
     )
-    .map_err(|e| format!("insert backlog card: {e}"))?;
+    .bind(&card_id)
+    .bind(repo)
+    .bind(&issue.title)
+    .bind(infer_issue_priority(&issue.labels))
+    .bind(&issue.url)
+    .bind(issue.number)
+    .bind(&issue.body)
+    .bind(&metadata)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("insert postgres backlog card: {e}"))?;
     Ok(card_id)
 }
 
@@ -656,6 +679,48 @@ fn resolve_card_id(
     }
 }
 
+async fn resolve_card_id_pg(
+    pool: &sqlx::PgPool,
+    card_ref: &str,
+    repo: Option<&str>,
+) -> Result<String, String> {
+    let trimmed = card_ref.trim();
+    if trimmed.is_empty() {
+        return Err("card reference is required".to_string());
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Ok(trimmed.to_string());
+    }
+
+    let issue_number = trimmed
+        .parse::<i64>()
+        .map_err(|e| format!("invalid issue number '{trimmed}': {e}"))?;
+    let ids: Vec<String> = if let Some(repo) = repo.map(str::trim).filter(|repo| !repo.is_empty()) {
+        sqlx::query_scalar(
+            "SELECT id FROM kanban_cards WHERE github_issue_number = $1 AND repo_id = $2",
+        )
+        .bind(issue_number)
+        .bind(repo)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("query postgres card lookup: {e}"))?
+    } else {
+        sqlx::query_scalar("SELECT id FROM kanban_cards WHERE github_issue_number = $1")
+            .bind(issue_number)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("query postgres card lookup: {e}"))?
+    };
+
+    match ids.len() {
+        0 => Err(format!("no card found for issue #{issue_number}")),
+        1 => Ok(ids[0].clone()),
+        _ => Err(format!(
+            "multiple cards match issue #{issue_number}; pass --repo owner/repo or use the card id"
+        )),
+    }
+}
+
 pub(crate) async fn cmd_card_create_from_issue(
     issue_number: i64,
     repo: Option<&str>,
@@ -675,17 +740,29 @@ pub(crate) async fn cmd_card_create_from_issue(
 
         match target_status {
             "backlog" => {
-                let card_id = upsert_backlog_card_from_issue(&state.db, &repo, &issue)?;
+                let pg_pool = state
+                    .pg_pool
+                    .clone()
+                    .ok_or_else(|| "postgres pool unavailable for card create".to_string())?;
+                let card_id = upsert_backlog_card_from_issue_pg(&pg_pool, &repo, &issue)
+                    .await
+                    .map_err(|e| format!("upsert backlog card in postgres: {e}"))?;
                 let (status, body) =
                     crate::server::routes::kanban::get_card(State(state), Path(card_id)).await;
                 route_json(status, body)
             }
             "ready" => {
+                let default_agent_id = if let Some(pool) = state.pg_pool_ref() {
+                    repo_default_agent_id_pg(pool, &repo).await
+                } else {
+                    None
+                }
+                .or_else(|| repo_default_agent_id(&state.db, &repo));
                 let effective_agent_id = agent_id
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
-                    .or_else(|| repo_default_agent_id(&state.db, &repo))
+                    .or(default_agent_id)
                     .ok_or_else(|| {
                         format!(
                             "ready card creation requires --agent or github_repos.default_agent_id for {repo}"
@@ -775,9 +852,39 @@ fn load_pr_tracking(db: &crate::db::Db, card_id: &str) -> Option<Value> {
     })
 }
 
+async fn load_pr_tracking_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<Value> {
+    let row = sqlx::query(
+        "SELECT repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at
+         FROM pr_tracking WHERE card_id = $1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+
+    Some(json!({
+        "repo_id": row.try_get::<Option<String>, _>("repo_id").ok().flatten(),
+        "worktree_path": row.try_get::<Option<String>, _>("worktree_path").ok().flatten(),
+        "branch": row.try_get::<Option<String>, _>("branch").ok().flatten(),
+        "pr_number": row.try_get::<Option<i64>, _>("pr_number").ok().flatten(),
+        "head_sha": row.try_get::<Option<String>, _>("head_sha").ok().flatten(),
+        "state": row.try_get::<String, _>("state").unwrap_or_default(),
+        "last_error": row.try_get::<Option<String>, _>("last_error").ok().flatten(),
+        "created_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at").ok().flatten().map(|value| value.to_rfc3339()),
+        "updated_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at").ok().flatten().map(|value| value.to_rfc3339()),
+    }))
+}
+
 pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Result<(), String> {
     run_command(false, false, |state| async move {
-        let card_id = resolve_card_id(&state.db, card_ref, repo)?;
+        let card_id = if let Some(pool) = state.pg_pool_ref() {
+            resolve_card_id_pg(pool, card_ref, repo)
+                .await
+                .or_else(|_| resolve_card_id(&state.db, card_ref, repo))?
+        } else {
+            resolve_card_id(&state.db, card_ref, repo)?
+        };
         let (status, Json(value)) =
             crate::server::routes::kanban::get_card(State(state.clone()), Path(card_id.clone()))
                 .await;
@@ -856,13 +963,21 @@ pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Resul
             _ => None,
         };
 
+        let pr_tracking = if let Some(pool) = state.pg_pool_ref() {
+            load_pr_tracking_pg(pool, &card_id)
+                .await
+                .or_else(|| load_pr_tracking(&state.db, &card_id))
+        } else {
+            load_pr_tracking(&state.db, &card_id)
+        };
+
         Ok(json!({
             "card": card,
             "dispatches": dispatches,
             "connected_commits": commits,
             "merged_to_main": merged_to_main,
             "worktree": worktree,
-            "pr_tracking": load_pr_tracking(&state.db, &card_id),
+            "pr_tracking": pr_tracking,
             "github_issue": github_issue,
         }))
     })

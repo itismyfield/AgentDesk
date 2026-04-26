@@ -25,6 +25,7 @@ mod review_automation_ops;
 mod review_ops;
 mod runtime_ops;
 
+pub(crate) use db_ops::execute_policy_sql;
 pub(crate) use review_ops::{ADVANCE_REVIEW_ROUND_HINT_KEY, ensure_js_error_json};
 
 #[cfg(test)]
