@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, params}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 

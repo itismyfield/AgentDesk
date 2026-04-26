@@ -1,4 +1,4 @@
-use libsql_rusqlite::{Connection, Row, types::ToSql}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, Row, types::ToSql};
 use sqlx::{PgPool, QueryBuilder, Row as SqlxRow};
 
 #[derive(Debug, Clone, Default)]
@@ -64,7 +64,6 @@ const CARD_SELECT_SQL_PG: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status,
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
 pub fn list_registered_repo_ids(conn: &Connection) -> libsql_rusqlite::Result<Vec<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut stmt = conn.prepare("SELECT id FROM github_repos")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect()
@@ -230,7 +229,6 @@ pub fn list_cards(
     filter: &ListCardsFilter,
     registered_repo_ids: &[String],
 ) -> libsql_rusqlite::Result<Vec<KanbanCardRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let mut sql = format!("{CARD_SELECT_SQL} WHERE 1=1");
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
@@ -312,7 +310,6 @@ pub async fn list_cards_pg(
 }
 
 fn kanban_card_row_to_record(row: &Row<'_>) -> libsql_rusqlite::Result<KanbanCardRecord> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let latest_dispatch_status = row.get::<_, Option<String>>(13).unwrap_or(None);
     let latest_dispatch_type = row.get::<_, Option<String>>(14).unwrap_or(None);
     let latest_dispatch_result_raw = row.get::<_, Option<String>>(17).unwrap_or(None);

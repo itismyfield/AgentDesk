@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, Row, params}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row as SqlxRow};
 
@@ -348,7 +348,7 @@ pub fn list_transcripts_for_agent(
     )?;
 
     let rows = stmt.query_map(params![agent_id, limit], session_transcript_record_from_row)?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 pub async fn list_transcripts_for_agent_db(
@@ -401,7 +401,7 @@ pub fn list_transcripts_for_card(
     )?;
 
     let rows = stmt.query_map(params![card_id, limit], session_transcript_record_from_row)?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 pub async fn list_transcripts_for_card_db(
@@ -453,7 +453,6 @@ pub fn dispatch_has_assistant_response_db(
 fn session_transcript_record_from_row(
     row: &Row<'_>,
 ) -> libsql_rusqlite::Result<SessionTranscriptRecord> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     let events_json: Option<String> = row.get(13)?;
     Ok(SessionTranscriptRecord {
         id: row.get(0)?,

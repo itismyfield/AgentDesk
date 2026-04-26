@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use libsql_rusqlite::{Connection, OptionalExtension}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, OptionalExtension};
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::config::{AgentChannel, AgentDef};
@@ -122,7 +122,6 @@ pub fn load_agent_channel_bindings(
     conn: &Connection,
     agent_id: &str,
 ) -> libsql_rusqlite::Result<Option<AgentChannelBindings>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     conn.query_row(
         "SELECT provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
          FROM agents WHERE id = ?1",
@@ -144,7 +143,6 @@ pub fn resolve_agent_primary_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
 ) -> libsql_rusqlite::Result<Option<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.primary_channel()))
 }
 
@@ -152,7 +150,6 @@ pub fn resolve_agent_counter_model_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
 ) -> libsql_rusqlite::Result<Option<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.counter_model_channel()))
 }
 
@@ -161,7 +158,6 @@ pub fn resolve_agent_channel_for_provider_on_conn(
     agent_id: &str,
     provider: Option<&str>,
 ) -> libsql_rusqlite::Result<Option<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.channel_for_provider(provider)))
 }
 
@@ -170,7 +166,6 @@ pub fn resolve_agent_dispatch_channel_on_conn(
     agent_id: &str,
     dispatch_type: Option<&str>,
 ) -> libsql_rusqlite::Result<Option<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     Ok(
         load_agent_channel_bindings(conn, agent_id)?.and_then(|bindings| {
             if matches!(dispatch_type, Some("review" | "e2e-test" | "consultation")) {
@@ -353,7 +348,6 @@ fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Resul
             discord_channel_cdx = excluded.discord_channel_cdx,
             updated_at = CURRENT_TIMESTAMP",
         libsql_rusqlite::params![
-            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
             agent.id,
             agent.name,
             agent.name_ko,
@@ -491,7 +485,7 @@ mod tests {
     use crate::config::AgentChannels;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

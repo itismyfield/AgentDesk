@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, params}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, params};
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::Db;
@@ -140,7 +140,7 @@ pub async fn upsert_turn_stat_pg(pool: &PgPool, stat: &MementoFeedbackTurnStat) 
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn list_daily_stats(conn: &Connection) -> Result<Vec<MementoFeedbackDailyStat>> {
     let mut stmt = conn.prepare(
         "SELECT
@@ -173,7 +173,7 @@ pub fn list_daily_stats(conn: &Connection) -> Result<Vec<MementoFeedbackDailySta
             coverage_rate: row.get(10)?,
         })
     })?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 #[allow(dead_code)]

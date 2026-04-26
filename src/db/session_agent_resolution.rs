@@ -1,4 +1,4 @@
-use libsql_rusqlite::Connection; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::Connection;
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::agents::AgentChannelBindings;

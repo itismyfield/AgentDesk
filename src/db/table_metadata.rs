@@ -11,10 +11,9 @@
 //!     (`sync_pipeline_stages_from_yaml`) and stamp `last_synced_at`.
 //!
 //! The table itself is created in the Postgres migration
-//! `0019_db_table_metadata.sql` and in `src/db/schema.rs` for SQLite.
+//! `0019_db_table_metadata.sql`.
 
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -90,37 +89,6 @@ pub async fn upsert_pg(
     .execute(pool)
     .await
     .map_err(|error| anyhow!("upsert postgres db_table_metadata {table_name}: {error}"))?;
-    Ok(())
-}
-
-/// `fn db_source_of_truth(table_name) -> Option<Source>` — SQLite path.
-pub fn source_of_truth_sqlite(conn: &Connection, table_name: &str) -> Option<Source> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT source_of_truth FROM db_table_metadata WHERE table_name = ?1",
-            [table_name],
-            |row| row.get::<_, String>(0),
-        )
-        .ok();
-    raw.as_deref().and_then(Source::from_str)
-}
-
-/// Upsert a metadata row.  Used by startup sync and tests.
-pub fn upsert_sqlite(
-    conn: &Connection,
-    table_name: &str,
-    source: Source,
-    file_path: Option<&str>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO db_table_metadata (table_name, source_of_truth, file_path, last_synced_at)
-         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
-         ON CONFLICT(table_name) DO UPDATE SET
-             source_of_truth = excluded.source_of_truth,
-             file_path = excluded.file_path,
-             last_synced_at = CURRENT_TIMESTAMP",
-        libsql_rusqlite::params![table_name, source.as_str(), file_path],
-    )?;
     Ok(())
 }
 
@@ -208,63 +176,6 @@ pub async fn sync_pipeline_stages_from_yaml_pg(
         yaml_path.to_str(),
     )
     .await?;
-
-    Ok(yaml_names.len())
-}
-
-/// Materialized view sync.  Parses `policies/default-pipeline.yaml`
-/// (just the top-level `states:` list for now) and upserts one
-/// `pipeline_stages` row per state for the sentinel repo
-/// `__default__`, then stamps `last_synced_at`.
-///
-/// Startup calls this *after* `pipeline::load` so we know the file is
-/// already parseable.  If the yaml has entries the DB does not, they
-/// are inserted; if the DB has extra rows, we log a warning rather
-/// than deleting (per DoD: "don't destroy").
-pub fn sync_pipeline_stages_from_yaml_sqlite(
-    conn: &Connection,
-    yaml_path: &std::path::Path,
-) -> Result<usize> {
-    let Some(yaml_names) = load_pipeline_state_ids(yaml_path)? else {
-        return Ok(0);
-    };
-
-    let sentinel_repo = "__default__";
-    for (idx, id) in yaml_names.iter().enumerate() {
-        conn.execute(
-            "INSERT INTO pipeline_stages
-                (repo_id, stage_name, stage_order, entry_skill, timeout_minutes, on_failure)
-             SELECT ?1, ?2, ?3, NULL, 60, 'fail'
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM pipeline_stages
-                 WHERE repo_id = ?1 AND stage_name = ?2
-             )",
-            libsql_rusqlite::params![sentinel_repo, id, idx as i64 + 1],
-        )?;
-    }
-
-    // Warn on DB-only entries (yaml has entries not in db → sync;
-    // db has entries not in yaml → warn, don't destroy).
-    let mut stmt = conn.prepare(
-        "SELECT stage_name FROM pipeline_stages WHERE repo_id = ?1 AND stage_name IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([sentinel_repo], |row| row.get::<_, String>(0))?;
-    for row in rows.flatten() {
-        if !yaml_names.contains(&row) {
-            tracing::warn!(
-                "[db_table_metadata] pipeline_stages has DB-only entry '{}' not present in {}; leaving untouched",
-                row,
-                yaml_path.display()
-            );
-        }
-    }
-
-    upsert_sqlite(
-        conn,
-        "pipeline_stages",
-        Source::FileCanonical,
-        yaml_path.to_str(),
-    )?;
 
     Ok(yaml_names.len())
 }
