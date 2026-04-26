@@ -869,7 +869,15 @@ export default function AppShell({
 
                 {showNotificationPanel && (
                   <div
-                    className="absolute right-0 top-12 w-[min(22rem,calc(100vw-2rem))] rounded-3xl border p-3 shadow-2xl"
+                    /* The bell sits on the left side of the topbar action
+                       cluster on mobile (it follows the theme toggle), so
+                       anchoring with `right-0` made the popup expand
+                       leftward off the viewport. Anchor to `left-0` so the
+                       popup grows toward the empty topbar area to the right
+                       on every breakpoint, and cap width to the actual
+                       viewport so a 22rem popup can never overflow on a
+                       narrow phone (#1253 follow-up). */
+                    className="absolute left-0 top-12 w-[min(22rem,calc(100vw-1.5rem))] max-w-[calc(100vw-1.5rem)] rounded-3xl border p-3 shadow-2xl"
                     style={{
                       zIndex: SHELL_POPOVER_Z_INDEX,
                       borderColor: "var(--th-border-subtle)",
@@ -2008,14 +2016,17 @@ function HomeOverviewPage({
     }
     return streak;
   }, [analytics]);
-  const formatCompact = useCallback(
-    (value: number) =>
-      new Intl.NumberFormat(isKo ? "ko-KR" : "en-US", {
-        notation: "compact",
-        maximumFractionDigits: value >= 1_000_000 ? 1 : 0,
-      }).format(value),
-    [isKo],
-  );
+  /* Match StatsPageView.formatTokens — always use M/B/K units regardless of
+     locale so the home KPI tiles read the same as the stats receipt. The
+     previous Intl compact formatter switched to 만/억 in Korean locale,
+     which was inconsistent with /stats and made cross-page mental math
+     harder. */
+  const formatCompact = useCallback((value: number): string => {
+    if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
+    if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+    return Math.round(value).toString();
+  }, []);
   const formatCurrency = useCallback(
     (value: number) =>
       new Intl.NumberFormat(isKo ? "en-US" : "en-US", {

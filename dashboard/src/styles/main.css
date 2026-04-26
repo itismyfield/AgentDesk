@@ -111,6 +111,11 @@
   --th-accent-info: var(--info);
   --th-accent-warn: var(--warn);
   --th-accent-danger: var(--err);
+  /* `--th-accent-success` was missing from the theme tokens, so callers like
+     HomeMetricTile that referenced it for the API-cost sparkline accent
+     resolved to an empty string and stroked nothing. Map it to the existing
+     `--ok` green so the cost graph appears alongside the token graph. */
+  --th-accent-success: var(--ok);
   --th-badge-sky-bg: color-mix(in oklch, var(--info) 16%, var(--bg-2) 84%);
   --th-badge-sky-text: color-mix(in oklch, var(--info) 74%, var(--fg) 26%);
   --th-badge-blue-bg: color-mix(in oklch, var(--accent) 18%, var(--bg-2) 82%);
