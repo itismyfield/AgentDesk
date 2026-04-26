@@ -1,3 +1,11 @@
+//! Inflight turn state persistence.
+//!
+//! `response_sent_offset`, `current_msg_id`, and
+//! `last_watcher_relayed_offset` participate in the relay state contract
+//! documented in `docs/relay-state-contract.md` (#1222 / #1224).
+//! Any change that touches relay producers/consumers must keep the
+//! invariants enumerated there satisfied.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1012,5 +1020,74 @@ mod tests {
         assert_eq!(states[0].request_owner_user_id, 123);
         assert_eq!(states[0].user_msg_id, 456);
         assert_eq!(states[0].user_text, "real user input");
+    }
+
+    /// Relay state contract — invariant **I1**
+    /// (`docs/relay-state-contract.md`, `response_sent_offset_in_bounds` +
+    /// `response_sent_offset_monotonic`).
+    ///
+    /// A normal forward-moving save must succeed without tripping either
+    /// the bounds or the monotonicity check.
+    #[test]
+    fn relay_state_contract_i1_response_sent_offset_advances_monotonically() {
+        let temp = TempDir::new().unwrap();
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            555,
+            Some("adk-cdx".to_string()),
+            1,
+            2,
+            3,
+            "user prompt".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.full_response = "hello world".to_string();
+        state.response_sent_offset = 5;
+        save_inflight_state_in_root(temp.path(), &state).expect("first save");
+
+        state.response_sent_offset = 11; // == full_response.len()
+        save_inflight_state_in_root(temp.path(), &state).expect("forward save");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].response_sent_offset, 11);
+        assert_eq!(loaded[0].full_response, "hello world");
+    }
+
+    /// Relay state contract — invariant **I3**
+    /// (`docs/relay-state-contract.md`, `watcher_relay_idempotent`).
+    ///
+    /// `last_watcher_relayed_offset` must round-trip across save/load so
+    /// a replacement watcher (post restart, post replace) initialises its
+    /// duplicate-relay guard from the persisted high-water mark.
+    #[test]
+    fn relay_state_contract_i3_last_watcher_relayed_offset_persists() {
+        let temp = TempDir::new().unwrap();
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            777,
+            Some("adk-cdx".to_string()),
+            1,
+            2,
+            3,
+            "user prompt".to_string(),
+            None,
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.last_watcher_relayed_offset = Some(4_096);
+        save_inflight_state_in_root(temp.path(), &state).expect("save with watcher offset");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].last_watcher_relayed_offset, Some(4_096));
     }
 }
