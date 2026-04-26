@@ -145,6 +145,11 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             .map_err(|e| format!("prepare runtime layout: {e}"))?;
     }
 
+    let legacy_scan = runtime_root
+        .as_ref()
+        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
+        .unwrap_or_default();
+
     let loaded = if let Some(root) = runtime_root.as_ref() {
         crate::services::discord_config_audit::load_runtime_config(root)
             .map_err(|e| format!("load runtime config: {e}"))?
@@ -157,7 +162,20 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
         }
     };
 
-    let config = loaded.config;
+    let mut config = if let Some(root) = runtime_root.as_ref() {
+        crate::services::discord_config_audit::audit_and_reconcile_config_only(
+            root,
+            loaded.config,
+            loaded.path,
+            loaded.existed,
+            &legacy_scan,
+            false,
+        )
+        .map_err(|e| format!("audit runtime config: {e}"))?
+        .config
+    } else {
+        loaded.config
+    };
 
     let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
     if pipeline_path.exists() {
@@ -176,6 +194,20 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     }
 
     let pg_pool = crate::db::postgres::connect_and_migrate(&config).await?;
+    if let Some(root) = runtime_root.as_ref() {
+        let loaded = crate::services::discord_config_audit::load_runtime_config(root)
+            .map_err(|e| format!("reload runtime config after pg migration: {e}"))?;
+        config = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+            root,
+            loaded.config,
+            loaded.path,
+            loaded.existed,
+            &legacy_scan,
+            false,
+        )
+        .map_err(|e| format!("persist runtime config audit after pg migration: {e}"))?
+        .config;
+    }
     if let Some(pool) = pg_pool.as_ref() {
         crate::db::postgres::startup_reseed(pool, &config)
             .await
