@@ -601,112 +601,7 @@ pub(super) async fn list_agents(
         return Json(json!({ "agents": agents }));
     }
 
-    let agents = match state.sqlite_db().lock() {
-        Ok(conn) => {
-            let (sql, bind_values): (String, Vec<String>) = if let Some(ref oid) = params.office_id
-            {
-                (
-                    "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                            a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-                            a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
-                            aa.state, aa.archived_at, aa.reason,
-                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
-                            (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
-                            (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
-                            (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id,
-                            a.pipeline_config
-                     FROM agents a
-                     INNER JOIN office_agents oa ON oa.agent_id = a.id
-                     LEFT JOIN departments d ON d.id = a.department
-                     LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
-                     WHERE oa.office_id = ?1
-                     ORDER BY a.id".to_string(),
-                    vec![oid.clone()],
-                )
-            } else {
-                (
-                    "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                            a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-                            a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
-                            aa.state, aa.archived_at, aa.reason,
-                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
-                            (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
-                            (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
-                            (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id,
-                            a.pipeline_config
-                     FROM agents a
-                     LEFT JOIN departments d ON d.id = a.department
-                     LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
-                     ORDER BY a.id".to_string(),
-                    vec![],
-                )
-            };
-
-            let mut stmt = match conn.prepare(&sql) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Json(json!({ "error": format!("query prepare failed: {e}") }));
-                }
-            };
-
-            let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
-                .iter()
-                .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
-                .collect();
-
-            let rows = stmt
-                .query_map(params_ref.as_slice(), |row| {
-                    let provider = row.get::<_, Option<String>>(3)?;
-                    let discord_channel_alt = row.get::<_, Option<String>>(7)?;
-                    let discord_channel_cdx = row.get::<_, Option<String>>(9)?;
-                    let xp_val = row.get::<_, f64>(11).unwrap_or(0.0) as i64;
-                    Ok(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "name": row.get::<_, String>(1)?,
-                        "name_ko": row.get::<_, Option<String>>(2)?,
-                        "provider": provider,
-                        "cli_provider": provider,
-                        "department": row.get::<_, Option<String>>(4)?,
-                        "department_id": row.get::<_, Option<String>>(4)?,
-                        "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                        "discord_channel_id": row.get::<_, Option<String>>(6)?,
-                        "discord_channel_alt": discord_channel_alt,
-                        "discord_channel_cc": row.get::<_, Option<String>>(8)?,
-                        "discord_channel_cdx": discord_channel_cdx,
-                        "discord_channel_id_codex": discord_channel_cdx,
-                        "status": row.get::<_, Option<String>>(10)?,
-                        "xp": xp_val,
-                        "stats_xp": xp_val,
-                        "archive_state": row.get::<_, Option<String>>(17)?,
-                        "archived_at": row.get::<_, Option<String>>(18)?,
-                        "archive_reason": row.get::<_, Option<String>>(19)?,
-                        "stats_tasks_done": row.get::<_, i64>(20).unwrap_or(0),
-                        "stats_tokens": row.get::<_, i64>(21).unwrap_or(0),
-                        "sprite_number": row.get::<_, Option<i64>>(12)?,
-                        "department_name": row.get::<_, Option<String>>(13)?,
-                        "department_name_ko": row.get::<_, Option<String>>(14)?,
-                        "department_color": row.get::<_, Option<String>>(15)?,
-                        "created_at": row.get::<_, Option<String>>(16)?,
-                        "alias": serde_json::Value::Null,
-                        "role_id": row.get::<_, Option<String>>(0)?,
-                        "personality": serde_json::Value::Null,
-                        "current_task_id": row.get::<_, Option<String>>(22)?,
-                        "current_thread_channel_id": row.get::<_, Option<String>>(23)?,
-                        "pipeline_config": row.get::<_, Option<String>>(24)?
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-                    }))
-                })
-                .ok();
-
-            match rows {
-                Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-                None => Vec::new(),
-            }
-        }
-        Err(_) => Vec::new(),
-    };
-
-    Json(json!({ "agents": agents }))
+    Json(json!({ "error": "postgres pool unavailable" }))
 }
 
 pub(super) async fn get_agent(
@@ -721,77 +616,7 @@ pub(super) async fn get_agent(
         };
     }
 
-    match state.sqlite_db().lock() {
-        Ok(conn) => {
-            let result = conn.query_row(
-                "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                        a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-                        a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
-                        aa.state, aa.archived_at, aa.reason,
-                        (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
-                        (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
-                        (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
-                        (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id,
-                        a.pipeline_config
-                 FROM agents a
-                 LEFT JOIN departments d ON d.id = a.department
-                 LEFT JOIN agent_archive aa ON aa.agent_id = a.id AND aa.state = 'archived'
-                 WHERE a.id = ?1",
-                [&id],
-                |row| {
-                    let provider = row.get::<_, Option<String>>(3)?;
-                    let discord_channel_alt = row.get::<_, Option<String>>(7)?;
-                    let discord_channel_cdx = row.get::<_, Option<String>>(9)?;
-                    let xp_val = row.get::<_, f64>(11).unwrap_or(0.0) as i64;
-                    let mut fields = load_agent_management_fields(&id, provider.as_deref());
-                    fields.archive_state = row.get::<_, Option<String>>(17)?;
-                    fields.archived_at = row.get::<_, Option<String>>(18)?;
-                    fields.archive_reason = row.get::<_, Option<String>>(19)?;
-                    Ok(attach_management_fields(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "name": row.get::<_, String>(1)?,
-                        "name_ko": row.get::<_, Option<String>>(2)?,
-                        "provider": provider,
-                        "cli_provider": provider,
-                        "department": row.get::<_, Option<String>>(4)?,
-                        "department_id": row.get::<_, Option<String>>(4)?,
-                        "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                        "discord_channel_id": row.get::<_, Option<String>>(6)?,
-                        "discord_channel_alt": discord_channel_alt,
-                        "discord_channel_cc": row.get::<_, Option<String>>(8)?,
-                        "discord_channel_cdx": discord_channel_cdx,
-                        "discord_channel_id_codex": discord_channel_cdx,
-                        "status": row.get::<_, Option<String>>(10)?,
-                        "xp": xp_val,
-                        "stats_xp": xp_val,
-                        "stats_tasks_done": row.get::<_, i64>(20).unwrap_or(0),
-                        "stats_tokens": row.get::<_, i64>(21).unwrap_or(0),
-                        "sprite_number": row.get::<_, Option<i64>>(12)?,
-                        "department_name": row.get::<_, Option<String>>(13)?,
-                        "department_name_ko": row.get::<_, Option<String>>(14)?,
-                        "department_color": row.get::<_, Option<String>>(15)?,
-                        "created_at": row.get::<_, Option<String>>(16)?,
-                        "alias": serde_json::Value::Null,
-                        "role_id": row.get::<_, Option<String>>(0)?,
-                        "personality": serde_json::Value::Null,
-                        "current_task_id": row.get::<_, Option<String>>(22)?,
-                        "current_thread_channel_id": row.get::<_, Option<String>>(23)?,
-                        "pipeline_config": row.get::<_, Option<String>>(24)?
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-                    }), fields))
-                },
-            );
-
-            match result {
-                Ok(agent) => Json(json!({ "agent": agent })),
-                Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
-                    Json(json!({ "error": "agent not found" }))
-                }
-                Err(e) => Json(json!({ "error": format!("query failed: {e}") })),
-            }
-        }
-        Err(_) => Json(json!({ "error": "db lock failed" })),
-    }
+    Json(json!({ "error": "postgres pool unavailable" }))
 }
 
 pub(super) async fn create_agent(
@@ -863,89 +688,10 @@ pub(super) async fn create_agent(
         };
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
-        merged_channel_values(
-            body.discord_channel_id.clone(),
-            body.discord_channel_alt.clone(),
-            body.discord_channel_cc.clone(),
-            body.discord_channel_cdx.clone(),
-        );
-
-    if let Err(e) = conn.execute(
-        "INSERT INTO agents (
-            id, name, name_ko, provider, department, avatar_emoji,
-            discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        libsql_rusqlite::params![
-            body.id,
-            body.name,
-            body.name_ko,
-            body.provider,
-            body.department,
-            body.avatar_emoji,
-            discord_channel_id,
-            discord_channel_alt,
-            discord_channel_cc,
-            discord_channel_cdx,
-        ],
-    ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
-    }
-
-    if let Some(ref office_id) = body.office_id {
-        if let Err(e) = conn.execute(
-            "INSERT OR REPLACE INTO office_agents (office_id, agent_id) VALUES (?1, ?2)",
-            libsql_rusqlite::params![office_id, body.id],
-        ) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    }
-
-    match conn.query_row(
-        "SELECT id, name, name_ko, provider, department, avatar_emoji,
-                discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx, status, xp
-         FROM agents WHERE id = ?1",
-        [&body.id],
-        |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "name_ko": row.get::<_, Option<String>>(2)?,
-                "provider": row.get::<_, Option<String>>(3)?,
-                "department": row.get::<_, Option<String>>(4)?,
-                "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                "discord_channel_id": row.get::<_, Option<String>>(6)?,
-                "discord_channel_alt": row.get::<_, Option<String>>(7)?,
-                "discord_channel_cc": row.get::<_, Option<String>>(8)?,
-                "discord_channel_cdx": row.get::<_, Option<String>>(9)?,
-                "discord_channel_id_codex": row.get::<_, Option<String>>(9)?,
-                "status": row.get::<_, Option<String>>(10)?,
-                "xp": row.get::<_, f64>(11).unwrap_or(0.0) as i64,
-            }))
-        },
-    ) {
-        Ok(agent) => (StatusCode::CREATED, Json(json!({"agent": agent}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
-    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
+    )
 }
 
 pub(super) async fn update_agent(
@@ -1186,252 +932,10 @@ pub(super) async fn update_agent(
         };
     }
 
-    let prompt_result = if let Some(ref prompt_content) = body.prompt_content {
-        let exists = match state.sqlite_db().lock() {
-            Ok(conn) => conn.query_row("SELECT COUNT(*) FROM agents WHERE id = ?1", [&id], |row| {
-                row.get::<_, i64>(0)
-            }),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        match exists {
-            Ok(0) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
-            }
-            Ok(_) => match write_prompt_if_changed(
-                &id,
-                body.provider.as_deref().or(body.cli_provider.as_deref()),
-                prompt_content,
-                body.auto_commit,
-                body.commit_message.as_deref(),
-            )
-            .await
-            {
-                Ok(result) => Some(result),
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            },
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        }
-    } else {
-        None
-    };
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    let mut sets: Vec<String> = Vec::new();
-    let mut values: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
-    let mut idx = 1;
-    let channel_patch_requested = body.discord_channel_id.is_some()
-        || body.discord_channel_alt.is_some()
-        || body.discord_channel_cc.is_some()
-        || body.discord_channel_cdx.is_some();
-
-    if let Some(ref name) = body.name {
-        sets.push(format!("name = ?{}", idx));
-        values.push(Box::new(name.clone()));
-        idx += 1;
-    }
-    if let Some(ref name_ko) = body.name_ko {
-        sets.push(format!("name_ko = ?{}", idx));
-        values.push(Box::new(name_ko.clone()));
-        idx += 1;
-    }
-    if let Some(ref provider) = body.provider {
-        sets.push(format!("provider = ?{}", idx));
-        values.push(Box::new(provider.clone()));
-        idx += 1;
-    }
-    if body.provider.is_none()
-        && let Some(ref provider) = body.cli_provider
-    {
-        sets.push(format!("provider = ?{}", idx));
-        values.push(Box::new(provider.clone()));
-        idx += 1;
-    }
-    let dept_value = body.department_id.as_ref().or(body.department.as_ref());
-    if let Some(department) = dept_value {
-        sets.push(format!("department = ?{}", idx));
-        values.push(Box::new(department.clone()));
-        idx += 1;
-    }
-    if let Some(ref avatar_emoji) = body.avatar_emoji {
-        sets.push(format!("avatar_emoji = ?{}", idx));
-        values.push(Box::new(avatar_emoji.clone()));
-        idx += 1;
-    }
-    if let Some(sprite_number) = body.sprite_number {
-        sets.push(format!("sprite_number = ?{}", idx));
-        values.push(Box::new(sprite_number));
-        idx += 1;
-    }
-    if let Some(ref status) = body.status {
-        sets.push(format!("status = ?{}", idx));
-        values.push(Box::new(status.clone()));
-        idx += 1;
-    }
-    if let Some(ref description) = body.description {
-        sets.push(format!("description = ?{}", idx));
-        values.push(Box::new(description.clone()));
-        idx += 1;
-    }
-    let system_prompt = body.system_prompt.as_ref().or(body.personality.as_ref());
-    if let Some(system_prompt) = system_prompt {
-        sets.push(format!("system_prompt = ?{}", idx));
-        values.push(Box::new(system_prompt.clone()));
-        idx += 1;
-    }
-    if channel_patch_requested {
-        let existing_channels: (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = match conn.query_row(
-            "SELECT discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-             FROM agents WHERE id = ?1",
-            [&id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ) {
-            Ok(channels) => channels,
-            Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
-            merged_channel_values(
-                body.discord_channel_id.clone().or(existing_channels.0),
-                body.discord_channel_alt.clone().or(existing_channels.1),
-                body.discord_channel_cc.clone().or(existing_channels.2),
-                body.discord_channel_cdx.clone().or(existing_channels.3),
-            );
-        for (column, value) in [
-            ("discord_channel_id", discord_channel_id),
-            ("discord_channel_alt", discord_channel_alt),
-            ("discord_channel_cc", discord_channel_cc),
-            ("discord_channel_cdx", discord_channel_cdx),
-        ] {
-            sets.push(format!("{column} = ?{idx}"));
-            values.push(Box::new(value));
-            idx += 1;
-        }
-    }
-    if let Some(ref pipeline_config) = body.pipeline_config {
-        if pipeline_config.is_null() {
-            sets.push(format!("pipeline_config = NULL"));
-        } else {
-            let s = pipeline_config.to_string();
-            if let Err(e) = crate::pipeline::parse_override(&s) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid pipeline_config: {e}")})),
-                );
-            }
-            sets.push(format!("pipeline_config = ?{}", idx));
-            values.push(Box::new(s));
-            idx += 1;
-        }
-    }
-
-    if sets.is_empty() && prompt_result.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "no fields to update"})),
-        );
-    }
-
-    if !sets.is_empty() {
-        sets.push(format!("updated_at = datetime('now')"));
-
-        let sql = format!("UPDATE agents SET {} WHERE id = ?{}", sets.join(", "), idx);
-        values.push(Box::new(id.clone()));
-
-        let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> =
-            values.iter().map(|v| v.as_ref()).collect();
-        match conn.execute(&sql, params_ref.as_slice()) {
-            Ok(0) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        }
-    }
-
-    match conn.query_row(
-        "SELECT id, name, name_ko, provider, department, avatar_emoji,
-                discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx, status, xp, pipeline_config
-         FROM agents WHERE id = ?1",
-        [&id],
-        |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "name_ko": row.get::<_, Option<String>>(2)?,
-                "provider": row.get::<_, Option<String>>(3)?,
-                "department": row.get::<_, Option<String>>(4)?,
-                "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                "discord_channel_id": row.get::<_, Option<String>>(6)?,
-                "discord_channel_alt": row.get::<_, Option<String>>(7)?,
-                "discord_channel_cc": row.get::<_, Option<String>>(8)?,
-                "discord_channel_cdx": row.get::<_, Option<String>>(9)?,
-                "discord_channel_id_codex": row.get::<_, Option<String>>(9)?,
-                "status": row.get::<_, Option<String>>(10)?,
-                "xp": row.get::<_, f64>(11).unwrap_or(0.0) as i64,
-                "pipeline_config": row.get::<_, Option<String>>(12)?
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-            }))
-        },
-    ) {
-        Ok(agent) => (
-            StatusCode::OK,
-            Json(json!({"agent": agent, "prompt": prompt_result})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
-    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
+    )
 }
 
 fn sqlite_agent_channels(
@@ -1872,121 +1376,9 @@ pub(super) async fn archive_agent(
         );
     }
 
-    let (previous_status, bindings, active_turn) = match state.sqlite_db().lock() {
-        Ok(conn) => {
-            let active_turn = match sqlite_agent_has_active_turn(&conn, &id) {
-                Ok(value) => value,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            };
-            match sqlite_agent_channels(&conn, &id) {
-                Ok((status, bindings)) => (status, bindings, active_turn),
-                Err(error) if error == "agent not found" => {
-                    return (StatusCode::NOT_FOUND, Json(json!({"error": error})));
-                }
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            }
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    };
-    if active_turn {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "agent has an active turn"})),
-        );
-    }
-    let (config_agent, prompt_path, role_map_snapshot) = match remove_agent_from_config(&id) {
-        Ok(value) => value,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-    };
-    let channels = bindings.all_channels();
-    let discord = apply_discord_archive_action(state.config.as_ref(), &body, &channels).await;
-    let discord_value = serde_json::to_value(&discord).unwrap_or_else(|_| json!({}));
-    match state.sqlite_db().lock() {
-        Ok(conn) => {
-            let config_text = config_agent.as_ref().map(Value::to_string);
-            let role_map_text = role_map_snapshot.as_ref().map(Value::to_string);
-            let channels_text = json!(channels).to_string();
-            let discord_text = discord_value.to_string();
-            if let Err(error) = conn.execute(
-                "INSERT INTO agent_archive (
-                    agent_id, state, reason, previous_status, config_agent_json, role_map_snapshot_json,
-                    prompt_path, discord_channels_json, discord_action, discord_result_json,
-                    archived_at, unarchived_at, updated_at
-                 )
-                 VALUES (?1, 'archived', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), NULL, datetime('now'))
-                 ON CONFLICT(agent_id) DO UPDATE SET
-                    state = 'archived',
-                    reason = excluded.reason,
-                    previous_status = COALESCE(agent_archive.previous_status, excluded.previous_status),
-                    config_agent_json = COALESCE(excluded.config_agent_json, agent_archive.config_agent_json),
-                    role_map_snapshot_json = COALESCE(excluded.role_map_snapshot_json, agent_archive.role_map_snapshot_json),
-                    prompt_path = COALESCE(excluded.prompt_path, agent_archive.prompt_path),
-                    discord_channels_json = excluded.discord_channels_json,
-                    discord_action = excluded.discord_action,
-                    discord_result_json = excluded.discord_result_json,
-                    archived_at = COALESCE(agent_archive.archived_at, datetime('now')),
-                    unarchived_at = NULL,
-                    updated_at = datetime('now')",
-                libsql_rusqlite::params![
-                    id,
-                    clean_optional_text(body.reason.clone()),
-                    previous_status,
-                    config_text,
-                    role_map_text,
-                    prompt_path,
-                    channels_text,
-                    discord.action,
-                    discord_text,
-                ],
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("record archive: {error}")})),
-                );
-            }
-            if let Err(error) = conn.execute(
-                "UPDATE agents SET status = 'archived', updated_at = datetime('now') WHERE id = ?1",
-                [&id],
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("update agent status: {error}")})),
-                );
-            }
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    }
-
     (
-        StatusCode::OK,
-        Json(
-            json!({"ok": true, "agent_id": id, "archive_state": "archived", "discord": discord_value}),
-        ),
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
     )
 }
 
@@ -2083,97 +1475,9 @@ pub(super) async fn unarchive_agent(
         );
     }
 
-    let (previous_status, config_agent, role_map_snapshot) = match state.sqlite_db().lock() {
-        Ok(conn) => match conn.query_row(
-            "SELECT previous_status, config_agent_json, role_map_snapshot_json
-               FROM agent_archive
-              WHERE agent_id = ?1 AND state = 'archived'",
-            [&id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        ) {
-            Ok(value) => value,
-            Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "archived agent state not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        },
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    };
-    let config_value = config_agent
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
-    let role_map_value = role_map_snapshot
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
-    if let Err(error) = restore_agent_config(&id, config_value.as_ref()) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
-    }
-    if let Some(runtime_root) = crate::config::runtime_root()
-        && let Err(error) = restore_role_map(&runtime_root, role_map_value.as_ref())
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
-    }
-    let status = previous_status
-        .filter(|value| value != "archived")
-        .unwrap_or_else(|| "idle".to_string());
-    match state.sqlite_db().lock() {
-        Ok(conn) => {
-            if let Err(error) = conn.execute(
-                "UPDATE agents SET status = ?2, updated_at = datetime('now') WHERE id = ?1",
-                libsql_rusqlite::params![id, status],
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-            if let Err(error) = conn.execute(
-                "UPDATE agent_archive
-                    SET state = 'unarchived', unarchived_at = datetime('now'), updated_at = datetime('now')
-                  WHERE agent_id = ?1",
-                [&id],
-            ) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    }
     (
-        StatusCode::OK,
-        Json(json!({"ok": true, "agent_id": id, "archive_state": "unarchived", "status": status})),
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
     )
 }
 
@@ -2270,29 +1574,10 @@ pub(super) async fn duplicate_agent(
             }
         }
     } else {
-        match state.sqlite_db().lock() {
-            Ok(conn) => match load_duplicate_source_sqlite(&conn, &id) {
-                Ok(Some(agent)) => agent,
-                Ok(None) => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "agent not found"})),
-                    );
-                }
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            },
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        }
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
     let provider = clean_optional_text(body.provider.clone())
@@ -2369,53 +1654,29 @@ pub(super) async fn duplicate_agent(
             .map(str::to_string)
     });
 
-    if let Some(pool) = state.pg_pool_ref() {
-        if let Err(error) = sqlx::query(
-            "UPDATE agents
-                SET name = $2, name_ko = $3, department = $4, avatar_emoji = $5, updated_at = NOW()
-              WHERE id = $1",
-        )
-        .bind(&new_agent_id)
-        .bind(&name)
-        .bind(&name_ko)
-        .bind(&department)
-        .bind(&avatar_emoji)
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("update duplicate metadata: {error}")})),
-            );
-        }
-    } else {
-        match state.sqlite_db().lock() {
-            Ok(conn) => {
-                if let Err(error) = conn.execute(
-                    "UPDATE agents
-                        SET name = ?2, name_ko = ?3, department = ?4, avatar_emoji = ?5, updated_at = datetime('now')
-                      WHERE id = ?1",
-                    libsql_rusqlite::params![
-                        new_agent_id,
-                        name,
-                        name_ko,
-                        department,
-                        avatar_emoji,
-                    ],
-                ) {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("update duplicate metadata: {error}")})),
-                    );
-                }
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    if let Err(error) = sqlx::query(
+        "UPDATE agents
+            SET name = $2, name_ko = $3, department = $4, avatar_emoji = $5, updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(&new_agent_id)
+    .bind(&name)
+    .bind(&name_ko)
+    .bind(&department)
+    .bind(&avatar_emoji)
+    .execute(pool)
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("update duplicate metadata: {error}")})),
+        );
     }
 
     if let Err(error) = update_duplicate_config_metadata(
@@ -2431,15 +1692,11 @@ pub(super) async fn duplicate_agent(
         );
     }
 
-    let agent = if let Some(pool) = state.pg_pool_ref() {
-        load_agent_pg(pool, &new_agent_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| json!({"id": new_agent_id}))
-    } else {
-        json!({"id": new_agent_id})
-    };
+    let agent = load_agent_pg(pool, &new_agent_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({"id": new_agent_id}));
 
     (
         StatusCode::CREATED,
@@ -2486,72 +1743,46 @@ pub(super) async fn delete_agent(
         }
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    match conn.execute("DELETE FROM agents WHERE id = ?1", [&id]) {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Ok(_) => {
-            let _ = conn.execute("DELETE FROM office_agents WHERE agent_id = ?1", [&id]);
-            (StatusCode::OK, Json(json!({"ok": true})))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
-    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
+    )
 }
 
 pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let sessions = match state.sqlite_db().lock() {
-        Ok(conn) => {
-            let mut stmt = match conn.prepare(
-                "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
-                        model, tokens, cwd, last_heartbeat
-                 FROM sessions
-                 WHERE status IN ('connected', 'working', 'idle')
-                 ORDER BY id",
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return Json(json!({ "error": format!("query prepare failed: {e}") }));
-                }
-            };
-
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(json!({
-                        "id": row.get::<_, i64>(0)?,
-                        "session_key": row.get::<_, Option<String>>(1)?,
-                        "agent_id": row.get::<_, Option<String>>(2)?,
-                        "provider": row.get::<_, Option<String>>(3)?,
-                        "status": row.get::<_, Option<String>>(4)?,
-                        "active_dispatch_id": row.get::<_, Option<String>>(5)?,
-                        "model": row.get::<_, Option<String>>(6)?,
-                        "tokens": row.get::<_, i64>(7)?,
-                        "cwd": row.get::<_, Option<String>>(8)?,
-                        "last_heartbeat": row.get::<_, Option<String>>(9)?,
-                    }))
-                })
-                .ok();
-
-            match rows {
-                Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
-                None => Vec::new(),
-            }
-        }
-        Err(_) => Vec::new(),
+    let Some(pool) = state.pg_pool_ref() else {
+        return Json(json!({ "error": "postgres pool unavailable" }));
     };
+    let rows = match sqlx::query(
+        "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
+                model, tokens, cwd, to_char(last_heartbeat, 'YYYY-MM-DD HH24:MI:SS') AS last_heartbeat
+         FROM sessions
+         WHERE status IN ('connected', 'working', 'idle')
+         ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return Json(json!({ "error": format!("query failed: {error}") })),
+    };
+    let sessions: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.try_get::<i64, _>("id").unwrap_or(0),
+                "session_key": row.try_get::<Option<String>, _>("session_key").ok().flatten(),
+                "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+                "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
+                "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
+                "active_dispatch_id": row.try_get::<Option<String>, _>("active_dispatch_id").ok().flatten(),
+                "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
+                "tokens": row.try_get::<i64, _>("tokens").unwrap_or(0),
+                "cwd": row.try_get::<Option<String>, _>("cwd").ok().flatten(),
+                "last_heartbeat": row.try_get::<Option<String>, _>("last_heartbeat").ok().flatten(),
+            })
+        })
+        .collect();
 
     Json(json!({ "sessions": sessions }))
 }

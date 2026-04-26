@@ -893,15 +893,7 @@ async fn db_agent_matches(state: &AppState, ctx: &SetupContext) -> Result<DbAgen
         return Ok(db_bindings_match(ctx, &bindings));
     }
 
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("DB lock error: {error}"))?;
-    match crate::db::agents::load_agent_channel_bindings(&conn, &ctx.agent_id) {
-        Ok(Some(bindings)) => Ok(db_bindings_match(ctx, &bindings)),
-        Ok(None) => Ok(DbAgentStatus::Missing),
-        Err(error) => Err(format!("query agent '{}': {error}", ctx.agent_id)),
-    }
+    Err("postgres pool unavailable".to_string())
 }
 
 fn db_bindings_match(
@@ -946,27 +938,7 @@ async fn insert_db_agent(state: &AppState, ctx: &SetupContext) -> Result<(), Set
         return Ok(());
     }
 
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| setup_error("db_seed", format!("DB lock error: {error}"), "db"))?;
-    conn.execute(
-        "INSERT INTO agents (
-            id, name, provider,
-            discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        libsql_rusqlite::params![
-            ctx.agent_id,
-            ctx.agent_id,
-            ctx.provider,
-            discord_channel_id,
-            discord_channel_alt,
-            discord_channel_cc,
-            discord_channel_cdx,
-        ],
-    )
-    .map_err(|error| setup_error("db_seed", format!("insert agent: {error}"), "db"))?;
-    Ok(())
+    Err(setup_error("db_seed", "postgres pool unavailable", "db"))
 }
 
 async fn delete_db_agent(state: &AppState, agent_id: &str) -> bool {
@@ -979,15 +951,7 @@ async fn delete_db_agent(state: &AppState, agent_id: &str) -> bool {
             .unwrap_or(false);
     }
 
-    state
-        .sqlite_db()
-        .lock()
-        .ok()
-        .and_then(|conn| {
-            conn.execute("DELETE FROM agents WHERE id = ?1", [agent_id])
-                .ok()
-        })
-        .is_some()
+    false
 }
 
 fn db_channel_columns(
