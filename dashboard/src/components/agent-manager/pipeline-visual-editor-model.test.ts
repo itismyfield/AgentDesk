@@ -154,6 +154,17 @@ describe("pipeline-visual-editor-model", () => {
     expect(payload.phase_gate?.dispatch_type).toBe("phase-gate");
   });
 
+  it("does not throw when the pipeline has no events map (runtime payload may omit it)", () => {
+    const pipeline = makePipeline();
+    // Simulate a backend payload that omits `events`. The interface declares
+    // `events` as required, but real overrides occasionally lack it.
+    delete (pipeline as { events?: unknown }).events;
+
+    expect(() => buildOverridePayload(pipeline, {})).not.toThrow();
+    const payload = buildOverridePayload(pipeline, {});
+    expect(payload.events).toEqual({});
+  });
+
   it("builds a single-column graph for compact mode", () => {
     const compact = buildPipelineGraph(makePipeline(), true);
     const desktop = buildPipelineGraph(makePipeline(), false);

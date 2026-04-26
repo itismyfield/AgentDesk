@@ -97,7 +97,7 @@ export function clonePipelineConfig(pipeline: PipelineConfigFull): PipelineConfi
       ]),
     ),
     events: Object.fromEntries(
-      Object.entries(pipeline.events).map(([key, hooks]) => [key, [...hooks]]),
+      Object.entries(pipeline.events ?? {}).map(([key, hooks]) => [key, [...hooks]]),
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
@@ -260,7 +260,7 @@ export function buildOverridePayload(
       ]),
     ),
     events: Object.fromEntries(
-      Object.entries(pipeline.events).map(([key, hooks]) => [key, [...hooks]]),
+      Object.entries(pipeline.events ?? {}).map(([key, hooks]) => [key, [...hooks]]),
     ),
     clocks: Object.fromEntries(
       Object.entries(pipeline.clocks).map(([key, clock]) => [key, { ...clock }]),
