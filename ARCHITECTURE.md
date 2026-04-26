@@ -329,6 +329,7 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
+│   ├── disk_monitor.rs
 │   ├── dispatches.rs
 │   ├── dispatches_followup.rs
 │   ├── gemini.rs

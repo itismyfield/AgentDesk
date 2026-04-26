@@ -2461,20 +2461,26 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["tmux_killed"], false);
     assert_eq!(json["queue_preserved"], true);
-    assert_eq!(json["inflight_cleared"], true);
+    assert_eq!(json["inflight_cleared"], false);
     assert_eq!(json["exact_channel_match"], true);
     assert!(json["dispatch_cancelled"].is_null());
-    assert!(!inflight_path.exists());
+    assert!(
+        inflight_path.exists(),
+        "default killed=false cancel must preserve persistent inflight for live-session handoff"
+    );
 
     let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
     assert!(!has_active_turn);
     assert_eq!(queue_depth, 1);
     assert_eq!(session_id, None);
     assert!(harness.has_dispatch_role_override(channel_num));
-    assert!(!harness.has_watcher(channel_num));
     assert!(
-        watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
-        "cancel must signal watcher cancellation"
+        harness.has_watcher(channel_num),
+        "killed=false cancel must preserve watcher ownership"
+    );
+    assert!(
+        !watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "killed=false cancel must not signal watcher cancellation"
     );
 
     let conn = db.lock().unwrap();

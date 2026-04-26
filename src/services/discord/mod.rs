@@ -1049,6 +1049,7 @@ pub(crate) mod test_harness_exports {
     pub(crate) struct WatcherHandleInspector {
         pub(crate) cancel: Arc<AtomicBool>,
         pub(crate) paused: Arc<AtomicBool>,
+        pub(crate) pause_epoch: Arc<AtomicU64>,
     }
 
     pub(crate) fn new_watcher_registry() -> WatcherRegistry {
@@ -1065,16 +1066,72 @@ pub(crate) mod test_harness_exports {
     ) -> (WatcherHandle, WatcherHandleInspector) {
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
+        let pause_epoch = Arc::new(AtomicU64::new(0));
         let inner = TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.to_string(),
             paused: paused.clone(),
             resume_offset: Arc::new(std::sync::Mutex::new(None)),
             cancel: cancel.clone(),
-            pause_epoch: Arc::new(AtomicU64::new(0)),
+            pause_epoch: pause_epoch.clone(),
             turn_delivered: Arc::new(AtomicBool::new(false)),
         };
-        let inspector = WatcherHandleInspector { cancel, paused };
+        let inspector = WatcherHandleInspector {
+            cancel,
+            paused,
+            pause_epoch,
+        };
         (WatcherHandle { inner }, inspector)
+    }
+
+    pub(crate) struct SharedRuntime {
+        inner: Arc<super::SharedData>,
+    }
+
+    pub(crate) fn new_shared_runtime() -> SharedRuntime {
+        SharedRuntime {
+            inner: super::make_shared_data_for_tests(),
+        }
+    }
+
+    pub(crate) fn seed_shared_watcher(
+        runtime: &SharedRuntime,
+        channel_id: ChannelId,
+        handle: WatcherHandle,
+    ) {
+        runtime.inner.tmux_watchers.insert(channel_id, handle.inner);
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn attach_paused_turn_watcher(
+        runtime: &SharedRuntime,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        tmux_session_name: Option<String>,
+        output_path: Option<String>,
+        initial_offset: u64,
+        source: &'static str,
+    ) -> ChannelId {
+        super::router::message_handler_test_harness_exports::attach_paused_turn_watcher(
+            &runtime.inner,
+            Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+            provider,
+            channel_id,
+            tmux_session_name,
+            output_path,
+            initial_offset,
+            source,
+        )
+    }
+
+    pub(crate) fn shared_watcher_slot_count(runtime: &SharedRuntime) -> usize {
+        runtime.inner.tmux_watchers.len()
+    }
+
+    pub(crate) fn shared_watcher_slot_exists(
+        runtime: &SharedRuntime,
+        channel_id: ChannelId,
+    ) -> bool {
+        runtime.inner.tmux_watchers.contains_key(&channel_id)
     }
 
     #[cfg(unix)]
@@ -1105,6 +1162,19 @@ pub(crate) mod test_harness_exports {
 
     pub(crate) fn watcher_slot_count(watchers: &WatcherRegistry) -> usize {
         watchers.inner.len()
+    }
+
+    pub(crate) fn watcher_slot_exists(watchers: &WatcherRegistry, channel_id: ChannelId) -> bool {
+        watchers.inner.contains_key(&channel_id)
+    }
+
+    pub(crate) fn owner_channel_for_tmux_session(
+        watchers: &WatcherRegistry,
+        tmux_session_name: &str,
+    ) -> Option<ChannelId> {
+        watchers
+            .inner
+            .owner_channel_for_tmux_session(tmux_session_name)
     }
 
     pub(crate) fn watcher_slot_paused(

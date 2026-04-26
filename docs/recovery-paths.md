@@ -73,6 +73,31 @@ The missing-inflight reattach fallback is the exception: it is triggered by an
 already-running watcher after relay ownership is broken, so it force-replaces
 the same-session handle and spawns a fresh watcher generation.
 
+## Watcher Lifecycle And Route Ownership
+
+Watcher lifetime follows the tmux session, not the Discord route that most
+recently noticed it. The route that wins the watcher claim becomes the owner
+channel for that `tmux_session_name`; later start/attach, restart recovery, or
+manual rebind calls for the same live tmux session must reuse that owner slot.
+Those callers must apply turn rotation state (`paused`, `pause_epoch`,
+`resume_offset`, and `turn_delivered`) to the returned owner channel. Applying
+the state to the requested channel can strand the live relayer and recreate
+duplicate relay races.
+
+Normal watcher shutdown is tmux-liveness driven. A terminal-success event does
+not detach the watcher while the tmux pane remains alive; the watcher stops
+only after tmux death is observed, then removes its slot quietly. Operator
+stop/cancel paths that report `killed=false` preserve watcher ownership and do
+not raise the watcher's cancel flag. They also preserve persistent inflight
+state for live-session handoff, so the live tmux session remains the watcher's
+lifecycle authority. Force-kill and hard-stop paths are different: they remove
+the watcher slot, clear inflight state, and raise the watcher's cancel flag so
+the loop exits without issuing session-ended relay noise.
+
+Manual rebind is route adoption, not relay multiplication. If a live watcher
+already owns the target tmux session, `rebind_inflight_for_channel` returns a
+non-spawning reuse result and leaves delivery with the incumbent watcher.
+
 ## Common Finalizer Shape
 
 All three paths funnel into the mailbox "finish turn" sequence. The common
