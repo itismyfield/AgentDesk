@@ -12,7 +12,7 @@
 //! Background: Claude CLI attaches MCP servers at boot and never hot-reloads
 //! them. When the operator authenticates a new MCP server (e.g. memento)
 //! mid-session, the running Claude process never sees the new tools. This
-//! watcher tells operators that a `/mcp-reload` is needed.
+//! watcher tells operators that a `/restart` is needed to pick up the new tools.
 //!
 //! Per-channel dedupe is in-memory (HashMap<ChannelId, Instant>); we deliberately
 //! do not persist this across restarts because the cooldown is short (5min default)

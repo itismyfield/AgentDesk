@@ -6,8 +6,6 @@ use super::super::{
 };
 
 const RESTART_SEED_PROMPT: &str = "안녕하세요. 세션 재시작 완료.";
-const MCP_RELOAD_DEPRECATION_NOTICE: &str =
-    "`/mcp-reload`는 deprecated alias입니다. `/restart`로 이름이 변경됐습니다.";
 
 /// Outcome of resolving the reload action against the current session state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,22 +176,13 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
     if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
         return Ok(());
     }
-    // Issue #1005: runtime-control tier — owner-only. /restart and /mcp-reload
-    // can drop in-flight turns and re-bootstrap the provider session, so they
-    // must not be reachable through `allow_all_users`.
     if !super::enforce_slash_command_policy(&ctx, command_name).await? {
         return Ok(());
     }
 
-    if command_name == "/mcp-reload" {
-        ctx.say(MCP_RELOAD_DEPRECATION_NOTICE).await?;
-    }
-
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] {command_name}");
-    if command_name == "/restart" {
-        ctx.say("♻ 세션 재시작 중...").await?;
-    }
+    ctx.say("♻ 세션 재시작 중...").await?;
 
     let channel_id = ctx.channel_id();
     let action = resolve_restart_action(&ctx.data().shared, channel_id).await;
@@ -249,12 +238,6 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
 #[poise::command(slash_command, rename = "restart")]
 pub(in crate::services::discord) async fn cmd_restart(ctx: Context<'_>) -> Result<(), Error> {
     run_restart(ctx, "/restart").await
-}
-
-/// Deprecated alias for `/restart`.
-#[poise::command(slash_command, rename = "mcp-reload")]
-pub(in crate::services::discord) async fn cmd_mcp_reload(ctx: Context<'_>) -> Result<(), Error> {
-    run_restart(ctx, "/mcp-reload").await
 }
 
 #[cfg(test)]

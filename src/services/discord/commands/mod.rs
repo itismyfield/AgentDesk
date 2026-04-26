@@ -48,7 +48,7 @@ pub(super) use help::cmd_help;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use receipt::cmd_receipt;
-pub(super) use restart::{cmd_mcp_reload, cmd_restart};
+pub(super) use restart::cmd_restart;
 pub(super) use session::{cmd_pwd, cmd_start};
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::cmd_cc;
