@@ -150,10 +150,13 @@ pub async fn get_token_analytics(
 
     let mut response = (StatusCode::OK, Json(json!(data))).into_response();
     let headers = response.headers_mut();
-    // SWR-friendly cache: stable for 30s, dashboard can serve stale up to 2 min while revalidating.
+    // Codex review (PR #1258): max-age=30 swallowed explicit refresh requests
+    // for up to 30 seconds. Use max-age=0 so manual reloads always hit the
+    // server, but keep stale-while-revalidate so background SWR can still
+    // serve the previous body while the new one is in flight.
     headers.insert(
         "Cache-Control",
-        HeaderValue::from_static("private, max-age=30, stale-while-revalidate=120"),
+        HeaderValue::from_static("private, max-age=0, stale-while-revalidate=120"),
     );
     if let Ok(value) = HeaderValue::from_str(&elapsed_ms.to_string()) {
         headers.insert("X-Response-Time-Ms", value);

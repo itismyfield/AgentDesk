@@ -2185,7 +2185,6 @@ function HomeOverviewPage({
               "프로바이더 한도 데이터 수집 대기",
               "Awaiting provider rate-limit telemetry",
             )}
-            delta={tr("placeholder", "placeholder")}
             deltaTone="flat"
             accent="var(--th-accent-info)"
             trend={[]}
