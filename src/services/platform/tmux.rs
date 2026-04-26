@@ -6,9 +6,19 @@
 use super::binary_resolver;
 use std::process::{Command, Output, Stdio};
 
-/// Format session name as exact-match target (prefix with `=`).
+/// Format session name as an exact-match target (prefix with `=`, suffix with
+/// `:` so the target also resolves in pane-context commands).
+///
+/// `=name` alone matches any object with that exact name, but `send-keys` and
+/// `display-message` require a target that resolves to a pane. Without the
+/// trailing colon, `tmux send-keys -t =SESSION C-c` errors with "can't find
+/// pane" and `display-message -t =SESSION '#{pane_pid}'` returns empty —
+/// which made user-initiated turn-stop (⏳ reaction, !stop, /stop, watchdog)
+/// silently fail to abort the running provider. `=SESSION:` reads as "exact
+/// session named SESSION, default window/pane" and works for every tmux
+/// command we use.
 fn exact_target(session_name: &str) -> String {
-    format!("={session_name}")
+    format!("={session_name}:")
 }
 
 fn tmux_command() -> Command {
@@ -267,4 +277,22 @@ pub fn set_option(session_name: &str, key: &str, value: &str) {
     let _ = tmux_command()
         .args(["set-option", "-t", &exact_target(session_name), key, value])
         .output();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_target_includes_trailing_colon_for_pane_context_commands() {
+        // `=name` alone fails for `send-keys` / `display-message` with
+        // "can't find pane"; the trailing colon makes the target resolve to
+        // the default pane in the matched session. Pin this format here so a
+        // future "simplification" doesn't silently re-break user-initiated
+        // turn-stop again.
+        assert_eq!(
+            exact_target("AgentDesk-claude-adk-cc"),
+            "=AgentDesk-claude-adk-cc:"
+        );
+    }
 }

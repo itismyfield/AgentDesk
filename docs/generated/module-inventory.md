@@ -329,7 +329,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 971 |  |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 1507 | giant-file |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 270 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 298 |  |
 | `services::process` | `src/services/process.rs` | 706 |  |
 | `services::provider` | `src/services/provider.rs` | 2100 | giant-file |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 381 |  |
