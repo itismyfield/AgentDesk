@@ -84,6 +84,7 @@ impl DispatchTransport for MockDispatchTransport {
     fn send_review_followup(
         &self,
         _db: Option<Db>,
+        _review_dispatch_id: String,
         _card_id: String,
         _channel_id_num: u64,
         message: String,

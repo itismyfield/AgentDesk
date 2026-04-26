@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
@@ -9,10 +9,17 @@ use sqlx::PgPool;
 
 use super::formatting::{build_long_message_attachment, split_message};
 use super::{
-    DISCORD_MSG_LIMIT, SharedData, clear_inflight_state, mailbox_cancel_active_turn,
-    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
+    SharedData, clear_inflight_state, mailbox_cancel_active_turn, mailbox_clear_channel,
+    mailbox_clear_recovery_marker, mailbox_finish_turn,
 };
 use crate::db::Db;
+use crate::server::routes::dispatches::discord_delivery::{
+    DispatchMessagePostError, DispatchMessagePostErrorKind,
+};
+use crate::services::discord::outbound::{
+    DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient,
+    DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind, OutboundDeduper, deliver_outbound,
+};
 use crate::services::provider::ProviderKind;
 
 /// Per-provider snapshot for the health response.
@@ -1879,12 +1886,8 @@ async fn resolve_send_target_channel_id_with_backends(
 /// Handle POST /api/send — agent-to-agent native routing.
 /// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify", "summary":"..."}
 ///
-/// `summary` is optional. When `content` exceeds the Discord 2000-char limit,
-/// the full `content` is delivered as a `.txt` attachment; the inline message
-/// then uses `summary` (if provided) so the sender controls what humans see
-/// at a glance, or falls back to a short generic notice pointing at the
-/// attachment. Keeping attachment-based delivery (instead of chunk splitting)
-/// avoids firing one recipient turn per chunk.
+/// `summary` is optional minimal fallback content if Discord rejects the
+/// length-truncated primary send.
 pub(crate) async fn send_message_with_backends(
     registry: &HealthRegistry,
     db: Option<&Db>,
@@ -1894,6 +1897,23 @@ pub(crate) async fn send_message_with_backends(
     source: &str,
     bot: &str,
     summary: Option<&str>,
+) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_id(
+        registry, db, pg_pool, target, content, source, bot, summary, None,
+    )
+    .await
+}
+
+pub(crate) async fn send_message_with_backends_and_delivery_id(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> (&'static str, String) {
     if content.is_empty() {
         return (
@@ -1989,55 +2009,53 @@ pub(crate) async fn send_message_with_backends(
         Err(resp) => return resp,
     };
 
-    // Overflow strategy depends on the bot:
-    //   - `announce` (agent-to-agent): deliver as a single inline message +
-    //     `.txt` attachment so chunk splits do not trigger one recipient turn
-    //     per chunk. Inline uses caller-supplied `summary` when present, else
-    //     a generic notice — never a raw byte-prefix of `content`.
-    //   - everything else (notify, etc.): human-facing alert channel with no
-    //     turn-trigger concern, so preserve the classic chunk-split behavior
-    //     for readability.
-    let overflowed = content.len() > DISCORD_MSG_LIMIT;
-    let use_attachment = overflowed && bot == "announce";
-    let chunked = overflowed && !use_attachment;
-    let send_result = if !overflowed {
-        channel_id
-            .send_message(&*http, CreateMessage::new().content(content))
-            .await
-    } else if use_attachment {
-        let (inline, attachment) = build_long_message_attachment(content, summary);
-        channel_id
-            .send_message(
-                &*http,
-                CreateMessage::new().content(inline).add_file(attachment),
-            )
-            .await
-    } else {
-        let chunks = split_message(content);
-        let mut last: Result<_, serenity::Error> =
-            Err(serenity::Error::Other("split_message returned no chunks"));
-        for chunk in chunks {
-            last = channel_id
-                .send_message(&*http, CreateMessage::new().content(chunk))
-                .await;
-            if last.is_err() {
-                break;
-            }
-        }
-        last
-    };
+    let outbound_client = SerenityManualOutboundClient { http };
+    send_resolved_manual_message_with_client(
+        &outbound_client,
+        manual_notification_deduper(),
+        channel_id_raw,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+    )
+    .await
+}
 
+async fn send_resolved_manual_message_with_client<C: ManualOutboundClient>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    channel_id_raw: u64,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+) -> (&'static str, String) {
+    let channel_id = ChannelId::new(channel_id_raw);
+    let send_result = deliver_manual_notification(
+        client,
+        dedup,
+        &channel_id_raw.to_string(),
+        content,
+        bot,
+        summary,
+        delivery_id,
+    )
+    .await;
     match send_result {
-        Ok(message) => {
+        ManualDeliveryOutcome::Sent {
+            message_id,
+            delivery,
+        } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let emoji = if bot == "notify" { "🔔" } else { "📨" };
-            let delivery_tag = if use_attachment {
-                " +attach"
-            } else if chunked {
-                " +split"
-            } else {
-                ""
-            };
+            let delivery_tag = delivery
+                .map(|value| format!(" +{value}"))
+                .unwrap_or_default();
             tracing::info!(
                 "  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot}{delivery_tag})"
             );
@@ -2045,30 +2063,251 @@ pub(crate) async fn send_message_with_backends(
                 "ok": true,
                 "target": format!("channel:{channel_id}"),
                 "channel_id": channel_id.get().to_string(),
-                "message_id": message.id.get().to_string(),
+                "message_id": message_id,
                 "source": source,
                 "bot": bot,
-                "sent_at": message.timestamp.to_string(),
+                "sent_at": chrono::Utc::now().to_rfc3339(),
             });
-            if use_attachment {
-                response["delivery"] = serde_json::Value::String("summary+txt".to_string());
-            } else if chunked {
-                response["delivery"] = serde_json::Value::String("chunked".to_string());
+            if let Some(delivery) = delivery {
+                response["delivery"] = serde_json::Value::String(delivery.to_string());
             }
             if target != format!("channel:{channel_id}") {
                 response["requested_target"] = serde_json::Value::String(target.to_string());
             }
             ("200 OK", response.to_string())
         }
-        Err(e) => {
+        ManualDeliveryOutcome::Failed { detail } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ ROUTE: failed to send to channel {channel_id}: {e}");
+            tracing::warn!("  [{ts}] ⚠ ROUTE: failed to send to channel {channel_id}: {detail}");
             (
                 "500 Internal Server Error",
-                format!(r#"{{"ok":false,"error":"Discord send failed: {}"}}"#, e),
+                format!(
+                    r#"{{"ok":false,"error":"Discord send failed: {}"}}"#,
+                    detail
+                ),
             )
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ManualOutboundDeliveryId<'a> {
+    pub(crate) correlation_id: &'a str,
+    pub(crate) semantic_event_id: &'a str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ManualDeliveryOutcome {
+    Sent {
+        message_id: String,
+        delivery: Option<&'static str>,
+    },
+    Failed {
+        detail: String,
+    },
+}
+
+#[derive(Clone)]
+struct SerenityManualOutboundClient {
+    http: Arc<serenity::Http>,
+}
+
+impl DiscordOutboundClient for SerenityManualOutboundClient {
+    async fn post_message(
+        &self,
+        target_channel: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = target_channel
+            .parse::<u64>()
+            .map(ChannelId::new)
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid discord channel id {target_channel}: {error}"),
+                )
+            })?;
+        channel_id
+            .send_message(&*self.http, CreateMessage::new().content(content))
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(|error| {
+                let detail = error.to_string();
+                let lowered = detail.to_ascii_lowercase();
+                let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
+                    || lowered.contains("2000 or fewer in length")
+                    || lowered.contains("length")
+                {
+                    DispatchMessagePostErrorKind::MessageTooLong
+                } else {
+                    DispatchMessagePostErrorKind::Other
+                };
+                DispatchMessagePostError::new(kind, detail)
+            })
+    }
+}
+
+trait ManualOutboundClient: DiscordOutboundClient {
+    async fn post_text_attachment(
+        &self,
+        target_channel: &str,
+        content: &str,
+        summary: Option<&str>,
+    ) -> Result<String, DispatchMessagePostError>;
+}
+
+impl ManualOutboundClient for SerenityManualOutboundClient {
+    async fn post_text_attachment(
+        &self,
+        target_channel: &str,
+        content: &str,
+        summary: Option<&str>,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = target_channel
+            .parse::<u64>()
+            .map(ChannelId::new)
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid discord channel id {target_channel}: {error}"),
+                )
+            })?;
+        let (inline, attachment) = build_long_message_attachment(content, summary);
+        channel_id
+            .send_message(
+                &*self.http,
+                CreateMessage::new().content(inline).add_file(attachment),
+            )
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    error.to_string(),
+                )
+            })
+    }
+}
+
+async fn deliver_manual_notification<C: ManualOutboundClient>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    channel_id: &str,
+    content: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+) -> ManualDeliveryOutcome {
+    let dedup_key = delivery_id.map(|delivery_id| {
+        format!(
+            "{}::{}",
+            delivery_id.correlation_id, delivery_id.semantic_event_id
+        )
+    });
+    if let Some(key) = dedup_key.as_deref() {
+        if dedup.lookup(key).is_some() {
+            return ManualDeliveryOutcome::Sent {
+                message_id: String::new(),
+                delivery: Some("duplicate"),
+            };
+        }
+    }
+
+    let content_len = content.chars().count();
+    if content_len > DISCORD_HARD_LIMIT_CHARS {
+        let result = match if bot == "announce" {
+            client
+                .post_text_attachment(channel_id, content, summary)
+                .await
+                .map(|message_id| ManualDeliveryOutcome::Sent {
+                    message_id,
+                    delivery: Some("summary+txt"),
+                })
+        } else {
+            deliver_chunked_manual_notification(client, channel_id, content).await
+        } {
+            Ok(outcome) => outcome,
+            Err(error) => ManualDeliveryOutcome::Failed {
+                detail: error.to_string(),
+            },
+        };
+        if let ManualDeliveryOutcome::Sent { message_id, .. } = &result {
+            if let Some(key) = dedup_key.as_deref() {
+                dedup.record(key, message_id);
+            }
+        }
+        return result;
+    }
+
+    if content_len > DISCORD_SAFE_LIMIT_CHARS {
+        let result = match client.post_message(channel_id, content).await {
+            Ok(message_id) => ManualDeliveryOutcome::Sent {
+                message_id,
+                delivery: None,
+            },
+            Err(error) => ManualDeliveryOutcome::Failed {
+                detail: error.to_string(),
+            },
+        };
+        if let ManualDeliveryOutcome::Sent { message_id, .. } = &result {
+            if let Some(key) = dedup_key.as_deref() {
+                dedup.record(key, message_id);
+            }
+        }
+        return result;
+    }
+
+    let mut outbound_msg = DiscordOutboundMessage::new(channel_id, content);
+    if let Some(delivery_id) = delivery_id {
+        outbound_msg = outbound_msg
+            .with_correlation(delivery_id.correlation_id, delivery_id.semantic_event_id);
+    }
+    let policy = DiscordOutboundPolicy::review_notification(
+        summary
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    );
+
+    match deliver_outbound(client, dedup, outbound_msg, policy).await {
+        DeliveryResult::Success { message_id } => ManualDeliveryOutcome::Sent {
+            message_id,
+            delivery: None,
+        },
+        DeliveryResult::Fallback { message_id, kind } => ManualDeliveryOutcome::Sent {
+            message_id,
+            delivery: Some(match kind {
+                FallbackKind::Truncated => "truncated",
+                FallbackKind::MinimalFallback => "minimal_fallback",
+            }),
+        },
+        DeliveryResult::Skipped { .. } => ManualDeliveryOutcome::Sent {
+            message_id: String::new(),
+            delivery: Some("duplicate"),
+        },
+        DeliveryResult::PermanentFailure { detail } => ManualDeliveryOutcome::Failed { detail },
+    }
+}
+
+async fn deliver_chunked_manual_notification<C: ManualOutboundClient>(
+    client: &C,
+    channel_id: &str,
+    content: &str,
+) -> Result<ManualDeliveryOutcome, DispatchMessagePostError> {
+    let mut last_message_id = None;
+    for chunk in split_message(content) {
+        let message_id = client.post_message(channel_id, &chunk).await?;
+        last_message_id = Some(message_id);
+    }
+    Ok(ManualDeliveryOutcome::Sent {
+        message_id: last_message_id.unwrap_or_default(),
+        delivery: Some("chunked"),
+    })
+}
+
+fn manual_notification_deduper() -> &'static OutboundDeduper {
+    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
+    DEDUPER.get_or_init(OutboundDeduper::new)
 }
 
 pub async fn send_message(
@@ -2116,8 +2355,33 @@ pub async fn handle_send<'a>(
         .and_then(|v| v.as_str())
         .unwrap_or("announce");
     let summary = json.get("summary").and_then(|v| v.as_str());
+    let delivery_id = match (
+        json.get("correlation_id").and_then(|v| v.as_str()),
+        json.get("semantic_event_id").and_then(|v| v.as_str()),
+    ) {
+        (Some(correlation_id), Some(semantic_event_id))
+            if !correlation_id.trim().is_empty() && !semantic_event_id.trim().is_empty() =>
+        {
+            Some(ManualOutboundDeliveryId {
+                correlation_id,
+                semantic_event_id,
+            })
+        }
+        _ => None,
+    };
 
-    send_message(registry, sqlite, target, content, source, bot, summary).await
+    send_message_with_backends_and_delivery_id(
+        registry,
+        Some(sqlite),
+        None,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+    )
+    .await
 }
 
 /// #896: Parsed `/api/inflight/rebind` body, extracted for unit-test
@@ -2557,6 +2821,7 @@ fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::DISCORD_MSG_LIMIT;
     use poise::serenity_prelude::{MessageId, UserId};
 
     fn test_db() -> Db {
@@ -2616,6 +2881,219 @@ mod tests {
         assert!(result.is_ok());
         let (_, _, source) = result.unwrap();
         assert_eq!(source, "unknown");
+    }
+
+    #[derive(Clone, Default)]
+    struct MockManualOutboundClient {
+        posts: Arc<std::sync::Mutex<Vec<String>>>,
+        attachments: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    impl DiscordOutboundClient for MockManualOutboundClient {
+        async fn post_message(
+            &self,
+            _target_channel: &str,
+            content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            let mut posts = self.posts.lock().unwrap();
+            posts.push(content.to_string());
+            Ok(format!("message-{}", posts.len()))
+        }
+    }
+
+    impl ManualOutboundClient for MockManualOutboundClient {
+        async fn post_text_attachment(
+            &self,
+            _target_channel: &str,
+            content: &str,
+            summary: Option<&str>,
+        ) -> Result<String, DispatchMessagePostError> {
+            let mut attachments = self.attachments.lock().unwrap();
+            attachments.push((content.to_string(), summary.map(str::to_string)));
+            Ok(format!("attachment-message-{}", attachments.len()))
+        }
+    }
+
+    fn boundary_payload(len: usize, fill: char) -> String {
+        let tail = format!("tail-{len}");
+        format!(
+            "{}{tail}",
+            fill.to_string().repeat(len.saturating_sub(tail.len()))
+        )
+    }
+
+    #[tokio::test]
+    async fn manual_notification_delivery_skips_duplicate_semantic_event() {
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: "manual:test",
+            semantic_event_id: "manual:test:duplicate",
+        };
+
+        let first = deliver_manual_notification(
+            &client,
+            &dedup,
+            "123",
+            "hello",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+        let second = deliver_manual_notification(
+            &client,
+            &dedup,
+            "123",
+            "hello",
+            "announce",
+            None,
+            Some(delivery_id),
+        )
+        .await;
+
+        assert_eq!(
+            first,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None
+            }
+        );
+        assert_eq!(
+            second,
+            ManualDeliveryOutcome::Sent {
+                message_id: String::new(),
+                delivery: Some("duplicate")
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn api_send_announce_long_content_preserves_full_payload_as_attachment() {
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let long = "A".repeat(DISCORD_MSG_LIMIT + 500);
+
+        let (status, body) = send_resolved_manual_message_with_client(
+            &client,
+            &dedup,
+            123,
+            "channel:123",
+            &long,
+            "system",
+            "announce",
+            None,
+            None,
+        )
+        .await;
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["bot"], "announce");
+        assert_eq!(response["delivery"], "summary+txt");
+        assert_eq!(response["message_id"], "attachment-message-1");
+        assert!(client.posts.lock().unwrap().is_empty());
+        let attachments = client.attachments.lock().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].0, long);
+    }
+
+    #[tokio::test]
+    async fn api_send_notify_long_content_preserves_full_payload_as_chunks() {
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let long = "B".repeat(DISCORD_MSG_LIMIT + 500);
+
+        let (status, body) = send_resolved_manual_message_with_client(
+            &client,
+            &dedup,
+            123,
+            "channel:123",
+            &long,
+            "system",
+            "notify",
+            None,
+            None,
+        )
+        .await;
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["bot"], "notify");
+        assert_eq!(response["delivery"], "chunked");
+        assert_eq!(response["message_id"], "message-2");
+        assert!(client.attachments.lock().unwrap().is_empty());
+        let posts = client.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|chunk| chunk.len() <= DISCORD_MSG_LIMIT));
+        assert_eq!(posts.concat(), long);
+    }
+
+    #[tokio::test]
+    async fn api_send_announce_1901_to_2000_preserves_full_payload_without_truncation() {
+        for len in [DISCORD_SAFE_LIMIT_CHARS + 1, DISCORD_HARD_LIMIT_CHARS] {
+            let client = MockManualOutboundClient::default();
+            let dedup = OutboundDeduper::new();
+            let content = boundary_payload(len, 'C');
+
+            let (status, body) = send_resolved_manual_message_with_client(
+                &client,
+                &dedup,
+                123,
+                "channel:123",
+                &content,
+                "system",
+                "announce",
+                None,
+                None,
+            )
+            .await;
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+            assert_eq!(status, "200 OK");
+            assert_eq!(response["bot"], "announce");
+            assert!(response.get("delivery").is_none());
+            assert!(client.attachments.lock().unwrap().is_empty());
+            let posts = client.posts.lock().unwrap();
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0], content);
+            assert!(posts[0].ends_with(&format!("tail-{len}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_send_notify_1901_to_2000_preserves_full_payload_without_truncation() {
+        for len in [DISCORD_SAFE_LIMIT_CHARS + 1, DISCORD_HARD_LIMIT_CHARS] {
+            let client = MockManualOutboundClient::default();
+            let dedup = OutboundDeduper::new();
+            let content = boundary_payload(len, 'D');
+
+            let (status, body) = send_resolved_manual_message_with_client(
+                &client,
+                &dedup,
+                123,
+                "channel:123",
+                &content,
+                "system",
+                "notify",
+                None,
+                None,
+            )
+            .await;
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+            assert_eq!(status, "200 OK");
+            assert_eq!(response["bot"], "notify");
+            assert!(response.get("delivery").is_none());
+            assert!(client.attachments.lock().unwrap().is_empty());
+            let posts = client.posts.lock().unwrap();
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0], content);
+            assert!(posts[0].ends_with(&format!("tail-{len}")));
+        }
     }
 
     #[test]
