@@ -1297,20 +1297,18 @@ export default function StatsPageView({
             </div>
           </div>
 
-          <div className="grid grid-feature">
-            <div data-testid="stats-daily-token-chart">
-              <DailyTokenCompositionCard
-                t={t}
-                localeTag={localeTag}
-                loading={loading}
-                daily={analytics?.daily ?? []}
-                series={series}
-              />
-            </div>
-            {/* DailyCacheHitCard hidden in PR 4 (#1249): the bar grid never
-                rendered visible bars (per-day hitRate aggregation gap), and
-                the average chip alone wasn't useful enough to keep half a
-                chart on screen. Re-enable once the per-day signal is fixed. */}
+          {/* Codex review (PR #1258): grid-feature uses 2fr 1fr on desktop;
+              after hiding DailyCacheHitCard the second column was empty.
+              Switch to a single-column container so the chart spans the
+              row. Re-introduce grid-feature when the cache card returns. */}
+          <div data-testid="stats-daily-token-chart">
+            <DailyTokenCompositionCard
+              t={t}
+              localeTag={localeTag}
+              loading={loading}
+              daily={analytics?.daily ?? []}
+              series={series}
+            />
           </div>
 
           <div className="grid grid-2 items-stretch [&>div]:flex [&>div>article]:flex-1">
