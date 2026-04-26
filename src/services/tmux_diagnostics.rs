@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 use crate::utils::format::safe_prefix;
 
@@ -27,7 +28,22 @@ pub fn record_tmux_exit_reason(tmux_session_name: &str, reason: &str) {
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         reason.trim()
     );
-    let _ = std::fs::write(tmux_exit_reason_path(tmux_session_name), stamped);
+    let path = tmux_exit_reason_path(tmux_session_name);
+    let path = Path::new(&path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp_path = path.with_extension(format!(
+        "exit_reason.tmp-{}-{}",
+        std::process::id(),
+        chrono::Local::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default()
+    ));
+    if std::fs::write(&tmp_path, stamped).is_ok() {
+        let _ = std::fs::rename(&tmp_path, path);
+    }
+    let _ = std::fs::remove_file(tmp_path);
 }
 
 pub fn record_normal_tmux_exit_reason(tmux_session_name: &str) {
@@ -233,6 +249,7 @@ mod tests {
 
     #[test]
     fn test_tmux_exit_reason_round_trip() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
         let session = unique_test_session_name();
         clear_tmux_exit_reason(&session);
         record_tmux_exit_reason(&session, "explicit cleanup: /stop");
@@ -255,6 +272,7 @@ mod tests {
 
     #[test]
     fn test_record_normal_tmux_exit_reason_round_trip() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
         let session = unique_test_session_name();
         clear_tmux_exit_reason(&session);
         record_normal_tmux_exit_reason(&session);

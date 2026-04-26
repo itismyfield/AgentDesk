@@ -225,6 +225,11 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         .get("dashboard")
         .cloned()
         .unwrap_or_else(|| serde_json::json!(false));
+    let server_up = json.get("server_up").cloned().unwrap_or_else(|| db.clone());
+    let fully_recovered = json
+        .get("fully_recovered")
+        .cloned()
+        .unwrap_or_else(|| server_up.clone());
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
     serde_json::json!({
         "ok": !degraded,
@@ -232,6 +237,8 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "version": version,
         "db": db,
         "dashboard": dashboard,
+        "server_up": server_up,
+        "fully_recovered": fully_recovered,
         "degraded": degraded,
     })
 }

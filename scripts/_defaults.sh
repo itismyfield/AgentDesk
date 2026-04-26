@@ -210,6 +210,21 @@ _health_json_field_is_true() {
     | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*true([[:space:]]*[,}])"
 }
 
+_health_json_field_is_false() {
+  local health_json="$1"
+  local key="$2"
+
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e ".$key == false" >/dev/null 2>&1
+    return
+  fi
+
+  _health_json_compact "$health_json" \
+    | grep -Eq "\"$key\"[[:space:]]*:[[:space:]]*false([[:space:]]*[,}])"
+}
+
 _health_json_field_exists() {
   local health_json="$1"
   local key="$2"
@@ -282,7 +297,16 @@ health_json_is_ready() {
   if _health_json_field_exists "$health_json" "server_up"; then
     _health_json_field_is_true "$health_json" "server_up" || return 1
     [ "$status" = "unhealthy" ] && return 1
-    return 0
+    [ "$status" = "healthy" ] && return 0
+    if [ "$allow_reconcile_degraded" = "1" ] \
+      && _health_json_field_exists "$health_json" "fully_recovered" \
+      && _health_json_field_is_false "$health_json" "fully_recovered"; then
+      return 0
+    fi
+    if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then
+      return 0
+    fi
+    return 1
   fi
 
   if [ "$status" = "healthy" ]; then
