@@ -339,7 +339,7 @@
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 303 |  |
 | `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 219 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 123 |  |
-| `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 404 |  |
+| `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 419 |  |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 381 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 706 |  |

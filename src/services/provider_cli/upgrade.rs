@@ -113,6 +113,7 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
     command.args(args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
+    crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command.spawn().map_err(UpgradeError::Io)?;
     let stdout_reader = child
@@ -132,15 +133,13 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::services::process::kill_child_tree(&mut child);
                 return Err(UpgradeError::UpgradeCommandTimedOut {
                     seconds: UPGRADE_COMMAND_TIMEOUT.as_secs(),
                 });
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::services::process::kill_child_tree(&mut child);
                 return Err(UpgradeError::Io(error));
             }
         }
@@ -305,6 +304,10 @@ pub fn transition(
 
 fn is_valid_transition(from: &MigrationState, to: &MigrationState) -> bool {
     use MigrationState::*;
+    if matches!(from, RolledBack | Failed) {
+        return from == to;
+    }
+
     matches!(
         (from, to),
         (Planned, CurrentSnapshotted)
@@ -381,6 +384,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.state, MigrationState::RolledBack);
+    }
+
+    #[test]
+    fn terminal_states_do_not_transition_forward() {
+        let mut rolled_back = new_migration_state("codex", make_channel());
+        transition(&mut rolled_back, MigrationState::RolledBack, None).unwrap();
+        assert!(transition(&mut rolled_back, MigrationState::CurrentSnapshotted, None).is_err());
+        assert!(transition(&mut rolled_back, MigrationState::Failed, None).is_err());
+
+        let mut failed = new_migration_state("codex", make_channel());
+        transition(&mut failed, MigrationState::Failed, None).unwrap();
+        assert!(transition(&mut failed, MigrationState::RolledBack, None).is_err());
     }
 
     #[test]
