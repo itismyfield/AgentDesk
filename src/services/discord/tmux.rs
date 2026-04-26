@@ -6497,6 +6497,52 @@ pub(super) fn process_watcher_lines(
                                                 is_error: false,
                                             },
                                         );
+                                    } else if block_type == Some("thinking") {
+                                        // Claude CLI emits thinking inside the
+                                        // `assistant` JSON message (not via
+                                        // `content_block_*` streaming events).
+                                        // When the API returns plaintext
+                                        // thinking text, mirror it into the
+                                        // body code-fence the same way the
+                                        // unified turn_bridge consumer does.
+                                        // When the API returns encrypted
+                                        // thinking (`thinking: ""` + signature
+                                        // only), the field is empty and we
+                                        // skip — there is no plaintext to
+                                        // surface.
+                                        let text = block
+                                            .get("thinking")
+                                            .and_then(|t| t.as_str())
+                                            .map(|t| t.trim())
+                                            .filter(|t| !t.is_empty());
+                                        if let Some(thinking_text) = text {
+                                            if !full_response.is_empty()
+                                                && !full_response.ends_with('\n')
+                                            {
+                                                full_response.push('\n');
+                                            }
+                                            full_response.push_str("\n💭 **Reasoning**\n```\n");
+                                            full_response
+                                                .push_str(&escape_for_code_fence(thinking_text));
+                                            full_response.push_str("\n```\n");
+                                            tool_state.set_current_tool_line(Some(format!(
+                                                "💭 {thinking_text}"
+                                            )));
+                                            push_transcript_event(
+                                                &mut tool_state.transcript_events,
+                                                SessionTranscriptEvent {
+                                                    kind: SessionTranscriptEventKind::Thinking,
+                                                    tool_name: None,
+                                                    summary: Some(
+                                                        truncate_str(thinking_text, 120)
+                                                            .to_string(),
+                                                    ),
+                                                    content: thinking_text.to_string(),
+                                                    status: Some("info".to_string()),
+                                                    is_error: false,
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
