@@ -71,7 +71,7 @@
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 232 |  |
 | `db::agents` | `src/db/agents.rs` | 1039 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 5939 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 5940 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 378 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1421 | giant-file |
@@ -338,7 +338,7 @@
 | `services::qwen` | `src/services/qwen.rs` | 2446 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1176 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
-| `services::retrospectives` | `src/services/retrospectives.rs` | 878 |  |
+| `services::retrospectives` | `src/services/retrospectives.rs` | 879 |  |
 | `services::service_error` | `src/services/service_error.rs` | 1 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 1053 | giant-file |
 | `services::settings` | `src/services/settings.rs` | 546 |  |
