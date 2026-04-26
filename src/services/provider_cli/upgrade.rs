@@ -27,6 +27,14 @@ pub enum UpgradeError {
     UpgradeCommandTimedOut {
         seconds: u64,
     },
+    UnmanagedSnapshotSource {
+        source: String,
+        install_source: String,
+    },
+    CandidatePathChanged {
+        pre_canonical_path: String,
+        post_canonical_path: String,
+    },
     VersionUnknown {
         pre_version: String,
         post_version: String,
@@ -51,6 +59,20 @@ impl std::fmt::Display for UpgradeError {
             UpgradeError::UpgradeCommandTimedOut { seconds } => {
                 write!(f, "upgrade_command_timed_out_after_{seconds}s")
             }
+            UpgradeError::UnmanagedSnapshotSource {
+                source,
+                install_source,
+            } => write!(
+                f,
+                "unmanaged_snapshot_source(source={source:?}, install_source={install_source:?})"
+            ),
+            UpgradeError::CandidatePathChanged {
+                pre_canonical_path,
+                post_canonical_path,
+            } => write!(
+                f,
+                "candidate_path_changed(pre={pre_canonical_path:?}, post={post_canonical_path:?})"
+            ),
             UpgradeError::VersionUnknown {
                 pre_version,
                 post_version,
@@ -130,6 +152,53 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
 fn version_is_unknown(version: &str) -> bool {
     let value = version.trim();
     value.is_empty() || value.eq_ignore_ascii_case("unknown")
+}
+
+fn validate_managed_snapshot_source(
+    strategy: &ProviderCliUpdateStrategy,
+    current_snapshot: &ProviderCliChannel,
+) -> Result<(), UpgradeError> {
+    if !matches!(
+        current_snapshot.source.as_str(),
+        "current_path" | "login_shell_path" | "fallback_path"
+    ) {
+        return Err(UpgradeError::UnmanagedSnapshotSource {
+            source: current_snapshot.source.clone(),
+            install_source: strategy.install_source.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_post_upgrade_channel(
+    strategy: &ProviderCliUpdateStrategy,
+    current_snapshot: &ProviderCliChannel,
+    post_channel: &ProviderCliChannel,
+    pre_version: &str,
+) -> Result<(), UpgradeError> {
+    if !strategy.mutates_in_place {
+        return Ok(());
+    }
+
+    let post_version = post_channel.version.clone();
+    if version_is_unknown(pre_version) || version_is_unknown(&post_version) {
+        return Err(UpgradeError::VersionUnknown {
+            pre_version: pre_version.to_string(),
+            post_version,
+        });
+    }
+    if current_snapshot.canonical_path != post_channel.canonical_path {
+        return Err(UpgradeError::CandidatePathChanged {
+            pre_canonical_path: current_snapshot.canonical_path.clone(),
+            post_canonical_path: post_channel.canonical_path.clone(),
+        });
+    }
+    if pre_version == post_version {
+        return Err(UpgradeError::VersionUnchanged {
+            version: post_version,
+        });
+    }
+    Ok(())
 }
 
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
@@ -311,11 +380,14 @@ pub fn run_upgrade(
     let strategy = update_strategy_for(provider).ok_or(UpgradeError::NoStrategy)?;
     let pre_version = current_snapshot.version.clone();
 
-    if strategy.mutates_in_place && version_is_unknown(&pre_version) {
-        return Err(UpgradeError::VersionUnknown {
-            pre_version,
-            post_version: String::new(),
-        });
+    if strategy.mutates_in_place {
+        validate_managed_snapshot_source(strategy, current_snapshot)?;
+        if version_is_unknown(&pre_version) {
+            return Err(UpgradeError::VersionUnknown {
+                pre_version,
+                post_version: String::new(),
+            });
+        }
     }
 
     // Guard: mutates_in_place requires previous preservation.
@@ -349,21 +421,7 @@ pub fn run_upgrade(
         })?;
 
     let post_version = post_channel.version.clone();
-
-    // Guard: version must change (for mutates_in_place providers).
-    if strategy.mutates_in_place {
-        if version_is_unknown(&pre_version) || version_is_unknown(&post_version) {
-            return Err(UpgradeError::VersionUnknown {
-                pre_version,
-                post_version,
-            });
-        }
-        if pre_version == post_version {
-            return Err(UpgradeError::VersionUnchanged {
-                version: post_version,
-            });
-        }
-    }
+    validate_post_upgrade_channel(strategy, current_snapshot, &post_channel, &pre_version)?;
 
     let mut evidence = HashMap::new();
     evidence.insert("pre_version".to_string(), pre_version.clone());
@@ -560,6 +618,48 @@ mod tests {
 
         assert!(matches!(result, Err(UpgradeError::VersionUnknown { .. })));
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn mutates_in_place_upgrade_rejects_unmanaged_snapshot_source_before_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut channel = make_channel();
+        channel.source = "env_override".to_string();
+        channel.path = temp
+            .path()
+            .join("missing-codex")
+            .to_string_lossy()
+            .to_string();
+        channel.canonical_path = channel.path.clone();
+        let dest = temp.path().join("codex-previous-binary");
+
+        let result = run_upgrade("codex", &channel, Some(&dest), false);
+
+        assert!(matches!(
+            result,
+            Err(UpgradeError::UnmanagedSnapshotSource { .. })
+        ));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn mutates_in_place_upgrade_rejects_changed_candidate_path() {
+        let current = make_channel();
+        let mut candidate = make_channel();
+        candidate.canonical_path = "/opt/other/codex".to_string();
+        candidate.version = "2.0.0".to_string();
+
+        let result = validate_post_upgrade_channel(
+            update_strategy_for("codex").unwrap(),
+            &current,
+            &candidate,
+            &current.version,
+        );
+
+        assert!(matches!(
+            result,
+            Err(UpgradeError::CandidatePathChanged { .. })
+        ));
     }
 
     #[cfg(unix)]
