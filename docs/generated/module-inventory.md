@@ -185,7 +185,7 @@
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4478 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1370 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
-| `server::routes::receipt` | `src/server/routes/receipt.rs` | 162 |  |
+| `server::routes::receipt` | `src/server/routes/receipt.rs` | 165 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2000 | giant-file |
