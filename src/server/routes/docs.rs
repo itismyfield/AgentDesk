@@ -3418,10 +3418,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
             ("action", body_param("string", true, "confirm_promote | rollback | rollback_to_previous")),
             ("evidence", body_param("string", false, "Optional operator note recorded in migration history")),
+            ("force_recreate_active", body_param("boolean", false, "Advanced override for active old-channel launch artifacts")),
         ])
         .with_example(
-            json!({"body": {"action": "confirm_promote", "evidence": "operator approved via Discord"}}),
-            json!({"provider": "codex", "action": "confirm_promote", "state": "ProviderSessionsSafeEnding", "updated_at": "2026-01-01T00:00:00Z"}),
+            json!({"body": {"action": "confirm_promote", "evidence": "operator approved via Discord", "force_recreate_active": false}}),
+            json!({"provider": "codex", "action": "confirm_promote", "state": "ProviderAgentsMigrated", "updated_at": "2026-01-01T00:00:00Z"}),
         ),
     ]
 }

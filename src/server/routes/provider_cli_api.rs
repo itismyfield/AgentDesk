@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 use crate::services::provider_cli::io::{
     load_migration_state, load_registry, load_smoke_result, save_migration_state,
 };
+use crate::services::provider_cli::orchestration::{
+    promote_registry_candidate, rollback_registry_previous, session_guard_evidence,
+};
 use crate::services::provider_cli::registry::MigrationState;
 use crate::services::provider_cli::upgrade::transition;
 use crate::services::provider_cli::{
@@ -93,9 +96,9 @@ pub async fn patch_provider_cli(
     Path(provider): Path<String>,
     Json(body): Json<ProviderCliActionRequest>,
 ) -> (StatusCode, Json<Value>) {
-    let next_state = match body.action.as_str() {
-        "confirm_promote" => MigrationState::ProviderSessionsSafeEnding,
-        "rollback" | "rollback_to_previous" => MigrationState::RolledBack,
+    let confirm_promote = match body.action.as_str() {
+        "confirm_promote" => true,
+        "rollback" | "rollback_to_previous" => false,
         action => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -127,7 +130,54 @@ pub async fn patch_provider_cli(
         }
     };
 
-    if let Err(e) = transition(&mut migration, next_state, body.evidence.clone()) {
+    let transition_result = if confirm_promote {
+        let target_agent_ids: Vec<String> = migration.selected_agent_id.iter().cloned().collect();
+        let guard = crate::services::provider_cli::session_guard::evaluate_session_migration_guards(
+            &root,
+            &provider,
+            &target_agent_ids,
+            "candidate",
+            body.force_recreate_active,
+        );
+
+        if guard.is_clear() {
+            advance_to(
+                &mut migration,
+                MigrationState::ProviderSessionsSafeEnding,
+                Some(session_guard_evidence(body.evidence.as_deref(), &guard)),
+            )
+            .and_then(|_| {
+                advance_to(
+                    &mut migration,
+                    MigrationState::ProviderSessionsRecreated,
+                    Some(guard.evidence_json()),
+                )
+            })
+            .and_then(|_| advance_to(&mut migration, MigrationState::ProviderAgentsMigrated, None))
+            .and_then(|_| promote_registry_candidate(&root, &provider))
+        } else {
+            let _ = transition(
+                &mut migration,
+                MigrationState::Failed,
+                Some(guard.evidence_json()),
+            );
+            let _ = save_migration_state(&root, &migration);
+            Err(format!(
+                "safe session guard blocked promotion: {}",
+                guard.blockers.join("; ")
+            ))
+        }
+    } else {
+        transition(
+            &mut migration,
+            MigrationState::RolledBack,
+            body.evidence.clone(),
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|_| rollback_registry_previous(&root, &provider))
+    };
+
+    if let Err(e) = transition_result {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": format!("invalid transition: {e}")})),
@@ -150,6 +200,17 @@ pub async fn patch_provider_cli(
             "updated_at": migration.updated_at,
         })),
     )
+}
+
+fn advance_to(
+    state: &mut crate::services::provider_cli::ProviderCliMigrationState,
+    next: MigrationState,
+    evidence: Option<String>,
+) -> Result<(), String> {
+    if state.state == next {
+        return Ok(());
+    }
+    transition(state, next, evidence).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -223,6 +284,7 @@ mod tests {
         let body = ProviderCliActionRequest {
             action: "invalid_action".to_string(),
             evidence: None,
+            force_recreate_active: false,
         };
         let (status, _) =
             patch_provider_cli(State(state), Path("codex".to_string()), Json(body)).await;
@@ -234,33 +296,69 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _runtime_root = RuntimeRootOverrideGuard::set(dir.path());
 
-        use crate::services::provider_cli::registry::{MigrationState, ProviderCliMigrationState};
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderChannels, ProviderCliChannel, ProviderCliMigrationState,
+            ProviderCliRegistry,
+        };
         use chrono::Utc;
+        let current = ProviderCliChannel {
+            path: "/tmp/current-codex".to_string(),
+            canonical_path: "/tmp/current-codex".to_string(),
+            version: "current".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        };
+        let candidate = ProviderCliChannel {
+            path: "/tmp/candidate-codex".to_string(),
+            canonical_path: "/tmp/candidate-codex".to_string(),
+            version: "candidate".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        };
         let ms = ProviderCliMigrationState {
             schema_version: 1,
             provider: "codex".to_string(),
             state: MigrationState::AwaitingOperatorPromote,
             selected_agent_id: None,
-            current_channel: None,
-            candidate_channel: None,
+            current_channel: Some(current.clone()),
+            candidate_channel: Some(candidate.clone()),
             rollback_target: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
             history: vec![],
         };
         crate::services::provider_cli::io::save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        let mut channels = ProviderChannels {
+            current: Some(current),
+            candidate: Some(candidate.clone()),
+            ..Default::default()
+        };
+        channels
+            .agent_overrides
+            .insert("codex-agent".to_string(), "candidate".to_string());
+        registry.providers.insert("codex".to_string(), channels);
+        crate::services::provider_cli::io::save_registry(dir.path(), &registry).unwrap();
 
         let state = make_state();
         let body = ProviderCliActionRequest {
             action: "confirm_promote".to_string(),
             evidence: Some("operator approved".to_string()),
+            force_recreate_active: false,
         };
         let (status, Json(value)) =
             patch_provider_cli(State(state), Path("codex".to_string()), Json(body)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            value["state"].as_str().unwrap(),
-            "ProviderSessionsSafeEnding"
-        );
+        assert_eq!(value["state"].as_str().unwrap(), "ProviderAgentsMigrated");
+        let registry = crate::services::provider_cli::io::load_registry(dir.path())
+            .unwrap()
+            .unwrap();
+        let channels = registry.providers.get("codex").unwrap();
+        assert_eq!(channels.current.as_ref(), Some(&candidate));
+        assert!(channels.agent_overrides.is_empty());
     }
 }

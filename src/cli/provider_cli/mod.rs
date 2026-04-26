@@ -4,9 +4,11 @@ use serde_json::json;
 use crate::services::provider_cli::io::{
     load_migration_state, load_registry, save_migration_state, save_registry, save_smoke_result,
 };
-use crate::services::provider_cli::registry::{
-    MigrationState, PROVIDER_UPDATE_STRATEGIES, ProviderChannels,
+use crate::services::provider_cli::orchestration::{
+    apply_canary_override, configured_provider_agents, evaluate_provider_session_guard,
+    promote_registry_candidate, rollback_registry_previous, session_guard_evidence,
 };
+use crate::services::provider_cli::registry::{MigrationState, PROVIDER_UPDATE_STRATEGIES};
 use crate::services::provider_cli::smoke::run_smoke;
 use crate::services::provider_cli::snapshot::snapshot_current_channel;
 use crate::services::provider_cli::upgrade::{new_migration_state, run_upgrade, transition};
@@ -64,6 +66,9 @@ pub enum ProviderCliAction {
         /// Operator note recorded in migration history
         #[arg(long)]
         evidence: Option<String>,
+        /// Allow promotion when an old-channel launch artifact still appears active
+        #[arg(long)]
+        force_recreate_active: bool,
     },
     /// Roll back migration to previous state
     Rollback {
@@ -97,6 +102,9 @@ pub enum ProviderCliAction {
         /// Auto-promote without waiting for operator confirmation
         #[arg(long)]
         auto_promote: bool,
+        /// Allow migration when an old-channel launch artifact still appears active
+        #[arg(long)]
+        force_recreate_active: bool,
     },
     /// Resume migration from the current persisted state
     Resume {
@@ -105,6 +113,9 @@ pub enum ProviderCliAction {
         /// Auto-promote without waiting for operator confirmation
         #[arg(long)]
         auto_promote: bool,
+        /// Allow migration when an old-channel launch artifact still appears active
+        #[arg(long)]
+        force_recreate_active: bool,
     },
 }
 
@@ -137,9 +148,11 @@ pub fn cmd_provider_cli(args: ProviderCliArgs) -> Result<(), String> {
             provider,
             canary_agent,
         } => cmd_canary(&provider, canary_agent.as_deref()),
-        ProviderCliAction::Promote { provider, evidence } => {
-            cmd_promote(&provider, evidence.as_deref())
-        }
+        ProviderCliAction::Promote {
+            provider,
+            evidence,
+            force_recreate_active,
+        } => cmd_promote(&provider, evidence.as_deref(), force_recreate_active),
         ProviderCliAction::Rollback { provider, evidence } => {
             cmd_rollback(&provider, evidence.as_deref())
         }
@@ -150,17 +163,20 @@ pub fn cmd_provider_cli(args: ProviderCliArgs) -> Result<(), String> {
             canary_agent,
             skip_upgrade,
             auto_promote,
+            force_recreate_active,
         } => cmd_run(
             &provider,
             candidate_path.as_deref(),
             canary_agent.as_deref(),
             skip_upgrade,
             auto_promote,
+            force_recreate_active,
         ),
         ProviderCliAction::Resume {
             provider,
             auto_promote,
-        } => cmd_resume(&provider, auto_promote),
+            force_recreate_active,
+        } => cmd_resume(&provider, auto_promote, force_recreate_active),
     }
 }
 
@@ -365,6 +381,11 @@ fn cmd_canary(provider: &str, canary_agent: Option<&str>) -> Result<(), String> 
         .ok_or_else(|| "no canary agent specified (use --agent <agent-id>)".to_string())?;
 
     state.selected_agent_id = Some(agent_id.clone());
+    if state.state == MigrationState::SmokeCandidatePassed {
+        transition(&mut state, MigrationState::CanarySelected, None)
+            .map_err(|e| format!("transition error: {e}"))?;
+    }
+    apply_canary_override(&root, provider, &agent_id)?;
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
 
     print_json(&json!({
@@ -374,18 +395,52 @@ fn cmd_canary(provider: &str, canary_agent: Option<&str>) -> Result<(), String> 
     Ok(())
 }
 
-fn cmd_promote(provider: &str, evidence: Option<&str>) -> Result<(), String> {
+fn cmd_promote(
+    provider: &str,
+    evidence: Option<&str>,
+    force_recreate_active: bool,
+) -> Result<(), String> {
     let root = runtime_root()?;
     let mut state = load_migration_state(&root, provider)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no migration state for provider: {provider}"))?;
 
-    transition(
+    let guard = evaluate_provider_session_guard(
+        &root,
+        provider,
+        state.selected_agent_id.as_deref(),
+        "candidate",
+        force_recreate_active,
+    );
+    if !guard.is_clear() {
+        transition(
+            &mut state,
+            MigrationState::Failed,
+            Some(guard.evidence_json()),
+        )
+        .map_err(|e| format!("transition error: {e}"))?;
+        save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+        return Err(format!(
+            "safe session guard blocked promotion: {}",
+            guard.blockers.join("; ")
+        ));
+    }
+
+    advance_to(
         &mut state,
         MigrationState::ProviderSessionsSafeEnding,
-        evidence.map(str::to_string),
+        Some(session_guard_evidence(evidence, &guard)),
     )
     .map_err(|e| format!("transition error: {e}"))?;
+    advance_to(
+        &mut state,
+        MigrationState::ProviderSessionsRecreated,
+        Some(guard.evidence_json()),
+    )
+    .map_err(|e| format!("transition error: {e}"))?;
+    advance_to(&mut state, MigrationState::ProviderAgentsMigrated, None)
+        .map_err(|e| format!("transition error: {e}"))?;
+    promote_registry_candidate(&root, provider)?;
 
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
 
@@ -411,17 +466,7 @@ fn cmd_rollback(provider: &str, evidence: Option<&str>) -> Result<(), String> {
 
     // Restore previous binary to current slot in registry if rollback_target is set.
     if state.rollback_target.is_some() || state.current_channel.is_some() {
-        if let Ok(mut registry) = load_registry(&root).map(|r| r.unwrap_or_default()) {
-            let channels = registry
-                .providers
-                .entry(provider.to_string())
-                .or_insert_with(ProviderChannels::default);
-            if let Some(prev) = channels.previous.clone() {
-                channels.current = Some(prev);
-                channels.candidate = None;
-            }
-            let _ = save_registry(&root, &registry);
-        }
+        let _ = rollback_registry_previous(&root, provider);
     }
 
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
@@ -464,6 +509,23 @@ fn cmd_cleanup(provider: &str, _dry_run: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_canary_agent_id(
+    provider: &str,
+    requested_agent: Option<&str>,
+    existing_agent: Option<&str>,
+) -> Result<String, String> {
+    if let Some(agent) = requested_agent.filter(|agent| !agent.trim().is_empty()) {
+        return Ok(agent.to_string());
+    }
+    if let Some(agent) = existing_agent.filter(|agent| !agent.trim().is_empty()) {
+        return Ok(agent.to_string());
+    }
+    let agents = configured_provider_agents(provider);
+    crate::services::provider_cli::select_canary_agent(provider, &agents, None).ok_or_else(|| {
+        format!("no configured canary agent found for provider: {provider}; pass --canary-agent")
+    })
+}
+
 /// Full migration orchestration: runs through the state machine up to
 /// `AwaitingOperatorPromote` (or `ProviderAgentsMigrated` when `auto_promote=true`).
 fn cmd_run(
@@ -472,6 +534,7 @@ fn cmd_run(
     canary_agent: Option<&str>,
     skip_upgrade: bool,
     auto_promote: bool,
+    force_recreate_active: bool,
 ) -> Result<(), String> {
     let root = runtime_root()?;
 
@@ -575,10 +638,11 @@ fn cmd_run(
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
     eprintln!("[4/7] Smoke check on candidate binary passed");
 
-    // Step 5: canary selection.
-    if let Some(agent) = canary_agent {
-        state.selected_agent_id = Some(agent.to_string());
-    }
+    // Step 5: canary selection and scoped candidate override.
+    let selected_agent_id =
+        resolve_canary_agent_id(provider, canary_agent, state.selected_agent_id.as_deref())?;
+    state.selected_agent_id = Some(selected_agent_id.clone());
+    apply_canary_override(&root, provider, &selected_agent_id)?;
     advance_to(&mut state, MigrationState::CanarySelected, None)?;
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
     eprintln!(
@@ -586,24 +650,80 @@ fn cmd_run(
         state.selected_agent_id.as_deref().unwrap_or("(none set)")
     );
 
-    // Step 6: canary session lifecycle (simulated — actual session control requires runtime).
-    advance_to(&mut state, MigrationState::CanarySessionSafeEnding, None)?;
-    advance_to(&mut state, MigrationState::CanarySessionRecreated, None)?;
+    // Step 6: canary resolver lifecycle. Known old-channel launch artifacts
+    // must be inactive, or the operator must explicitly force recreation.
+    let canary_guard =
+        crate::services::provider_cli::session_guard::evaluate_session_migration_guards(
+            &root,
+            provider,
+            std::slice::from_ref(&selected_agent_id),
+            "candidate",
+            force_recreate_active,
+        );
+    if !canary_guard.is_clear() {
+        transition(
+            &mut state,
+            MigrationState::Failed,
+            Some(canary_guard.evidence_json()),
+        )?;
+        save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+        return Err(format!(
+            "safe session guard blocked canary recreate: {}",
+            canary_guard.blockers.join("; ")
+        ));
+    }
+    advance_to(
+        &mut state,
+        MigrationState::CanarySessionSafeEnding,
+        Some(canary_guard.evidence_json()),
+    )?;
+    advance_to(
+        &mut state,
+        MigrationState::CanarySessionRecreated,
+        Some(canary_guard.evidence_json()),
+    )?;
     advance_to(&mut state, MigrationState::CanaryActive, None)?;
     advance_to(&mut state, MigrationState::CanaryPassed, None)?;
     advance_to(&mut state, MigrationState::AwaitingOperatorPromote, None)?;
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
-    eprintln!("[6/7] Canary lifecycle simulated — awaiting operator promote");
+    eprintln!("[6/7] Canary override active — awaiting operator promote");
 
     // Step 7: auto-promote if requested.
     if auto_promote {
+        let provider_guard = evaluate_provider_session_guard(
+            &root,
+            provider,
+            state.selected_agent_id.as_deref(),
+            "candidate",
+            force_recreate_active,
+        );
+        if !provider_guard.is_clear() {
+            transition(
+                &mut state,
+                MigrationState::Failed,
+                Some(provider_guard.evidence_json()),
+            )?;
+            save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+            return Err(format!(
+                "safe session guard blocked provider migration: {}",
+                provider_guard.blockers.join("; ")
+            ));
+        }
         advance_to(
             &mut state,
             MigrationState::ProviderSessionsSafeEnding,
-            Some("auto-promote".to_string()),
+            Some(session_guard_evidence(
+                Some("auto-promote"),
+                &provider_guard,
+            )),
         )?;
-        advance_to(&mut state, MigrationState::ProviderSessionsRecreated, None)?;
+        advance_to(
+            &mut state,
+            MigrationState::ProviderSessionsRecreated,
+            Some(provider_guard.evidence_json()),
+        )?;
         advance_to(&mut state, MigrationState::ProviderAgentsMigrated, None)?;
+        promote_registry_candidate(&root, provider)?;
         save_migration_state(&root, &state).map_err(|e| e.to_string())?;
         eprintln!("[7/7] Auto-promoted — migration complete");
     } else {
@@ -621,7 +741,11 @@ fn cmd_run(
 }
 
 /// Resume migration from the current persisted state.
-fn cmd_resume(provider: &str, auto_promote: bool) -> Result<(), String> {
+fn cmd_resume(
+    provider: &str,
+    auto_promote: bool,
+    force_recreate_active: bool,
+) -> Result<(), String> {
     let root = runtime_root()?;
     let state = load_migration_state(&root, provider)
         .map_err(|e| e.to_string())?
@@ -635,7 +759,11 @@ fn cmd_resume(provider: &str, auto_promote: bool) -> Result<(), String> {
     match state.state {
         MigrationState::AwaitingOperatorPromote => {
             if auto_promote {
-                cmd_promote(provider, Some("resumed with --auto-promote"))
+                cmd_promote(
+                    provider,
+                    Some("resumed with --auto-promote"),
+                    force_recreate_active,
+                )
             } else {
                 eprintln!(
                     "Migration is at AwaitingOperatorPromote. Use --auto-promote or run `agentdesk provider-cli promote {provider}`."
@@ -665,6 +793,7 @@ fn cmd_resume(provider: &str, auto_promote: bool) -> Result<(), String> {
                 state.selected_agent_id.as_deref(),
                 true,
                 auto_promote,
+                force_recreate_active,
             )
         }
     }
@@ -686,6 +815,18 @@ fn advance_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_channel(path: &str) -> crate::services::provider_cli::ProviderCliChannel {
+        crate::services::provider_cli::ProviderCliChannel {
+            path: path.to_string(),
+            canonical_path: path.to_string(),
+            version: "test-version".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: chrono::Utc::now(),
+            evidence: Default::default(),
+        }
+    }
 
     #[test]
     fn plan_shows_strategy_for_known_provider() {
@@ -740,28 +881,49 @@ mod tests {
     }
 
     #[test]
-    fn promote_transitions_to_provider_sessions_safe_ending() {
+    fn promote_transitions_to_provider_agents_migrated_and_clears_canary_override() {
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
 
-        use crate::services::provider_cli::registry::{MigrationState, ProviderCliMigrationState};
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderChannels, ProviderCliMigrationState, ProviderCliRegistry,
+        };
         use chrono::Utc;
+        let current = test_channel("/tmp/current-codex");
+        let candidate = test_channel("/tmp/candidate-codex");
         let ms = ProviderCliMigrationState {
             schema_version: 1,
             provider: "codex".to_string(),
             state: MigrationState::AwaitingOperatorPromote,
-            selected_agent_id: None,
-            current_channel: None,
-            candidate_channel: None,
+            selected_agent_id: Some("codex-agent".to_string()),
+            current_channel: Some(current.clone()),
+            candidate_channel: Some(candidate.clone()),
             rollback_target: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
             history: vec![],
         };
         save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        let mut channels = ProviderChannels {
+            current: Some(current),
+            candidate: Some(candidate.clone()),
+            ..Default::default()
+        };
+        channels
+            .agent_overrides
+            .insert("codex-agent".to_string(), "candidate".to_string());
+        registry.providers.insert("codex".to_string(), channels);
+        save_registry(dir.path(), &registry).unwrap();
 
-        let result = cmd_promote("codex", Some("operator approval"));
+        let result = cmd_promote("codex", Some("operator approval"), false);
+        let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
+        let registry = load_registry(dir.path()).unwrap().unwrap();
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         assert!(result.is_ok());
+        assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
+        let channels = registry.providers.get("codex").unwrap();
+        assert_eq!(channels.current.as_ref(), Some(&candidate));
+        assert!(channels.agent_overrides.is_empty());
     }
 }

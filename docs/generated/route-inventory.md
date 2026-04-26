@@ -87,9 +87,9 @@
 | `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:83` | `src/server/routes/domains/ops.rs:33` |
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:175` | `src/server/routes/domains/ops.rs:220` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:22` | `src/server/routes/domains/integrations.rs:40` |
-| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:3452` | `src/server/routes/domains/ops.rs:231` |
-| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:3621` | `src/server/routes/domains/ops.rs:233` |
-| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:3598` | `src/server/routes/domains/ops.rs:232` |
+| `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:3453` | `src/server/routes/domains/ops.rs:231` |
+| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:3622` | `src/server/routes/domains/ops.rs:233` |
+| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:3599` | `src/server/routes/domains/ops.rs:232` |
 | `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:451` | `src/server/routes/domains/ops.rs:29` |
 | `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:435` | `src/server/routes/domains/ops.rs:25` |
 | `GET` | `/api/github-closed-today` | `github_dashboard::closed_today` | `src/server/routes/github_dashboard.rs:139` | `src/server/routes/domains/integrations.rs:32` |
@@ -102,7 +102,7 @@
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:549` | `src/server/routes/domains/integrations.rs:25` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:415` | `src/server/routes/domains/access.rs:19` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:420` | `src/server/routes/domains/ops.rs:24` |
-| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:3430` | `src/server/routes/domains/ops.rs:230` |
+| `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:3431` | `src/server/routes/domains/ops.rs:230` |
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/ops.rs:101` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:112` | `src/server/routes/domains/ops.rs:103` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:62` | `src/server/routes/domains/ops.rs:102` |
@@ -179,8 +179,8 @@
 | `PUT` | `/api/pipeline/stages` | `pipeline::put_stages` | `src/server/routes/pipeline.rs:177` | `src/server/routes/domains/ops.rs:46` |
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:2430` | `src/server/routes/domains/kanban.rs:58` |
 | `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:2558` | `src/server/routes/domains/agents.rs:48` |
-| `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:23` | `src/server/routes/domains/ops.rs:237` |
-| `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:91` | `src/server/routes/domains/ops.rs:241` |
+| `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:26` | `src/server/routes/domains/ops.rs:237` |
+| `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:94` | `src/server/routes/domains/ops.rs:241` |
 | `GET` | `/api/quality/events` | `analytics::quality_events` | `src/server/routes/analytics.rs:95` | `src/server/routes/domains/admin.rs:72` |
 | `POST` | `/api/queue/cancel` | `auto_queue::cancel` | `src/server/routes/auto_queue.rs:10731` | `src/server/routes/domains/ops.rs:204` |
 | `POST` | `/api/queue/dispatch` | `auto_queue::dispatch` | `src/server/routes/auto_queue.rs:8287` | `src/server/routes/domains/ops.rs:151` |

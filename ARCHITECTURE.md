@@ -329,9 +329,11 @@ src/
 │   │   ├── diagnostics.rs
 │   │   ├── io.rs
 │   │   ├── mod.rs
+│   │   ├── orchestration.rs
 │   │   ├── paths.rs
 │   │   ├── registry.rs
 │   │   ├── retention.rs
+│   │   ├── session_guard.rs
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
