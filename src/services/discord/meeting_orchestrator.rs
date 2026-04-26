@@ -1882,13 +1882,13 @@ pub(super) async fn cancel_meeting(
             let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
             m.status = MeetingStatus::Cancelled;
             let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
-            Some(mc)
+            Some((mc, m.id.clone()))
         } else {
             None
         }
     };
 
-    if let Some(mc) = meeting_info {
+    if let Some((mc, meeting_id)) = meeting_info {
         // Save whatever transcript we have
         let _ = save_meeting_record(shared, channel_id, None).await;
         cleanup_meeting(shared, channel_id).await;
@@ -1896,7 +1896,7 @@ pub(super) async fn cancel_meeting(
             http,
             mc,
             shared,
-            format!("meeting:channel:{}:cancelled", channel_id.get()),
+            meeting_cancel_event_key(channel_id, &meeting_id),
             "🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어.",
         )
         .await;
@@ -1905,6 +1905,13 @@ pub(super) async fn cancel_meeting(
         let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
         Ok(())
     }
+}
+
+fn meeting_cancel_event_key(channel_id: ChannelId, meeting_id: &str) -> String {
+    format!(
+        "meeting:{meeting_id}:channel:{}:cancelled",
+        channel_id.get()
+    )
 }
 
 /// Get meeting status info
@@ -3189,10 +3196,11 @@ mod tests {
         ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
         build_fallback_meeting_summary, build_meeting_markdown, build_meeting_start_status_message,
         build_meeting_status_payload, build_selection_reason_line, clamp_max_participants,
-        display_query_hash, effective_round_count, meeting_outbound_message, meeting_query_hash,
-        meeting_slot_state, parse_meeting_start_text, parse_participant_selection_response,
-        resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
-        thread_query_hash, truncate_for_meeting, validate_fixed_participants,
+        display_query_hash, effective_round_count, meeting_cancel_event_key,
+        meeting_outbound_message, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
+        parse_participant_selection_response, resolve_meeting_stage_timeout_secs,
+        select_participants, summary_agent_context, thread_query_hash, truncate_for_meeting,
+        validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -3277,6 +3285,20 @@ mod tests {
         let message = meeting_outbound_message(channel_id, "hello".to_string(), "summary done/ok");
         let semantic = message.semantic_event_id.expect("semantic event id");
         assert!(semantic.starts_with("meeting:42:summary_done_ok:"));
+    }
+
+    #[test]
+    fn meeting_cancel_event_key_includes_meeting_id() {
+        let channel_id = poise::serenity_prelude::ChannelId::new(42);
+
+        assert_ne!(
+            meeting_cancel_event_key(channel_id, "meeting-one"),
+            meeting_cancel_event_key(channel_id, "meeting-two")
+        );
+        assert_eq!(
+            meeting_cancel_event_key(channel_id, "meeting-one"),
+            "meeting:meeting-one:channel:42:cancelled"
+        );
     }
 
     #[test]

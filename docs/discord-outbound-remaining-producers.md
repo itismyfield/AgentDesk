@@ -21,9 +21,9 @@ dispatch, review, placeholder, gateway, and CLI text/DM helpers landed in
   manual delivery.
 - `/api/senddm`: DM content delivery now uses the same manual outbound
   delivery path as `/api/send` after DM-channel resolution. Callers can pass
-  `correlation_id` plus `semantic_event_id`, or `idempotency_key`; otherwise
-  exact same user/bot/content payloads derive the same semantic key and are
-  treated as retries.
+  `correlation_id` plus `semantic_event_id`, or `idempotency_key`, to opt into
+  retry dedupe. Requests without those fields are delivered without semantic
+  dedupe so repeated identical DMs are still sent.
 
 ## Explicit exclusions
 

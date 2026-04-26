@@ -19,7 +19,6 @@ use crate::server::routes::dispatches::discord_delivery::{
 use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient,
     DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind, OutboundDeduper, deliver_outbound,
-    outbound_fingerprint,
 };
 use crate::services::provider::ProviderKind;
 
@@ -2679,7 +2678,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
         Err(resp) => return resp,
     };
     let user_id_text = request.user_id.to_string();
-    let (dm_correlation_id, dm_semantic_event_id) = request.delivery_ids();
+    let dm_delivery_id = request.delivery_id();
 
     use poise::serenity_prelude::UserId;
     let user_id = UserId::new(request.user_id);
@@ -2691,10 +2690,12 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
             &request.content,
             &request.bot,
             None,
-            Some(ManualOutboundDeliveryId {
-                correlation_id: &dm_correlation_id,
-                semantic_event_id: &dm_semantic_event_id,
-            }),
+            dm_delivery_id
+                .as_ref()
+                .map(|delivery_id| ManualOutboundDeliveryId {
+                    correlation_id: &delivery_id.0,
+                    semantic_event_id: &delivery_id.1,
+                }),
         )
         .await
         {
@@ -2743,7 +2744,7 @@ struct SendDmRequest {
 }
 
 impl SendDmRequest {
-    fn delivery_ids(&self) -> (String, String) {
+    fn delivery_id(&self) -> Option<(String, String)> {
         let correlation_id = self
             .correlation_id
             .as_deref()
@@ -2763,16 +2764,8 @@ impl SendDmRequest {
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(|key| format!("senddm:{}:{}", self.user_id, normalize_senddm_key(key)))
-            })
-            .unwrap_or_else(|| {
-                let user_id = self.user_id.to_string();
-                format!(
-                    "senddm:{}:{}",
-                    self.user_id,
-                    outbound_fingerprint(&[&user_id, &self.bot, &self.content])
-                )
             });
-        (correlation_id, semantic_event_id)
+        semantic_event_id.map(|semantic_event_id| (correlation_id, semantic_event_id))
     }
 }
 
@@ -3120,6 +3113,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_notification_without_delivery_id_does_not_dedupe_same_content() {
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+
+        let first =
+            deliver_manual_notification(&client, &dedup, "123", "hello", "announce", None, None)
+                .await;
+        let second =
+            deliver_manual_notification(&client, &dedup, "123", "hello", "announce", None, None)
+                .await;
+
+        assert_eq!(
+            first,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-1".to_string(),
+                delivery: None
+            }
+        );
+        assert_eq!(
+            second,
+            ManualDeliveryOutcome::Sent {
+                message_id: "message-2".to_string(),
+                delivery: None
+            }
+        );
+        assert_eq!(client.posts.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn api_send_announce_long_content_preserves_full_payload_as_attachment() {
         let client = MockManualOutboundClient::default();
         let dedup = OutboundDeduper::new();
@@ -3319,25 +3341,23 @@ mod tests {
         }"#;
         let parsed = parse_senddm_body(body).expect("senddm body should parse");
         assert_eq!(
-            parsed.delivery_ids(),
-            (
+            parsed.delivery_id(),
+            Some((
                 "senddm:custom".to_string(),
                 "senddm:custom:event".to_string()
-            )
+            ))
         );
     }
 
     #[test]
-    fn test_senddm_delivery_id_is_stable_without_explicit_ids() {
+    fn test_senddm_delivery_id_is_absent_without_explicit_ids() {
         let first =
             parse_senddm_body(r#"{"user_id":"123","content":"hello","bot":"claude"}"#).unwrap();
         let second =
             parse_senddm_body(r#"{"user_id":"123","content":"hello","bot":"claude"}"#).unwrap();
-        let changed =
-            parse_senddm_body(r#"{"user_id":"123","content":"changed","bot":"claude"}"#).unwrap();
 
-        assert_eq!(first.delivery_ids(), second.delivery_ids());
-        assert_ne!(first.delivery_ids().1, changed.delivery_ids().1);
+        assert_eq!(first.delivery_id(), None);
+        assert_eq!(second.delivery_id(), None);
     }
 
     #[test]
@@ -3347,11 +3367,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            parsed.delivery_ids(),
-            (
+            parsed.delivery_id(),
+            Some((
                 "senddm:123".to_string(),
                 "senddm:123:family_checkup_1".to_string()
-            )
+            ))
         );
     }
 

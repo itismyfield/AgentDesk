@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound, outbound_fingerprint,
+    OutboundDeduper, deliver_outbound,
 };
 use super::{SharedData, health, rate_limit_wait};
 use crate::server::routes::dispatches::discord_delivery::{
@@ -112,26 +112,18 @@ async fn deliver_monitoring_status<C: DiscordOutboundClient>(
     rendered_msg_id: Option<u64>,
     content: &str,
 ) -> Result<Option<u64>, String> {
-    let semantic_event_id = rendered_msg_id
-        .map(|message_id| {
-            format!(
-                "monitoring:{}:edit:{message_id}:{}",
-                channel_id.get(),
-                outbound_fingerprint(&[content])
-            )
-        })
-        .unwrap_or_else(|| {
+    let mut message = if rendered_msg_id.is_some() {
+        DiscordOutboundMessage::new(channel_id.get().to_string(), content)
+    } else {
+        DiscordOutboundMessage::new(channel_id.get().to_string(), content).with_correlation(
+            format!("monitoring:{}", channel_id.get()),
             format!(
                 "monitoring:{}:send:{}",
                 channel_id.get(),
                 uuid::Uuid::new_v4()
-            )
-        });
-    let mut message = DiscordOutboundMessage::new(channel_id.get().to_string(), content)
-        .with_correlation(
-            format!("monitoring:{}", channel_id.get()),
-            semantic_event_id,
-        );
+            ),
+        )
+    };
     if let Some(message_id) = rendered_msg_id {
         message = message.with_edit_message_id(message_id.to_string());
     }
@@ -503,10 +495,15 @@ mod tests {
             deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "updated again")
                 .await
                 .expect("changed edit succeeds");
+        let reverted_edit =
+            deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "updated")
+                .await
+                .expect("reverted edit succeeds");
 
         assert_eq!(sent, Some(9001));
         assert_eq!(edited, Some(1234));
         assert_eq!(changed_edit, Some(1234));
+        assert_eq!(reverted_edit, Some(1234));
         assert_eq!(
             client.posts.lock().unwrap().as_slice(),
             &[("42".to_string(), "status".to_string())]
@@ -519,7 +516,34 @@ mod tests {
                     "42".to_string(),
                     "1234".to_string(),
                     "updated again".to_string()
-                )
+                ),
+                ("42".to_string(), "1234".to_string(), "updated".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_monitoring_status_does_not_dedupe_reverted_edit_content() {
+        let client = MockMonitoringOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let channel_id = ChannelId::new(42);
+
+        deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "A")
+            .await
+            .expect("first edit succeeds");
+        deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "B")
+            .await
+            .expect("second edit succeeds");
+        deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "A")
+            .await
+            .expect("reverted edit succeeds");
+
+        assert_eq!(
+            client.edits.lock().unwrap().as_slice(),
+            &[
+                ("42".to_string(), "1234".to_string(), "A".to_string()),
+                ("42".to_string(), "1234".to_string(), "B".to_string()),
+                ("42".to_string(), "1234".to_string(), "A".to_string())
             ]
         );
     }
