@@ -54,7 +54,7 @@ pub(super) fn register_message_ops<'js>(
 }
 
 pub(crate) fn queue_message(
-    db: Option<&Db>,
+    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -88,18 +88,7 @@ pub(crate) fn queue_message(
         );
     }
 
-    let Some(db) = db else {
-        return Err("sqlite backend is unavailable".to_string());
-    };
-    let conn = db
-        .separate_conn()
-        .map_err(|e| format!("db connection: {e}"))?;
-    conn.execute(
-        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, ?3, ?4)",
-        libsql_rusqlite::params![target, content, bot, source], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )
-    .map_err(|e| format!("insert failed: {e}"))?;
-    Ok(conn.last_insert_rowid())
+    Err("sqlite backend is unavailable".to_string())
 }
 
 fn message_queue_raw(

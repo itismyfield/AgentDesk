@@ -1,5 +1,4 @@
 use crate::db::Db;
-use libsql_rusqlite::params; // TODO(#839): sqlite fallback retained for tests.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
@@ -121,7 +120,7 @@ pub(super) fn register_ci_recovery_ops<'js>(
 }
 
 fn set_blocked_reason_raw(
-    db: Option<&Db>,
+    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     reason: Option<&str>,
@@ -136,27 +135,7 @@ fn set_blocked_reason_raw(
     if let Some(pool) = pg_pool {
         return set_blocked_reason_pg(pool, card_id, reason);
     }
-    let Some(db) = db else {
-        return json!({ "error": "sqlite backend is unavailable" }).to_string();
-    };
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return json!({ "error": format!("DB: {e}") }).to_string(),
-    };
-    let result = match reason {
-        Some(r) => conn.execute(
-            "UPDATE kanban_cards SET blocked_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
-            params![r, card_id],
-        ),
-        None => conn.execute(
-            "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
-            params![card_id],
-        ),
-    };
-    match result {
-        Ok(n) => json!({ "ok": true, "rows_affected": n }).to_string(),
-        Err(e) => json!({ "error": format!("UPDATE: {e}") }).to_string(),
-    }
+    json!({ "error": "sqlite backend is unavailable" }).to_string()
 }
 
 fn set_blocked_reason_pg(pool: &PgPool, card_id: &str, reason: Option<&str>) -> String {
@@ -185,25 +164,11 @@ fn set_blocked_reason_pg(pool: &PgPool, card_id: &str, reason: Option<&str>) -> 
     }
 }
 
-fn get_card_status_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
+fn get_card_status_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
     if let Some(pool) = pg_pool {
         return get_card_status_pg(pool, card_id);
     }
-    let Some(db) = db else {
-        return json!({ "error": "sqlite backend is unavailable" }).to_string();
-    };
-    let conn = match db.read_conn() {
-        Ok(c) => c,
-        Err(e) => return json!({ "error": format!("DB: {e}") }).to_string(),
-    };
-    match conn.query_row(
-        "SELECT status FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| row.get::<_, String>(0),
-    ) {
-        Ok(status) => json!({ "found": true, "status": status }).to_string(),
-        Err(_) => json!({ "found": false }).to_string(),
-    }
+    json!({ "error": "sqlite backend is unavailable" }).to_string()
 }
 
 fn get_card_status_pg(pool: &PgPool, card_id: &str) -> String {
@@ -231,37 +196,11 @@ fn get_card_status_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-fn get_rework_card_info_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
+fn get_rework_card_info_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
     if let Some(pool) = pg_pool {
         return get_rework_card_info_pg(pool, card_id);
     }
-    let Some(db) = db else {
-        return json!({ "error": "sqlite backend is unavailable" }).to_string();
-    };
-    let conn = match db.read_conn() {
-        Ok(c) => c,
-        Err(e) => return json!({ "error": format!("DB: {e}") }).to_string(),
-    };
-    match conn.query_row(
-        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-            ))
-        },
-    ) {
-        Ok((agent, title, issue)) => json!({
-            "found": true,
-            "assigned_agent_id": agent,
-            "title": title,
-            "github_issue_number": issue
-        })
-        .to_string(),
-        Err(_) => json!({ "found": false }).to_string(),
-    }
+    json!({ "error": "sqlite backend is unavailable" }).to_string()
 }
 
 fn get_rework_card_info_pg(pool: &PgPool, card_id: &str) -> String {
@@ -308,40 +247,11 @@ fn get_rework_card_info_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-fn list_waiting_for_ci_raw(db: Option<&Db>, pg_pool: Option<&PgPool>) -> String {
+fn list_waiting_for_ci_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>) -> String {
     if let Some(pool) = pg_pool {
         return list_waiting_for_ci_pg(pool);
     }
-    let Some(db) = db else {
-        return json!({ "error": "sqlite backend is unavailable" }).to_string();
-    };
-    let conn = match db.read_conn() {
-        Ok(c) => c,
-        Err(e) => return json!({ "error": format!("DB: {e}") }).to_string(),
-    };
-    let mut stmt = match conn.prepare(
-        "SELECT p.card_id AS id, c.blocked_reason AS blocked_reason
-         FROM pr_tracking p
-         JOIN kanban_cards c ON c.id = p.card_id
-         WHERE p.state = 'wait-ci'",
-    ) {
-        Ok(s) => s,
-        Err(e) => return json!({ "error": format!("prepare: {e}") }).to_string(),
-    };
-    let rows_iter = match stmt.query_map([], |row| {
-        Ok(json!({
-            "id": row.get::<_, String>(0)?,
-            "blocked_reason": row.get::<_, Option<String>>(1)?,
-        }))
-    }) {
-        Ok(r) => r,
-        Err(e) => return json!({ "error": format!("query: {e}") }).to_string(),
-    };
-    let rows: Vec<serde_json::Value> = match rows_iter.collect::<Result<Vec<_>, _>>() {
-        Ok(v) => v,
-        Err(e) => return json!({ "error": format!("collect: {e}") }).to_string(),
-    };
-    json!({ "rows": rows }).to_string()
+    json!({ "error": "sqlite backend is unavailable" }).to_string()
 }
 
 fn list_waiting_for_ci_pg(pool: &PgPool) -> String {

@@ -1,5 +1,4 @@
 use crate::db::Db;
-use libsql_rusqlite::Connection; // TODO(#839): drop sqlite fallback once policy-engine tests move to PG fixtures.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::PgPool;
@@ -9,15 +8,25 @@ pub(super) fn register_queue_ops<'js>(
     db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
+    #[cfg(not(test))]
+    let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let queue_obj = Object::new(ctx.clone())?;
 
+    #[cfg(test)]
     let db_status = db;
     let pg_status = pg_pool;
     queue_obj.set(
         "__statusRaw",
         Function::new(ctx.clone(), move || -> String {
-            queue_status_raw(db_status.as_ref(), pg_status.as_ref())
+            if let Some(pool) = pg_status.as_ref() {
+                return queue_status_raw_pg(pool);
+            }
+            #[cfg(test)]
+            if let Some(db_status) = db_status.as_ref() {
+                return queue_status_raw_sqlite_test(db_status);
+            }
+            json!({ "error": "sqlite backend is unavailable" }).to_string()
         })?,
     )?;
 
@@ -36,72 +45,6 @@ pub(super) fn register_queue_ops<'js>(
     )?;
 
     Ok(())
-}
-
-fn queue_status_raw(db: Option<&Db>, pg_pool: Option<&PgPool>) -> String {
-    if let Some(pool) = pg_pool {
-        return queue_status_raw_pg(pool);
-    }
-    let Some(db) = db else {
-        return json!({ "error": "sqlite backend is unavailable" }).to_string();
-    };
-
-    let result = (|| -> anyhow::Result<serde_json::Value> {
-        let conn = db.read_conn()?;
-        let has_auto_runs = table_exists(&conn, "auto_queue_runs")?;
-        let has_auto_entries = table_exists(&conn, "auto_queue_entries")?;
-
-        Ok(json!({
-            "dispatches": {
-                "pending": count(&conn, "SELECT COUNT(*) FROM task_dispatches WHERE status = 'pending'")?,
-                "dispatched": count(&conn, "SELECT COUNT(*) FROM task_dispatches WHERE status = 'dispatched'")?,
-            },
-            "legacy_dispatch_queue": {
-                "queued": count(&conn, "SELECT COUNT(*) FROM dispatch_queue")?,
-            },
-            "message_outbox": {
-                "pending": count(&conn, "SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'")?,
-                "failed": count(&conn, "SELECT COUNT(*) FROM message_outbox WHERE status = 'failed'")?,
-            },
-            "dispatch_outbox": {
-                "pending": count(&conn, "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'")?,
-                "processing": count(&conn, "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'processing'")?,
-                "failed": count(&conn, "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'")?,
-            },
-            "auto_queue": {
-                "active_runs": if has_auto_runs {
-                    count(&conn, "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'")?
-                } else {
-                    0
-                },
-                "paused_runs": if has_auto_runs {
-                    count(&conn, "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'paused'")?
-                } else {
-                    0
-                },
-                "pending_entries": if has_auto_entries {
-                    count(&conn, "SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'pending'")?
-                } else {
-                    0
-                },
-                "dispatched_entries": if has_auto_entries {
-                    count(&conn, "SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'dispatched'")?
-                } else {
-                    0
-                },
-                "done_entries": if has_auto_entries {
-                    count(&conn, "SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'done'")?
-                } else {
-                    0
-                },
-            }
-        }))
-    })();
-
-    match result {
-        Ok(value) => value.to_string(),
-        Err(err) => json!({ "error": err.to_string() }).to_string(),
-    }
 }
 
 fn queue_status_raw_pg(pool: &PgPool) -> String {
@@ -167,18 +110,76 @@ fn queue_status_raw_pg(pool: &PgPool) -> String {
     }
 }
 
-fn count(conn: &Connection, sql: &str) -> anyhow::Result<i64> {
-    conn.query_row(sql, [], |row| row.get(0))
-        .map_err(anyhow::Error::from)
-}
+#[cfg(test)]
+fn queue_status_raw_sqlite_test(db: &Db) -> String {
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        let conn = db.read_conn()?;
+        let count = |sql: &str| -> anyhow::Result<i64> {
+            conn.query_row(sql, [], |row| row.get(0))
+                .map_err(anyhow::Error::from)
+        };
+        let table_exists = |table: &str| -> anyhow::Result<bool> {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(anyhow::Error::from)
+        };
+        let has_auto_runs = table_exists("auto_queue_runs")?;
+        let has_auto_entries = table_exists("auto_queue_entries")?;
 
-fn table_exists(conn: &Connection, table: &str) -> anyhow::Result<bool> {
-    conn.query_row(
-        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [table],
-        |row| row.get(0),
-    )
-    .map_err(anyhow::Error::from)
+        Ok(json!({
+            "dispatches": {
+                "pending": count("SELECT COUNT(*) FROM task_dispatches WHERE status = 'pending'")?,
+                "dispatched": count("SELECT COUNT(*) FROM task_dispatches WHERE status = 'dispatched'")?,
+            },
+            "legacy_dispatch_queue": {
+                "queued": count("SELECT COUNT(*) FROM dispatch_queue")?,
+            },
+            "message_outbox": {
+                "pending": count("SELECT COUNT(*) FROM message_outbox WHERE status = 'pending'")?,
+                "failed": count("SELECT COUNT(*) FROM message_outbox WHERE status = 'failed'")?,
+            },
+            "dispatch_outbox": {
+                "pending": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'")?,
+                "processing": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'processing'")?,
+                "failed": count("SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'")?,
+            },
+            "auto_queue": {
+                "active_runs": if has_auto_runs {
+                    count("SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'")?
+                } else {
+                    0
+                },
+                "paused_runs": if has_auto_runs {
+                    count("SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'paused'")?
+                } else {
+                    0
+                },
+                "pending_entries": if has_auto_entries {
+                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'pending'")?
+                } else {
+                    0
+                },
+                "dispatched_entries": if has_auto_entries {
+                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'dispatched'")?
+                } else {
+                    0
+                },
+                "done_entries": if has_auto_entries {
+                    count("SELECT COUNT(*) FROM auto_queue_entries WHERE status = 'done'")?
+                } else {
+                    0
+                },
+            }
+        }))
+    })();
+
+    match result {
+        Ok(value) => value.to_string(),
+        Err(err) => json!({ "error": err.to_string() }).to_string(),
+    }
 }
 
 async fn count_pg(pool: &PgPool, sql: &str) -> Result<i64, String> {

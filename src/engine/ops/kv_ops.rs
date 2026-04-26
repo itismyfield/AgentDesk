@@ -1,5 +1,4 @@
 use crate::db::Db;
-use libsql_rusqlite::params; // TODO(#839): drop sqlite fallback once policy-engine tests move to PG fixtures.
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 
@@ -11,14 +10,13 @@ use sqlx::PgPool;
 
 pub(super) fn register_kv_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    _db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kv_obj = Object::new(ctx.clone())?;
 
     // __kvSetRaw(key, value, ttlSeconds) — Rust raw impl, always 3 args
-    let db_set = db.clone();
     let pg_set = pg_pool.clone();
     kv_obj.set(
         "__setRaw",
@@ -28,37 +26,12 @@ pub(super) fn register_kv_ops<'js>(
                 if let Some(pool) = pg_set.as_ref() {
                     return kv_set_raw_pg(pool, &key, &value, ttl_seconds);
                 }
-                let Some(db_set) = db_set.as_ref() else {
-                    return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-                };
-                let conn = match db_set.separate_conn() {
-                    Ok(c) => c,
-                    Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
-                };
-                let result = if ttl_seconds > 0 {
-                    conn.execute(
-                        &format!(
-                            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{} seconds'))",
-                            ttl_seconds
-                        ),
-                        params![key, value],
-                    )
-                } else {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
-                        params![key, value],
-                    )
-                };
-                match result {
-                    Ok(_) => r#"{"ok":true}"#.to_string(),
-                    Err(e) => format!(r#"{{"error":"{}"}}"#, e),
-                }
+                r#"{"error":"sqlite backend is unavailable"}"#.to_string()
             },
         )?,
     )?;
 
     // __kvGetRaw(key) → JSON: {"found":true,"value":"..."} or {"found":false}
-    let db_get = db.clone();
     let pg_get = pg_pool.clone();
     kv_obj.set(
         "__getRaw",
@@ -66,26 +39,11 @@ pub(super) fn register_kv_ops<'js>(
             if let Some(pool) = pg_get.as_ref() {
                 return kv_get_raw_pg(pool, &key);
             }
-            let Some(db_get) = db_get.as_ref() else {
-                return r#"{"found":false}"#.to_string();
-            };
-            let conn = match db_get.separate_conn() {
-                Ok(c) => c,
-                Err(_) => return r#"{"found":false}"#.to_string(),
-            };
-            match conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
-                [&key],
-                |row| row.get::<_, String>(0),
-            ) {
-                Ok(v) => format!(r#"{{"found":true,"value":{}}}"#, serde_json::json!(v)),
-                Err(_) => r#"{"found":false}"#.to_string(),
-            }
+            r#"{"found":false}"#.to_string()
         })?,
     )?;
 
     // kv.delete(key)
-    let db_del = db.clone();
     let pg_del = pg_pool.clone();
     kv_obj.set(
         "delete",
@@ -93,17 +51,7 @@ pub(super) fn register_kv_ops<'js>(
             if let Some(pool) = pg_del.as_ref() {
                 return kv_delete_raw_pg(pool, &key);
             }
-            let Some(db_del) = db_del.as_ref() else {
-                return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-            };
-            let conn = match db_del.separate_conn() {
-                Ok(c) => c,
-                Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
-            };
-            match conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&key]) {
-                Ok(_) => r#"{"ok":true}"#.to_string(),
-                Err(e) => format!(r#"{{"error":"{}"}}"#, e),
-            }
+            r#"{"error":"sqlite backend is unavailable"}"#.to_string()
         })?,
     )?;
 
@@ -128,14 +76,9 @@ pub(super) fn register_kv_ops<'js>(
     // Replaces direct SQL INSERT/UPDATE on card_review_state from JS policies.
     // All review-state mutations go through this single entrypoint.
     {
-        let db_rs = db.clone();
         let pg_rs = pg_pool.clone();
         let sync_raw = Function::new(ctx.clone(), move |json_str: String| -> String {
-            crate::engine::ops::review_state_sync_with_backends(
-                db_rs.as_ref(),
-                pg_rs.as_ref(),
-                &json_str,
-            )
+            crate::engine::ops::review_state_sync_with_backends(None, pg_rs.as_ref(), &json_str)
         })?;
 
         let _: rquickjs::Value = ctx.eval(
