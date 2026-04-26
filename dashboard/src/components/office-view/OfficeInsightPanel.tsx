@@ -2,6 +2,12 @@ import { useState, useEffect } from "react";
 import type { Notification } from "../NotificationCenter";
 import type { Agent, AuditLogEntry, KanbanCard, RoundTableMeeting } from "../../types";
 import { getAgentWarnings } from "../../agent-insights";
+import { getFontFamilyForText } from "../../lib/fonts";
+import AgentAvatar from "../AgentAvatar";
+import {
+  getProviderLevelColors,
+  getProviderMeta,
+} from "../../app/providerTheme";
 import type {
   OfficeManualIntervention,
   OfficeSeatStatus,
@@ -9,6 +15,7 @@ import type {
 import {
   SurfaceActionButton,
   SurfaceListItem,
+  SurfaceMetricPill,
   SurfaceNotice,
   SurfaceSection,
   SurfaceSubsection,

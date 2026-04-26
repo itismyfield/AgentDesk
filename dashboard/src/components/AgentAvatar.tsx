@@ -37,7 +37,7 @@ function spriteSrc(spriteNumber: number): string {
 }
 
 function resolveSpriteNumber(
-  agent: Agent | undefined,
+  agent: AgentLike | undefined,
   agents: Agent[] | undefined,
   spriteMap: Map<string, number> | undefined,
 ): number {
@@ -57,8 +57,12 @@ function resolveSpriteNumber(
   return (hash % 12) + 1;
 }
 
+type AgentLike = Pick<Agent, "id" | "name"> & {
+  sprite_number?: number | null;
+};
+
 interface AgentAvatarProps {
-  agent: Agent | undefined;
+  agent: AgentLike | undefined;
   agents?: Agent[];
   spriteMap?: Map<string, number>;
   size?: number;

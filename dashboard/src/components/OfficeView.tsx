@@ -252,7 +252,6 @@ export default function OfficeView({
 
   const handleSelectAgent = useCallback((agent: Agent) => {
     setSelectedAgentId(agent.id);
-    setOfficeMode("list");
     onSelectAgent?.(agent);
   }, [onSelectAgent]);
 
