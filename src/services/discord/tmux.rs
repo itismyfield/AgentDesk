@@ -6335,10 +6335,51 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                    crate::services::platform::tmux::kill_session_with_reason(
+
+                    // #1261 (Fix B): the wrapper's stderr `[stderr] ...` lines and
+                    // synthetic `[fatal startup error]` markers go to the PTY, not
+                    // to the structured jsonl that `recent_output_tail` reads. Dump
+                    // the current pane buffer to a `death_pane_log` file BEFORE we
+                    // kill the session so the wrapper-level death context is still
+                    // recoverable post-mortem. Kept out of `cleanup_session_temp_files`
+                    // EXTS on purpose — the file persists past the cleanup and is
+                    // overwritten on the next death of the same session.
+                    if let Some(pane_content) =
+                        crate::services::platform::tmux::capture_pane(&sess, -1000)
+                    {
+                        let stamped = format!(
+                            "[{}] post-mortem capture for session={}\n{}",
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                            sess,
+                            pane_content
+                        );
+                        let path = crate::services::tmux_common::session_temp_path(
+                            &sess,
+                            "death_pane_log",
+                        );
+                        if let Some(parent) = std::path::Path::new(&path).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&path, stamped);
+                    }
+
+                    let killed = crate::services::platform::tmux::kill_session_with_reason(
                         &sess,
                         "watcher cleanup: dead session after turn",
                     );
+                    // #1261 (Fix C): pair the kill with `cleanup_session_temp_files`
+                    // so the jsonl capture file (and FIFO/owner/prompt/sh markers)
+                    // is gone before the next message respawns the session.
+                    // Otherwise `RotatingJsonlWriter` reopens the path in append
+                    // mode (`tmux_common.rs:230`), the new wrapper writes on top of
+                    // the old buffer, and the next watcher walks the file from
+                    // offset 0 — flooding Discord with stale assistant output. The
+                    // `force_kill` path in `turn_lifecycle.rs:163` already pairs
+                    // the two; the watcher cleanup was the only kill site that
+                    // omitted it.
+                    if killed {
+                        crate::services::tmux_common::cleanup_session_temp_files(&sess);
+                    }
                 }
             })
             .await;
