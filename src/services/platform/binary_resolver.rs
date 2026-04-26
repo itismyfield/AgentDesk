@@ -677,10 +677,55 @@ fn join_paths_lossy(paths: Vec<PathBuf>) -> Option<OsString> {
     std::env::join_paths(paths).ok()
 }
 
-/// Context-aware resolver. Phase 1 (PR-1): no registry loaded — delegates to legacy path.
+/// Context-aware resolver (PR-2).
+///
+/// Resolution order:
+/// 1. Per-agent channel override in registry (`agent_overrides`)
+/// 2. Named channel in registry (`current`, `candidate`, `default`)
+/// 3. Legacy env-override / PATH / login-shell / fallback (unchanged behaviour)
 pub fn resolve_provider_binary_for_context(
     ctx: &crate::services::provider_cli::ProviderExecutionContext,
 ) -> BinaryResolution {
+    if let Some(root) = crate::config::runtime_root() {
+        if let Ok(Some(registry)) = crate::services::provider_cli::io::load_registry(&root) {
+            if let Some(channels) = registry.providers.get(&ctx.provider) {
+                // 1. Per-agent override → named channel
+                let channel_name = ctx
+                    .channel_name
+                    .as_deref()
+                    .or_else(|| {
+                        ctx.agent_id
+                            .as_deref()
+                            .and_then(|id| registry.agent_channel(&ctx.provider, id))
+                    })
+                    .unwrap_or("current");
+
+                let maybe_channel = match channel_name {
+                    "candidate" => channels.candidate.as_ref(),
+                    "default" => channels.default.as_ref(),
+                    "previous" => channels.previous.as_ref(),
+                    _ => channels.current.as_ref(),
+                };
+
+                if let Some(channel) = maybe_channel {
+                    let path = channel.path.clone();
+                    let canonical = channel.canonical_path.clone();
+                    let source_tag = format!("registry:{channel_name}");
+                    let exec_path = crate::services::platform::merged_runtime_path();
+                    return BinaryResolution {
+                        requested_binary: ctx.provider.clone(),
+                        resolved_path: Some(path),
+                        canonical_path: Some(canonical),
+                        source: Some(source_tag),
+                        attempts: vec![],
+                        failure_kind: None,
+                        exec_path,
+                    };
+                }
+            }
+        }
+    }
+    // 3. Fall back to legacy resolver.
     resolve_provider_binary(&ctx.provider)
 }
 
