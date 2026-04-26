@@ -2070,6 +2070,95 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
 }
 
 #[tokio::test]
+async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_watcher() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let provider = crate::services::provider::ProviderKind::Codex;
+    let harness =
+        crate::services::discord::health::TestHealthHarness::new_with_provider(provider.clone())
+            .await;
+    let channel_num = 1485506232256168013u64;
+    let channel_name = "operator-stop-tmux-only";
+    let tmux_name = provider.build_tmux_session_name(channel_name);
+    let session_key = format!("mac-mini:{tmux_name}");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, created_at, updated_at)
+             VALUES ('agent-stop-tmux-only', 'Agent Stop Tmux Only', 'codex', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-stop-tmux-only', 'codex', 'working', datetime('now'), datetime('now'))",
+            [session_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    harness
+        .seed_channel_session(channel_num, channel_name, Some("session-stop-tmux-only"))
+        .await;
+    harness.seed_active_turn(channel_num, 9, 91).await;
+    let watcher_cancel = harness.seed_watcher(channel_num);
+
+    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/agent-stop-tmux-only/turn/stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    if status != StatusCode::OK {
+        panic!(
+            "stop_agent_turn_tmux_only_fallback status={} body={}",
+            status,
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "stopped");
+    assert_eq!(json["lifecycle_path"], "mailbox_canonical");
+    assert_eq!(json["tmux_killed"], false);
+
+    let (has_active_turn, _, _) = harness.mailbox_state(channel_num).await;
+    assert!(
+        !has_active_turn,
+        "tmux-only operator stop fallback must clear active mailbox state",
+    );
+    assert!(
+        harness.has_watcher(channel_num),
+        "tmux-only operator stop fallback must preserve live watcher ownership",
+    );
+    assert!(
+        !watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "tmux-only operator stop fallback must not cancel the watcher",
+    );
+
+    let conn = db.lock().unwrap();
+    let session_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_status, "disconnected");
+}
+
+#[tokio::test]
 async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
     let db = test_db();
     let engine = test_engine(&db);

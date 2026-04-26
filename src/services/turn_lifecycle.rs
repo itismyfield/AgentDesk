@@ -107,23 +107,32 @@ async fn stop_turn_with_policy(
         }
     }
 
-    // Some force-kill callers only know the tmux session name. When the canonical
-    // provider/channel path cannot resolve, fall back to mailbox hard-stop cleanup
-    // so active-turn state does not survive after tmux teardown. Preserve-session
-    // stops must not use this path: tmux-name inference does not prove tmux death,
-    // and `hard_stop_runtime_turn` intentionally cancels watcher ownership.
+    // Some callers only know the tmux session name. When the canonical
+    // provider/channel path cannot resolve, fall back to mailbox cleanup by
+    // tmux lookup. Force-kill tears down watcher ownership; preserve-session
+    // stops clear active-turn state while leaving watcher lifetime to tmux.
     if lifecycle_path == "direct-fallback"
-        && cleanup_tmux
         && let Some(registry) = health_registry
     {
-        let hard_stop = crate::services::discord::health::hard_stop_runtime_turn(
-            Some(registry),
-            target.provider.as_ref().map(|provider| provider.as_str()),
-            target.channel_id.map(|channel_id| channel_id.get()),
-            Some(&target.tmux_name),
-            "turn_lifecycle_direct_fallback",
-        )
-        .await;
+        let hard_stop = if cleanup_tmux {
+            crate::services::discord::health::hard_stop_runtime_turn(
+                Some(registry),
+                target.provider.as_ref().map(|provider| provider.as_str()),
+                target.channel_id.map(|channel_id| channel_id.get()),
+                Some(&target.tmux_name),
+                "turn_lifecycle_direct_fallback",
+            )
+            .await
+        } else {
+            crate::services::discord::health::stop_runtime_turn_preserving_watcher(
+                Some(registry),
+                target.provider.as_ref().map(|provider| provider.as_str()),
+                target.channel_id.map(|channel_id| channel_id.get()),
+                Some(&target.tmux_name),
+                "turn_lifecycle_preserve_direct_fallback",
+            )
+            .await
+        };
         if hard_stop.cleanup_path != "runtime_unavailable_fallback" {
             lifecycle_path = hard_stop.cleanup_path;
         }
@@ -346,9 +355,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.lifecycle_path, "direct-fallback");
+        assert_eq!(result.lifecycle_path, "mailbox_canonical");
         assert!(!result.tmux_killed);
         assert!(!result.inflight_cleared);
+
+        let (has_active_turn, _, _) = harness.mailbox_state(channel_id).await;
+        assert!(
+            !has_active_turn,
+            "preserve-session fallback must clear active mailbox state",
+        );
         assert!(
             harness.has_watcher(channel_id),
             "preserve-session fallback must leave live watcher ownership attached",

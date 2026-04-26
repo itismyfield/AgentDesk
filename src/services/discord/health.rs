@@ -761,6 +761,43 @@ pub async fn hard_stop_runtime_turn(
     tmux_name: Option<&str>,
     stop_source: &'static str,
 ) -> HardStopRuntimeResult {
+    runtime_turn_cleanup_by_lookup(
+        registry,
+        provider_name,
+        channel_id,
+        tmux_name,
+        stop_source,
+        true,
+    )
+    .await
+}
+
+pub async fn stop_runtime_turn_preserving_watcher(
+    registry: Option<&HealthRegistry>,
+    provider_name: Option<&str>,
+    channel_id: Option<u64>,
+    tmux_name: Option<&str>,
+    stop_source: &'static str,
+) -> HardStopRuntimeResult {
+    runtime_turn_cleanup_by_lookup(
+        registry,
+        provider_name,
+        channel_id,
+        tmux_name,
+        stop_source,
+        false,
+    )
+    .await
+}
+
+async fn runtime_turn_cleanup_by_lookup(
+    registry: Option<&HealthRegistry>,
+    provider_name: Option<&str>,
+    channel_id: Option<u64>,
+    tmux_name: Option<&str>,
+    stop_source: &'static str,
+    stop_watcher: bool,
+) -> HardStopRuntimeResult {
     let channel_id = channel_id.map(ChannelId::new);
 
     if let Some(registry) = registry
@@ -791,7 +828,7 @@ pub async fn hard_stop_runtime_turn(
             runtime.channel_id,
             &finish,
             stop_source,
-            true,
+            stop_watcher,
         )
         .await;
         return HardStopRuntimeResult {
