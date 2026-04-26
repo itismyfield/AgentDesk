@@ -347,7 +347,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 320 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 398 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2056 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 1033 | giant-file |
 | `ui` | `src/ui/mod.rs` | 1 |  |
