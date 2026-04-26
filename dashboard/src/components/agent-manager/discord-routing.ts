@@ -121,7 +121,15 @@ export function describeDiscordBinding(
 }
 
 export function describeDispatchedSession(
-  session: Pick<DispatchedSession, "thread_channel_id" | "session_key" | "name">,
+  session: Pick<
+    DispatchedSession,
+    | "thread_channel_id"
+    | "session_key"
+    | "name"
+    | "guild_id"
+    | "channel_web_url"
+    | "channel_deeplink_url"
+  >,
   channelInfo?: DiscordChannelInfo | null,
   parentInfo?: DiscordChannelInfo | null,
 ): DiscordTargetSummary {
@@ -129,12 +137,29 @@ export function describeDispatchedSession(
     parseChannelNameFromSessionKey(session.session_key)
     ?? session.name
     ?? session.session_key;
-  return describeDiscordTarget(
+  const summary = describeDiscordTarget(
     session.thread_channel_id ?? null,
     channelInfo,
     parentInfo,
     fallbackName,
   );
+
+  // Backend agents.rs:849-927 now returns guild_id + channel_*_url directly on
+  // each session row, so we can fall back to those when the per-channel
+  // DiscordChannelInfo lookup hasn't filled in (or before it has resolved).
+  if (!summary.webUrl && session.channel_web_url) {
+    summary.webUrl = session.channel_web_url;
+  }
+  if (!summary.deepLink && session.channel_deeplink_url) {
+    summary.deepLink = session.channel_deeplink_url;
+  }
+  if (!summary.webUrl && !summary.deepLink && session.thread_channel_id && session.guild_id) {
+    const links = buildDiscordChannelLinks(session.thread_channel_id, session.guild_id);
+    summary.webUrl = links.webUrl;
+    summary.deepLink = links.deepLink;
+  }
+
+  return summary;
 }
 
 export function formatDiscordSummary(summary: Pick<DiscordTargetSummary, "title" | "subtitle">): string {

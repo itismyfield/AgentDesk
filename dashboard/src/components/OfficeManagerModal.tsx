@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { X, Plus, Trash2, UserPlus, UserMinus, Settings2 } from "lucide-react";
 import type { Office, Agent } from "../types";
 import * as api from "../api/client";
+import AgentAvatar from "./AgentAvatar";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -448,7 +449,7 @@ export default function OfficeManagerModal({
                     }}
                   >
                     <div className="flex items-center gap-3">
-                      <span className="text-base">{a.avatar_emoji}</span>
+                      <AgentAvatar agent={a} agents={allAgents} size={24} rounded="xl" />
                       <div className="flex-1 min-w-0">
                         <div
                           className="text-sm truncate"

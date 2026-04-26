@@ -94,7 +94,9 @@ export default function KanbanColumn({
         </span>
       </div>
 
-      <div className="space-y-2 min-h-12">
+      {/* #1253: cap each column's body and let it scroll internally so a long
+          backlog (often 50+ open issues) doesn't stretch the whole page. */}
+      <div className="space-y-2 min-h-12 overflow-y-auto pr-1" style={{ maxHeight: "calc(100vh - 22rem)" }}>
         {column.status === "backlog" && loadingIssues && (
           <SurfaceEmptyState
             className="rounded-2xl px-3 py-4 text-center text-xs"

@@ -846,12 +846,16 @@ pub async fn agent_dispatched_sessions(
         }
     }
 
+    // SQL only orders by recency now. Dedupe + activity-aware ranking are
+    // both done in application code below using SessionActivityResolver,
+    // because raw status='working' can lag behind the resolver's view
+    // (Codex review PR #1258, 9th pass).
     let rows = match sqlx::query(
         "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
                 model, tokens, cwd, last_heartbeat, thread_channel_id
          FROM sessions
          WHERE agent_id = $1
-         ORDER BY id",
+         ORDER BY COALESCE(last_heartbeat, created_at) DESC NULLS LAST, id DESC",
     )
     .bind(&id)
     .fetch_all(pool)
@@ -866,40 +870,137 @@ pub async fn agent_dispatched_sessions(
         }
     };
 
+    let guild_id = state
+        .config
+        .discord
+        .guild_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // Resolve every row first — SessionActivityResolver translates raw
+    // status + active_dispatch_id + heartbeat freshness into the effective
+    // status the dashboard renders. We need that view *before* the dedupe
+    // so the live row beats a stale 'working' sibling for the same
+    // (thread_channel_id, provider).
     let mut resolver = SessionActivityResolver::new();
-    let sessions: Vec<serde_json::Value> = rows
+    let resolved: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
-            let session_key = row.try_get::<Option<String>, _>("session_key").ok().flatten();
+            let session_key = row
+                .try_get::<Option<String>, _>("session_key")
+                .ok()
+                .flatten();
             let status = row.try_get::<Option<String>, _>("status").ok().flatten();
             let active_dispatch_id = row
                 .try_get::<Option<String>, _>("active_dispatch_id")
                 .ok()
                 .flatten();
-            let last_heartbeat = pg_timestamp_to_rfc3339(row.try_get("last_heartbeat").ok().flatten());
+            let last_heartbeat =
+                pg_timestamp_to_rfc3339(row.try_get("last_heartbeat").ok().flatten());
+            let provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
+            let thread_channel_id = row
+                .try_get::<Option<String>, _>("thread_channel_id")
+                .ok()
+                .flatten();
+
             let effective = resolver.resolve(
                 session_key.as_deref(),
                 status.as_deref(),
                 active_dispatch_id.as_deref(),
                 last_heartbeat.as_deref(),
             );
+
+            let (channel_web_url, channel_deeplink_url) =
+                build_channel_deeplinks(thread_channel_id.as_deref(), guild_id.as_deref());
+
             json!({
                 "id": row.try_get::<i64, _>("id").unwrap_or(0),
                 "session_key": session_key,
                 "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
+                "provider": provider,
                 "status": effective.status,
                 "active_dispatch_id": effective.active_dispatch_id,
                 "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
                 "tokens": row.try_get::<i64, _>("tokens").unwrap_or(0),
                 "cwd": row.try_get::<Option<String>, _>("cwd").ok().flatten(),
                 "last_heartbeat": last_heartbeat,
-                "thread_channel_id": row.try_get::<Option<String>, _>("thread_channel_id").ok().flatten(),
+                "thread_channel_id": thread_channel_id,
+                "guild_id": guild_id.clone(),
+                "channel_web_url": channel_web_url,
+                "channel_deeplink_url": channel_deeplink_url,
             })
         })
         .collect();
 
+    // Codex review (PR #1258, 9th pass): dedupe AFTER resolver translation
+    // so the resolved 'working' row outranks a stale sibling that still has
+    // raw status='working' but no fresh heartbeat / no active dispatch.
+    fn effective_priority(value: &serde_json::Value) -> u8 {
+        let status = value.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let has_dispatch = value
+            .get("active_dispatch_id")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        match status {
+            "working" => 0,
+            _ if has_dispatch => 1,
+            "idle" => 2,
+            _ => 3,
+        }
+    }
+
+    let mut best_index_for_key: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    let mut keep: Vec<bool> = vec![true; resolved.len()];
+    for (idx, value) in resolved.iter().enumerate() {
+        let channel = value.get("thread_channel_id").and_then(|v| v.as_str());
+        let provider = value.get("provider").and_then(|v| v.as_str());
+        if let (Some(cid), Some(prov)) = (channel, provider) {
+            let key = (cid.to_string(), prov.to_string());
+            match best_index_for_key.get(&key) {
+                None => {
+                    best_index_for_key.insert(key, idx);
+                }
+                Some(&prev_idx) => {
+                    let prev_priority = effective_priority(&resolved[prev_idx]);
+                    let curr_priority = effective_priority(value);
+                    if curr_priority < prev_priority {
+                        keep[prev_idx] = false;
+                        best_index_for_key.insert(key, idx);
+                    } else {
+                        keep[idx] = false;
+                    }
+                }
+            }
+        }
+    }
+
+    let sessions: Vec<serde_json::Value> = resolved
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, value)| if keep[idx] { Some(value) } else { None })
+        .collect();
+
     (StatusCode::OK, Json(json!({"sessions": sessions})))
+}
+
+/// Build Discord web + deep-link URLs for a channel. Returns (None, None) when either
+/// channel_id or guild_id is missing so the caller can render plain text fallback.
+fn build_channel_deeplinks(
+    channel_id: Option<&str>,
+    guild_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let channel = channel_id.map(str::trim).filter(|s| !s.is_empty());
+    let guild = guild_id.map(str::trim).filter(|s| !s.is_empty());
+    match (channel, guild) {
+        (Some(c), Some(g)) => (
+            Some(format!("https://discord.com/channels/{g}/{c}")),
+            Some(format!("discord://discord.com/channels/{g}/{c}")),
+        ),
+        _ => (None, None),
+    }
 }
 
 /// GET /api/agents/:id/turn

@@ -36,6 +36,8 @@ import {
   Users,
 } from "lucide-react";
 import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
+import AgentAvatar from "./AgentAvatar";
 
 type Period = "7d" | "30d" | "90d";
 type DailySeriesKey =
@@ -105,7 +107,7 @@ interface AgentSkillRow {
 interface LeaderboardRow {
   id: string;
   label: string;
-  avatar: string;
+  agent: (Pick<Agent, "id" | "name"> & { sprite_number?: number | null }) | null;
   tasksDone: number;
   xp: number;
   tokens: number;
@@ -125,6 +127,48 @@ interface MetricDelta {
 }
 
 const PERIOD_OPTIONS: Period[] = ["7d", "30d", "90d"];
+
+// SWR persistence (#1250). sessionStorage so cross-tab leakage is avoided
+// and reload-after-deploy doesn't render the analytics empty.
+const ANALYTICS_STORAGE_PREFIX = "stats:token-analytics:";
+const SKILL_RANKING_STORAGE_PREFIX = "stats:skill-ranking:";
+
+function readPersistedAnalytics(period: Period): TokenAnalyticsResponse | null {
+  if (typeof sessionStorage === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(ANALYTICS_STORAGE_PREFIX + period);
+    return raw ? (JSON.parse(raw) as TokenAnalyticsResponse) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedAnalytics(period: Period, value: TokenAnalyticsResponse): void {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.setItem(ANALYTICS_STORAGE_PREFIX + period, JSON.stringify(value));
+  } catch {
+    // quota or serialization failures are fine — next fetch refills.
+  }
+}
+
+function readPersistedSkillRanking(period: Period): SkillRankingResponse | null {
+  if (typeof sessionStorage === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(SKILL_RANKING_STORAGE_PREFIX + period);
+    return raw ? (JSON.parse(raw) as SkillRankingResponse) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedSkillRanking(period: Period, value: SkillRankingResponse): void {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.setItem(SKILL_RANKING_STORAGE_PREFIX + period, JSON.stringify(value));
+  } catch { /* swallow */ }
+}
+
 const NUMERIC_STYLE: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontVariantNumeric: "tabular-nums",
@@ -756,7 +800,7 @@ function buildLeaderboardRows(
     return topAgents.slice(0, 5).map((agent) => ({
       id: agent.id,
       label: agent.alias?.trim() || agent.name_ko || agent.name,
-      avatar: agent.avatar_emoji,
+      agent,
       tasksDone: agent.stats_tasks_done,
       xp: agent.stats_xp,
       tokens: agent.stats_tokens,
@@ -769,7 +813,7 @@ function buildLeaderboardRows(
     .map((agent) => ({
       id: agent.id,
       label: agent.alias?.trim() || agent.name_ko || agent.name,
-      avatar: agent.avatar_emoji,
+      agent,
       tasksDone: agent.stats_tasks_done,
       xp: agent.stats_xp,
       tokens: agent.stats_tokens,
@@ -871,12 +915,21 @@ export default function StatsPageView({
     const controller = new AbortController();
 
     const load = async () => {
+      // SWR fast-path (#1250): hydrate from in-memory cache, then fall back to
+      // sessionStorage so the *first* tab entry after a reload still paints
+      // instantly instead of showing every "...불러오는 중" placeholder.
       const cachedAnalytics = getCachedTokenAnalytics(period);
       if (cachedAnalytics) {
         setAnalytics(cachedAnalytics.data);
+      } else {
+        const persisted = readPersistedAnalytics(period);
+        if (persisted) setAnalytics(persisted);
       }
-      setLoading(!cachedAnalytics);
-      setSkillLoading(true);
+      const persistedRanking = readPersistedSkillRanking(period);
+      if (persistedRanking) setSkillRanking(persistedRanking);
+
+      setLoading(!cachedAnalytics && readPersistedAnalytics(period) === null);
+      setSkillLoading(persistedRanking === null);
       setAnalyticsError(null);
       setSkillError(null);
 
@@ -888,6 +941,7 @@ export default function StatsPageView({
 
       if (analyticsResult.status === "fulfilled") {
         setAnalytics(analyticsResult.value);
+        writePersistedAnalytics(period, analyticsResult.value);
       } else {
         setAnalyticsError(
           t(
@@ -903,6 +957,7 @@ export default function StatsPageView({
 
       if (skillResult.status === "fulfilled") {
         setSkillRanking(skillResult.value);
+        writePersistedSkillRanking(period, skillResult.value);
       } else {
         setSkillError(
           t(
@@ -1242,28 +1297,21 @@ export default function StatsPageView({
             </div>
           </div>
 
-          <div className="grid grid-feature">
-            <div data-testid="stats-daily-token-chart">
-              <DailyTokenCompositionCard
-                t={t}
-                localeTag={localeTag}
-                loading={loading}
-                daily={analytics?.daily ?? []}
-                series={series}
-              />
-            </div>
-            <div data-testid="stats-daily-cache-hit">
-              <DailyCacheHitCard
-                t={t}
-                localeTag={localeTag}
-                loading={loading}
-                daily={analytics?.daily ?? []}
-                averageHitRate={averageDailyHitRate}
-              />
-            </div>
+          {/* Codex review (PR #1258): grid-feature uses 2fr 1fr on desktop;
+              after hiding DailyCacheHitCard the second column was empty.
+              Switch to a single-column container so the chart spans the
+              row. Re-introduce grid-feature when the cache card returns. */}
+          <div data-testid="stats-daily-token-chart">
+            <DailyTokenCompositionCard
+              t={t}
+              localeTag={localeTag}
+              loading={loading}
+              daily={analytics?.daily ?? []}
+              series={series}
+            />
           </div>
 
-          <div className="grid grid-2">
+          <div className="grid grid-2 items-stretch [&>div]:flex [&>div>article]:flex-1">
             <div data-testid="stats-model-share">
               <ModelDistributionCard
                 t={t}
@@ -1299,6 +1347,10 @@ export default function StatsPageView({
             />
           </div>
 
+          <div data-testid="stats-receipt">
+            <ReceiptWidget t={t} />
+          </div>
+
           <div className="grid grid-extra">
             <div data-testid="stats-provider-share">
               <ProviderDistributionCard
@@ -1318,7 +1370,7 @@ export default function StatsPageView({
                 />
               </div>
               <div data-testid="stats-agent-leaderboard">
-                <AgentLeaderboardCard t={t} rows={leaderboardRows} />
+                <AgentLeaderboardCard t={t} rows={leaderboardRows} agents={agents} />
               </div>
             </div>
           </div>
@@ -1349,8 +1401,10 @@ function HeadlineMetricCard({
         <div className="flex items-start justify-between gap-3">
           <div
             className="card-title text-[10.5px] font-semibold uppercase tracking-[0.18em]"
-            style={{ color: "var(--th-text-muted)" }}
+            style={{ color: "var(--th-text-muted)", cursor: "help" }}
             data-tip={tip}
+            title={tip}
+            aria-label={`${title}: ${tip}`}
           >
             <span>{title}</span>
             <Info
@@ -1512,12 +1566,14 @@ function DailyTokenCompositionCard({
                 return (
                   <div
                     key={day.date}
-                    className="group flex min-w-[18px] flex-1 flex-col items-center gap-2"
+                    className="group flex min-w-[18px] flex-1 cursor-help flex-col items-center gap-2 transition-colors hover:bg-[color-mix(in_srgb,var(--th-overlay-subtle)_70%,transparent)]"
                     title={tooltip}
+                    aria-label={tooltip}
                   >
                     <div className="flex h-[188px] items-end">
                       <div
                         className="flex w-[16px] flex-col-reverse overflow-hidden rounded-t-[6px] border sm:w-[18px]"
+                        title={tooltip}
                         style={{
                           height,
                           borderColor: "var(--th-border-subtle)",
@@ -2337,9 +2393,11 @@ function SkillUsageCard({
 function AgentLeaderboardCard({
   t,
   rows,
+  agents,
 }: {
   t: TFunction;
   rows: LeaderboardRow[];
+  agents?: Agent[];
 }) {
   const maxTokens = Math.max(1, ...rows.map((row) => row.tokens));
 
@@ -2396,10 +2454,10 @@ function AgentLeaderboardCard({
                     {index + 1}
                   </span>
                   <span
-                    className="inline-grid h-9 w-9 place-items-center rounded-full text-lg"
+                    className="inline-grid h-9 w-9 place-items-center overflow-hidden rounded-full"
                     style={{ background: "var(--th-overlay-subtle)" }}
                   >
-                    {row.avatar}
+                    <AgentAvatar agent={row.agent ?? undefined} agents={agents} size={32} rounded="full" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-3">

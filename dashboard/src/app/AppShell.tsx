@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Flame,
   FolderKanban,
+  Gauge,
   GripVertical,
   Home,
   LayoutDashboard,
@@ -45,7 +46,7 @@ import * as api from "../api/client";
 import { useKanban } from "../contexts/KanbanContext";
 import { useOffice } from "../contexts/OfficeContext";
 import { useSettings } from "../contexts/SettingsContext";
-import { useSpriteMap } from "../components/AgentAvatar";
+import AgentAvatar, { useSpriteMap } from "../components/AgentAvatar";
 import {
   ToastOverlay,
   type Notification,
@@ -122,13 +123,10 @@ const HOME_DEFAULT_WIDGETS = [
   "m_tokens",
   "m_cost",
   "m_progress",
-  "m_streak",
-  "office",
-  "missions",
-  "quality",
-  "roster",
-  "activity",
+  "m_rate_limit",
   "kanban",
+  "quality",
+  "missions",
 ];
 const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
@@ -612,12 +610,12 @@ export default function AppShell({
           }}
         >
           <div
-            className="border-b px-4 py-5"
+            className="flex h-16 shrink-0 items-center border-b px-4"
             style={{ borderColor: "var(--th-border-subtle)" }}
           >
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <div
-                className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-semibold"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-[13px] font-semibold"
                 style={{
                   background: "var(--th-accent-primary-soft)",
                   color: "var(--th-accent-primary)",
@@ -625,7 +623,7 @@ export default function AppShell({
               >
                 AD
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 leading-tight">
                 <div
                   className="truncate text-sm font-semibold"
                   style={{ color: "var(--th-text-heading)" }}
@@ -633,7 +631,7 @@ export default function AppShell({
                   AgentDesk
                 </div>
                 <div
-                  className="truncate text-xs"
+                  className="truncate text-[11px]"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   v2.4.1
@@ -754,7 +752,7 @@ export default function AppShell({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header
           data-testid="topbar"
-          className="relative shrink-0 border-b px-4 py-2.5 sm:px-5"
+          className="relative flex min-h-16 shrink-0 items-center border-b px-4 py-2 sm:px-5"
           style={{
             zIndex: SHELL_HEADER_Z_INDEX,
             borderColor: "var(--th-border-subtle)",
@@ -763,7 +761,7 @@ export default function AppShell({
             backdropFilter: "blur(14px)",
           }}
         >
-          <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:flex-nowrap">
             <div className="min-w-0 basis-full sm:flex-1">
               <div
                 data-testid="topbar-breadcrumb"
@@ -2176,6 +2174,23 @@ function HomeOverviewPage({
           />
         ),
       },
+      m_rate_limit: {
+        className: "lg:col-span-3",
+        render: () => (
+          <HomeMetricTile
+            icon={<Gauge size={14} />}
+            title={tr("한도", "Rate limit")}
+            value="—"
+            sub={tr(
+              "프로바이더 한도 데이터 수집 대기",
+              "Awaiting provider rate-limit telemetry",
+            )}
+            deltaTone="flat"
+            accent="var(--th-accent-info)"
+            trend={[]}
+          />
+        ),
+      },
       office: {
         className: "lg:col-span-8",
         render: () => (
@@ -2215,8 +2230,8 @@ function HomeOverviewPage({
                     const progress = Math.min(100, Math.max(12, Math.round(agent.stats_tokens / 100_000)));
                     return (
                       <div key={agent.id} className="rounded-2xl border px-3 py-3 text-center" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)" }}>
-                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border text-xl" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-card-bg)" }}>
-                          {agent.avatar_emoji || "🤖"}
+                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-card-bg)" }}>
+                          <AgentAvatar agent={agent} agents={agents} size={40} rounded="2xl" />
                         </div>
                         <div className="mt-3 truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
                           {isKo ? agent.name_ko : agent.name}
@@ -2237,7 +2252,7 @@ function HomeOverviewPage({
         ),
       },
       missions: {
-        className: "lg:col-span-4",
+        className: "lg:col-span-6",
         render: () => (
           <HomeWidgetShell
             title={tr("데일리 미션", "Daily missions")}
@@ -2285,8 +2300,8 @@ function HomeOverviewPage({
               ) : (
                 topAgents.map((agent) => (
                   <div key={agent.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-2xl border px-3 py-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl border text-lg" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-bg-surface)" }}>
-                      {agent.avatar_emoji || "🤖"}
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl border" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-bg-surface)" }}>
+                      <AgentAvatar agent={agent} agents={agents} size={32} rounded="2xl" />
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
@@ -2662,13 +2677,13 @@ function HomeMetricTile({
         <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
           {sub}
         </div>
-        {strokePoints ? (
-          <svg
-            viewBox="0 0 100 30"
-            preserveAspectRatio="none"
-            className="mt-3 h-8 w-full"
-            aria-hidden="true"
-          >
+        <svg
+          viewBox="0 0 100 30"
+          preserveAspectRatio="none"
+          className="mt-3 h-8 w-full"
+          aria-hidden="true"
+        >
+          {strokePoints ? (
             <polyline
               fill="none"
               stroke={accent}
@@ -2677,12 +2692,20 @@ function HomeMetricTile({
               strokeLinecap="round"
               points={strokePoints}
             />
-          </svg>
-        ) : (
-          <div className="mt-3 h-1.5 rounded-full" style={{ background: "color-mix(in srgb, var(--th-border-subtle) 68%, transparent)" }}>
-            <div className="h-full rounded-full" style={{ width: "100%", background: accent }} />
-          </div>
-        )}
+          ) : (
+            <line
+              x1="0"
+              x2="100"
+              y1="16"
+              y2="16"
+              stroke={accent}
+              strokeWidth="1.4"
+              strokeDasharray="2.5 4"
+              strokeLinecap="round"
+              opacity="0.55"
+            />
+          )}
+        </svg>
       </div>
     </div>
   );

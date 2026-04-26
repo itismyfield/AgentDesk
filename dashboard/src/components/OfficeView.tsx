@@ -3,7 +3,7 @@ import type { Application, Container, Graphics, Text, Texture } from "pixi.js";
 import type { Agent, AuditLogEntry, Department, KanbanCard, RoundTableMeeting, Task, SubAgent } from "../types";
 type ThemeMode = "dark" | "light";
 import type { UiLanguage } from "../i18n";
-import { buildSpriteMap } from "./AgentAvatar";
+import AgentAvatar, { buildSpriteMap } from "./AgentAvatar";
 import { buildOfficeScene } from "./office-view/buildScene";
 import type { Notification } from "./NotificationCenter";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "../app/breakpoints";
@@ -130,7 +130,6 @@ export default function OfficeView({
     return window.matchMedia(MOBILE_LAYOUT_MEDIA_QUERY).matches;
   });
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [officeMode, setOfficeMode] = useState<"office" | "list" | "flow">("office");
   const sceneSectionRef = useRef<HTMLDivElement | null>(null);
   const railSectionRef = useRef<HTMLDivElement | null>(null);
 
@@ -253,19 +252,9 @@ export default function OfficeView({
 
   const handleSelectAgent = useCallback((agent: Agent) => {
     setSelectedAgentId(agent.id);
-    setOfficeMode("list");
     onSelectAgent?.(agent);
   }, [onSelectAgent]);
 
-  const handleModeChange = useCallback((mode: "office" | "list" | "flow") => {
-    setOfficeMode(mode);
-    if (mode === "flow") {
-      onNavigateToKanban?.();
-      return;
-    }
-    const target = mode === "office" ? sceneSectionRef.current : railSectionRef.current;
-    target?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [onNavigateToKanban]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -535,33 +524,6 @@ export default function OfficeView({
               <span className="h-2 w-2 rounded-full" style={{ background: "var(--th-accent-primary)" }} />
               {`live · ${liveClockLabel}`}
             </span>
-            <div
-              className="inline-flex items-center rounded-[14px] border p-1"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
-              }}
-            >
-              <OfficeModeButton
-                active={officeMode === "office"}
-                onClick={() => handleModeChange("office")}
-              >
-                {isKo ? "오피스" : "Office"}
-              </OfficeModeButton>
-              <OfficeModeButton
-                active={officeMode === "list"}
-                onClick={() => handleModeChange("list")}
-              >
-                {isKo ? "리스트" : "List"}
-              </OfficeModeButton>
-              <OfficeModeButton
-                active={officeMode === "flow"}
-                disabled={!onNavigateToKanban}
-                onClick={() => handleModeChange("flow")}
-              >
-                {isKo ? "플로우" : "Flow"}
-              </OfficeModeButton>
-            </div>
           </div>
         </div>
 
@@ -651,34 +613,6 @@ export default function OfficeView({
         </div>
       </div>
     </div>
-  );
-}
-
-function OfficeModeButton({
-  active,
-  disabled = false,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="rounded-[10px] px-3 py-1.5 text-[12px] font-medium transition-colors"
-      style={{
-        background: active ? "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)" : "transparent",
-        color: active ? "var(--th-text)" : "var(--th-text-muted)",
-        opacity: disabled ? 0.55 : 1,
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -1011,13 +945,13 @@ function MobileAgentStatusGrid({
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex min-w-0 items-start gap-2.5">
                     <span
-                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border text-base"
+                      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border"
                       style={{
                         borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
                         background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
                       }}
                     >
-                      {agent.avatar_emoji}
+                      <AgentAvatar agent={agent} agents={agents} size={28} rounded="2xl" />
                     </span>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text)" }}>

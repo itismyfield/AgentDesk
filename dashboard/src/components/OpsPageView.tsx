@@ -746,7 +746,7 @@ export default function OpsPageView({
   return (
     <div
       data-testid="ops-page"
-      className="page fade-in ops-shell mx-auto w-full min-w-0 overflow-x-hidden"
+      className="page fade-in ops-shell mx-auto h-full w-full min-w-0 overflow-x-hidden overflow-y-auto"
     >
       <style>{OPS_SHELL_STYLES}</style>
       <div className="page fade-in">
