@@ -38,6 +38,7 @@ pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::interrupt_provider_cli_turn;
 pub(super) use tmux_runtime::stale_inflight_message;
+pub(super) use tmux_runtime::stop_active_turn;
 
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;

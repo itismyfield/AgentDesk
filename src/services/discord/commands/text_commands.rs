@@ -326,20 +326,12 @@ pub(in crate::services::discord) async fn handle_text_command(
             let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
             match stop_lookup {
                 TextStopLookup::Stop(token) => {
-                    super::super::turn_bridge::cancel_active_token(
-                        &token,
-                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "!stop",
-                    );
-                    // #1117 cancel_active_token only kills the tracked child PID
-                    // (which can be `None` for already-detached/restarted runs)
-                    // and flips the cooperative `cancelled` flag. To actually
-                    // halt Codex/Qwen TUIs (stdin null — ESC bytes ignored),
-                    // also send the provider-specific abort key + SIGINT
-                    // fallback through `interrupt_provider_cli_turn`.
-                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                    // #1218: send abort key first, then SIGKILL — see
+                    // `stop_active_turn` doc comment.
+                    super::super::turn_bridge::stop_active_turn(
                         &data.provider,
                         &token,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "!stop",
                     )
                     .await;
