@@ -69,7 +69,7 @@
 | `config` | `src/config.rs` | 2218 | giant-file |
 | `crate` | `src/main.rs` | 43 |  |
 | `credential` | `src/credential.rs` | 24 |  |
-| `db` | `src/db/mod.rs` | 232 |  |
+| `db` | `src/db/mod.rs` | 247 |  |
 | `db::agents` | `src/db/agents.rs` | 1039 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 5940 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
@@ -125,7 +125,7 @@
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1581 | giant-file |
 | `kanban` | `src/kanban.rs` | 3817 | giant-file |
-| `launch` | `src/launch.rs` | 37 |  |
+| `launch` | `src/launch.rs` | 39 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 65 |  |
 | `pipeline` | `src/pipeline.rs` | 2144 | giant-file |
@@ -137,13 +137,13 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3253 | giant-file |
+| `server` | `src/server/mod.rs` | 3269 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 182 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 933 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 245 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 2056 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 1814 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1548 | giant-file |
