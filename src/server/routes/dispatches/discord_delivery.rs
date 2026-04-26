@@ -738,6 +738,68 @@ async fn post_dispatch_message_once_to_channel(
         })
 }
 
+/// Pure PATCH helper used by the unified outbound API for edit operations.
+pub(crate) async fn edit_raw_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message_id: &str,
+    content: &str,
+) -> Result<String, DispatchMessagePostError> {
+    let url = discord_api_url(
+        base_url,
+        &format!("/channels/{channel_id}/messages/{message_id}"),
+    );
+    let response = client
+        .patch(url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({ "content": content }))
+        .send()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to edit dispatch message {message_id}: {error}"),
+            )
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let kind = if is_discord_length_error(status, &body) {
+            DispatchMessagePostErrorKind::MessageTooLong
+        } else {
+            DispatchMessagePostErrorKind::Other
+        };
+        return Err(DispatchMessagePostError::new(
+            kind,
+            format!("Discord edit failed for message {message_id}: {status} {body}"),
+        ));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to parse dispatch edit response for {message_id}: {error}"),
+            )
+        })?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("dispatch edit response for {message_id} omitted message id"),
+            )
+        })
+}
+
 pub(super) async fn post_dispatch_message_to_channel(
     client: &reqwest::Client,
     token: &str,
@@ -829,6 +891,20 @@ pub(super) async fn post_dispatch_message_to_channel_with_delivery(
                 },
             })
         }
+        DeliveryResult::Duplicate { .. } => Ok(DispatchMessagePostOutcome {
+            message_id: String::new(),
+            delivery: DispatchNotifyDeliveryResult {
+                status: "duplicate".to_string(),
+                dispatch_id: dispatch_id.unwrap_or("").to_string(),
+                action: "notify".to_string(),
+                correlation_id,
+                semantic_event_id,
+                target_channel_id: Some(channel_id.to_string()),
+                message_id: None,
+                fallback_kind: None,
+                detail: Some("shared outbound API deduplicated delivery".to_string()),
+            },
+        }),
         DeliveryResult::Skipped { .. } => Err(DispatchMessagePostError::new(
             DispatchMessagePostErrorKind::Other,
             format!("unexpected skip for channel {channel_id}"),
@@ -3893,10 +3969,11 @@ async fn send_review_result_message_via_http(
 
     match deliver_outbound(&outbound_client, dedup, outbound_msg, policy).await {
         DeliveryResult::Success { .. } | DeliveryResult::Fallback { .. } => Ok(()),
-        DeliveryResult::Skipped { .. } => {
+        DeliveryResult::Duplicate { .. } => {
             // Duplicate suppression is a success for the caller.
             Ok(())
         }
+        DeliveryResult::Skipped { .. } => Ok(()),
         DeliveryResult::PermanentFailure { detail } => match kind {
             ReviewFollowupKind::Pass => Err(format!(
                 "discord request failed for pass notification: {detail}"

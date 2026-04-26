@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 
 use super::harness::{TestHarness, postgres_available};
 use crate::services::discord::outbound::{
-    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, OutboundDeduper, SkipReason,
+    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, OutboundDeduper,
     deliver_outbound,
 };
 use crate::services::discord::test_harness_exports as flow;
@@ -56,13 +56,8 @@ async fn duplicate_relay_suppressed_by_dedupe() {
         .with_correlation(correlation, semantic);
     let second = deliver_outbound(&harness.mock_discord, &dedup, msg_b, policy).await;
     assert!(
-        matches!(
-            second,
-            DeliveryResult::Skipped {
-                reason: SkipReason::Duplicate
-            }
-        ),
-        "second relay must be skipped as Duplicate, got {second:?}"
+        matches!(second, DeliveryResult::Duplicate { .. }),
+        "second relay must be recorded as Duplicate, got {second:?}"
     );
 
     assert_eq!(

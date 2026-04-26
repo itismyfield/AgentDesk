@@ -28,6 +28,7 @@ use super::SharedData;
 use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
 };
+use super::gateway::edit_outbound_message;
 use super::inflight::{
     InflightTurnState, delete_inflight_state_file, load_inflight_states_for_sweep,
     parse_started_at_unix,
@@ -103,6 +104,7 @@ fn build_abandoned_placeholder(state: &InflightTurnState) -> String {
 
 async fn edit_placeholder_safe(
     http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
     channel_id: u64,
     message_id: u64,
     content: &str,
@@ -112,8 +114,7 @@ async fn edit_placeholder_safe(
     }
     let channel = serenity::ChannelId::new(channel_id);
     let message = serenity::MessageId::new(message_id);
-    channel
-        .edit_message(http, message, serenity::EditMessage::new().content(content))
+    edit_outbound_message(http.clone(), shared.clone(), channel, message, content)
         .await
         .is_ok()
 }
@@ -177,7 +178,14 @@ async fn run_placeholder_sweep_pass(
                     continue;
                 }
                 let text = build_stalled_placeholder(&state);
-                if edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text).await
+                if edit_placeholder_safe(
+                    http,
+                    shared,
+                    state.channel_id,
+                    state.current_msg_id,
+                    &text,
+                )
+                .await
                 {
                     stalled_tracker.mark_edited(provider, &state);
                     report.stalled += 1;
@@ -187,9 +195,14 @@ async fn run_placeholder_sweep_pass(
             }
             SweepDecision::Abandoned => {
                 let text = build_abandoned_placeholder(&state);
-                let edited =
-                    edit_placeholder_safe(http, state.channel_id, state.current_msg_id, &text)
-                        .await;
+                let edited = edit_placeholder_safe(
+                    http,
+                    shared,
+                    state.channel_id,
+                    state.current_msg_id,
+                    &text,
+                )
+                .await;
                 // Recheck after the awaited edit covers three concerns:
                 //   1. Edit failure (rate limit / 5xx): leave state for the
                 //      next pass to retry.
