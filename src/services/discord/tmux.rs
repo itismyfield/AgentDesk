@@ -58,6 +58,8 @@ const RECENT_WATCHER_REATTACH_OFFSET_TTL: std::time::Duration =
     std::time::Duration::from_secs(15 * 60);
 const RECENT_TURN_STOP_CAPACITY: usize = 128;
 const RECENT_TURN_STOP_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: std::time::Duration =
+    std::time::Duration::from_secs(60);
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 const TMUX_LIVENESS_PROBE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(2);
@@ -218,13 +220,44 @@ fn recent_turn_stop_for_watcher_range(
         .iter()
         .rev()
         .find(|entry| {
-            entry.channel_id == channel_id
-                && entry.tmux_session_name.as_deref() == Some(tmux_session_name)
-                && entry
-                    .stop_output_offset
-                    .is_some_and(|stop_offset| data_start_offset <= stop_offset)
+            recent_turn_stop_matches_watcher_range(
+                entry,
+                channel_id,
+                tmux_session_name,
+                data_start_offset,
+                now,
+            )
         })
         .cloned()
+}
+
+fn recent_turn_stop_matches_watcher_range(
+    entry: &RecentTurnStop,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    now: std::time::Instant,
+) -> bool {
+    if entry.channel_id != channel_id {
+        return false;
+    }
+
+    if let (Some(entry_tmux), Some(stop_offset)) =
+        (entry.tmux_session_name.as_deref(), entry.stop_output_offset)
+    {
+        // Exact EOF equality means the next watcher range starts after a clean
+        // cancel boundary. Only ranges that began before the stop EOF belong to
+        // the canceled turn.
+        return entry_tmux == tmux_session_name && data_start_offset < stop_offset;
+    }
+
+    let session_matches = entry
+        .tmux_session_name
+        .as_deref()
+        .map_or(true, |entry_tmux| entry_tmux == tmux_session_name);
+    session_matches
+        && now.saturating_duration_since(entry.recorded_at)
+            <= RECENT_TURN_STOP_METADATA_FALLBACK_TTL
 }
 
 #[cfg(test)]
@@ -245,6 +278,24 @@ fn record_recent_turn_stop_with_offset_for_tests(
         Some(stop_output_offset),
         reason,
     );
+}
+
+#[cfg(test)]
+fn record_recent_turn_stop_for_tests(
+    channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+    stop_output_offset: Option<u64>,
+    reason: &str,
+    recorded_at: std::time::Instant,
+) {
+    let mut stops = recent_turn_stops();
+    stops.push_back(RecentTurnStop {
+        channel_id,
+        tmux_session_name: tmux_session_name.map(str::to_string),
+        stop_output_offset,
+        reason: reason.to_string(),
+        recorded_at,
+    });
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2716,6 +2767,18 @@ fn should_suppress_terminal_output_after_recent_stop(
     inflight_missing: bool,
     recent_turn_stop: bool,
 ) -> bool {
+    should_suppress_streaming_placeholder_after_recent_stop(
+        has_assistant_response,
+        inflight_missing,
+        recent_turn_stop,
+    )
+}
+
+fn should_suppress_streaming_placeholder_after_recent_stop(
+    has_assistant_response: bool,
+    inflight_missing: bool,
+    recent_turn_stop: bool,
+) -> bool {
     has_assistant_response && inflight_missing && recent_turn_stop
 }
 
@@ -3828,6 +3891,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             let mut last_liveness_probe_at = tokio::time::Instant::now();
             let mut tmux_death_observed = false;
             let mut ready_for_input_failure_notice: Option<String> = None;
+            let mut streaming_suppressed_by_recent_stop = false;
 
             while !found_result && turn_start.elapsed() < turn_timeout {
                 if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
@@ -4123,6 +4187,45 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     last_status_update = tokio::time::Instant::now();
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
+
+                    let has_assistant_response_for_streaming = !full_response.trim().is_empty();
+                    let recent_stop_for_streaming = if has_assistant_response_for_streaming {
+                        recent_turn_stop_for_watcher_range(
+                            channel_id,
+                            &tmux_session_name,
+                            data_start_offset,
+                        )
+                    } else {
+                        None
+                    };
+                    let inflight_missing_for_streaming =
+                        super::inflight::load_inflight_state(&watcher_provider, channel_id.get())
+                            .is_none();
+                    if should_suppress_streaming_placeholder_after_recent_stop(
+                        has_assistant_response_for_streaming,
+                        inflight_missing_for_streaming,
+                        recent_stop_for_streaming.is_some(),
+                    ) {
+                        if let Some(msg_id) = placeholder_msg_id.take() {
+                            let _ = channel_id.delete_message(&http, msg_id).await;
+                        }
+                        last_edit_text.clear();
+                        if !streaming_suppressed_by_recent_stop {
+                            if let Some(stop) = recent_stop_for_streaming {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] 🛑 watcher: suppressed streaming placeholder output for channel {} after recent turn stop ({}, tmux={}, range {}..{})",
+                                    channel_id.get(),
+                                    stop.reason,
+                                    tmux_session_name,
+                                    data_start_offset,
+                                    current_offset
+                                );
+                            }
+                            streaming_suppressed_by_recent_stop = true;
+                        }
+                        continue;
+                    }
 
                     loop {
                         let current_portion =
@@ -6972,11 +7075,12 @@ mod tests {
         notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
         parse_bg_trigger_offset_from_session_key, process_watcher_lines,
         recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
-        record_recent_turn_stop_with_offset_for_tests, record_recent_watcher_reattach_offset,
-        refresh_session_heartbeat_from_tmux_output,
+        record_recent_turn_stop_for_tests, record_recent_turn_stop_with_offset_for_tests,
+        record_recent_watcher_reattach_offset, refresh_session_heartbeat_from_tmux_output,
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
+        should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
         tmux_death_is_normal_completion, trigger_missing_inflight_reattach,
@@ -7891,7 +7995,7 @@ mod tests {
             .expect("recent turn stop tombstone should be visible");
         assert_eq!(recent_stop.reason, "unit-test stop");
         assert!(
-            recent_turn_stop_for_watcher_range(channel, tmux_name, 128).is_some(),
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 127).is_some(),
             "cancelled turn range should match the stop tombstone"
         );
 
@@ -7915,8 +8019,12 @@ mod tests {
         record_recent_turn_stop_with_offset_for_tests(channel, tmux_name, 128, "unit-test stop");
 
         assert!(
-            recent_turn_stop_for_watcher_range(channel, tmux_name, 128).is_some(),
-            "late output that starts at the stopped turn boundary should be suppressed"
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 127).is_some(),
+            "late output that started before the stopped turn boundary should be suppressed"
+        );
+        assert!(
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 128).is_none(),
+            "a clean later turn starting exactly at cancel EOF must not be suppressed"
         );
         assert!(
             recent_turn_stop_for_watcher_range(channel, tmux_name, 129).is_none(),
@@ -7927,7 +8035,7 @@ mod tests {
             true,
             false,
             true,
-            recent_turn_stop_for_watcher_range(channel, tmux_name, 128).is_some(),
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 127).is_some(),
             true,
         );
         assert!(!stopped.trigger_reattach);
@@ -7947,6 +8055,131 @@ mod tests {
     }
 
     #[test]
+    fn recent_turn_stop_equal_boundary_does_not_suppress_later_turn() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1044_014);
+        let tmux_name = "AgentDesk-codex-recent-stop-equality";
+
+        record_recent_turn_stop_with_offset_for_tests(channel, tmux_name, 2048, "unit-test stop");
+
+        assert!(
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 2047).is_some(),
+            "ranges that began before cancel EOF belong to the stopped turn"
+        );
+        assert!(
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 2048).is_none(),
+            "ranges starting exactly at cancel EOF belong to the next turn"
+        );
+        let later = missing_inflight_fallback_plan(
+            true,
+            false,
+            true,
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 2048).is_some(),
+            true,
+        );
+        assert!(later.trigger_reattach);
+        assert!(!later.suppressed_by_recent_stop);
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn recent_turn_stop_metadata_unavailable_fallback_is_bounded() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1044_015);
+        let tmux_name = "AgentDesk-codex-recent-stop-no-metadata";
+
+        record_recent_turn_stop_for_tests(
+            channel,
+            None,
+            None,
+            "unit-test stop missing metadata",
+            std::time::Instant::now(),
+        );
+        assert!(
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 4096).is_some(),
+            "fresh same-channel tombstones without metadata should still suppress the stop race"
+        );
+        let fallback = missing_inflight_fallback_plan(
+            true,
+            false,
+            true,
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 4096).is_some(),
+            true,
+        );
+        assert!(!fallback.trigger_reattach);
+        assert!(fallback.suppressed_by_recent_stop);
+
+        clear_recent_turn_stops_for_tests();
+        record_recent_turn_stop_for_tests(
+            channel,
+            None,
+            None,
+            "unit-test old missing metadata",
+            std::time::Instant::now()
+                - super::RECENT_TURN_STOP_METADATA_FALLBACK_TTL
+                - std::time::Duration::from_secs(1),
+        );
+        assert!(
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 4097).is_none(),
+            "metadata-free fallback must expire before it can suppress unrelated later turns"
+        );
+        let later = missing_inflight_fallback_plan(
+            true,
+            false,
+            true,
+            recent_turn_stop_for_watcher_range(channel, tmux_name, 4097).is_some(),
+            true,
+        );
+        assert!(later.trigger_reattach);
+        assert!(!later.suppressed_by_recent_stop);
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn recent_turn_stop_suppresses_streaming_placeholder_before_send() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1044_016);
+        let tmux_name = "AgentDesk-codex-recent-stop-streaming";
+
+        record_recent_turn_stop_with_offset_for_tests(channel, tmux_name, 512, "unit-test stop");
+
+        let stopped_range = recent_turn_stop_for_watcher_range(channel, tmux_name, 511).is_some();
+        assert!(should_suppress_streaming_placeholder_after_recent_stop(
+            true,
+            true,
+            stopped_range
+        ));
+        assert!(
+            !should_suppress_streaming_placeholder_after_recent_stop(true, false, stopped_range),
+            "active inflight streaming should keep normal placeholder behavior"
+        );
+        assert!(
+            !should_suppress_streaming_placeholder_after_recent_stop(
+                true,
+                true,
+                recent_turn_stop_for_watcher_range(channel, tmux_name, 512).is_some()
+            ),
+            "streaming at the exact cancel EOF boundary belongs to a later turn"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
     fn recent_turn_stop_suppresses_late_terminal_output_after_inflight_deletion() {
         let _lock = match test_env_lock().lock() {
             Ok(guard) => guard,
@@ -7958,14 +8191,14 @@ mod tests {
 
         record_recent_turn_stop_with_offset_for_tests(channel, tmux_name, 512, "unit-test stop");
 
-        let stopped_range = recent_turn_stop_for_watcher_range(channel, tmux_name, 512).is_some();
+        let stopped_range = recent_turn_stop_for_watcher_range(channel, tmux_name, 511).is_some();
         assert!(should_suppress_terminal_output_after_recent_stop(
             true,
             true,
             stopped_range
         ));
 
-        let later_range = recent_turn_stop_for_watcher_range(channel, tmux_name, 513).is_some();
+        let later_range = recent_turn_stop_for_watcher_range(channel, tmux_name, 512).is_some();
         assert!(!should_suppress_terminal_output_after_recent_stop(
             true,
             true,
