@@ -328,7 +328,9 @@ src/
 │   │   ├── mod.rs
 │   │   ├── paths.rs
 │   │   ├── registry.rs
-│   │   └── snapshot.rs
+│   │   ├── smoke.rs
+│   │   ├── snapshot.rs
+│   │   └── upgrade.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── agent_protocol.rs
