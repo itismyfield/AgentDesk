@@ -1,11 +1,9 @@
 use chrono::Utc;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use super::registry::{
     MigrationHistoryEntry, MigrationState, ProviderCliChannel, ProviderCliMigrationState,
@@ -14,7 +12,6 @@ use super::registry::{
 use super::snapshot::snapshot_current_channel;
 
 const UPGRADE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
-const UPGRADE_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub enum UpgradeError {
@@ -88,69 +85,12 @@ struct UpgradeCommandOutput {
     stderr: String,
 }
 
-struct UpgradeOutputTempFile {
-    path: PathBuf,
-    file: fs::File,
-}
-
-impl UpgradeOutputTempFile {
-    fn create(label: &str) -> std::io::Result<Self> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        for attempt in 0..100 {
-            let path = std::env::temp_dir().join(format!(
-                "agentdesk-provider-cli-upgrade-{label}-{}-{nonce}-{attempt}.log",
-                std::process::id()
-            ));
-            match fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => return Ok(Self { path, file }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "exhausted provider CLI upgrade output temp file names",
-        ))
-    }
-}
-
-impl Drop for UpgradeOutputTempFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn read_limited_output_file(path: &Path) -> Vec<u8> {
-    let Ok(file) = fs::File::open(path) else {
-        return Vec::new();
-    };
-
-    let mut output = Vec::new();
-    let mut limited = file.take(UPGRADE_OUTPUT_LIMIT_BYTES as u64);
-    limited
-        .read_to_end(&mut output)
-        .map(|_| output)
-        .unwrap_or_default()
-}
-
 fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeError> {
     let (cmd, args) = argv.split_first().expect("command_argv is non-empty");
-    let stdout_file = UpgradeOutputTempFile::create("stdout")?;
-    let stderr_file = UpgradeOutputTempFile::create("stderr")?;
 
     let mut command = Command::new(cmd);
     command.args(args);
-    command
-        .stdout(Stdio::from(stdout_file.file.try_clone()?))
-        .stderr(Stdio::from(stderr_file.file.try_clone()?));
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     crate::services::platform::binary_resolver::apply_runtime_path(&mut command);
     crate::services::process::configure_child_process_group(&mut command);
 
@@ -176,31 +116,20 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
         }
     };
 
-    let stderr = read_limited_output_file(&stderr_file.path);
-
     Ok(UpgradeCommandOutput {
         success: status.success(),
         exit_code: status.code(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr: if status.success() {
+            String::new()
+        } else {
+            "upgrade command output suppressed to avoid unbounded provider CLI logs".to_string()
+        },
     })
 }
 
 fn version_is_unknown(version: &str) -> bool {
     let value = version.trim();
     value.is_empty() || value.eq_ignore_ascii_case("unknown")
-}
-
-fn preservation_tree_path(entry_path: &Path) -> PathBuf {
-    let mut name = entry_path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("previous-binary"));
-    name.push(".tree");
-
-    entry_path
-        .parent()
-        .map(|parent| parent.join(&name))
-        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
@@ -341,7 +270,7 @@ fn preserve_previous_install(
     remove_path_if_exists(dest_entry)?;
 
     if let Some(source_root) = previous_install_root(strategy, source_entry) {
-        let tree_dest = preservation_tree_path(dest_entry);
+        let tree_dest = super::paths::preserved_previous_tree_path(dest_entry);
         remove_path_if_exists(&tree_dest)?;
         copy_dir_recursive(&source_root, &tree_dest)?;
 
@@ -380,6 +309,14 @@ pub fn run_upgrade(
     skip_previous_preservation: bool,
 ) -> Result<UpgradeResult, UpgradeError> {
     let strategy = update_strategy_for(provider).ok_or(UpgradeError::NoStrategy)?;
+    let pre_version = current_snapshot.version.clone();
+
+    if strategy.mutates_in_place && version_is_unknown(&pre_version) {
+        return Err(UpgradeError::VersionUnknown {
+            pre_version,
+            post_version: String::new(),
+        });
+    }
 
     // Guard: mutates_in_place requires previous preservation.
     if strategy.mutates_in_place && !skip_previous_preservation {
@@ -392,8 +329,6 @@ pub fn run_upgrade(
             }
         }
     }
-
-    let pre_version = current_snapshot.version.clone();
 
     // Run the update command.
     let argv = strategy.command_argv;
@@ -606,6 +541,25 @@ mod tests {
             result,
             Err(UpgradeError::PreviousPreservationRequired { .. })
         ));
+    }
+
+    #[test]
+    fn mutates_in_place_upgrade_rejects_unknown_pre_version_before_io() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut channel = make_channel();
+        channel.version = "unknown".to_string();
+        channel.path = temp
+            .path()
+            .join("missing-codex")
+            .to_string_lossy()
+            .to_string();
+        channel.canonical_path = channel.path.clone();
+        let dest = temp.path().join("codex-previous-binary");
+
+        let result = run_upgrade("codex", &channel, Some(&dest), false);
+
+        assert!(matches!(result, Err(UpgradeError::VersionUnknown { .. })));
+        assert!(!dest.exists());
     }
 
     #[cfg(unix)]
