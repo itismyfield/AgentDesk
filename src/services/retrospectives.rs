@@ -76,6 +76,7 @@ fn record_card_retrospective(
     card_id: &str,
     terminal_status: &str,
 ) -> Result<Value, String> {
+    // PG card_retrospectives rows are authoritative once a pool is attached.
     let card_id = card_id.trim().to_string();
     let terminal_status = terminal_status.trim().to_string();
 

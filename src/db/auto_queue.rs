@@ -1682,6 +1682,7 @@ fn bind_slot_index_for_group_entries(
     thread_group: i64,
     slot_index: i64,
 ) -> libsql_rusqlite::Result<usize> {
+    // SQLite-only compatibility path: PG auto-queue slot ownership is authoritative in production.
     // SQLite-only compatibility path for the legacy no-PG runtime.
     conn.execute(
         "UPDATE auto_queue_entries
