@@ -5,7 +5,6 @@ import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { useLocalStorage } from "../../lib/useLocalStorage";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "../../app/breakpoints";
 import AutoQueuePanel from "./AutoQueuePanel";
-import PipelineVisualEditor from "./PipelineVisualEditor";
 import CardTimeline from "./CardTimeline";
 import MarkdownContent from "../common/MarkdownContent";
 import { Drawer } from "../common/overlay/Drawer";
@@ -3081,13 +3080,10 @@ export default function KanbanTab({
               selectedAgentId={selectedAgentId}
             />
 
-            <PipelineVisualEditor
-              tr={tr}
-              locale={locale}
-              repo={selectedRepo}
-              agents={agents}
-              selectedAgentId={selectedAgentId}
-            />
+            {/* PipelineVisualEditor (FSM editor) was lifted out of the kanban
+                page in #1253; it now lives only in the Settings page (#1257)
+                under the 파이프라인 group, so the kanban surface stays
+                focused on flow state instead of pipeline editing. */}
 
             {recentDoneCards.length > 0 && (() => {
               const PAGE_SIZE = 10;

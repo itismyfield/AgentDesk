@@ -36,6 +36,7 @@ import {
   Users,
 } from "lucide-react";
 import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
 import AgentAvatar from "./AgentAvatar";
 
 type Period = "7d" | "30d" | "90d";
@@ -1346,6 +1347,10 @@ export default function StatsPageView({
               t={t}
               localeTag={localeTag}
             />
+          </div>
+
+          <div data-testid="stats-receipt">
+            <ReceiptWidget t={t} />
           </div>
 
           <div className="grid grid-extra">
