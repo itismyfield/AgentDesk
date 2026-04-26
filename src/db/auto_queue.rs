@@ -1,4 +1,4 @@
-use libsql_rusqlite::{Connection, OptionalExtension, types::ToSql}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+use libsql_rusqlite::{Connection, OptionalExtension}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
@@ -1625,35 +1625,6 @@ pub async fn list_entry_dispatch_history_pg(
         .collect()
 }
 
-pub fn rebind_slot_for_group_agent(
-    conn: &Connection,
-    run_id: &str,
-    thread_group: i64,
-    agent_id: &str,
-    slot_index: i64,
-) -> libsql_rusqlite::Result<usize> {
-    // SQLite-only compatibility path: PG auto-queue slot ownership is
-    // authoritative when a pool exists, but legacy no-PG routes/tests still
-    // need deterministic slot rebinding behavior.
-    ensure_agent_slot_rows(conn, run_id, agent_id)?;
-
-    let slot_updated = conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = ?1,
-             assigned_thread_group = ?2,
-             updated_at = datetime('now')
-         WHERE agent_id = ?3
-           AND slot_index = ?4
-           AND (assigned_run_id IS NULL OR assigned_run_id = ?1)",
-        libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index],
-    )?;
-    if slot_updated == 0 {
-        return Ok(0);
-    }
-
-    bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
-}
-
 pub async fn rebind_slot_for_group_agent_pg(
     pool: &PgPool,
     run_id: &str,
@@ -1830,40 +1801,6 @@ pub struct AutoQueueRunHistoryRecord {
     pub dispatched_count: i64,
 }
 
-pub fn find_latest_run_id(
-    conn: &Connection,
-    filter: &StatusFilter,
-) -> libsql_rusqlite::Result<Option<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut run_filter = "1=1".to_string();
-    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
-
-    if let Some(repo) = filter.repo.as_ref() {
-        params.push(Box::new(repo.clone()));
-        run_filter.push_str(&format!(
-            " AND (repo = ?{} OR repo IS NULL OR repo = '')",
-            params.len()
-        ));
-    }
-    if let Some(agent_id) = filter.agent_id.as_ref() {
-        params.push(Box::new(agent_id.clone()));
-        run_filter.push_str(&format!(
-            " AND (agent_id = ?{} OR agent_id IS NULL OR agent_id = '')",
-            params.len()
-        ));
-    }
-
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    conn.query_row(
-        &format!(
-            "SELECT id FROM auto_queue_runs WHERE {run_filter} ORDER BY created_at DESC LIMIT 1"
-        ),
-        param_refs.as_slice(),
-        |row| row.get(0),
-    )
-    .optional()
-}
-
 pub async fn find_latest_run_id_pg(
     pool: &PgPool,
     filter: &StatusFilter,
@@ -1883,41 +1820,6 @@ pub async fn find_latest_run_id_pg(
     .bind(agent_id)
     .fetch_optional(pool)
     .await
-}
-
-pub fn get_run(
-    conn: &Connection,
-    run_id: &str,
-) -> libsql_rusqlite::Result<Option<AutoQueueRunRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.query_row(
-        "SELECT id, repo, agent_id, COALESCE(review_mode, 'enabled'), status, timeout_minutes,
-                ai_model, ai_rationale,
-                CAST(strftime('%s', created_at) AS INTEGER) * 1000,
-                CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
-                COALESCE(max_concurrent_threads, 1),
-                COALESCE(thread_group_count, 1)
-         FROM auto_queue_runs
-         WHERE id = ?1",
-        [run_id],
-        |row| {
-            Ok(AutoQueueRunRecord {
-                id: row.get(0)?,
-                repo: row.get(1)?,
-                agent_id: row.get(2)?,
-                review_mode: row.get(3)?,
-                status: row.get(4)?,
-                timeout_minutes: row.get(5)?,
-                ai_model: row.get(6)?,
-                ai_rationale: row.get(7)?,
-                created_at: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
-                completed_at: row.get(9)?,
-                max_concurrent_threads: row.get(10)?,
-                thread_group_count: row.get(11)?,
-            })
-        },
-    )
-    .optional()
 }
 
 pub async fn get_run_pg(
@@ -1948,31 +1850,6 @@ pub async fn get_run_pg(
 
     row.map(|row| auto_queue_run_record_from_pg_row(&row))
         .transpose()
-}
-
-pub fn get_status_entry(
-    conn: &Connection,
-    entry_id: &str,
-) -> libsql_rusqlite::Result<Option<StatusEntryRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.query_row(
-        "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
-                COALESCE(e.retry_count, 0),
-                CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
-                CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
-                CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
-                kc.title, kc.github_issue_number, kc.github_issue_url,
-                COALESCE(e.thread_group, 0), e.slot_index, COALESCE(e.batch_phase, 0),
-                kc.channel_thread_map, kc.active_thread_id,
-                kc.status, COALESCE(crs.review_round, kc.review_round, 0)
-         FROM auto_queue_entries e
-         LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
-         LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
-         WHERE e.id = ?1",
-        [entry_id],
-        map_status_entry_row,
-    )
-    .optional()
 }
 
 pub async fn get_status_entry_pg(
@@ -2015,46 +1892,6 @@ pub async fn get_status_entry_pg(
 
     row.map(|row| status_entry_record_from_pg_row(&row))
         .transpose()
-}
-
-pub fn list_status_entries(
-    conn: &Connection,
-    run_id: &str,
-    filter: &StatusFilter,
-) -> libsql_rusqlite::Result<Vec<StatusEntryRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut sql = String::from(
-        "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
-                COALESCE(e.retry_count, 0),
-                CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
-                CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
-                CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
-                kc.title, kc.github_issue_number, kc.github_issue_url,
-                COALESCE(e.thread_group, 0), e.slot_index, COALESCE(e.batch_phase, 0),
-                kc.channel_thread_map, kc.active_thread_id,
-                kc.status, COALESCE(crs.review_round, kc.review_round, 0)
-         FROM auto_queue_entries e
-         LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
-         LEFT JOIN card_review_state crs ON e.kanban_card_id = crs.card_id
-         WHERE e.run_id = ?1",
-    );
-    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(run_id.to_string())];
-
-    if let Some(agent_id) = filter.agent_id.as_ref().filter(|value| !value.is_empty()) {
-        params.push(Box::new(agent_id.clone()));
-        sql.push_str(&format!(" AND e.agent_id = ?{}", params.len()));
-    }
-    if let Some(repo) = filter.repo.as_ref().filter(|value| !value.is_empty()) {
-        params.push(Box::new(repo.clone()));
-        sql.push_str(&format!(" AND kc.repo_id = ?{}", params.len()));
-    }
-
-    sql.push_str(" ORDER BY e.priority_rank ASC");
-
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), map_status_entry_row)?;
-    rows.collect()
 }
 
 pub async fn list_status_entries_pg(
@@ -2109,70 +1946,6 @@ pub async fn list_status_entries_pg(
         .collect()
 }
 
-pub fn list_run_history(
-    conn: &Connection,
-    filter: &StatusFilter,
-    limit: usize,
-) -> libsql_rusqlite::Result<Vec<AutoQueueRunHistoryRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut sql = String::from(
-        "SELECT r.id, r.repo, r.agent_id, r.status,
-                CAST(strftime('%s', r.created_at) AS INTEGER) * 1000,
-                CASE WHEN r.completed_at IS NOT NULL THEN CAST(strftime('%s', r.completed_at) AS INTEGER) * 1000 END,
-                COUNT(e.id),
-                COALESCE(SUM(CASE WHEN e.status = 'done' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN e.status = 'skipped' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN e.status = 'dispatched' THEN 1 ELSE 0 END), 0)
-         FROM auto_queue_runs r
-         LEFT JOIN auto_queue_entries e ON e.run_id = r.id
-         LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
-         WHERE 1 = 1",
-    );
-    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
-
-    if let Some(repo) = filter.repo.as_ref().filter(|value| !value.is_empty()) {
-        params.push(Box::new(repo.clone()));
-        sql.push_str(&format!(
-            " AND COALESCE(kc.repo_id, r.repo, '') = ?{}",
-            params.len()
-        ));
-    }
-    if let Some(agent_id) = filter.agent_id.as_ref().filter(|value| !value.is_empty()) {
-        params.push(Box::new(agent_id.clone()));
-        sql.push_str(&format!(
-            " AND COALESCE(e.agent_id, r.agent_id, '') = ?{}",
-            params.len()
-        ));
-    }
-
-    sql.push_str(
-        " GROUP BY r.id, r.repo, r.agent_id, r.status, r.created_at, r.completed_at
-          ORDER BY r.created_at DESC",
-    );
-    params.push(Box::new(limit as i64));
-    sql.push_str(&format!(" LIMIT ?{}", params.len()));
-
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(AutoQueueRunHistoryRecord {
-            id: row.get(0)?,
-            repo: row.get(1)?,
-            agent_id: row.get(2)?,
-            status: row.get(3)?,
-            created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-            completed_at: row.get(5)?,
-            entry_count: row.get(6)?,
-            done_count: row.get(7)?,
-            skipped_count: row.get(8)?,
-            pending_count: row.get(9)?,
-            dispatched_count: row.get(10)?,
-        })
-    })?;
-    rows.collect()
-}
-
 pub async fn list_run_history_pg(
     pool: &PgPool,
     filter: &StatusFilter,
@@ -2216,34 +1989,6 @@ pub async fn list_run_history_pg(
         .collect()
 }
 
-pub fn list_backlog_cards(
-    conn: &Connection,
-    filter: &GenerateCardFilter,
-) -> libsql_rusqlite::Result<Vec<BacklogCardRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut conditions = Vec::new();
-    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
-    append_card_filters("kc", filter, &mut conditions, &mut params);
-    conditions.push("kc.status = 'backlog'".to_string());
-
-    let sql = format!(
-        "SELECT kc.id, kc.repo_id, kc.assigned_agent_id
-         FROM kanban_cards kc
-         WHERE {}",
-        conditions.join(" AND ")
-    );
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(BacklogCardRecord {
-            card_id: row.get(0)?,
-            repo_id: row.get(1)?,
-            assigned_agent_id: row.get(2)?,
-        })
-    })?;
-    rows.collect()
-}
-
 pub async fn list_backlog_cards_pg(
     pool: &PgPool,
     filter: &GenerateCardFilter,
@@ -2281,60 +2026,6 @@ pub async fn list_backlog_cards_pg(
             })
         })
         .collect()
-}
-
-pub fn list_generate_candidates(
-    conn: &Connection,
-    filter: &GenerateCardFilter,
-    enqueueable_states: &[String],
-) -> libsql_rusqlite::Result<Vec<GenerateCandidateRecord>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut conditions = Vec::new();
-    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
-
-    let state_start = params.len() + 1;
-    let state_placeholders = enqueueable_states
-        .iter()
-        .enumerate()
-        .map(|(idx, _)| format!("?{}", state_start + idx))
-        .collect::<Vec<_>>()
-        .join(",");
-    for state in enqueueable_states {
-        params.push(Box::new(state.clone()));
-    }
-    conditions.push(format!("kc.status IN ({state_placeholders})"));
-    append_card_filters("kc", filter, &mut conditions, &mut params);
-
-    let sql = format!(
-        "SELECT kc.id, kc.assigned_agent_id, kc.priority, kc.description, kc.metadata, kc.github_issue_number
-         FROM kanban_cards kc
-         WHERE {}
-         ORDER BY
-           CASE kc.priority
-             WHEN 'urgent' THEN 0
-             WHEN 'high' THEN 1
-             WHEN 'medium' THEN 2
-             WHEN 'low' THEN 3
-             ELSE 4
-           END,
-           kc.created_at ASC",
-        conditions.join(" AND ")
-    );
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(GenerateCandidateRecord {
-            card_id: row.get::<_, String>(0)?,
-            agent_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            priority: row
-                .get::<_, Option<String>>(2)?
-                .unwrap_or_else(|| "medium".to_string()),
-            description: row.get::<_, Option<String>>(3)?,
-            metadata: row.get::<_, Option<String>>(4)?,
-            github_issue_number: row.get::<_, Option<i64>>(5)?,
-        })
-    })?;
-    rows.collect()
 }
 
 pub async fn list_generate_candidates_pg(
@@ -2397,29 +2088,6 @@ pub async fn list_generate_candidates_pg(
         .collect()
 }
 
-pub fn count_cards_by_status(
-    conn: &Connection,
-    repo: Option<&str>,
-    agent_id: Option<&str>,
-    status: &str,
-) -> libsql_rusqlite::Result<i64> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut sql = "SELECT COUNT(*) FROM kanban_cards WHERE status = ?1".to_string();
-    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(status.to_string())];
-
-    if let Some(repo) = repo.filter(|value| !value.is_empty()) {
-        params.push(Box::new(repo.to_string()));
-        sql.push_str(&format!(" AND repo_id = ?{}", params.len()));
-    }
-    if let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) {
-        params.push(Box::new(agent_id.to_string()));
-        sql.push_str(&format!(" AND assigned_agent_id = ?{}", params.len()));
-    }
-
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    conn.query_row(&sql, param_refs.as_slice(), |row| row.get(0))
-}
-
 pub async fn count_cards_by_status_pg(
     pool: &PgPool,
     repo: Option<&str>,
@@ -2440,7 +2108,7 @@ pub async fn count_cards_by_status_pg(
     .await
 }
 
-pub fn run_slot_pool_size(conn: &Connection, run_id: &str) -> i64 {
+fn run_slot_pool_size(conn: &Connection, run_id: &str) -> i64 {
     conn.query_row(
         "SELECT COALESCE(max_concurrent_threads, 1)
          FROM auto_queue_runs
@@ -4736,34 +4404,6 @@ fn ensure_entry_transition_audit_schema(conn: &Connection) -> libsql_rusqlite::R
     )
 }
 
-fn map_status_entry_row(
-    row: &libsql_rusqlite::Row<'_>, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-) -> libsql_rusqlite::Result<StatusEntryRecord> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    Ok(StatusEntryRecord {
-        id: row.get(0)?,
-        agent_id: row.get(1)?,
-        card_id: row.get(2)?,
-        priority_rank: row.get(3)?,
-        reason: row.get(4)?,
-        status: row.get(5)?,
-        retry_count: row.get(6)?,
-        created_at: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-        dispatched_at: row.get(8)?,
-        completed_at: row.get(9)?,
-        card_title: row.get(10)?,
-        github_issue_number: row.get(11)?,
-        github_repo: row.get(12)?,
-        thread_group: row.get(13)?,
-        slot_index: row.get(14)?,
-        batch_phase: row.get(15)?,
-        channel_thread_map: row.get(16)?,
-        active_thread_id: row.get(17)?,
-        card_status: row.get(18)?,
-        review_round: row.get::<_, Option<i64>>(19)?.unwrap_or(0),
-    })
-}
-
 fn auto_queue_run_record_from_pg_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<AutoQueueRunRecord, sqlx::Error> {
@@ -4835,45 +4475,6 @@ fn ensure_agent_slot_rows(
 ) -> libsql_rusqlite::Result<()> {
     // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
-}
-
-fn append_card_filters(
-    alias: &str,
-    filter: &GenerateCardFilter,
-    conditions: &mut Vec<String>,
-    params: &mut Vec<Box<dyn ToSql>>,
-) {
-    let prefix = if alias.is_empty() {
-        String::new()
-    } else {
-        format!("{alias}.")
-    };
-
-    if let Some(repo) = filter.repo.as_ref() {
-        params.push(Box::new(repo.clone()));
-        conditions.push(format!("{}repo_id = ?{}", prefix, params.len()));
-    }
-    if let Some(agent_id) = filter.agent_id.as_ref() {
-        params.push(Box::new(agent_id.clone()));
-        conditions.push(format!("{}assigned_agent_id = ?{}", prefix, params.len()));
-    }
-    if let Some(issue_numbers) = filter
-        .issue_numbers
-        .as_ref()
-        .filter(|nums| !nums.is_empty())
-    {
-        let start = params.len() + 1;
-        let placeholders = issue_numbers
-            .iter()
-            .enumerate()
-            .map(|(idx, _)| format!("?{}", start + idx))
-            .collect::<Vec<_>>()
-            .join(",");
-        for issue_number in issue_numbers {
-            params.push(Box::new(*issue_number));
-        }
-        conditions.push(format!("{}github_issue_number IN ({placeholders})", prefix));
-    }
 }
 
 #[cfg(test)]
