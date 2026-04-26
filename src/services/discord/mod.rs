@@ -1324,12 +1324,52 @@ async fn mailbox_cancel_active_turn(
     shared: &SharedData,
     channel_id: ChannelId,
 ) -> CancelActiveTurnResult {
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name)
+        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
     let result = shared.mailbox(channel_id).cancel_active_turn().await;
     #[cfg(unix)]
     if result.token.is_some() {
-        tmux::record_recent_turn_stop(channel_id, "mailbox_cancel_active_turn");
+        tmux::record_recent_turn_stop(
+            channel_id,
+            tmux_session_name.as_deref(),
+            "mailbox_cancel_active_turn",
+        );
     }
     result
+}
+
+fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<String> {
+    [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::Gemini,
+        ProviderKind::Qwen,
+    ]
+    .into_iter()
+    .find_map(|provider| {
+        inflight::load_inflight_state(&provider, channel_id.get())
+            .and_then(|state| state.tmux_session_name)
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn record_turn_stop_tombstone(
+    channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+    reason: &str,
+) {
+    tmux::record_recent_turn_stop(channel_id, tmux_session_name, reason);
+}
+
+#[cfg(not(unix))]
+pub(crate) fn record_turn_stop_tombstone(
+    _channel_id: ChannelId,
+    _tmux_session_name: Option<&str>,
+    _reason: &str,
+) {
 }
 
 async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
