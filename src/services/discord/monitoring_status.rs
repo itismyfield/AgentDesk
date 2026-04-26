@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound,
+    OutboundDeduper, deliver_outbound, outbound_fingerprint,
 };
 use super::{SharedData, health, rate_limit_wait};
 use crate::server::routes::dispatches::discord_delivery::{
@@ -113,7 +113,13 @@ async fn deliver_monitoring_status<C: DiscordOutboundClient>(
     content: &str,
 ) -> Result<Option<u64>, String> {
     let semantic_event_id = rendered_msg_id
-        .map(|message_id| format!("monitoring:{}:edit:{message_id}", channel_id.get()))
+        .map(|message_id| {
+            format!(
+                "monitoring:{}:edit:{message_id}:{}",
+                channel_id.get(),
+                outbound_fingerprint(&[content])
+            )
+        })
         .unwrap_or_else(|| {
             format!(
                 "monitoring:{}:send:{}",
@@ -493,16 +499,28 @@ mod tests {
         let edited = deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "updated")
             .await
             .expect("edit succeeds");
+        let changed_edit =
+            deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "updated again")
+                .await
+                .expect("changed edit succeeds");
 
         assert_eq!(sent, Some(9001));
         assert_eq!(edited, Some(1234));
+        assert_eq!(changed_edit, Some(1234));
         assert_eq!(
             client.posts.lock().unwrap().as_slice(),
             &[("42".to_string(), "status".to_string())]
         );
         assert_eq!(
             client.edits.lock().unwrap().as_slice(),
-            &[("42".to_string(), "1234".to_string(), "updated".to_string())]
+            &[
+                ("42".to_string(), "1234".to_string(), "updated".to_string()),
+                (
+                    "42".to_string(),
+                    "1234".to_string(),
+                    "updated again".to_string()
+                )
+            ]
         );
     }
 }

@@ -36,4 +36,5 @@ pub(crate) use legacy::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient,
     DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind, FileFallback, HttpOutboundClient,
     OutboundDeduper, SkipReason, SplitStrategy, ThreadFallback, deliver_outbound,
+    outbound_fingerprint,
 };

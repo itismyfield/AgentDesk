@@ -19,6 +19,7 @@ use crate::server::routes::dispatches::discord_delivery::{
 use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient,
     DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind, OutboundDeduper, deliver_outbound,
+    outbound_fingerprint,
 };
 use crate::services::provider::ProviderKind;
 
@@ -2678,8 +2679,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
         Err(resp) => return resp,
     };
     let user_id_text = request.user_id.to_string();
-    let dm_correlation_id = format!("senddm:{}", request.user_id);
-    let dm_semantic_event_id = format!("senddm:{}", uuid::Uuid::new_v4());
+    let (dm_correlation_id, dm_semantic_event_id) = request.delivery_ids();
 
     use poise::serenity_prelude::UserId;
     let user_id = UserId::new(request.user_id);
@@ -2737,6 +2737,62 @@ struct SendDmRequest {
     user_id: u64,
     content: String,
     bot: String,
+    correlation_id: Option<String>,
+    semantic_event_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+impl SendDmRequest {
+    fn delivery_ids(&self) -> (String, String) {
+        let correlation_id = self
+            .correlation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("senddm:{}", self.user_id));
+        let semantic_event_id = self
+            .semantic_event_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                self.idempotency_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|key| format!("senddm:{}:{}", self.user_id, normalize_senddm_key(key)))
+            })
+            .unwrap_or_else(|| {
+                let user_id = self.user_id.to_string();
+                format!(
+                    "senddm:{}:{}",
+                    self.user_id,
+                    outbound_fingerprint(&[&user_id, &self.bot, &self.content])
+                )
+            });
+        (correlation_id, semantic_event_id)
+    }
+}
+
+fn normalize_senddm_key(value: &str) -> String {
+    let normalized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect();
+    if normalized.is_empty() {
+        "message".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
@@ -2756,11 +2812,30 @@ fn parse_senddm_body(body: &str) -> Result<SendDmRequest, String> {
         .ok_or("content required")?
         .to_string();
     let bot = parsed["bot"].as_str().unwrap_or("announce").to_string();
+    let correlation_id = parsed["correlation_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let semantic_event_id = parsed["semantic_event_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let idempotency_key = parsed["idempotency_key"]
+        .as_str()
+        .or_else(|| parsed["idempotency_id"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     Ok(SendDmRequest {
         user_id,
         content,
         bot,
+        correlation_id,
+        semantic_event_id,
+        idempotency_key,
     })
 }
 
@@ -3209,6 +3284,9 @@ mod tests {
                 user_id: 123,
                 content: "hello".to_string(),
                 bot: "claude".to_string(),
+                correlation_id: None,
+                semantic_event_id: None,
+                idempotency_key: None,
             }
         );
     }
@@ -3228,6 +3306,53 @@ mod tests {
         assert_eq!(parsed.user_id, 123);
         assert_eq!(parsed.content, "건강검진 요즘 했어?");
         assert_eq!(parsed.bot, "claude");
+    }
+
+    #[test]
+    fn test_parse_senddm_body_accepts_delivery_ids() {
+        let body = r#"{
+            "user_id":"123",
+            "content":"hello",
+            "bot":"claude",
+            "correlation_id":"senddm:custom",
+            "semantic_event_id":"senddm:custom:event"
+        }"#;
+        let parsed = parse_senddm_body(body).expect("senddm body should parse");
+        assert_eq!(
+            parsed.delivery_ids(),
+            (
+                "senddm:custom".to_string(),
+                "senddm:custom:event".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_senddm_delivery_id_is_stable_without_explicit_ids() {
+        let first =
+            parse_senddm_body(r#"{"user_id":"123","content":"hello","bot":"claude"}"#).unwrap();
+        let second =
+            parse_senddm_body(r#"{"user_id":"123","content":"hello","bot":"claude"}"#).unwrap();
+        let changed =
+            parse_senddm_body(r#"{"user_id":"123","content":"changed","bot":"claude"}"#).unwrap();
+
+        assert_eq!(first.delivery_ids(), second.delivery_ids());
+        assert_ne!(first.delivery_ids().1, changed.delivery_ids().1);
+    }
+
+    #[test]
+    fn test_senddm_delivery_id_uses_idempotency_key() {
+        let parsed = parse_senddm_body(
+            r#"{"user_id":"123","content":"hello","bot":"claude","idempotency_key":"family/checkup 1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.delivery_ids(),
+            (
+                "senddm:123".to_string(),
+                "senddm:123:family_checkup_1".to_string()
+            )
+        );
     }
 
     #[test]

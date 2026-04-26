@@ -19,7 +19,7 @@ use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
 use super::org_schema;
 use super::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
-    OutboundDeduper, deliver_outbound,
+    OutboundDeduper, deliver_outbound, outbound_fingerprint,
 };
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
@@ -716,7 +716,27 @@ pub(in crate::services::discord) async fn send_meeting_message(
     content: impl Into<String>,
 ) -> Result<Option<serenity::MessageId>, String> {
     let content = content.into();
-    let message = DiscordOutboundMessage::new(channel_id.get().to_string(), content);
+    let event_key = format!("send:{}", uuid::Uuid::new_v4());
+    let message = meeting_outbound_message(channel_id, content, &event_key);
+    deliver_meeting_message(http, shared, message).await
+}
+
+async fn send_meeting_message_with_event(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    event_key: impl AsRef<str>,
+    content: impl Into<String>,
+) -> Result<Option<serenity::MessageId>, String> {
+    let message = meeting_outbound_message(channel_id, content.into(), event_key.as_ref());
+    deliver_meeting_message(http, shared, message).await
+}
+
+async fn deliver_meeting_message(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    message: DiscordOutboundMessage,
+) -> Result<Option<serenity::MessageId>, String> {
     meeting_delivery_result(
         deliver_outbound(
             &MeetingOutboundClient { http, shared },
@@ -728,6 +748,42 @@ pub(in crate::services::discord) async fn send_meeting_message(
     )
 }
 
+fn meeting_outbound_message(
+    channel_id: ChannelId,
+    content: String,
+    event_key: &str,
+) -> DiscordOutboundMessage {
+    let content_hash = outbound_fingerprint(&[&content]);
+    DiscordOutboundMessage::new(channel_id.get().to_string(), content).with_correlation(
+        format!("meeting:{}", channel_id.get()),
+        format!(
+            "meeting:{}:{}:{content_hash}",
+            channel_id.get(),
+            normalize_meeting_event_key(event_key)
+        ),
+    )
+}
+
+fn normalize_meeting_event_key(value: &str) -> String {
+    let normalized: String = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect();
+    if normalized.is_empty() {
+        "event".to_string()
+    } else {
+        normalized
+    }
+}
+
 async fn edit_meeting_message(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -736,8 +792,9 @@ async fn edit_meeting_message(
     content: impl Into<String>,
 ) -> Result<(), String> {
     let content = content.into();
-    let message = DiscordOutboundMessage::new(channel_id.get().to_string(), content)
-        .with_edit_message_id(message_id.get().to_string());
+    let message =
+        meeting_outbound_message(channel_id, content, &format!("edit:{}", message_id.get()))
+            .with_edit_message_id(message_id.get().to_string());
     meeting_delivery_result(
         deliver_outbound(
             &MeetingOutboundClient { http, shared },
@@ -1559,10 +1616,11 @@ async fn start_meeting_with_reviewer(
         "[meeting] query hashes assigned"
     );
 
-    let selection_status_message = send_meeting_message(
+    let selection_status_message = send_meeting_message_with_event(
         http,
         msg_channel,
         shared,
+        format!("meeting:{meeting_id}:selection-status:init"),
         build_meeting_start_status_message(
             agenda,
             &meeting_hash_display,
@@ -1628,10 +1686,11 @@ async fn start_meeting_with_reviewer(
         .iter()
         .map(|p| format!("• {}", p.display_name))
         .collect();
-    let _ = send_meeting_message(
+    let _ = send_meeting_message_with_event(
         http,
         msg_channel,
         shared,
+        format!("meeting:{meeting_id}:participants-confirmed"),
         format!(
             "👥 **참여자 확정** ({}명)\n{}",
             participants.len(),
@@ -1672,10 +1731,11 @@ async fn start_meeting_with_reviewer(
             return Ok(None);
         }
 
-        let _ = send_meeting_message(
+        let _ = send_meeting_message_with_event(
             http,
             msg_channel,
             shared,
+            format!("meeting:{meeting_id}:round:{round}:header"),
             format!("─── **라운드 {}/{}** ───", round, max_rounds),
         )
         .await;
@@ -1703,10 +1763,11 @@ async fn start_meeting_with_reviewer(
         }
 
         if consensus {
-            let _ = send_meeting_message(
+            let _ = send_meeting_message_with_event(
                 http,
                 msg_channel,
                 shared,
+                format!("meeting:{meeting_id}:consensus"),
                 "✅ **합의 도달! 회의를 마무리할게.**",
             )
             .await;
@@ -1725,10 +1786,11 @@ async fn start_meeting_with_reviewer(
         cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
         return Ok(None);
     }
-    let _ = send_meeting_message(
+    let _ = send_meeting_message_with_event(
         http,
         msg_channel,
         shared,
+        format!("meeting:{meeting_id}:record-saved"),
         "💾 **회의록 저장 완료.** memory write/capture는 자동 실행하지 않으며, 후처리는 승인 기반으로만 진행합니다.",
     )
     .await;
@@ -1830,10 +1892,11 @@ pub(super) async fn cancel_meeting(
         // Save whatever transcript we have
         let _ = save_meeting_record(shared, channel_id, None).await;
         cleanup_meeting(shared, channel_id).await;
-        let _ = send_meeting_message(
+        let _ = send_meeting_message_with_event(
             http,
             mc,
             shared,
+            format!("meeting:channel:{}:cancelled", channel_id.get()),
             "🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어.",
         )
         .await;
@@ -2189,10 +2252,14 @@ async fn run_meeting_round(
             }
             Err(e) => {
                 // Skip this agent, post error to thread
-                let _ = send_meeting_message(
+                let _ = send_meeting_message_with_event(
                     http,
                     msg_channel,
                     shared,
+                    format!(
+                        "meeting:{meeting_id}:round:{round}:participant:{}:error",
+                        participant.role_id
+                    ),
                     format!("⚠️ {} 발언 실패: {}", participant.display_name, e),
                 )
                 .await;
@@ -2636,7 +2703,14 @@ async fn conclude_meeting(
     if active_meeting_state(shared, channel_id, meeting_id).await != ActiveMeetingSlot::Active {
         return Ok(false);
     }
-    let _ = send_meeting_message(http, msg_channel, shared, "📝 **회의록 작성 중...**").await;
+    let _ = send_meeting_message_with_event(
+        http,
+        msg_channel,
+        shared,
+        format!("meeting:{meeting_id}:summary:drafting"),
+        "📝 **회의록 작성 중...**",
+    )
+    .await;
 
     let draft = execute_provider_stage(
         primary_provider.clone(),
@@ -2736,10 +2810,11 @@ async fn conclude_meeting(
                     Some(trimmed)
                 }
                 Err(e) => {
-                    let _ = send_meeting_message(
+                    let _ = send_meeting_message_with_event(
                         http,
                         msg_channel,
                         shared,
+                        format!("meeting:{meeting_id}:summary:finalize-error"),
                         format!("⚠️ 회의록 최종화 실패: {} — 초안으로 저장합니다.", e),
                     )
                     .await;
@@ -2761,10 +2836,11 @@ async fn conclude_meeting(
         Err(e) => {
             let fallback_summary =
                 build_fallback_meeting_summary(&agenda, &participants_list, &transcript_snapshot);
-            let _ = send_meeting_message(
+            let _ = send_meeting_message_with_event(
                 http,
                 msg_channel,
                 shared,
+                format!("meeting:{meeting_id}:summary:draft-error"),
                 format!("⚠️ 회의록 작성 실패: {} — fallback 회의록을 저장합니다.", e),
             )
             .await;
@@ -3113,8 +3189,8 @@ mod tests {
         ResolvedMemorySettings, SummaryAgentConfig, agent_metadata_card,
         build_fallback_meeting_summary, build_meeting_markdown, build_meeting_start_status_message,
         build_meeting_status_payload, build_selection_reason_line, clamp_max_participants,
-        display_query_hash, effective_round_count, meeting_query_hash, meeting_slot_state,
-        parse_meeting_start_text, parse_participant_selection_response,
+        display_query_hash, effective_round_count, meeting_outbound_message, meeting_query_hash,
+        meeting_slot_state, parse_meeting_start_text, parse_participant_selection_response,
         resolve_meeting_stage_timeout_secs, select_participants, summary_agent_context,
         thread_query_hash, truncate_for_meeting, validate_fixed_participants,
     };
@@ -3163,6 +3239,44 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.primary_provider, ProviderKind::Qwen);
         assert_eq!(parsed.agenda, "신규 안건");
+    }
+
+    #[test]
+    fn meeting_outbound_message_adds_stable_metadata_for_true_retries() {
+        let channel_id = poise::serenity_prelude::ChannelId::new(42);
+        let first = meeting_outbound_message(
+            channel_id,
+            "round 1".to_string(),
+            "meeting:m-1:round:1:header",
+        );
+        let retry = meeting_outbound_message(
+            channel_id,
+            "round 1".to_string(),
+            "meeting:m-1:round:1:header",
+        );
+        let changed = meeting_outbound_message(
+            channel_id,
+            "round 1 changed".to_string(),
+            "meeting:m-1:round:1:header",
+        );
+
+        assert_eq!(first.correlation_id.as_deref(), Some("meeting:42"));
+        assert_eq!(
+            first.semantic_event_id.as_deref(),
+            retry.semantic_event_id.as_deref()
+        );
+        assert_ne!(
+            first.semantic_event_id.as_deref(),
+            changed.semantic_event_id.as_deref()
+        );
+    }
+
+    #[test]
+    fn meeting_outbound_message_normalizes_event_keys() {
+        let channel_id = poise::serenity_prelude::ChannelId::new(42);
+        let message = meeting_outbound_message(channel_id, "hello".to_string(), "summary done/ok");
+        let semantic = message.semantic_event_id.expect("semantic event id");
+        assert!(semantic.starts_with("meeting:42:summary_done_ok:"));
     }
 
     #[test]

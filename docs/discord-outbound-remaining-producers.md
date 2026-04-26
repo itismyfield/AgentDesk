@@ -20,7 +20,10 @@ dispatch, review, placeholder, gateway, and CLI text/DM helpers landed in
   reason/session correlation, and row semantic event instead of anonymous
   manual delivery.
 - `/api/senddm`: DM content delivery now uses the same manual outbound
-  delivery path as `/api/send` after DM-channel resolution.
+  delivery path as `/api/send` after DM-channel resolution. Callers can pass
+  `correlation_id` plus `semantic_event_id`, or `idempotency_key`; otherwise
+  exact same user/bot/content payloads derive the same semantic key and are
+  treated as retries.
 
 ## Explicit exclusions
 

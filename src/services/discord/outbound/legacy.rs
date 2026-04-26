@@ -22,6 +22,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use sha2::{Digest, Sha256};
+
 use crate::server::routes::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -30,6 +32,18 @@ use crate::server::routes::dispatches::discord_delivery::{
 pub(crate) const DISCORD_HARD_LIMIT_CHARS: usize = 2000;
 /// Conservative soft limit — leaves headroom for the `[… truncated]` marker.
 pub(crate) const DISCORD_SAFE_LIMIT_CHARS: usize = 1900;
+
+/// Short stable fingerprint for outbound idempotency keys. Parts are separated
+/// before hashing so concatenated inputs cannot collide by boundary changes.
+pub(crate) fn outbound_fingerprint(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    format!("{digest:x}").chars().take(16).collect()
+}
 
 /// Strategy for handling content that exceeds the Discord per-message limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
