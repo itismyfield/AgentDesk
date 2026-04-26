@@ -48,13 +48,13 @@ function resolveSpriteNumber(
     const map = buildSpriteMap(agents);
     if (map.has(agent.id)) return map.get(agent.id) as number;
   }
-  // Stable per-agent fallback so the same agent keeps the same sprite even
-  // without a sprite_number / agents list to anchor against.
-  let hash = 0;
-  for (let i = 0; i < agent.id.length; i += 1) {
-    hash = (hash * 31 + agent.id.charCodeAt(i)) >>> 0;
-  }
-  return (hash % 12) + 1;
+  // Codex review (PR #1258, 4th pass): the previous hash fallback could
+  // disagree with buildSpriteMap (sorted-id + DORO special case), so the
+  // same agent showed different sprites on different pages when the
+  // caller didn't pass agents/spriteMap. Use the canonical fallback
+  // sprite instead — agent identity stays stable, even if it shares the
+  // sprite with the default-portrait pool.
+  return SPRITE_FALLBACK_NUMBER;
 }
 
 type AgentLike = Pick<Agent, "id" | "name"> & {

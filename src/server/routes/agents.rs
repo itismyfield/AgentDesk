@@ -851,7 +851,12 @@ pub async fn agent_dispatched_sessions(
                 model, tokens, cwd, last_heartbeat, thread_channel_id
          FROM sessions
          WHERE agent_id = $1
-         ORDER BY last_heartbeat DESC NULLS LAST, id DESC",
+         -- Codex review (PR #1258, 4th pass): brand-new sessions have NULL
+         -- last_heartbeat. NULLS LAST sent them to the back, and the dedupe
+         -- below kept the older row for the same (channel, provider), so
+         -- live sessions could be hidden until their first heartbeat. Match
+         -- the rest of the codebase by ranking on COALESCE(heartbeat, created_at).
+         ORDER BY COALESCE(last_heartbeat, created_at) DESC NULLS LAST, id DESC",
     )
     .bind(&id)
     .fetch_all(pool)
