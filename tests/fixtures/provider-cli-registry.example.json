@@ -1,0 +1,63 @@
+{
+  "_comment": "Example provider-cli-registry.json fixtures. Three variants below.",
+
+  "empty_registry": {
+    "schema_version": 1,
+    "providers": {},
+    "updated_at": "2026-04-26T00:00:00Z"
+  },
+
+  "normal_codex_current_only": {
+    "schema_version": 1,
+    "providers": {
+      "codex": {
+        "current": {
+          "path": "/Users/user/.npm-global/bin/codex",
+          "canonical_path": "/Users/user/.npm-global/bin/codex",
+          "version": "0.1.0",
+          "source": "fallback_path",
+          "checked_at": "2026-04-26T00:00:00Z",
+          "evidence": {}
+        }
+      }
+    },
+    "updated_at": "2026-04-26T00:00:00Z"
+  },
+
+  "codex_with_candidate_and_canary": {
+    "schema_version": 1,
+    "providers": {
+      "codex": {
+        "current": {
+          "path": "/Users/user/.npm-global/bin/codex",
+          "canonical_path": "/Users/user/.npm-global/bin/codex",
+          "version": "0.1.0",
+          "source": "fallback_path",
+          "checked_at": "2026-04-26T00:00:00Z",
+          "evidence": {}
+        },
+        "candidate": {
+          "path": "/Users/user/.npm-global/bin/codex",
+          "canonical_path": "/Users/user/.npm-global/bin/codex",
+          "version": "0.2.0",
+          "source": "fallback_path",
+          "checked_at": "2026-04-26T01:00:00Z",
+          "evidence": {
+            "smoke_status": "passed",
+            "binary_hash": "sha256:abc123"
+          }
+        },
+        "agent_overrides": {
+          "codex-agent": "candidate"
+        }
+      }
+    },
+    "updated_at": "2026-04-26T01:00:00Z"
+  },
+
+  "invalid_unknown_schema_version": {
+    "schema_version": 999,
+    "providers": {},
+    "updated_at": "2026-04-26T00:00:00Z"
+  }
+}
