@@ -24,72 +24,37 @@ pub async fn list_channel_queue(
         return Json(json!({"error": "invalid channel_id", "queue": []}));
     }
 
-    let dispatches = if let Some(pool) = state.pg_pool_ref() {
-        sqlx::query(
-            "SELECT
-                td.id,
-                td.dispatch_type,
-                td.status,
-                td.title,
-                td.created_at::TEXT AS created_at,
-                kc.github_issue_number::BIGINT AS github_issue_number
-             FROM task_dispatches td
-             JOIN kanban_cards kc ON td.kanban_card_id = kc.id
-             JOIN agents a ON td.to_agent_id = a.id
-             WHERE (
-                 a.discord_channel_id = $1 OR a.discord_channel_alt = $1 OR
-                 a.discord_channel_cc = $1 OR a.discord_channel_cdx = $1
-             )
-               AND td.status IN ('pending', 'dispatched')
-             ORDER BY td.created_at DESC",
-        )
-        .bind(&channel_id)
-        .fetch_all(pool)
-        .await
-        .ok()
-        .map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| queue_channel_dispatch_row_to_json_pg(&row).ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-    } else {
-        match state.sqlite_db().lock() {
-            Ok(conn) => {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT td.id, td.dispatch_type, td.status, td.title, td.created_at, kc.github_issue_number \
-                         FROM task_dispatches td \
-                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                         JOIN agents a ON td.to_agent_id = a.id \
-                         WHERE (
-                             a.discord_channel_id = ?1 OR a.discord_channel_alt = ?1 OR
-                             a.discord_channel_cc = ?1 OR a.discord_channel_cdx = ?1
-                         ) \
-                         AND td.status IN ('pending', 'dispatched') \
-                         ORDER BY td.created_at DESC",
-                    )
-                    .ok();
-                stmt.as_mut()
-                    .and_then(|s| {
-                        s.query_map([&channel_id], |row| {
-                            Ok(json!({
-                                "dispatch_id": row.get::<_, String>(0)?,
-                                "dispatch_type": row.get::<_, String>(1)?,
-                                "status": row.get::<_, String>(2)?,
-                                "title": row.get::<_, Option<String>>(3)?,
-                                "created_at": row.get::<_, Option<String>>(4)?,
-                                "github_issue_number": row.get::<_, Option<i64>>(5)?,
-                            }))
-                        })
-                        .ok()
-                    })
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            }
-            Err(_) => Vec::new(),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return Json(json!({"error": "postgres pool unavailable", "queue": []}));
     };
+    let dispatches = sqlx::query(
+        "SELECT
+            td.id,
+            td.dispatch_type,
+            td.status,
+            td.title,
+            td.created_at::TEXT AS created_at,
+            kc.github_issue_number::BIGINT AS github_issue_number
+         FROM task_dispatches td
+         JOIN kanban_cards kc ON td.kanban_card_id = kc.id
+         JOIN agents a ON td.to_agent_id = a.id
+         WHERE (
+             a.discord_channel_id = $1 OR a.discord_channel_alt = $1 OR
+             a.discord_channel_cc = $1 OR a.discord_channel_cdx = $1
+         )
+           AND td.status IN ('pending', 'dispatched')
+         ORDER BY td.created_at DESC",
+    )
+    .bind(&channel_id)
+    .fetch_all(pool)
+    .await
+    .ok()
+    .map(|rows| {
+        rows.into_iter()
+            .filter_map(|row| queue_channel_dispatch_row_to_json_pg(&row).ok())
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
 
     Json(json!({"channel_id": channel_id, "dispatches": dispatches}))
 }
@@ -98,73 +63,36 @@ pub async fn list_channel_queue(
 
 /// List all pending dispatches across all agents.
 pub async fn list_pending_dispatches(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let dispatches = if let Some(pool) = state.pg_pool_ref() {
-        sqlx::query(
-            "SELECT
-                td.id,
-                td.kanban_card_id,
-                td.to_agent_id,
-                td.dispatch_type,
-                td.status,
-                td.title,
-                td.thread_id,
-                td.created_at::TEXT AS created_at,
-                td.retry_count::BIGINT AS retry_count,
-                kc.github_issue_number::BIGINT AS github_issue_number,
-                kc.status AS card_status
-             FROM task_dispatches td
-             JOIN kanban_cards kc ON td.kanban_card_id = kc.id
-             WHERE td.status IN ('pending', 'dispatched')
-             ORDER BY td.created_at DESC",
-        )
-        .fetch_all(pool)
-        .await
-        .ok()
-        .map(|rows| {
-            rows.into_iter()
-                .filter_map(|row| pending_dispatch_row_to_json_pg(&row).ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-    } else {
-        match state.sqlite_db().lock() {
-            Ok(conn) => {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT td.id, td.kanban_card_id, td.to_agent_id, td.dispatch_type, td.status, \
-                                td.title, td.thread_id, td.created_at, td.retry_count, \
-                                kc.github_issue_number, kc.status as card_status \
-                         FROM task_dispatches td \
-                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                         WHERE td.status IN ('pending', 'dispatched') \
-                         ORDER BY td.created_at DESC",
-                    )
-                    .ok();
-                stmt.as_mut()
-                    .and_then(|s| {
-                        s.query_map([], |row| {
-                            Ok(json!({
-                                "id": row.get::<_, String>(0)?,
-                                "kanban_card_id": row.get::<_, String>(1)?,
-                                "to_agent_id": row.get::<_, String>(2)?,
-                                "dispatch_type": row.get::<_, String>(3)?,
-                                "status": row.get::<_, String>(4)?,
-                                "title": row.get::<_, Option<String>>(5)?,
-                                "thread_id": row.get::<_, Option<String>>(6)?,
-                                "created_at": row.get::<_, Option<String>>(7)?,
-                                "retry_count": row.get::<_, i64>(8)?,
-                                "github_issue_number": row.get::<_, Option<i64>>(9)?,
-                                "card_status": row.get::<_, String>(10)?,
-                            }))
-                        })
-                        .ok()
-                    })
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            }
-            Err(_) => Vec::new(),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return Json(json!({"error": "postgres pool unavailable", "dispatches": [], "count": 0}));
     };
+    let dispatches = sqlx::query(
+        "SELECT
+            td.id,
+            td.kanban_card_id,
+            td.to_agent_id,
+            td.dispatch_type,
+            td.status,
+            td.title,
+            td.thread_id,
+            td.created_at::TEXT AS created_at,
+            td.retry_count::BIGINT AS retry_count,
+            kc.github_issue_number::BIGINT AS github_issue_number,
+            kc.status AS card_status
+         FROM task_dispatches td
+         JOIN kanban_cards kc ON td.kanban_card_id = kc.id
+         WHERE td.status IN ('pending', 'dispatched')
+         ORDER BY td.created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .ok()
+    .map(|rows| {
+        rows.into_iter()
+            .filter_map(|row| pending_dispatch_row_to_json_pg(&row).ok())
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
 
     Json(json!({"dispatches": dispatches, "count": dispatches.len()}))
 }

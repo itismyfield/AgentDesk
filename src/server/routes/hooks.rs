@@ -23,37 +23,17 @@ pub struct SkillUsageBody {
 
 /// POST /api/hook/reset-status
 pub async fn reset_status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match reset_status_pg(pool).await {
-            Ok(updated) => (
-                StatusCode::OK,
-                Json(json!({"ok": true, "updated": updated})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-
-    match conn.execute(
-        "UPDATE agents SET status = 'idle' WHERE status = 'working'",
-        [],
-    ) {
-        Ok(count) => (StatusCode::OK, Json(json!({"ok": true, "updated": count}))),
-        Err(e) => (
+    match reset_status_pg(pool).await {
+        Ok(updated) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "updated": updated})),
+        ),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
+            Json(json!({"error": format!("{error}")})),
         ),
     }
 }
@@ -63,47 +43,14 @@ pub async fn skill_usage(
     State(state): State<AppState>,
     Json(body): Json<SkillUsageBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match skill_usage_pg(pool, &body).await {
-            Ok(id) => (StatusCode::OK, Json(json!({"ok": true, "id": id}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-
-    // Resolve agent_id: use provided value, or look up by role_id
-    let agent_id = body.agent_id.clone().or_else(|| {
-        body.role_id.as_ref().and_then(|rid| {
-            conn.query_row("SELECT id FROM agents WHERE id = ?1", [rid], |row| {
-                row.get(0)
-            })
-            .ok()
-        })
-    });
-
-    match conn.execute(
-        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        libsql_rusqlite::params![body.skill_id, agent_id, body.session_key],
-    ) {
-        Ok(_) => {
-            let id = conn.last_insert_rowid();
-            (StatusCode::OK, Json(json!({"ok": true, "id": id})))
-        }
-        Err(e) => (
+    match skill_usage_pg(pool, &body).await {
+        Ok(id) => (StatusCode::OK, Json(json!({"ok": true, "id": id}))),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
+            Json(json!({"error": format!("{error}")})),
         ),
     }
 }
@@ -113,50 +60,30 @@ pub async fn disconnect_session(
     State(state): State<AppState>,
     Path(session_key): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match disconnect_session_pg(pool, &session_key).await {
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "session not found"})),
-            ),
-            Ok(true) => (
-                StatusCode::OK,
-                Json(json!({"ok": true, "session_key": session_key})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-
-    match conn.execute(
-        "UPDATE sessions SET status = 'disconnected' WHERE session_key = ?1",
-        [&session_key],
-    ) {
-        Ok(0) => (
+    match disconnect_session_pg(pool, &session_key).await {
+        Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "session not found"})),
         ),
-        Ok(_) => (
+        Ok(true) => (
             StatusCode::OK,
             Json(json!({"ok": true, "session_key": session_key})),
         ),
-        Err(e) => (
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
+            Json(json!({"error": format!("{error}")})),
         ),
     }
+}
+
+fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool unavailable"})),
+    )
 }
 
 async fn reset_status_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {

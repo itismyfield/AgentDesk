@@ -180,16 +180,12 @@ async fn overview(State(state): State<AppState>) -> Response {
 }
 
 async fn list_agents(State(state): State<AppState>, Query(query): Query<AgentsQuery>) -> Response {
-    let agents = if let Some(pool) = state.pg_pool_ref() {
-        match load_agents_pg(pool, query.office_id.as_deref()).await {
-            Ok(agents) => agents,
-            Err(error) => return internal_error("list_agents_pg", &error),
-        }
-    } else {
-        match load_agents_sqlite(&state, query.office_id.as_deref()) {
-            Ok(agents) => agents,
-            Err(error) => return internal_error("list_agents_sqlite", &error),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable("list_agents");
+    };
+    let agents = match load_agents_pg(pool, query.office_id.as_deref()).await {
+        Ok(agents) => agents,
+        Err(error) => return internal_error("list_agents_pg", &error),
     };
 
     json_response(
@@ -291,16 +287,12 @@ async fn stream(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn activity(State(state): State<AppState>, Query(query): Query<ActivityQuery>) -> Response {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let before = query.before.as_deref().and_then(parse_cursor);
-    let mut items = if let Some(pool) = state.pg_pool_ref() {
-        match load_activity_items_pg(pool).await {
-            Ok(items) => items,
-            Err(error) => return internal_error("activity_pg", &error),
-        }
-    } else {
-        match load_activity_items_sqlite(&state) {
-            Ok(items) => items,
-            Err(error) => return internal_error("activity_sqlite", &error),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable("activity");
+    };
+    let mut items = match load_activity_items_pg(pool).await {
+        Ok(items) => items,
+        Err(error) => return internal_error("activity_pg", &error),
     };
 
     items.sort_by(|left, right| {
@@ -336,16 +328,12 @@ async fn achievements(
     State(state): State<AppState>,
     Query(query): Query<AchievementsQuery>,
 ) -> Response {
-    let bundle = if let Some(pool) = state.pg_pool_ref() {
-        match build_achievements_pg(pool, query.agent_id.as_deref()).await {
-            Ok(bundle) => bundle,
-            Err(error) => return internal_error("achievements_pg", &error),
-        }
-    } else {
-        match build_achievements_sqlite(&state, query.agent_id.as_deref()) {
-            Ok(bundle) => bundle,
-            Err(error) => return internal_error("achievements_sqlite", &error),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable("achievements");
+    };
+    let bundle = match build_achievements_pg(pool, query.agent_id.as_deref()).await {
+        Ok(bundle) => bundle,
+        Err(error) => return internal_error("achievements_pg", &error),
     };
 
     json_response(
@@ -464,14 +452,12 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
     let mut events = Vec::new();
     let generated_at = utc_now_iso();
 
-    let agents = if let Some(pool) = state.pg_pool_ref() {
-        load_agents_pg(pool, None)
-            .await
-            .map_err(|error| internal_error("stream_agents_pg", &error))?
-    } else {
-        load_agents_sqlite(&state, None)
-            .map_err(|error| internal_error("stream_agents_sqlite", &error))?
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable("stream_snapshot"));
     };
+    let agents = load_agents_pg(pool, None)
+        .await
+        .map_err(|error| internal_error("stream_agents_pg", &error))?;
     for agent in &agents {
         if let Some(agent_id) = agent["id"].as_str() {
             events.push(snapshot_envelope(
@@ -506,14 +492,9 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
         compact_ops_health_event(health_status, &health_payload, &generated_at),
     ));
 
-    let achievements = if let Some(pool) = state.pg_pool_ref() {
-        build_achievements_pg(pool, None)
-            .await
-            .map_err(|error| internal_error("stream_achievements_pg", &error))?
-    } else {
-        build_achievements_sqlite(&state, None)
-            .map_err(|error| internal_error("stream_achievements_sqlite", &error))?
-    };
+    let achievements = build_achievements_pg(pool, None)
+        .await
+        .map_err(|error| internal_error("stream_achievements_pg", &error))?;
     for achievement in achievements.achievements.iter().take(8) {
         if let Some(achievement_id) = achievement["id"].as_str() {
             events.push(snapshot_envelope(
@@ -529,14 +510,9 @@ async fn build_stream_snapshot(state: AppState) -> Result<Vec<StreamEnvelope>, R
         }
     }
 
-    let activity_items = if let Some(pool) = state.pg_pool_ref() {
-        load_activity_items_pg(pool)
-            .await
-            .map_err(|error| internal_error("stream_activity_pg", &error))?
-    } else {
-        load_activity_items_sqlite(&state)
-            .map_err(|error| internal_error("stream_activity_sqlite", &error))?
-    };
+    let activity_items = load_activity_items_pg(pool)
+        .await
+        .map_err(|error| internal_error("stream_activity_pg", &error))?;
     for item in activity_items
         .into_iter()
         .filter(|item| item.body["kind"] == "kanban_transition")
@@ -687,6 +663,15 @@ fn internal_error(operation: &str, message: &str) -> Response {
     )
 }
 
+fn pg_unavailable(operation: &str) -> Response {
+    v1_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "postgres_unavailable",
+        format!("{operation}: postgres pool unavailable"),
+        true,
+    )
+}
+
 fn map_legacy_error(status: StatusCode, body: &Value, fallback_code: &str) -> Response {
     let message = body["error"]
         .as_str()
@@ -791,14 +776,12 @@ async fn load_overview_spark(state: AppState) -> Result<Vec<Value>, Response> {
         }
     }
 
-    let completed_map = if let Some(pool) = state.pg_pool_ref() {
-        load_completed_dispatch_counts_pg(pool, 14)
-            .await
-            .map_err(|error| internal_error("overview_spark_pg", &error))?
-    } else {
-        load_completed_dispatch_counts_sqlite(&state, 14)
-            .map_err(|error| internal_error("overview_spark_sqlite", &error))?
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable("overview_spark"));
     };
+    let completed_map = load_completed_dispatch_counts_pg(pool, 14)
+        .await
+        .map_err(|error| internal_error("overview_spark_pg", &error))?;
 
     let mut dates = token_map.keys().cloned().collect::<Vec<_>>();
     for date in completed_map.keys() {
@@ -825,112 +808,58 @@ async fn load_overview_spark(state: AppState) -> Result<Vec<Value>, Response> {
 }
 
 async fn load_session_count(state: AppState) -> Result<i64, Response> {
-    if let Some(pool) = state.pg_pool_ref() {
-        return sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM sessions WHERE status IS DISTINCT FROM 'disconnected'",
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|error| internal_error("session_count_pg", &error.to_string()));
-    }
-
-    let conn = state
-        .db
-        .lock()
-        .map_err(|error| internal_error("session_count_sqlite_lock", &error.to_string()))?;
-    conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE COALESCE(status, '') != 'disconnected'",
-        [],
-        |row| row.get(0),
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable("session_count"));
+    };
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM sessions WHERE status IS DISTINCT FROM 'disconnected'",
     )
-    .map_err(|error| internal_error("session_count_sqlite", &error.to_string()))
+    .fetch_one(pool)
+    .await
+    .map_err(|error| internal_error("session_count_pg", &error.to_string()))
 }
 
 async fn load_agent_counts(state: AppState) -> Result<Value, Response> {
-    let (agents, sessions) = if let Some(pool) = state.pg_pool_ref() {
-        let agents = sqlx::query("SELECT id, status FROM agents ORDER BY id")
-            .fetch_all(pool)
-            .await
-            .map_err(|error| internal_error("agent_counts_agents_pg", &error.to_string()))?
-            .into_iter()
-            .map(|row| AgentActivitySnapshot {
-                id: row.try_get::<String, _>("id").unwrap_or_default(),
-                status: row.try_get::<Option<String>, _>("status").ok().flatten(),
-            })
-            .collect::<Vec<_>>();
-        let sessions = sqlx::query(
-            "SELECT session_key, agent_id, status, active_dispatch_id, last_heartbeat
-             FROM sessions
-             WHERE agent_id IS NOT NULL
-               AND status IS DISTINCT FROM 'disconnected'",
-        )
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable("agent_counts"));
+    };
+    let agents = sqlx::query("SELECT id, status FROM agents ORDER BY id")
         .fetch_all(pool)
         .await
-        .map_err(|error| internal_error("agent_counts_sessions_pg", &error.to_string()))?
+        .map_err(|error| internal_error("agent_counts_agents_pg", &error.to_string()))?
         .into_iter()
-        .map(|row| SessionSnapshot {
-            session_key: row
-                .try_get::<Option<String>, _>("session_key")
-                .ok()
-                .flatten(),
-            agent_id: row.try_get::<String, _>("agent_id").unwrap_or_default(),
+        .map(|row| AgentActivitySnapshot {
+            id: row.try_get::<String, _>("id").unwrap_or_default(),
             status: row.try_get::<Option<String>, _>("status").ok().flatten(),
-            active_dispatch_id: row
-                .try_get::<Option<String>, _>("active_dispatch_id")
-                .ok()
-                .flatten(),
-            last_heartbeat: row
-                .try_get::<Option<String>, _>("last_heartbeat")
-                .ok()
-                .flatten(),
         })
         .collect::<Vec<_>>();
-        (agents, sessions)
-    } else {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|error| internal_error("agent_counts_sqlite_lock", &error.to_string()))?;
-        let mut agents_stmt = conn
-            .prepare("SELECT id, status FROM agents ORDER BY id")
-            .map_err(|error| internal_error("agent_counts_agents_sqlite", &error.to_string()))?;
-        let agents = agents_stmt
-            .query_map([], |row| {
-                Ok(AgentActivitySnapshot {
-                    id: row.get::<_, String>(0)?,
-                    status: row.get::<_, Option<String>>(1)?,
-                })
-            })
-            .map_err(|error| internal_error("agent_counts_agents_sqlite_map", &error.to_string()))?
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
-        drop(agents_stmt);
-
-        let mut session_stmt = conn
-            .prepare(
-                "SELECT session_key, agent_id, status, active_dispatch_id, last_heartbeat
-                 FROM sessions
-                 WHERE agent_id IS NOT NULL
-                   AND COALESCE(status, '') != 'disconnected'",
-            )
-            .map_err(|error| internal_error("agent_counts_sessions_sqlite", &error.to_string()))?;
-        let sessions = session_stmt
-            .query_map([], |row| {
-                Ok(SessionSnapshot {
-                    session_key: row.get::<_, Option<String>>(0)?,
-                    agent_id: row.get::<_, String>(1)?,
-                    status: row.get::<_, Option<String>>(2)?,
-                    active_dispatch_id: row.get::<_, Option<String>>(3)?,
-                    last_heartbeat: row.get::<_, Option<String>>(4)?,
-                })
-            })
-            .map_err(|error| {
-                internal_error("agent_counts_sessions_sqlite_map", &error.to_string())
-            })?
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
-        (agents, sessions)
-    };
+    let sessions = sqlx::query(
+        "SELECT session_key, agent_id, status, active_dispatch_id, last_heartbeat
+         FROM sessions
+         WHERE agent_id IS NOT NULL
+           AND status IS DISTINCT FROM 'disconnected'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| internal_error("agent_counts_sessions_pg", &error.to_string()))?
+    .into_iter()
+    .map(|row| SessionSnapshot {
+        session_key: row
+            .try_get::<Option<String>, _>("session_key")
+            .ok()
+            .flatten(),
+        agent_id: row.try_get::<String, _>("agent_id").unwrap_or_default(),
+        status: row.try_get::<Option<String>, _>("status").ok().flatten(),
+        active_dispatch_id: row
+            .try_get::<Option<String>, _>("active_dispatch_id")
+            .ok()
+            .flatten(),
+        last_heartbeat: row
+            .try_get::<Option<String>, _>("last_heartbeat")
+            .ok()
+            .flatten(),
+    })
+    .collect::<Vec<_>>();
 
     let mut resolver = SessionActivityResolver::new();
     let mut working_agents = std::collections::HashSet::new();
@@ -974,14 +903,12 @@ async fn load_agent_counts(state: AppState) -> Result<Value, Response> {
 }
 
 async fn load_kanban_summary(state: AppState) -> Result<Value, Response> {
-    let summary = if let Some(pool) = state.pg_pool_ref() {
-        load_kanban_summary_pg(pool)
-            .await
-            .map_err(|error| internal_error("kanban_summary_pg", &error))?
-    } else {
-        load_kanban_summary_sqlite(&state)
-            .map_err(|error| internal_error("kanban_summary_sqlite", &error))?
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable("kanban_summary"));
     };
+    let summary = load_kanban_summary_pg(pool)
+        .await
+        .map_err(|error| internal_error("kanban_summary_pg", &error))?;
     Ok(summary)
 }
 
@@ -1068,87 +995,6 @@ async fn load_kanban_summary_pg(pool: &sqlx::PgPool) -> Result<Value, String> {
     ))
 }
 
-fn load_kanban_summary_sqlite(state: &AppState) -> Result<Value, String> {
-    let statuses = [
-        "backlog",
-        "ready",
-        "requested",
-        "in_progress",
-        "review",
-        "failed",
-        "done",
-        "cancelled",
-    ];
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let mut by_status = serde_json::Map::new();
-    for status in statuses {
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM kanban_cards WHERE status = ?1",
-                [status],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        by_status.insert(status.to_string(), json!(count));
-    }
-    let blocked = conn
-        .prepare("SELECT review_status, blocked_reason FROM kanban_cards")
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .ok()
-            .map(|rows| {
-                rows.filter_map(Result::ok)
-                    .filter(|(review_status, blocked_reason)| {
-                        crate::manual_intervention::requires_manual_intervention(
-                            review_status.as_deref(),
-                            blocked_reason.as_deref(),
-                        )
-                    })
-                    .count() as i64
-            })
-        })
-        .unwrap_or(0);
-    let top_repos = conn
-        .prepare(
-            "SELECT repo_id, COUNT(*) as count
-             FROM kanban_cards
-             WHERE repo_id IS NOT NULL
-               AND status NOT IN ('done', 'cancelled')
-             GROUP BY repo_id
-             ORDER BY count DESC, repo_id ASC
-             LIMIT 5",
-        )
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| {
-                let count: i64 = row.get(1)?;
-                Ok(json!({
-                    "github_repo": row.get::<_, String>(0)?,
-                    "open_count": count,
-                    "pressure_count": count,
-                }))
-            })
-            .ok()
-            .map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
-    Ok(build_kanban_payload(
-        by_status,
-        blocked,
-        top_repos,
-        load_auto_queue_summary_sqlite(state)?,
-    ))
-}
-
 fn build_kanban_payload(
     by_status: serde_json::Map<String, Value>,
     blocked: i64,
@@ -1227,71 +1073,6 @@ async fn load_auto_queue_summary_pg(pool: &sqlx::PgPool) -> Result<Value, String
         "dispatched": find_status_count(&counts, "dispatched"),
         "done": find_status_count(&counts, "done"),
         "failed": find_status_count(&counts, "failed"),
-    }))
-}
-
-fn load_auto_queue_summary_sqlite(state: &AppState) -> Result<Value, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let run = conn
-        .query_row(
-            "SELECT id, status, repo, agent_id, created_at
-             FROM auto_queue_runs
-             ORDER BY datetime(created_at) DESC, id DESC
-             LIMIT 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .ok();
-    let Some((run_id, status, repo, agent_id, created_at)) = run else {
-        return Ok(json!({
-            "run": Value::Null,
-            "pending": 0,
-            "dispatched": 0,
-            "done": 0,
-            "failed": 0,
-        }));
-    };
-    let mut counts_stmt = conn
-        .prepare(
-            "SELECT status, COUNT(*) AS count
-             FROM auto_queue_entries
-             WHERE run_id = ?1
-             GROUP BY status",
-        )
-        .map_err(|error| format!("{error}"))?;
-    let counts = counts_stmt
-        .query_map([&run_id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                row.get::<_, i64>(1).unwrap_or(0),
-            ))
-        })
-        .map_err(|error| format!("{error}"))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "run": {
-            "id": run_id,
-            "status": status.unwrap_or_else(|| "active".to_string()),
-            "repo": repo,
-            "agent_id": agent_id,
-            "created_at": created_at.as_deref().and_then(normalize_datetime_to_iso),
-        },
-        "pending": counts.iter().find(|(name, _)| name == "pending").map(|(_, count)| *count).unwrap_or(0),
-        "dispatched": counts.iter().find(|(name, _)| name == "dispatched").map(|(_, count)| *count).unwrap_or(0),
-        "done": counts.iter().find(|(name, _)| name == "done").map(|(_, count)| *count).unwrap_or(0),
-        "failed": counts.iter().find(|(name, _)| name == "failed").map(|(_, count)| *count).unwrap_or(0),
     }))
 }
 
@@ -1440,101 +1221,6 @@ async fn load_agents_pg(
         .collect())
 }
 
-fn load_agents_sqlite(state: &AppState, office_id: Option<&str>) -> Result<Vec<Value>, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let (sql, params): (String, Vec<String>) = if let Some(office_id) = office_id {
-        (
-            "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                    a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-                    a.status, COALESCE(a.xp, 0), a.sprite_number, d.name, d.name_ko, d.color,
-                    a.created_at,
-                    (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
-                    (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
-                    (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_task_id,
-                    (SELECT kc.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_card_id,
-                    (SELECT kc.title FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_card_title
-             FROM agents a
-             INNER JOIN office_agents oa ON oa.agent_id = a.id
-             LEFT JOIN departments d ON d.id = a.department
-             WHERE oa.office_id = ?1
-             ORDER BY a.id"
-                .to_string(),
-            vec![office_id.to_string()],
-        )
-    } else {
-        (
-            "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                    a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
-                    a.status, COALESCE(a.xp, 0), a.sprite_number, d.name, d.name_ko, d.color,
-                    a.created_at,
-                    (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
-                    (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
-                    (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_task_id,
-                    (SELECT kc.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_card_id,
-                    (SELECT kc.title FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' ORDER BY td2.created_at DESC, td2.id DESC LIMIT 1) AS current_card_title
-             FROM agents a
-             LEFT JOIN departments d ON d.id = a.department
-             ORDER BY a.id"
-                .to_string(),
-            Vec::new(),
-        )
-    };
-    let mut stmt = conn.prepare(&sql).map_err(|error| format!("{error}"))?;
-    let param_refs = params
-        .iter()
-        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
-        .collect::<Vec<_>>();
-    let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "name_ko": row.get::<_, Option<String>>(2)?,
-                "cli_provider": row.get::<_, Option<String>>(3)?,
-                "department_id": row.get::<_, Option<String>>(4)?,
-                "avatar_emoji": row.get::<_, Option<String>>(5)?,
-                "discord_channel_id": row.get::<_, Option<String>>(6)?,
-                "discord_channel_alt": row.get::<_, Option<String>>(7)?,
-                "discord_channel_cc": row.get::<_, Option<String>>(8)?,
-                "discord_channel_cdx": row.get::<_, Option<String>>(9)?,
-                "status": row.get::<_, Option<String>>(10)?,
-                "stats_xp": row.get::<_, i64>(11).unwrap_or(0),
-                "sprite_number": row.get::<_, Option<i64>>(12)?,
-                "department_name": row.get::<_, Option<String>>(13)?,
-                "department_name_ko": row.get::<_, Option<String>>(14)?,
-                "department_color": row.get::<_, Option<String>>(15)?,
-                "created_at": row.get::<_, Option<String>>(16)?.as_deref().and_then(normalize_datetime_to_iso),
-                "stats_tasks_done": row.get::<_, i64>(17).unwrap_or(0),
-                "stats_tokens": row.get::<_, i64>(18).unwrap_or(0),
-                "current_task_id": row.get::<_, Option<String>>(19)?,
-                "current_task": build_current_task(
-                    row.get::<_, Option<String>>(19)?,
-                    row.get::<_, Option<String>>(20)?,
-                    row.get::<_, Option<String>>(21)?,
-                ),
-            }))
-        })
-        .map_err(|error| format!("{error}"))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    let agent_ids = rows
-        .iter()
-        .filter_map(|row| row["id"].as_str().map(str::to_string))
-        .collect::<Vec<_>>();
-    let skills_7d = load_skills_7d_sqlite(state, &agent_ids);
-    Ok(rows
-        .into_iter()
-        .map(|mut row| {
-            let agent_id = row["id"].as_str().unwrap_or_default().to_string();
-            row["skills_7d"] = Value::Array(skills_7d.get(&agent_id).cloned().unwrap_or_default());
-            row
-        })
-        .collect())
-}
-
 async fn load_skills_7d_pg(
     pool: &sqlx::PgPool,
     agent_ids: &[String],
@@ -1569,51 +1255,6 @@ async fn load_skills_7d_pg(
             row.try_get::<i64, _>("uses").unwrap_or(0),
         )
     }))
-}
-
-fn load_skills_7d_sqlite(state: &AppState, agent_ids: &[String]) -> HashMap<String, Vec<Value>> {
-    if agent_ids.is_empty() {
-        return HashMap::new();
-    }
-    let conn = match state.sqlite_db().lock() {
-        Ok(conn) => conn,
-        Err(_) => return HashMap::new(),
-    };
-    let placeholders = agent_ids
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("?{}", index + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT su.agent_id, su.skill_id, COALESCE(s.name, su.skill_id) AS skill_name, COUNT(*) AS uses
-         FROM skill_usage su
-         LEFT JOIN skills s ON s.id = su.skill_id
-         WHERE su.agent_id IN ({placeholders})
-           AND su.used_at >= datetime('now', '-7 days')
-         GROUP BY su.agent_id, su.skill_id, skill_name
-         ORDER BY su.agent_id ASC, uses DESC, su.skill_id ASC"
-    );
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(stmt) => stmt,
-        Err(_) => return HashMap::new(),
-    };
-    let param_refs = agent_ids
-        .iter()
-        .map(|id| id as &dyn libsql_rusqlite::types::ToSql)
-        .collect::<Vec<_>>();
-    let rows = match stmt.query_map(param_refs.as_slice(), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3).unwrap_or(0),
-        ))
-    }) {
-        Ok(rows) => rows.filter_map(Result::ok).collect::<Vec<_>>(),
-        Err(_) => return HashMap::new(),
-    };
-    group_skill_rows(rows.into_iter())
 }
 
 fn group_skill_rows<I>(rows: I) -> HashMap<String, Vec<Value>>
@@ -1799,163 +1440,6 @@ async fn load_activity_items_pg(pool: &sqlx::PgPool) -> Result<Vec<ActivityItem>
     Ok(items)
 }
 
-fn load_activity_items_sqlite(state: &AppState) -> Result<Vec<ActivityItem>, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let mut items = Vec::new();
-
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT kal.id, kal.card_id, kal.from_status, kal.to_status, kal.source, kal.result, kal.created_at,
-                kc.title, kc.github_issue_number
-         FROM kanban_audit_logs kal
-         LEFT JOIN kanban_cards kc ON kc.id = kal.card_id
-         ORDER BY datetime(kal.created_at) DESC, kal.id DESC
-         LIMIT 64",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<i64>>(8)?,
-            ))
-        }) {
-            for row in rows.filter_map(Result::ok) {
-                let iso = row
-                    .6
-                    .as_deref()
-                    .and_then(normalize_datetime_to_iso)
-                    .unwrap_or_else(utc_now_iso);
-                let id = format!("kanban:{}", row.0);
-                let from_status = row.2.clone().unwrap_or_else(|| "unknown".to_string());
-                let to_status = row.3.clone().unwrap_or_else(|| "unknown".to_string());
-                items.push(ActivityItem {
-                    timestamp_ms: iso_to_millis(&iso),
-                    cursor_id: id.clone(),
-                    body: json!({
-                        "id": id,
-                        "kind": "kanban_transition",
-                        "created_at": iso,
-                        "summary": format!(
-                            "{} {} -> {}",
-                            row.8.map(|value| format!("#{value}")).unwrap_or_else(|| "card".to_string()),
-                            from_status,
-                            to_status,
-                        ),
-                        "meta": {
-                            "card_id": row.1,
-                            "card_title": row.7,
-                            "from_status": row.2,
-                            "to_status": row.3,
-                            "source": row.4,
-                            "result": row.5,
-                        }
-                    }),
-                });
-            }
-        }
-    }
-
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at
-         FROM task_dispatches
-         ORDER BY datetime(created_at) DESC, id DESC
-         LIMIT 64",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        }) {
-            for row in rows.filter_map(Result::ok) {
-                let iso = row
-                    .6
-                    .as_deref()
-                    .and_then(normalize_datetime_to_iso)
-                    .unwrap_or_else(utc_now_iso);
-                let id = format!("dispatch:{}", row.0);
-                items.push(ActivityItem {
-                    timestamp_ms: iso_to_millis(&iso),
-                    cursor_id: id.clone(),
-                    body: json!({
-                        "id": id,
-                        "kind": "dispatch",
-                        "created_at": iso,
-                        "summary": row.5.clone().unwrap_or_else(|| "dispatch created".to_string()),
-                        "meta": {
-                            "dispatch_id": row.0,
-                            "card_id": row.1,
-                            "agent_id": row.2,
-                            "dispatch_type": row.3,
-                            "status": row.4,
-                        }
-                    }),
-                });
-            }
-        }
-    }
-
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, entity_type, entity_id, action, actor, timestamp
-         FROM audit_logs
-         WHERE entity_type LIKE 'provider%' OR action LIKE 'provider%'
-         ORDER BY datetime(timestamp) DESC, id DESC
-         LIMIT 32",
-    ) {
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        }) {
-            for row in rows.filter_map(Result::ok) {
-                let iso = row
-                    .5
-                    .as_deref()
-                    .and_then(normalize_datetime_to_iso)
-                    .unwrap_or_else(utc_now_iso);
-                let id = format!("provider:{}", row.0);
-                items.push(ActivityItem {
-                    timestamp_ms: iso_to_millis(&iso),
-                    cursor_id: id.clone(),
-                    body: json!({
-                        "id": id,
-                        "kind": "provider_event",
-                        "created_at": iso,
-                        "summary": row.3.clone().unwrap_or_else(|| "provider event".to_string()),
-                        "meta": {
-                            "entity_type": row.1,
-                            "entity_id": row.2,
-                            "actor": row.4,
-                        }
-                    }),
-                });
-            }
-        }
-    }
-
-    let achievement_bundle = build_achievements_sqlite(state, None)?;
-    items.extend(achievement_bundle.events);
-    Ok(items)
-}
-
 async fn build_achievements_pg(
     pool: &sqlx::PgPool,
     agent_filter: Option<&str>,
@@ -2074,134 +1558,6 @@ async fn build_achievements_pg(
     })
 }
 
-fn build_achievements_sqlite(
-    state: &AppState,
-    agent_filter: Option<&str>,
-) -> Result<AchievementBundle, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let (sql, params): (String, Vec<String>) = if let Some(agent_id) = agent_filter {
-        (
-            "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), COALESCE(xp, 0), COALESCE(avatar_emoji, '🤖')
-             FROM agents
-             WHERE id = ?1
-               AND COALESCE(xp, 0) > 0"
-                .to_string(),
-            vec![agent_id.to_string()],
-        )
-    } else {
-        (
-            "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), COALESCE(xp, 0), COALESCE(avatar_emoji, '🤖')
-             FROM agents
-             WHERE COALESCE(xp, 0) > 0"
-                .to_string(),
-            Vec::new(),
-        )
-    };
-    let mut stmt = conn.prepare(&sql).map_err(|error| format!("{error}"))?;
-    let param_refs = params
-        .iter()
-        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
-        .collect::<Vec<_>>();
-    let agents = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3).unwrap_or(0),
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .map_err(|error| format!("{error}"))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    let mut achievements = Vec::new();
-    let mut events = Vec::new();
-    for (agent_id, name, name_ko, xp, avatar_emoji) in agents {
-        let completion_times = conn
-            .prepare(
-                "SELECT updated_at
-                 FROM task_dispatches
-                 WHERE to_agent_id = ?1
-                   AND status = 'completed'
-                 ORDER BY datetime(updated_at) ASC",
-            )
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_map([&agent_id], |row| row.get::<_, Option<String>>(0))
-                    .ok()
-                    .map(|rows| {
-                        rows.filter_map(Result::ok)
-                            .flatten()
-                            .filter_map(|value| normalize_datetime_to_iso(&value))
-                            .map(|value| iso_to_millis(&value))
-                            .collect::<Vec<_>>()
-                    })
-            })
-            .unwrap_or_default();
-
-        for (index, (threshold, achievement_type, description, rarity)) in
-            ACHIEVEMENT_MILESTONES.iter().enumerate()
-        {
-            if xp < *threshold {
-                continue;
-            }
-            let next_threshold = ACHIEVEMENT_MILESTONES
-                .get(index + 1)
-                .map(|(next, _, _, _)| *next);
-            let earned_at = completion_times
-                .get((threshold / 10).saturating_sub(1) as usize)
-                .copied()
-                .unwrap_or(0);
-            let event_iso = millis_to_iso(earned_at).unwrap_or_else(utc_now_iso);
-            let achievement = json!({
-                "id": format!("{agent_id}:{achievement_type}"),
-                "agent_id": agent_id,
-                "type": achievement_type,
-                "name": format!("{description} ({threshold} XP)"),
-                "description": description,
-                "earned_at": event_iso,
-                "agent_name": name,
-                "agent_name_ko": name_ko,
-                "avatar_emoji": avatar_emoji,
-                "rarity": rarity,
-                "progress": {
-                    "current_xp": xp,
-                    "threshold": threshold,
-                    "next_threshold": next_threshold,
-                    "percent": if let Some(next) = next_threshold {
-                        ((xp as f64 / next as f64) * 100.0).round() as i64
-                    } else {
-                        100
-                    },
-                }
-            });
-            achievements.push(achievement.clone());
-            events.push(ActivityItem {
-                timestamp_ms: earned_at,
-                cursor_id: format!("achievement:{agent_id}:{achievement_type}"),
-                body: json!({
-                    "id": format!("achievement:{agent_id}:{achievement_type}"),
-                    "kind": "achievement",
-                    "created_at": event_iso,
-                    "summary": format!("{name} achieved {}", achievement["name"].as_str().unwrap_or("milestone")),
-                    "meta": achievement,
-                }),
-            });
-        }
-    }
-
-    let daily_missions = build_daily_missions_sqlite(state)?;
-    Ok(AchievementBundle {
-        achievements,
-        events,
-        daily_missions,
-    })
-}
-
 async fn build_daily_missions_pg(pool: &sqlx::PgPool) -> Result<Vec<Value>, String> {
     let completed_today = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT
@@ -2228,39 +1584,6 @@ async fn build_daily_missions_pg(pool: &sqlx::PgPool) -> Result<Vec<Value>, Stri
     .fetch_one(pool)
     .await
     .map_err(|error| format!("daily mission review_queue: {error}"))?;
-    Ok(build_daily_missions_payload(
-        completed_today,
-        active_agents_today,
-        review_queue,
-    ))
-}
-
-fn build_daily_missions_sqlite(state: &AppState) -> Result<Vec<Value>, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let completed_today: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches WHERE status = 'completed' AND date(updated_at) = date('now')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let active_agents_today: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT to_agent_id) FROM task_dispatches WHERE status = 'completed' AND date(updated_at) = date('now') AND to_agent_id IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let review_queue: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM kanban_cards WHERE status = 'review'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
     Ok(build_daily_missions_payload(
         completed_today,
         active_agents_today,
@@ -2322,33 +1645,6 @@ async fn load_completed_dispatch_counts_pg(
         );
     }
     Ok(map)
-}
-
-fn load_completed_dispatch_counts_sqlite(
-    state: &AppState,
-    days: i64,
-) -> Result<HashMap<String, i64>, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("{error}"))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT date(updated_at) AS day, COUNT(*) AS count
-             FROM task_dispatches
-             WHERE status = 'completed'
-               AND updated_at >= datetime('now', '-' || ?1 || ' days')
-             GROUP BY day",
-        )
-        .map_err(|error| format!("{error}"))?;
-    let rows = stmt
-        .query_map([days], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1).unwrap_or(0)))
-        })
-        .map_err(|error| format!("{error}"))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
-    Ok(rows.into_iter().collect())
 }
 
 fn build_bottlenecks(payload: &Value) -> Vec<Value> {
