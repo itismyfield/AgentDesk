@@ -18,8 +18,8 @@ use crate::server::routes::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 use crate::services::discord::outbound::{
-    DISCORD_HARD_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage,
-    DiscordOutboundPolicy, FallbackKind, OutboundDeduper, deliver_outbound,
+    DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DeliveryResult, DiscordOutboundClient,
+    DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind, OutboundDeduper, deliver_outbound,
 };
 use crate::services::provider::ProviderKind;
 
@@ -2214,7 +2214,8 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         }
     }
 
-    if content.chars().count() > DISCORD_HARD_LIMIT_CHARS {
+    let content_len = content.chars().count();
+    if content_len > DISCORD_HARD_LIMIT_CHARS {
         let result = match if bot == "announce" {
             client
                 .post_text_attachment(channel_id, content, summary)
@@ -2227,6 +2228,24 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
             deliver_chunked_manual_notification(client, channel_id, content).await
         } {
             Ok(outcome) => outcome,
+            Err(error) => ManualDeliveryOutcome::Failed {
+                detail: error.to_string(),
+            },
+        };
+        if let ManualDeliveryOutcome::Sent { message_id, .. } = &result {
+            if let Some(key) = dedup_key.as_deref() {
+                dedup.record(key, message_id);
+            }
+        }
+        return result;
+    }
+
+    if content_len > DISCORD_SAFE_LIMIT_CHARS {
+        let result = match client.post_message(channel_id, content).await {
+            Ok(message_id) => ManualDeliveryOutcome::Sent {
+                message_id,
+                delivery: None,
+            },
             Err(error) => ManualDeliveryOutcome::Failed {
                 detail: error.to_string(),
             },
@@ -2895,6 +2914,14 @@ mod tests {
         }
     }
 
+    fn boundary_payload(len: usize, fill: char) -> String {
+        let tail = format!("tail-{len}");
+        format!(
+            "{}{tail}",
+            fill.to_string().repeat(len.saturating_sub(tail.len()))
+        )
+    }
+
     #[tokio::test]
     async fn manual_notification_delivery_skips_duplicate_semantic_event() {
         let client = MockManualOutboundClient::default();
@@ -3003,6 +3030,70 @@ mod tests {
         assert_eq!(posts.len(), 2);
         assert!(posts.iter().all(|chunk| chunk.len() <= DISCORD_MSG_LIMIT));
         assert_eq!(posts.concat(), long);
+    }
+
+    #[tokio::test]
+    async fn api_send_announce_1901_to_2000_preserves_full_payload_without_truncation() {
+        for len in [DISCORD_SAFE_LIMIT_CHARS + 1, DISCORD_HARD_LIMIT_CHARS] {
+            let client = MockManualOutboundClient::default();
+            let dedup = OutboundDeduper::new();
+            let content = boundary_payload(len, 'C');
+
+            let (status, body) = send_resolved_manual_message_with_client(
+                &client,
+                &dedup,
+                123,
+                "channel:123",
+                &content,
+                "system",
+                "announce",
+                None,
+                None,
+            )
+            .await;
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+            assert_eq!(status, "200 OK");
+            assert_eq!(response["bot"], "announce");
+            assert!(response.get("delivery").is_none());
+            assert!(client.attachments.lock().unwrap().is_empty());
+            let posts = client.posts.lock().unwrap();
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0], content);
+            assert!(posts[0].ends_with(&format!("tail-{len}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_send_notify_1901_to_2000_preserves_full_payload_without_truncation() {
+        for len in [DISCORD_SAFE_LIMIT_CHARS + 1, DISCORD_HARD_LIMIT_CHARS] {
+            let client = MockManualOutboundClient::default();
+            let dedup = OutboundDeduper::new();
+            let content = boundary_payload(len, 'D');
+
+            let (status, body) = send_resolved_manual_message_with_client(
+                &client,
+                &dedup,
+                123,
+                "channel:123",
+                &content,
+                "system",
+                "notify",
+                None,
+                None,
+            )
+            .await;
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+            assert_eq!(status, "200 OK");
+            assert_eq!(response["bot"], "notify");
+            assert!(response.get("delivery").is_none());
+            assert!(client.attachments.lock().unwrap().is_empty());
+            let posts = client.posts.lock().unwrap();
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0], content);
+            assert!(posts[0].ends_with(&format!("tail-{len}")));
+        }
     }
 
     #[test]
