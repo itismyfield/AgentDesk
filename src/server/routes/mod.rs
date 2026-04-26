@@ -50,6 +50,7 @@ use axum::{
 
 use std::sync::Arc;
 
+use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::error::{AppError, ErrorCode};
 use crate::services::discord::health::HealthRegistry;
@@ -57,6 +58,7 @@ use crate::services::discord::health::HealthRegistry;
 /// Shared application state passed to all route handlers.
 #[derive(Clone)]
 pub struct AppState {
+    pub db: Db,
     pub pg_pool: Option<sqlx::PgPool>,
     pub engine: PolicyEngine,
     pub config: Arc<crate::config::Config>,
@@ -66,9 +68,46 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn sqlite_db(&self) -> &crate::db::Db {
+        &self.db
+    }
+
     pub fn pg_pool_ref(&self) -> Option<&sqlx::PgPool> {
         self.pg_pool.as_ref()
     }
+
+    pub fn kanban_service(&self) -> crate::services::kanban::KanbanService {
+        crate::services::kanban::KanbanService::new(self.db.clone(), self.pg_pool.clone())
+    }
+
+    pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
+        crate::services::dispatches::DispatchService::new(self.db.clone(), self.engine.clone())
+    }
+
+    pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
+        crate::services::auto_queue::AutoQueueService::new(
+            Some(self.db.clone()),
+            self.engine.clone(),
+        )
+    }
+
+    pub fn queue_service(&self) -> crate::services::queue::QueueService {
+        crate::services::queue::QueueService::new(self.db.clone(), self.pg_pool.clone())
+    }
+
+    pub fn settings_service(&self) -> crate::services::settings::SettingsService {
+        crate::services::settings::SettingsService::new(
+            self.db.clone(),
+            self.pg_pool.clone(),
+            self.config.clone(),
+        )
+    }
+}
+
+pub(crate) fn legacy_sqlite_shim() -> crate::db::Db {
+    let conn = libsql_rusqlite::Connection::open_in_memory()
+        .expect("open legacy sqlite compatibility shim");
+    crate::db::wrap_conn(conn)
 }
 
 pub(crate) type ApiRouter = Router<AppState>;
@@ -83,14 +122,19 @@ pub(crate) fn log_deprecated_alias(old_path: &'static str, canonical_path: &'sta
 
 #[cfg(test)]
 impl AppState {
-    pub fn test_state(engine: PolicyEngine) -> Self {
-        Self::test_state_with_config(engine, crate::config::Config::default())
+    pub fn test_state(db: Db, engine: PolicyEngine) -> Self {
+        Self::test_state_with_config(db, engine, crate::config::Config::default())
     }
 
-    pub fn test_state_with_config(engine: PolicyEngine, config: crate::config::Config) -> Self {
+    pub fn test_state_with_config(
+        db: Db,
+        engine: PolicyEngine,
+        config: crate::config::Config,
+    ) -> Self {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         Self {
+            db,
             pg_pool: None,
             engine,
             config: Arc::new(config),
@@ -102,6 +146,7 @@ impl AppState {
 }
 
 pub fn api_router(
+    db: Db,
     engine: PolicyEngine,
     config: crate::config::Config,
     broadcast_tx: crate::server::ws::BroadcastTx,
@@ -109,6 +154,7 @@ pub fn api_router(
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Router {
     api_router_with_pg(
+        db,
         engine,
         config,
         broadcast_tx,
@@ -119,6 +165,7 @@ pub fn api_router(
 }
 
 pub fn api_router_with_pg(
+    db: Db,
     engine: PolicyEngine,
     config: crate::config::Config,
     broadcast_tx: crate::server::ws::BroadcastTx,
@@ -127,6 +174,7 @@ pub fn api_router_with_pg(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Router {
     let state = AppState {
+        db,
         pg_pool,
         engine,
         config: Arc::new(config),

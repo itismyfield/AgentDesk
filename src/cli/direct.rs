@@ -66,15 +66,6 @@ fn parse_health_status_code(status: &str) -> StatusCode {
     }
 }
 
-fn wal_checkpoint(db: &crate::db::Db) -> Result<(), String> {
-    let conn = db
-        .separate_conn()
-        .map_err(|e| format!("open checkpoint connection: {e}"))?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .map_err(|e| format!("wal checkpoint: {e}"))?;
-    Ok(())
-}
-
 fn maybe_infer_repo_from_git() -> Option<String> {
     let repo_dir = crate::services::platform::resolve_repo_dir()?;
     let output = Command::new("git")
@@ -103,13 +94,17 @@ fn split_repo(repo: &str) -> Result<(String, String), String> {
     Ok((owner.to_string(), name.to_string()))
 }
 
-fn load_repo_candidates(db: &crate::db::Db) -> Vec<String> {
-    crate::github::list_repos(db)
+async fn load_repo_candidates_pg(pool: &sqlx::PgPool) -> Vec<String> {
+    crate::github::list_repos_pg(pool)
+        .await
         .map(|repos| repos.into_iter().map(|repo| repo.id).collect())
         .unwrap_or_default()
 }
 
-fn resolve_repo_arg(provided: Option<&str>, db: &crate::db::Db) -> Result<String, String> {
+async fn resolve_repo_arg_pg(
+    provided: Option<&str>,
+    pool: &sqlx::PgPool,
+) -> Result<String, String> {
     if let Some(repo) = provided.map(str::trim).filter(|repo| !repo.is_empty()) {
         return Ok(repo.to_string());
     }
@@ -117,25 +112,12 @@ fn resolve_repo_arg(provided: Option<&str>, db: &crate::db::Db) -> Result<String
         return Ok(repo);
     }
 
-    let repos = load_repo_candidates(db);
+    let repos = load_repo_candidates_pg(pool).await;
     if repos.len() == 1 {
         return Ok(repos[0].clone());
     }
 
     Err("repo could not be inferred; pass --repo owner/repo".to_string())
-}
-
-fn repo_default_agent_id(db: &crate::db::Db, repo: &str) -> Option<String> {
-    db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT default_agent_id FROM github_repos WHERE id = ?1",
-            [repo],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-        .filter(|agent_id| !agent_id.trim().is_empty())
-    })
 }
 
 async fn repo_default_agent_id_pg(pool: &sqlx::PgPool, repo: &str) -> Option<String> {
@@ -157,10 +139,6 @@ fn resolve_repo_dir(repo_id: Option<&str>) -> Result<Option<String>, String> {
 
 async fn build_app_state(with_health_registry: bool) -> Result<AppState, String> {
     let runtime_root = crate::config::runtime_root();
-    let legacy_scan = runtime_root
-        .as_ref()
-        .map(|root| crate::services::discord_config_audit::scan_legacy_sources(root))
-        .unwrap_or_default();
 
     if let Some(root) = runtime_root.as_ref() {
         crate::runtime_layout::ensure_runtime_layout(root)
@@ -179,23 +157,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
         }
     };
 
-    let db = crate::db::init(&loaded.config).map_err(|e| format!("init db: {e}"))?;
-
-    let config = if let Some(root) = runtime_root.as_ref() {
-        crate::services::discord_config_audit::audit_and_reconcile(
-            root,
-            loaded.config,
-            loaded.path,
-            loaded.existed,
-            &db,
-            &legacy_scan,
-            false,
-        )
-        .map_err(|e| format!("audit runtime config: {e}"))?
-        .config
-    } else {
-        loaded.config
-    };
+    let config = loaded.config;
 
     let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
     if pipeline_path.exists() {
@@ -214,7 +176,8 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     }
 
     let pg_pool = crate::db::postgres::connect_and_migrate(&config).await?;
-    crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
+    let legacy_db = crate::server::routes::legacy_sqlite_shim();
+    crate::services::termination_audit::init_audit_db(legacy_db.clone(), pg_pool.clone());
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
@@ -229,7 +192,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     };
 
     Ok(AppState {
-        db,
+        db: legacy_db,
         pg_pool,
         engine,
         config: Arc::new(config),
@@ -241,7 +204,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
 
 async fn run_command<F, Fut>(
     with_health_registry: bool,
-    writes_db: bool,
+    _writes_db: bool,
     operation: F,
 ) -> Result<(), String>
 where
@@ -249,11 +212,7 @@ where
     Fut: Future<Output = Result<Value, String>>,
 {
     let state = build_app_state(with_health_registry).await?;
-    let db = state.db.clone();
     let value = operation(state).await?;
-    if writes_db {
-        wal_checkpoint(&db)?;
-    }
     print_json(&value);
     Ok(())
 }
@@ -269,15 +228,18 @@ pub(crate) async fn cmd_send(
             .health_registry
             .as_ref()
             .ok_or_else(|| "Discord health registry not available".to_string())?;
-        let body = json!({
-            "target": target,
-            "content": content,
-            "source": source.unwrap_or("system"),
-            "bot": bot.unwrap_or("announce"),
-        });
-        let (status, response) =
-            crate::services::discord::health::handle_send(registry, &state.db, &body.to_string())
-                .await;
+        let (status, response) = crate::services::discord::health::send_message_with_backends(
+            registry,
+            None,
+            state.pg_pool_ref(),
+            target,
+            content,
+            source.unwrap_or("system"),
+            bot.unwrap_or("announce"),
+            None,
+        )
+        .await;
+        let response = response.to_string();
         let value: Value =
             serde_json::from_str(&response).unwrap_or_else(|_| json!({"error": response}));
         let status = parse_health_status_code(status);
@@ -467,7 +429,11 @@ pub(crate) async fn cmd_github_sync(repo: Option<&str>) -> Result<(), String> {
     let repos = if let Some(repo) = repo.map(str::trim).filter(|repo| !repo.is_empty()) {
         vec![repo.to_string()]
     } else {
-        crate::github::list_repos(&state.db)
+        let pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable for github sync".to_string())?;
+        crate::github::list_repos_pg(pool)
+            .await
             .map_err(|e| format!("list registered repos: {e}"))?
             .into_iter()
             .filter(|repo| repo.sync_enabled)
@@ -509,9 +475,6 @@ pub(crate) async fn cmd_github_sync(repo: Option<&str>) -> Result<(), String> {
         "results": results,
     });
 
-    if !any_failed {
-        wal_checkpoint(&state.db)?;
-    }
     print_json(&value);
 
     if any_failed {
@@ -631,54 +594,6 @@ async fn upsert_backlog_card_from_issue_pg(
     Ok(card_id)
 }
 
-fn resolve_card_id(
-    db: &crate::db::Db,
-    card_ref: &str,
-    repo: Option<&str>,
-) -> Result<String, String> {
-    let trimmed = card_ref.trim();
-    if trimmed.is_empty() {
-        return Err("card reference is required".to_string());
-    }
-    if !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
-        return Ok(trimmed.to_string());
-    }
-
-    let issue_number = trimmed
-        .parse::<i64>()
-        .map_err(|e| format!("invalid issue number '{trimmed}': {e}"))?;
-    let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
-
-    let mut ids = Vec::new();
-    if let Some(repo) = repo.map(str::trim).filter(|repo| !repo.is_empty()) {
-        let mut stmt = conn
-            .prepare("SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2")
-            .map_err(|e| format!("prepare card lookup: {e}"))?;
-        let rows = stmt
-            .query_map(libsql_rusqlite::params![issue_number, repo], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| format!("query card lookup: {e}"))?;
-        ids.extend(rows.filter_map(Result::ok));
-    } else {
-        let mut stmt = conn
-            .prepare("SELECT id FROM kanban_cards WHERE github_issue_number = ?1")
-            .map_err(|e| format!("prepare card lookup: {e}"))?;
-        let rows = stmt
-            .query_map([issue_number], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("query card lookup: {e}"))?;
-        ids.extend(rows.filter_map(Result::ok));
-    }
-
-    match ids.len() {
-        0 => Err(format!("no card found for issue #{issue_number}")),
-        1 => Ok(ids.remove(0)),
-        _ => Err(format!(
-            "multiple cards match issue #{issue_number}; pass --repo owner/repo or use the card id"
-        )),
-    }
-}
-
 async fn resolve_card_id_pg(
     pool: &sqlx::PgPool,
     card_ref: &str,
@@ -728,7 +643,11 @@ pub(crate) async fn cmd_card_create_from_issue(
     agent_id: Option<&str>,
 ) -> Result<(), String> {
     run_command(false, true, |state| async move {
-        let repo = resolve_repo_arg(repo, &state.db)?;
+        let pg_pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable for card create".to_string())?
+            .clone();
+        let repo = resolve_repo_arg_pg(repo, &pg_pool).await?;
         let issue = fetch_github_issue(&repo, issue_number)?;
 
         let requested_status = status.map(str::trim).filter(|value| !value.is_empty());
@@ -740,10 +659,6 @@ pub(crate) async fn cmd_card_create_from_issue(
 
         match target_status {
             "backlog" => {
-                let pg_pool = state
-                    .pg_pool
-                    .clone()
-                    .ok_or_else(|| "postgres pool unavailable for card create".to_string())?;
                 let card_id = upsert_backlog_card_from_issue_pg(&pg_pool, &repo, &issue)
                     .await
                     .map_err(|e| format!("upsert backlog card in postgres: {e}"))?;
@@ -752,12 +667,7 @@ pub(crate) async fn cmd_card_create_from_issue(
                 route_json(status, body)
             }
             "ready" => {
-                let default_agent_id = if let Some(pool) = state.pg_pool_ref() {
-                    repo_default_agent_id_pg(pool, &repo).await
-                } else {
-                    None
-                }
-                .or_else(|| repo_default_agent_id(&state.db, &repo));
+                let default_agent_id = repo_default_agent_id_pg(&pg_pool, &repo).await;
                 let effective_agent_id = agent_id
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
@@ -828,30 +738,6 @@ fn commit_merged_to_main(repo_dir: &str, commit: &str) -> Result<bool, String> {
     Ok(merge_status.success())
 }
 
-fn load_pr_tracking(db: &crate::db::Db, card_id: &str) -> Option<Value> {
-    db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at
-             FROM pr_tracking WHERE card_id = ?1",
-            [card_id],
-            |row| {
-                Ok(json!({
-                    "repo_id": row.get::<_, Option<String>>(0)?,
-                    "worktree_path": row.get::<_, Option<String>>(1)?,
-                    "branch": row.get::<_, Option<String>>(2)?,
-                    "pr_number": row.get::<_, Option<i64>>(3)?,
-                    "head_sha": row.get::<_, Option<String>>(4)?,
-                    "state": row.get::<_, String>(5)?,
-                    "last_error": row.get::<_, Option<String>>(6)?,
-                    "created_at": row.get::<_, Option<String>>(7)?,
-                    "updated_at": row.get::<_, Option<String>>(8)?,
-                }))
-            },
-        )
-        .ok()
-    })
-}
-
 async fn load_pr_tracking_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<Value> {
     let row = sqlx::query(
         "SELECT repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at
@@ -878,13 +764,10 @@ async fn load_pr_tracking_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<Value
 
 pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Result<(), String> {
     run_command(false, false, |state| async move {
-        let card_id = if let Some(pool) = state.pg_pool_ref() {
-            resolve_card_id_pg(pool, card_ref, repo)
-                .await
-                .or_else(|_| resolve_card_id(&state.db, card_ref, repo))?
-        } else {
-            resolve_card_id(&state.db, card_ref, repo)?
-        };
+        let pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable for card status".to_string())?;
+        let card_id = resolve_card_id_pg(pool, card_ref, repo).await?;
         let (status, Json(value)) =
             crate::server::routes::kanban::get_card(State(state.clone()), Path(card_id.clone()))
                 .await;
@@ -963,13 +846,7 @@ pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Resul
             _ => None,
         };
 
-        let pr_tracking = if let Some(pool) = state.pg_pool_ref() {
-            load_pr_tracking_pg(pool, &card_id)
-                .await
-                .or_else(|| load_pr_tracking(&state.db, &card_id))
-        } else {
-            load_pr_tracking(&state.db, &card_id)
-        };
+        let pr_tracking = load_pr_tracking_pg(pool, &card_id).await;
 
         Ok(json!({
             "card": card,
@@ -984,50 +861,43 @@ pub(crate) async fn cmd_card_status(card_ref: &str, repo: Option<&str>) -> Resul
     .await
 }
 
-fn resolve_auto_queue_run(
-    conn: &libsql_rusqlite::Connection,
+async fn resolve_auto_queue_run_pg(
+    pool: &sqlx::PgPool,
     run_id: Option<&str>,
     repo: Option<&str>,
     agent_id: Option<&str>,
 ) -> Result<String, String> {
     if let Some(run_id) = run_id.map(str::trim).filter(|value| !value.is_empty()) {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM auto_queue_runs WHERE id = ?1",
-                [run_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM auto_queue_runs WHERE id = $1)",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("query postgres auto-queue run '{run_id}': {e}"))?;
         if exists {
             return Ok(run_id.to_string());
         }
         return Err(format!("auto-queue run '{run_id}' not found"));
     }
 
-    let mut sql = String::from(
-        "SELECT id FROM auto_queue_runs WHERE status IN ('active', 'pending', 'generated', 'paused')",
-    );
-    let mut values: Vec<String> = Vec::new();
-
-    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
-        values.push(repo.to_string());
-        sql.push_str(&format!(" AND (repo = ?{} OR repo IS NULL)", values.len()));
-    }
-    if let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) {
-        values.push(agent_id.to_string());
-        sql.push_str(&format!(
-            " AND (agent_id = ?{} OR agent_id IS NULL)",
-            values.len()
-        ));
-    }
-    sql.push_str(" ORDER BY created_at DESC LIMIT 1");
-
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = values
-        .iter()
-        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
-        .collect();
-    conn.query_row(&sql, params_ref.as_slice(), |row| row.get::<_, String>(0))
-        .map_err(|_| "no matching live auto-queue run found".to_string())
+    let repo = repo.map(str::trim).filter(|value| !value.is_empty());
+    let agent_id = agent_id.map(str::trim).filter(|value| !value.is_empty());
+    sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_runs
+         WHERE status IN ('active', 'pending', 'generated', 'paused')
+           AND ($1::TEXT IS NULL OR repo = $1 OR repo IS NULL OR repo = '')
+           AND ($2::TEXT IS NULL OR agent_id = $2 OR agent_id IS NULL OR agent_id = '')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(repo)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("query postgres live auto-queue run: {e}"))?
+    .ok_or_else(|| "no matching live auto-queue run found".to_string())
 }
 
 pub(crate) async fn cmd_auto_queue_add(
@@ -1045,26 +915,35 @@ pub(crate) async fn cmd_auto_queue_add(
     }
 
     run_command(false, true, |state| async move {
-        let card_id = resolve_card_id(&state.db, card_ref, None)?;
-        let conn = state
-            .db
-            .separate_conn()
-            .map_err(|e| format!("open db: {e}"))?;
+        let pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable for auto-queue add".to_string())?;
+        let card_id = resolve_card_id_pg(pool, card_ref, None).await?;
 
         let (repo_id, card_agent_id, card_status, issue_number): (
             Option<String>,
             Option<String>,
             String,
             Option<i64>,
-        ) = conn
-            .query_row(
+        ) = {
+            let row = sqlx::query(
                 "SELECT repo_id, assigned_agent_id, status, github_issue_number
                  FROM kanban_cards
-                 WHERE id = ?1",
-                [&card_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                 WHERE id = $1",
             )
-            .map_err(|_| format!("card '{card_id}' not found"))?;
+            .bind(&card_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("load postgres card '{card_id}': {e}"))?
+            .ok_or_else(|| format!("card '{card_id}' not found"))?;
+            (
+                row.try_get("repo_id").ok().flatten(),
+                row.try_get("assigned_agent_id").ok().flatten(),
+                row.try_get("status")
+                    .map_err(|e| format!("decode postgres card status: {e}"))?,
+                row.try_get("github_issue_number").ok().flatten(),
+            )
+        };
 
         let effective_agent = agent_id
             .map(str::trim)
@@ -1072,77 +951,104 @@ pub(crate) async fn cmd_auto_queue_add(
             .map(str::to_string)
             .or(card_agent_id)
             .unwrap_or_default();
-        let existing_run_id = match resolve_auto_queue_run(
-            &conn,
+        let existing_run_id = match resolve_auto_queue_run_pg(
+            pool,
             run_id,
             repo_id.as_deref(),
             (!effective_agent.is_empty()).then_some(effective_agent.as_str()),
-        ) {
+        )
+        .await
+        {
             Ok(existing_run_id) => Some(existing_run_id),
             Err(err) if run_id.is_some() => return Err(err),
             Err(_) => None,
         };
 
         if let Some(existing_run_id) = existing_run_id {
-            let run_status: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM auto_queue_runs WHERE id = ?1",
-                    [&existing_run_id],
-                    |row| row.get(0),
-                )
-                .ok();
+            let run_status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM auto_queue_runs WHERE id = $1",
+            )
+            .bind(&existing_run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("load postgres auto-queue run status: {e}"))?;
             if run_id.is_some() || matches!(run_status.as_deref(), Some("active")) {
                 let issue_number = issue_number.ok_or_else(|| {
                     format!("card '{card_id}' has no linked GitHub issue number")
                 })?;
-                drop(conn);
-                let mut value = crate::cli::client::post_json_value(
-                    &format!("/api/auto-queue/runs/{existing_run_id}/entries"),
-                    json!({
-                        "issue_number": issue_number,
-                        "batch_phase": phase.unwrap_or(0),
-                        "thread_group": thread_group,
+                let (status, Json(mut value)) = crate::server::routes::auto_queue::add_run_entry(
+                    State(state.clone()),
+                    Path(existing_run_id.clone()),
+                    Json(crate::server::routes::auto_queue::AddRunEntryBody {
+                        issue_number,
+                        batch_phase: Some(phase.unwrap_or(0)),
+                        thread_group,
                     }),
-                );
-                if let (Ok(created), Some(priority_rank)) = (value.as_ref(), priority) {
-                    if let Some(entry_id) = created
+                )
+                .await;
+                if !status.is_success() {
+                    return Err(extract_error_message(&value)
+                        .unwrap_or_else(|| format!("auto-queue add failed ({})", status.as_u16())));
+                }
+                if let Some(priority_rank) = priority {
+                    if let Some(entry_id) = value
                         .get("entry")
                         .and_then(|entry| entry.get("id"))
                         .and_then(Value::as_str)
                     {
-                        value = crate::cli::client::patch_json_value(
-                            &format!("/api/auto-queue/entries/{entry_id}"),
-                            json!({
-                                "priority_rank": priority_rank,
-                            }),
-                        );
+                        let (update_status, Json(update_value)) =
+                            crate::server::routes::auto_queue::update_entry(
+                                State(state),
+                                Path(entry_id.to_string()),
+                                Json(crate::server::routes::auto_queue::UpdateEntryBody {
+                                    thread_group: None,
+                                    priority_rank: Some(priority_rank),
+                                    batch_phase: None,
+                                    status: None,
+                                }),
+                            )
+                            .await;
+                        if update_status.is_success() {
+                            value = update_value;
+                        } else {
+                            return Err(extract_error_message(&update_value).unwrap_or_else(|| {
+                                format!("auto-queue priority update failed ({})", update_status.as_u16())
+                            }));
+                        }
                     }
                 }
-                return value;
+                return Ok(value);
             }
         }
 
         let run_id = {
             let created_run_id = uuid::Uuid::new_v4().to_string();
-            conn.execute(
+            sqlx::query(
                 "INSERT INTO auto_queue_runs (
                      id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, thread_group_count
                  )
-                 VALUES (?1, ?2, ?3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
-                libsql_rusqlite::params![created_run_id, repo_id, effective_agent],
+                 VALUES ($1, $2, $3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
             )
-            .map_err(|e| format!("create auto-queue run: {e}"))?;
+            .bind(&created_run_id)
+            .bind(&repo_id)
+            .bind(&effective_agent)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("create postgres auto-queue run: {e}"))?;
             created_run_id
         };
 
-        let already_queued: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM auto_queue_entries
-                 WHERE run_id = ?1 AND kanban_card_id = ?2 AND status IN ('pending', 'dispatched')",
-                libsql_rusqlite::params![run_id, card_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let already_queued = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM auto_queue_entries
+                 WHERE run_id = $1 AND kanban_card_id = $2 AND status IN ('pending', 'dispatched')
+             )",
+        )
+        .bind(&run_id)
+        .bind(&card_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
         if already_queued {
             return Ok(json!({
                 "ok": true,
@@ -1152,14 +1058,16 @@ pub(crate) async fn cmd_auto_queue_add(
             }));
         }
 
-        let has_active_dispatch: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM task_dispatches
-                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
-                [&card_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let has_active_dispatch = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM task_dispatches
+                 WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')
+             )",
+        )
+        .bind(&card_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
         if has_active_dispatch {
             return Err(format!(
                 "card {card_id} already has an active dispatch and cannot be queued again"
@@ -1167,35 +1075,39 @@ pub(crate) async fn cmd_auto_queue_add(
         }
 
         let effective_thread_group = thread_group.unwrap_or(0);
-        let next_rank = priority.unwrap_or_else(|| {
-            conn.query_row(
-                "SELECT COALESCE(MAX(priority_rank), -1) + 1
+        let next_rank = if let Some(priority) = priority {
+            priority
+        } else {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT (COALESCE(MAX(priority_rank), -1) + 1)::BIGINT
                  FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND COALESCE(thread_group, 0) = ?2",
-                libsql_rusqlite::params![&run_id, effective_thread_group],
-                |row| row.get::<_, i64>(0),
+                 WHERE run_id = $1
+                   AND COALESCE(thread_group, 0) = $2",
             )
+            .bind(&run_id)
+            .bind(effective_thread_group)
+            .fetch_one(pool)
+            .await
             .unwrap_or(0)
-        });
+        };
         let entry_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
+        sqlx::query(
             "INSERT INTO auto_queue_entries (
                  id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, reason
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql_rusqlite::params![
-                entry_id,
-                run_id,
-                card_id,
-                effective_agent,
-                next_rank,
-                effective_thread_group,
-                phase.unwrap_or(0),
-                format!("manual CLI add from status {card_status}"),
-            ],
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
-        .map_err(|e| format!("insert auto-queue entry: {e}"))?;
+        .bind(&entry_id)
+        .bind(&run_id)
+        .bind(&card_id)
+        .bind(&effective_agent)
+        .bind(next_rank)
+        .bind(effective_thread_group)
+        .bind(phase.unwrap_or(0))
+        .bind(format!("manual CLI add from status {card_status}"))
+        .execute(pool)
+        .await
+        .map_err(|e| format!("insert postgres auto-queue entry: {e}"))?;
 
         Ok(json!({
             "ok": true,
@@ -1221,38 +1133,43 @@ pub(crate) async fn cmd_auto_queue_config(
     }
 
     run_command(false, true, |state| async move {
-        let conn = state
-            .db
-            .separate_conn()
-            .map_err(|e| format!("open db: {e}"))?;
-        let run_id = resolve_auto_queue_run(&conn, run_id, repo, agent_id)?;
-        let changed = conn
-            .execute(
-                "UPDATE auto_queue_runs SET max_concurrent_threads = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![max_concurrent_threads, run_id],
-            )
-            .map_err(|e| format!("update auto-queue run: {e}"))?;
-        if changed == 0 {
-            return Err("auto-queue run not found".to_string());
+        let pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable for auto-queue config".to_string())?;
+        let pool = pool.clone();
+        let run_id = resolve_auto_queue_run_pg(&pool, run_id, repo, agent_id).await?;
+        let (status, Json(value)) = crate::server::routes::auto_queue::update_run(
+            State(state.clone()),
+            Path(run_id.clone()),
+            Json(crate::server::routes::auto_queue::UpdateRunBody {
+                status: None,
+                unified_thread: None,
+                deploy_phases: None,
+                max_concurrent_threads: Some(max_concurrent_threads),
+            }),
+        )
+        .await;
+        if !status.is_success() {
+            return Err(extract_error_message(&value)
+                .unwrap_or_else(|| format!("auto-queue config failed ({})", status.as_u16())));
         }
 
-        let run = conn
-            .query_row(
-                "SELECT id, repo, agent_id, status, max_concurrent_threads, thread_group_count
-                 FROM auto_queue_runs WHERE id = ?1",
-                [&run_id],
-                |row| {
-                    Ok(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "repo": row.get::<_, Option<String>>(1)?,
-                        "agent_id": row.get::<_, Option<String>>(2)?,
-                        "status": row.get::<_, String>(3)?,
-                        "max_concurrent_threads": row.get::<_, i64>(4)?,
-                        "thread_group_count": row.get::<_, i64>(5)?,
-                    }))
-                },
-            )
-            .map_err(|e| format!("reload auto-queue run: {e}"))?;
+        let row = sqlx::query(
+            "SELECT id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+             FROM auto_queue_runs WHERE id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| format!("reload postgres auto-queue run: {e}"))?;
+        let run = json!({
+            "id": row.try_get::<String, _>("id").unwrap_or_default(),
+            "repo": row.try_get::<Option<String>, _>("repo").ok().flatten(),
+            "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            "status": row.try_get::<String, _>("status").unwrap_or_default(),
+            "max_concurrent_threads": row.try_get::<i64, _>("max_concurrent_threads").unwrap_or(1),
+            "thread_group_count": row.try_get::<i64, _>("thread_group_count").unwrap_or(1),
+        });
 
         Ok(json!({
             "ok": true,
