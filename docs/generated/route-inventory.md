@@ -131,7 +131,7 @@
 | `POST` | `/api/kanban-cards/{id}/retry` | `kanban::retry_card` | `src/server/routes/kanban.rs:1021` | `src/server/routes/domains/kanban.rs:33` |
 | `GET` | `/api/kanban-cards/{id}/review-state` | `kanban::get_card_review_state` | `src/server/routes/kanban.rs:1511` | `src/server/routes/domains/kanban.rs:41` |
 | `GET` | `/api/kanban-cards/{id}/reviews` | `kanban::list_card_reviews` | `src/server/routes/kanban.rs:1600` | `src/server/routes/domains/kanban.rs:40` |
-| `POST` | `/api/kanban-cards/{id}/transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:4510` | `src/server/routes/domains/kanban.rs:29` |
+| `POST` | `/api/kanban-cards/{id}/transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:4514` | `src/server/routes/domains/kanban.rs:29` |
 | `GET` | `/api/kanban-repos` | `kanban_repos::list_repos` | `src/server/routes/kanban_repos.rs:29` | `src/server/routes/domains/kanban.rs:50` |
 | `POST` | `/api/kanban-repos` | `kanban_repos::create_repo` | `src/server/routes/kanban_repos.rs:78` | `src/server/routes/domains/kanban.rs:50` |
 | `DELETE` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::delete_repo` | `src/server/routes/kanban_repos.rs:234` | `src/server/routes/domains/kanban.rs:54` |

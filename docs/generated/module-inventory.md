@@ -123,7 +123,7 @@
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
-| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1581 | giant-file |
+| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1584 | giant-file |
 | `kanban` | `src/kanban.rs` | 3817 | giant-file |
 | `launch` | `src/launch.rs` | 59 |  |
 | `logging` | `src/logging.rs` | 160 |  |
@@ -152,7 +152,7 @@
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 189 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 165 |  |
-| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 4496 | giant-file |
+| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 4497 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 424 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 6101 | giant-file |
@@ -174,7 +174,7 @@
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 936 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
-| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4775 | giant-file |
+| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4787 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 2024 | giant-file |
