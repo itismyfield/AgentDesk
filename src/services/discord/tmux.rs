@@ -6335,10 +6335,61 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         None,
                     );
                     record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                    crate::services::platform::tmux::kill_session_with_reason(
-                        &sess,
-                        "watcher cleanup: dead session after turn",
-                    );
+
+                    // #1261 (Fix B): the wrapper's stderr `[stderr] ...` lines and
+                    // synthetic `[fatal startup error]` markers go to the PTY, not
+                    // to the structured jsonl that `recent_output_tail` reads. Dump
+                    // the current pane buffer to a `death_pane_log` file BEFORE we
+                    // kill the session so the wrapper-level death context is still
+                    // recoverable post-mortem. Kept out of `cleanup_session_temp_files`
+                    // EXTS on purpose — the file persists past the cleanup and is
+                    // overwritten on the next death of the same session.
+                    if let Some(pane_content) =
+                        crate::services::platform::tmux::capture_pane(&sess, -1000)
+                    {
+                        let stamped = format!(
+                            "[{}] post-mortem capture for session={}\n{}",
+                            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                            sess,
+                            pane_content
+                        );
+                        let path = crate::services::tmux_common::session_temp_path(
+                            &sess,
+                            "death_pane_log",
+                        );
+                        if let Some(parent) = std::path::Path::new(&path).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&path, stamped);
+                    }
+
+                    // #1261 (codex P2): the `capture_pane` subprocess above
+                    // widens the gap between the outer dead-pane gate and the
+                    // kill. In that window a concurrent follow-up could run
+                    // claude.rs::start_claude, which kills the stale session
+                    // (line 1294), respawns a fresh live session with the
+                    // same name (line 1379), and we'd then kill the brand-new
+                    // session here. Revalidate the dead-pane condition right
+                    // before the kill so we only tear down the same
+                    // dead-paned session we capture-paned.
+                    if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
+                        crate::services::platform::tmux::kill_session_with_reason(
+                            &sess,
+                            "watcher cleanup: dead session after turn",
+                        );
+                    }
+                    // NOTE: jsonl/FIFO/etc. cleanup intentionally NOT done here.
+                    // `claude.rs::start_claude` calls
+                    // `cleanup_session_temp_files` at spawn time
+                    // (`claude.rs:1304`) before recreating the canonical paths,
+                    // which already covers the "next-spawn against stale jsonl"
+                    // case. Pairing a watcher-side cleanup with the kill races
+                    // with that spawn-side cleanup + recreate (#1261 codex P1):
+                    // if the next message lands between our `kill_session` and
+                    // our cleanup, claude's spawn already laid down fresh files
+                    // and our cleanup deletes them, breaking the new turn.
+                    // Keep cleanup as a single-source-of-truth on the spawn
+                    // path.
                 }
             })
             .await;

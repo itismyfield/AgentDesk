@@ -649,4 +649,84 @@ mod tests {
         let stale_content = std::fs::read_to_string(&stale).expect("read stale");
         assert!(stale_content.contains(r#"{"type":"assistant","message":"before"}"#));
     }
+
+    // #1261 (Fix B): the watcher cleanup writes a `death_pane_log` snapshot
+    // before killing the dead-pane session so the wrapper-level stderr that
+    // never reached the structured jsonl is still recoverable post-mortem.
+    // `cleanup_session_temp_files` MUST NOT delete this snapshot — otherwise
+    // it would be erased microseconds after being written.
+    //
+    // The deletable EXTS list (`jsonl`, `input`, `prompt`, `owner`, `sh`,
+    // `generation`, `exit_reason`) is the cleanup contract; pin its shape
+    // here so a future "let's also nuke death_pane_log" tweak fails this
+    // test instead of silently re-breaking post-mortem.
+    #[test]
+    fn cleanup_session_temp_files_preserves_death_pane_log_snapshot() {
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let previous_host = std::env::var_os("HOSTNAME");
+
+        let tdir =
+            std::env::temp_dir().join(format!("adk-issue-1261-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tdir);
+
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", &tdir);
+            std::env::set_var("HOSTNAME", "issue-1261-host");
+        }
+
+        let session = format!("issue-1261-cleanup-sess-{}", std::process::id());
+
+        // Seed every cleanup-eligible extension *plus* the death_pane_log
+        // snapshot Fix B writes.
+        let cleaned_exts = [
+            "jsonl",
+            "input",
+            "prompt",
+            "owner",
+            "sh",
+            "generation",
+            "exit_reason",
+        ];
+        let mut cleaned_paths = Vec::new();
+        for ext in &cleaned_exts {
+            let path = session_temp_path(&session, ext);
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, format!("seed-{ext}")).unwrap();
+            cleaned_paths.push(path);
+        }
+        let death_log_path = session_temp_path(&session, "death_pane_log");
+        std::fs::write(&death_log_path, "post-mortem capture").unwrap();
+
+        cleanup_session_temp_files(&session);
+
+        for path in &cleaned_paths {
+            assert!(
+                !std::path::Path::new(path).exists(),
+                "cleanup_session_temp_files must remove cleanup-eligible files: {path}"
+            );
+        }
+        assert!(
+            std::path::Path::new(&death_log_path).exists(),
+            "cleanup_session_temp_files must NOT remove the death_pane_log snapshot: {death_log_path}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&death_log_path).unwrap(),
+            "post-mortem capture",
+            "death_pane_log content must be preserved verbatim"
+        );
+
+        let _ = std::fs::remove_file(&death_log_path);
+        let _ = std::fs::remove_dir_all(&tdir);
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+        match previous_host {
+            Some(value) => unsafe { std::env::set_var("HOSTNAME", value) },
+            None => unsafe { std::env::remove_var("HOSTNAME") },
+        }
+    }
 }
