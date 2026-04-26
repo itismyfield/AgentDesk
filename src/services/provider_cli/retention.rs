@@ -68,10 +68,7 @@ pub fn build_retention_set(
 
 /// Dry-run: list paths under `scan_dir` that are NOT in the retention set.
 /// Does not delete anything.
-pub fn cleanup_dry_run(
-    scan_dir: &Path,
-    set: &RetentionSet,
-) -> std::io::Result<Vec<PathBuf>> {
+pub fn cleanup_dry_run(scan_dir: &Path, set: &RetentionSet) -> std::io::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
     for entry in std::fs::read_dir(scan_dir)? {
         let entry = entry?;
@@ -86,7 +83,9 @@ pub fn cleanup_dry_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::provider_cli::registry::{ProviderChannels, ProviderCliChannel, ProviderCliRegistry};
+    use crate::services::provider_cli::registry::{
+        ProviderChannels, ProviderCliChannel, ProviderCliRegistry,
+    };
     use chrono::Utc;
     use std::collections::HashMap;
 

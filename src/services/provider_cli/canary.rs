@@ -12,7 +12,10 @@ pub fn select_canary_agent(
     requested_agent_id: Option<&str>,
 ) -> Option<String> {
     if let Some(id) = requested_agent_id {
-        if agents.iter().any(|a| a.agent_id == id && a.provider == provider) {
+        if agents
+            .iter()
+            .any(|a| a.agent_id == id && a.provider == provider)
+        {
             return Some(id.to_string());
         }
     }
