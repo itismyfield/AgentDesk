@@ -213,9 +213,36 @@ mod tests {
     use super::{
         MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
         build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
-        filter_codex_tool_logs, finalize_in_progress_tool_status, normalize_allowed_tools,
-        preserve_previous_tool_status,
+        escape_for_code_fence, filter_codex_tool_logs, finalize_in_progress_tool_status,
+        normalize_allowed_tools, preserve_previous_tool_status,
     };
+
+    #[test]
+    fn escape_for_code_fence_passes_through_when_no_triple_backtick() {
+        assert_eq!(escape_for_code_fence("plain text"), "plain text");
+        assert_eq!(escape_for_code_fence("`one` `two`"), "`one` `two`");
+        assert_eq!(
+            escape_for_code_fence("``two backticks``"),
+            "``two backticks``"
+        );
+    }
+
+    #[test]
+    fn escape_for_code_fence_breaks_triple_backtick_fences() {
+        // Without escaping, "```" inside a fenced block would close the fence
+        // prematurely. We split it with a zero-width space so the user still
+        // sees three backticks but Discord stops treating it as a terminator.
+        let zwsp = "\u{200B}";
+        assert_eq!(
+            escape_for_code_fence("before ``` after"),
+            format!("before ``{zwsp}` after"),
+        );
+        // Multiple occurrences are all escaped.
+        assert_eq!(
+            escape_for_code_fence("a``` b ```c"),
+            format!("a``{zwsp}` b ``{zwsp}`c"),
+        );
+    }
 
     #[test]
     fn test_canonical_tool_name_is_case_insensitive() {
@@ -1386,6 +1413,21 @@ pub(super) fn build_streaming_placeholder_text(
 }
 
 /// Truncate a string to max_len bytes at a safe UTF-8 and line boundary
+/// Make a string safe to embed inside a Discord triple-backtick code fence.
+///
+/// If the input contains a literal "```" sequence, it would prematurely close
+/// the surrounding fence and let the rest leak out as Markdown. Insert a
+/// zero-width space (U+200B) between the second and third backtick so the
+/// rendered output stays inside the fence; the user sees the same backticks
+/// visually but Discord no longer treats it as a fence terminator.
+pub(super) fn escape_for_code_fence(s: &str) -> String {
+    if s.contains("```") {
+        s.replace("```", "``\u{200B}`")
+    } else {
+        s.to_string()
+    }
+}
+
 pub(super) fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         return s.to_string();
