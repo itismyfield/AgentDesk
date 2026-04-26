@@ -62,7 +62,9 @@ fn overall_status(checks: &SmokeChecks) -> &'static str {
         &checks.resume,
         &checks.cancel,
     ];
-    let failed = statuses.iter().any(|s| matches!(s, SmokeCheckStatus::Failed));
+    let failed = statuses
+        .iter()
+        .any(|s| matches!(s, SmokeCheckStatus::Failed));
     let all_ok = statuses.iter().all(|s| matches!(s, SmokeCheckStatus::Ok));
     if failed {
         "failed"

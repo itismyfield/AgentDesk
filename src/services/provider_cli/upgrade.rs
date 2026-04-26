@@ -12,9 +12,16 @@ use super::snapshot::snapshot_current_channel;
 pub enum UpgradeError {
     NoStrategy,
     CurrentSnapshotRequired,
-    PreviousPreservationRequired { reason: String },
-    UpgradeCommandFailed { exit_code: Option<i32>, stderr: String },
-    VersionUnchanged { version: String },
+    PreviousPreservationRequired {
+        reason: String,
+    },
+    UpgradeCommandFailed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    VersionUnchanged {
+        version: String,
+    },
     Io(std::io::Error),
 }
 
@@ -114,8 +121,8 @@ pub fn run_upgrade(
     }
 
     // Re-snapshot after upgrade to get new version.
-    let post_channel = snapshot_current_channel(provider)
-        .ok_or_else(|| UpgradeError::UpgradeCommandFailed {
+    let post_channel =
+        snapshot_current_channel(provider).ok_or_else(|| UpgradeError::UpgradeCommandFailed {
             exit_code: None,
             stderr: "binary not found after upgrade".to_string(),
         })?;
@@ -133,10 +140,7 @@ pub fn run_upgrade(
     evidence.insert("pre_version".to_string(), pre_version.clone());
     evidence.insert("post_version".to_string(), post_version.clone());
     evidence.insert("strategy".to_string(), strategy.install_source.to_string());
-    evidence.insert(
-        "command".to_string(),
-        strategy.command_argv.join(" "),
-    );
+    evidence.insert("command".to_string(), strategy.command_argv.join(" "));
 
     Ok(UpgradeResult {
         pre_version,
@@ -147,7 +151,10 @@ pub fn run_upgrade(
 }
 
 /// Build the initial `ProviderCliMigrationState` in `Planned` state.
-pub fn new_migration_state(provider: &str, current: ProviderCliChannel) -> ProviderCliMigrationState {
+pub fn new_migration_state(
+    provider: &str,
+    current: ProviderCliChannel,
+) -> ProviderCliMigrationState {
     let now = Utc::now();
     ProviderCliMigrationState {
         schema_version: 1,
@@ -258,7 +265,12 @@ mod tests {
         let mut state = new_migration_state("codex", make_channel());
         transition(&mut state, MigrationState::CurrentSnapshotted, None).unwrap();
         transition(&mut state, MigrationState::SmokeCurrentPassed, None).unwrap();
-        transition(&mut state, MigrationState::RolledBack, Some("test".to_string())).unwrap();
+        transition(
+            &mut state,
+            MigrationState::RolledBack,
+            Some("test".to_string()),
+        )
+        .unwrap();
         assert_eq!(state.state, MigrationState::RolledBack);
     }
 
