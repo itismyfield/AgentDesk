@@ -1370,7 +1370,7 @@ export default function StatsPageView({
                 />
               </div>
               <div data-testid="stats-agent-leaderboard">
-                <AgentLeaderboardCard t={t} rows={leaderboardRows} />
+                <AgentLeaderboardCard t={t} rows={leaderboardRows} agents={agents} />
               </div>
             </div>
           </div>
@@ -2393,9 +2393,11 @@ function SkillUsageCard({
 function AgentLeaderboardCard({
   t,
   rows,
+  agents,
 }: {
   t: TFunction;
   rows: LeaderboardRow[];
+  agents?: Agent[];
 }) {
   const maxTokens = Math.max(1, ...rows.map((row) => row.tokens));
 
