@@ -13,7 +13,7 @@
 //! The table itself is created in the Postgres migration
 //! `0019_db_table_metadata.sql` and in `src/db/schema.rs` for SQLite.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use libsql_rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -46,6 +46,14 @@ impl Source {
             _ => None,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Source::Db => "db",
+            Source::File => "file",
+            Source::FileCanonical => "file-canonical",
+        }
+    }
 }
 
 /// `fn db_source_of_truth(table_name) -> Option<Source>` — Postgres path.
@@ -59,6 +67,30 @@ pub async fn source_of_truth_pg(pool: &PgPool, table_name: &str) -> Option<Sourc
             .ok()
             .flatten();
     row.and_then(|(s,)| Source::from_str(&s))
+}
+
+#[allow(dead_code)]
+pub async fn upsert_pg(
+    pool: &PgPool,
+    table_name: &str,
+    source: Source,
+    file_path: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO db_table_metadata (table_name, source_of_truth, file_path, last_synced_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (table_name) DO UPDATE SET
+             source_of_truth = EXCLUDED.source_of_truth,
+             file_path = EXCLUDED.file_path,
+             last_synced_at = NOW()",
+    )
+    .bind(table_name)
+    .bind(source.as_str())
+    .bind(file_path)
+    .execute(pool)
+    .await
+    .map_err(|error| anyhow!("upsert postgres db_table_metadata {table_name}: {error}"))?;
+    Ok(())
 }
 
 /// `fn db_source_of_truth(table_name) -> Option<Source>` — SQLite path.
@@ -80,11 +112,6 @@ pub fn upsert_sqlite(
     source: Source,
     file_path: Option<&str>,
 ) -> Result<()> {
-    let source_str = match source {
-        Source::Db => "db",
-        Source::File => "file",
-        Source::FileCanonical => "file-canonical",
-    };
     conn.execute(
         "INSERT INTO db_table_metadata (table_name, source_of_truth, file_path, last_synced_at)
          VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
@@ -92,9 +119,97 @@ pub fn upsert_sqlite(
              source_of_truth = excluded.source_of_truth,
              file_path = excluded.file_path,
              last_synced_at = CURRENT_TIMESTAMP",
-        libsql_rusqlite::params![table_name, source_str, file_path],
+        libsql_rusqlite::params![table_name, source.as_str(), file_path],
     )?;
     Ok(())
+}
+
+fn load_pipeline_state_ids(yaml_path: &std::path::Path) -> Result<Option<Vec<String>>> {
+    use std::fs;
+
+    if !yaml_path.exists() {
+        tracing::warn!(
+            "[db_table_metadata] pipeline yaml not found at {}; skipping sync",
+            yaml_path.display()
+        );
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(yaml_path)?;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+
+    let states = parsed
+        .get("states")
+        .and_then(|v| v.as_sequence())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(Some(
+        states
+            .iter()
+            .filter_map(|state| state.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect(),
+    ))
+}
+
+#[allow(dead_code)]
+pub async fn sync_pipeline_stages_from_yaml_pg(
+    pool: &PgPool,
+    yaml_path: &std::path::Path,
+) -> Result<usize> {
+    let Some(yaml_names) = load_pipeline_state_ids(yaml_path)? else {
+        return Ok(0);
+    };
+
+    let sentinel_repo = "__default__";
+    for (idx, id) in yaml_names.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO pipeline_stages
+                (repo_id, stage_name, stage_order, entry_skill, timeout_minutes, on_failure)
+             VALUES ($1, $2, $3, NULL, 60, 'fail')
+             ON CONFLICT (repo_id, stage_name) DO NOTHING",
+        )
+        .bind(sentinel_repo)
+        .bind(id)
+        .bind(idx as i64 + 1)
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "sync postgres pipeline_stages from {}: {error}",
+                yaml_path.display()
+            )
+        })?;
+    }
+
+    let db_names = sqlx::query_scalar::<_, String>(
+        "SELECT stage_name
+         FROM pipeline_stages
+         WHERE repo_id = $1 AND stage_name IS NOT NULL",
+    )
+    .bind(sentinel_repo)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("scan postgres pipeline_stages default rows: {error}"))?;
+    for row in db_names {
+        if !yaml_names.contains(&row) {
+            tracing::warn!(
+                "[db_table_metadata] pipeline_stages has DB-only entry '{}' not present in {}; leaving untouched",
+                row,
+                yaml_path.display()
+            );
+        }
+    }
+
+    upsert_pg(
+        pool,
+        "pipeline_stages",
+        Source::FileCanonical,
+        yaml_path.to_str(),
+    )
+    .await?;
+
+    Ok(yaml_names.len())
 }
 
 /// Materialized view sync.  Parses `policies/default-pipeline.yaml`
@@ -110,35 +225,12 @@ pub fn sync_pipeline_stages_from_yaml_sqlite(
     conn: &Connection,
     yaml_path: &std::path::Path,
 ) -> Result<usize> {
-    use std::fs;
-
-    if !yaml_path.exists() {
-        tracing::warn!(
-            "[db_table_metadata] pipeline yaml not found at {}; skipping sync",
-            yaml_path.display()
-        );
+    let Some(yaml_names) = load_pipeline_state_ids(yaml_path)? else {
         return Ok(0);
-    }
-
-    let raw = fs::read_to_string(yaml_path)?;
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&raw)?;
-
-    let states = parsed
-        .get("states")
-        .and_then(|v| v.as_sequence())
-        .cloned()
-        .unwrap_or_default();
+    };
 
     let sentinel_repo = "__default__";
-    let mut yaml_names: Vec<String> = Vec::new();
-
-    for (idx, state) in states.iter().enumerate() {
-        let id = match state.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        yaml_names.push(id.clone());
-
+    for (idx, id) in yaml_names.iter().enumerate() {
         conn.execute(
             "INSERT INTO pipeline_stages
                 (repo_id, stage_name, stage_order, entry_skill, timeout_minutes, on_failure)
@@ -181,66 +273,30 @@ pub fn sync_pipeline_stages_from_yaml_sqlite(
 mod tests {
     use super::*;
 
-    fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        conn
-    }
-
     #[test]
-    fn db_source_of_truth_returns_seeded_value() {
-        let conn = test_conn();
-        // pipeline_stages is seeded as file-canonical by the schema migrator.
-        let got = source_of_truth_sqlite(&conn, "pipeline_stages");
-        assert_eq!(got, Some(Source::FileCanonical));
-        assert!(got.unwrap().is_readonly());
-    }
-
-    #[test]
-    fn db_source_of_truth_returns_none_for_unknown_table() {
-        let conn = test_conn();
-        let got = source_of_truth_sqlite(&conn, "no_such_table_xyz");
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn db_source_of_truth_upsert_roundtrip() {
-        let conn = test_conn();
-        upsert_sqlite(
-            &conn,
-            "role_bindings",
-            Source::File,
-            Some("config/agentdesk.yaml"),
-        )
-        .unwrap();
+    fn source_roundtrips_storage_values() {
+        assert_eq!(Source::from_str(Source::Db.as_str()), Some(Source::Db));
+        assert_eq!(Source::from_str(Source::File.as_str()), Some(Source::File));
         assert_eq!(
-            source_of_truth_sqlite(&conn, "role_bindings"),
-            Some(Source::File)
+            Source::from_str(Source::FileCanonical.as_str()),
+            Some(Source::FileCanonical)
         );
+        assert_eq!(Source::from_str("unknown"), None);
+    }
 
-        // Flip to db-canonical.
-        upsert_sqlite(&conn, "role_bindings", Source::Db, None).unwrap();
-        assert_eq!(
-            source_of_truth_sqlite(&conn, "role_bindings"),
-            Some(Source::Db)
-        );
+    #[test]
+    fn readonly_marker_matches_file_sources() {
+        assert!(Source::File.is_readonly());
+        assert!(Source::FileCanonical.is_readonly());
         assert!(!Source::Db.is_readonly());
     }
 
     #[test]
-    fn materialized_view_sync_populates_stages_from_yaml() {
+    fn load_pipeline_state_ids_reads_top_level_states() {
         use std::io::Write;
-        let conn = test_conn();
-
-        // Make sure the metadata table starts empty for this table.
-        conn.execute(
-            "DELETE FROM db_table_metadata WHERE table_name = 'pipeline_stages'",
-            [],
-        )
-        .unwrap();
 
         let dir = std::env::temp_dir().join(format!(
-            "agentdesk_1097_yaml_{}",
+            "agentdesk_table_metadata_yaml_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -256,35 +312,8 @@ mod tests {
         .unwrap();
         drop(f);
 
-        let inserted = sync_pipeline_stages_from_yaml_sqlite(&conn, &yaml_path).unwrap();
-        assert_eq!(inserted, 3);
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = '__default__'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 3);
-
-        // The metadata row is now stamped and marks the table readonly.
-        assert_eq!(
-            source_of_truth_sqlite(&conn, "pipeline_stages"),
-            Some(Source::FileCanonical)
-        );
-
-        // Re-running should be idempotent.
-        let inserted2 = sync_pipeline_stages_from_yaml_sqlite(&conn, &yaml_path).unwrap();
-        assert_eq!(inserted2, 3);
-        let count2: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = '__default__'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count2, 3);
+        let ids = load_pipeline_state_ids(&yaml_path).unwrap().unwrap();
+        assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2606,6 +2606,22 @@ pub fn run_has_blocking_phase_gate(conn: &Connection, run_id: &str) -> bool {
     .unwrap_or(false)
 }
 
+#[allow(dead_code)]
+pub async fn run_has_blocking_phase_gate_pg(
+    pool: &PgPool,
+    run_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
+         FROM auto_queue_phase_gates
+         WHERE run_id = $1
+           AND status IN ('pending', 'failed')",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+}
+
 fn consultation_metadata_object(
     base_metadata_json: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -3926,7 +3942,7 @@ pub fn slot_has_active_dispatch_excluding(
     .unwrap_or(false)
 }
 
-async fn slot_has_active_dispatch_excluding_pg(
+pub async fn slot_has_active_dispatch_excluding_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -3987,6 +4003,52 @@ pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqli
          WHERE id = ?2",
         libsql_rusqlite::params![thread_group_count, run_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
     )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn sync_run_group_metadata_pg(pool: &PgPool, run_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres sync run group metadata {run_id}: {error}"))?;
+    sync_run_group_metadata_pg_tx(&mut tx, run_id).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres sync run group metadata {run_id}: {error}"))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn sync_run_group_metadata_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<(), String> {
+    let thread_group_count = sqlx::query_scalar::<_, i64>(
+        "SELECT GREATEST(
+                COALESCE(COUNT(DISTINCT COALESCE(thread_group, 0)), 0),
+                1
+            )::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("count postgres thread groups for run {run_id}: {error}"))?;
+
+    sqlx::query(
+        "UPDATE auto_queue_runs
+         SET thread_group_count = $1,
+             max_concurrent_threads = $1
+         WHERE id = $2",
+    )
+    .bind(thread_group_count)
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("update postgres run group metadata for {run_id}: {error}"))?;
+
     Ok(())
 }
 
