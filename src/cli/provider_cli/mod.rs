@@ -10,7 +10,7 @@ use crate::services::provider_cli::orchestration::{
     session_guard_evidence,
 };
 use crate::services::provider_cli::registry::{
-    MigrationState, PROVIDER_UPDATE_STRATEGIES, ProviderCliChannel,
+    MigrationState, PROVIDER_UPDATE_STRATEGIES, ProviderCliChannel, ProviderCliMigrationState,
 };
 use crate::services::provider_cli::smoke::run_smoke;
 use crate::services::provider_cli::snapshot::snapshot_current_channel;
@@ -605,6 +605,15 @@ fn preserved_previous_channel(
     }
 }
 
+fn should_reuse_migration_state(state: &ProviderCliMigrationState) -> bool {
+    !matches!(
+        state.state,
+        MigrationState::Failed
+            | MigrationState::RolledBack
+            | MigrationState::ProviderAgentsMigrated
+    )
+}
+
 /// Full migration orchestration: runs through the state machine up to
 /// `AwaitingOperatorPromote` (or `ProviderAgentsMigrated` when `auto_promote=true`).
 fn cmd_run(
@@ -625,7 +634,7 @@ fn cmd_run(
     // Initialize or reload migration state.
     let mut state = load_migration_state(&root, provider)
         .map_err(|e| e.to_string())?
-        .filter(|s| s.state != MigrationState::Failed && s.state != MigrationState::RolledBack)
+        .filter(should_reuse_migration_state)
         .unwrap_or_else(|| new_migration_state(provider, current.clone()));
 
     advance_to(&mut state, MigrationState::CurrentSnapshotted, None)?;
@@ -957,6 +966,35 @@ mod tests {
         });
 
         assert_eq!(result, Err("unsupported provider: ../codex".to_string()));
+    }
+
+    #[test]
+    fn completed_or_terminal_migration_state_is_not_reused_by_run() {
+        use crate::services::provider_cli::registry::{MigrationState, ProviderCliMigrationState};
+        use chrono::Utc;
+
+        let mut state = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::AwaitingOperatorPromote,
+            selected_agent_id: None,
+            current_channel: None,
+            candidate_channel: None,
+            rollback_target: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            history: vec![],
+        };
+
+        assert!(should_reuse_migration_state(&state));
+        for terminal in [
+            MigrationState::ProviderAgentsMigrated,
+            MigrationState::RolledBack,
+            MigrationState::Failed,
+        ] {
+            state.state = terminal;
+            assert!(!should_reuse_migration_state(&state));
+        }
     }
 
     #[test]

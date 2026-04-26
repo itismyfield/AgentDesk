@@ -185,6 +185,14 @@ pub async fn patch_provider_cli(
                 )
             })
             .and_then(|_| {
+                save_migration_state(&root, &migration).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("save migration state: {e}"),
+                    )
+                })
+            })
+            .and_then(|_| {
                 promote_registry_candidate(&root, &provider).map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -453,6 +461,93 @@ mod tests {
         let channels = registry.providers.get("codex").unwrap();
         assert_eq!(channels.current.as_ref(), Some(&candidate));
         assert!(channels.agent_overrides.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn patch_confirm_promote_saves_state_before_registry_promotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime_root = RuntimeRootOverrideGuard::set(dir.path());
+
+        use crate::services::provider_cli::paths::migration_state_path;
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderChannels, ProviderCliChannel, ProviderCliMigrationState,
+            ProviderCliRegistry,
+        };
+        use chrono::Utc;
+        use std::os::unix::fs::PermissionsExt;
+
+        let current = ProviderCliChannel {
+            path: "/tmp/current-codex".to_string(),
+            canonical_path: "/tmp/current-codex".to_string(),
+            version: "current".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        };
+        let candidate = ProviderCliChannel {
+            path: "/tmp/candidate-codex".to_string(),
+            canonical_path: "/tmp/candidate-codex".to_string(),
+            version: "candidate".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        };
+        let ms = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::AwaitingOperatorPromote,
+            selected_agent_id: None,
+            current_channel: Some(current.clone()),
+            candidate_channel: Some(candidate.clone()),
+            rollback_target: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            history: vec![],
+        };
+        crate::services::provider_cli::io::save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                current: Some(current.clone()),
+                candidate: Some(candidate),
+                ..Default::default()
+            },
+        );
+        crate::services::provider_cli::io::save_registry(dir.path(), &registry).unwrap();
+
+        let state_path = migration_state_path(dir.path(), "codex");
+        let mut read_only = std::fs::metadata(&state_path).unwrap().permissions();
+        read_only.set_mode(0o444);
+        std::fs::set_permissions(&state_path, read_only).unwrap();
+
+        let state = make_state();
+        let body = ProviderCliActionRequest {
+            action: "confirm_promote".to_string(),
+            evidence: Some("operator approved".to_string()),
+            force_recreate_active: false,
+        };
+        let (status, Json(value)) =
+            patch_provider_cli(State(state), Path("codex".to_string()), Json(body)).await;
+
+        let mut writable = std::fs::metadata(&state_path).unwrap().permissions();
+        writable.set_mode(0o644);
+        std::fs::set_permissions(&state_path, writable).unwrap();
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("save migration state"))
+        );
+        let registry = crate::services::provider_cli::io::load_registry(dir.path())
+            .unwrap()
+            .unwrap();
+        let channels = registry.providers.get("codex").unwrap();
+        assert_eq!(channels.current.as_ref(), Some(&current));
     }
 
     #[tokio::test]
