@@ -109,8 +109,11 @@ async fn stop_turn_with_policy(
 
     // Some force-kill callers only know the tmux session name. When the canonical
     // provider/channel path cannot resolve, fall back to mailbox hard-stop cleanup
-    // so active-turn state does not survive after tmux teardown.
+    // so active-turn state does not survive after tmux teardown. Preserve-session
+    // stops must not use this path: tmux-name inference does not prove tmux death,
+    // and `hard_stop_runtime_turn` intentionally cancels watcher ownership.
     if lifecycle_path == "direct-fallback"
+        && cleanup_tmux
         && let Some(registry) = health_registry
     {
         let hard_stop = crate::services::discord::health::hard_stop_runtime_turn(
@@ -316,5 +319,80 @@ mod tests {
         assert!(!has_active_turn);
         assert_eq!(queue_depth, 1);
         assert_eq!(session_id, None);
+    }
+
+    #[tokio::test]
+    async fn preserve_session_direct_fallback_does_not_cancel_watcher_by_tmux_lookup() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 223_456_789_012_345_680;
+        let channel_name = "preserve-fallback-watcher";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(channel_name);
+
+        harness
+            .seed_channel_session(channel_id, channel_name, Some("session-preserve-fallback"))
+            .await;
+        harness.seed_active_turn(channel_id, 55, 66).await;
+        let watcher_cancel = harness.seed_watcher(channel_id);
+
+        let registry = harness.registry();
+        let result = super::stop_turn_preserving_queue(
+            Some(registry.as_ref()),
+            &super::TurnLifecycleTarget {
+                provider: Some(ProviderKind::Codex),
+                channel_id: None,
+                tmux_name,
+            },
+            "preserve fallback must not infer tmux death",
+        )
+        .await;
+
+        assert_eq!(result.lifecycle_path, "direct-fallback");
+        assert!(!result.tmux_killed);
+        assert!(!result.inflight_cleared);
+        assert!(
+            harness.has_watcher(channel_id),
+            "preserve-session fallback must leave live watcher ownership attached",
+        );
+        assert!(
+            !watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "preserve-session fallback must not cancel the watcher",
+        );
+    }
+
+    #[tokio::test]
+    async fn force_kill_direct_fallback_still_cancels_watcher_by_tmux_lookup() {
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 223_456_789_012_345_681;
+        let channel_name = "force-kill-fallback-watcher";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(channel_name);
+
+        harness
+            .seed_channel_session(channel_id, channel_name, Some("session-force-fallback"))
+            .await;
+        harness.seed_active_turn(channel_id, 55, 66).await;
+        let watcher_cancel = harness.seed_watcher(channel_id);
+
+        let registry = harness.registry();
+        let result = super::force_kill_turn(
+            Some(registry.as_ref()),
+            &super::TurnLifecycleTarget {
+                provider: Some(ProviderKind::Codex),
+                channel_id: None,
+                tmux_name,
+            },
+            "force kill fallback should detach watcher",
+            "force_kill",
+        )
+        .await;
+
+        assert_eq!(result.lifecycle_path, "mailbox_canonical");
+        assert!(
+            !harness.has_watcher(channel_id),
+            "force-kill fallback should remove watcher ownership",
+        );
+        assert!(
+            watcher_cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "force-kill fallback should cancel the watcher",
+        );
     }
 }
