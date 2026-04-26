@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::registry::{ProviderCliChannel, ProviderCliMigrationState, SmokeResult};
+use super::registry::{MigrationState, ProviderCliChannel, ProviderCliMigrationState, SmokeResult};
 
 /// Top-level diagnostics snapshot for all providers.
 ///
@@ -82,6 +82,13 @@ pub struct ProviderCliStatusResponse {
     pub generated_at: DateTime<Utc>,
 }
 
+pub fn migration_state_wire_value(state: &MigrationState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{state:?}"))
+}
+
 /// Request body for `PATCH /api/provider-cli/{provider}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderCliActionRequest {
@@ -101,7 +108,7 @@ pub fn build_snapshot(
         .iter()
         .map(|s| MigrationDiagnostics {
             provider: s.provider.clone(),
-            state: format!("{:?}", s.state),
+            state: migration_state_wire_value(&s.state),
             canary_agent_id: s.selected_agent_id.clone(),
             started_at: Some(s.started_at),
             updated_at: Some(s.updated_at),
@@ -165,6 +172,6 @@ mod tests {
         let snapshot = build_snapshot(vec![], vec![], &[state]);
         assert_eq!(snapshot.migrations.len(), 1);
         assert_eq!(snapshot.migrations[0].provider, "codex");
-        assert_eq!(snapshot.migrations[0].state, "CanaryActive");
+        assert_eq!(snapshot.migrations[0].state, "canary_active");
     }
 }
