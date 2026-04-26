@@ -111,17 +111,22 @@ export default function AgentAvatar({
       role="img"
     >
       <img
+        // Codex review (9th pass): keying on the requested sprite number
+        // forces React to swap the <img> node when the agent (and so the
+        // sprite) changes, which resets the on-error guard below for the
+        // new identity. Without this, a previous fallback flag could
+        // suppress the 404 → fallback path on the next agent.
+        key={spriteNumber}
         src={spriteSrc(spriteNumber)}
         alt=""
         width={size}
         height={size}
         loading="lazy"
         draggable={false}
-        // Codex review (PR #1258, 7th pass): an out-of-range sprite_number
-        // in stored agent data would 404 and render a broken-image icon.
-        // Fall back to the bundled SPRITE_FALLBACK_NUMBER once on error,
-        // and stop after the first swap so a missing fallback doesn't
-        // loop forever.
+        // Codex review (7th pass): out-of-range sprite_number would 404
+        // and render the broken-image icon. Fall back to the bundled
+        // SPRITE_FALLBACK_NUMBER once on error, then stop so a missing
+        // fallback doesn't loop on hot reload.
         onError={(event) => {
           const img = event.currentTarget;
           const fallbackSrc = spriteSrc(SPRITE_FALLBACK_NUMBER);
