@@ -1,0 +1,107 @@
+{
+  "_comment": "Example migration state fixtures. Includes happy-path and invalid-transition cases.",
+
+  "planned": {
+    "schema_version": 1,
+    "provider": "codex",
+    "state": "planned",
+    "started_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T00:00:00Z",
+    "history": []
+  },
+
+  "smoke_current_passed": {
+    "schema_version": 1,
+    "provider": "codex",
+    "state": "smoke_current_passed",
+    "current_channel": {
+      "path": "/Users/user/.npm-global/bin/codex",
+      "canonical_path": "/Users/user/.npm-global/bin/codex",
+      "version": "0.1.0",
+      "source": "fallback_path",
+      "checked_at": "2026-04-26T00:05:00Z",
+      "evidence": {
+        "smoke_status": "passed"
+      }
+    },
+    "rollback_target": "current",
+    "started_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T00:05:00Z",
+    "history": [
+      {
+        "from_state": "planned",
+        "to_state": "current_snapshotted",
+        "transitioned_at": "2026-04-26T00:01:00Z"
+      },
+      {
+        "from_state": "current_snapshotted",
+        "to_state": "smoke_current_passed",
+        "transitioned_at": "2026-04-26T00:05:00Z"
+      }
+    ]
+  },
+
+  "awaiting_operator_promote": {
+    "schema_version": 1,
+    "provider": "codex",
+    "state": "awaiting_operator_promote",
+    "selected_agent_id": "codex-agent",
+    "current_channel": {
+      "path": "/Users/user/.npm-global/bin/codex",
+      "canonical_path": "/Users/user/.npm-global/bin/codex",
+      "version": "0.1.0",
+      "source": "fallback_path",
+      "checked_at": "2026-04-26T00:05:00Z",
+      "evidence": {}
+    },
+    "candidate_channel": {
+      "path": "/Users/user/.npm-global/bin/codex",
+      "canonical_path": "/Users/user/.npm-global/bin/codex",
+      "version": "0.2.0",
+      "source": "fallback_path",
+      "checked_at": "2026-04-26T01:00:00Z",
+      "evidence": {
+        "smoke_status": "passed"
+      }
+    },
+    "rollback_target": "current",
+    "started_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T01:30:00Z",
+    "history": []
+  },
+
+  "invalid_transition_upgrade_before_smoke_current": {
+    "_invalid": true,
+    "_reason": "upgrade_planned requires smoke_current_passed first",
+    "schema_version": 1,
+    "provider": "codex",
+    "state": "upgrade_planned",
+    "started_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T00:01:00Z",
+    "history": [
+      {
+        "from_state": "planned",
+        "to_state": "upgrade_planned",
+        "transitioned_at": "2026-04-26T00:01:00Z",
+        "evidence": "INVALID: skipped smoke_current_passed and current_snapshotted"
+      }
+    ]
+  },
+
+  "failed_upgrade_version_unchanged": {
+    "schema_version": 1,
+    "provider": "codex",
+    "state": "failed",
+    "rollback_target": "current",
+    "started_at": "2026-04-26T00:00:00Z",
+    "updated_at": "2026-04-26T00:20:00Z",
+    "history": [
+      {
+        "from_state": "upgrade_succeeded",
+        "to_state": "failed",
+        "transitioned_at": "2026-04-26T00:20:00Z",
+        "evidence": "upgrade_version_unchanged: discovered_version=0.1.0 equals snapshot_version=0.1.0"
+      }
+    ]
+  }
+}

@@ -677,6 +677,13 @@ fn join_paths_lossy(paths: Vec<PathBuf>) -> Option<OsString> {
     std::env::join_paths(paths).ok()
 }
 
+/// Context-aware resolver. Phase 1 (PR-1): no registry loaded — delegates to legacy path.
+pub fn resolve_provider_binary_for_context(
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+) -> BinaryResolution {
+    resolve_provider_binary(&ctx.provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

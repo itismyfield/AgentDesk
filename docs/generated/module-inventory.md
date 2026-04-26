@@ -31,8 +31,8 @@
 | `reconcile` | 1 |
 | `runtime` | 1 |
 | `runtime_layout` | 5 |
-| `server` | 65 |
-| `services` | 151 |
+| `server` | 67 |
+| `services` | 154 |
 | `supervisor` | 1 |
 | `ui` | 2 |
 | `utils` | 4 |
@@ -286,7 +286,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11980 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11984 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
@@ -327,15 +327,18 @@
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
-| `services::opencode` | `src/services/opencode.rs` | 1132 | giant-file |
-| `services::platform` | `src/services/platform/mod.rs` | 19 |  |
-| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 971 |  |
+| `services::opencode` | `src/services/opencode.rs` | 1316 | giant-file |
+| `services::platform` | `src/services/platform/mod.rs` | 20 |  |
+| `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 978 |  |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 1507 | giant-file |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 298 |  |
 | `services::process` | `src/services/process.rs` | 706 |  |
 | `services::provider` | `src/services/provider.rs` | 2177 | giant-file |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 399 |  |
+| `services::provider_cli` | `src/services/provider_cli/mod.rs` | 9 |  |
+| `services::provider_cli::context` | `src/services/provider_cli/context.rs` | 70 |  |
+| `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 303 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 430 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
 | `services::queue` | `src/services/queue.rs` | 499 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2446 | giant-file |
