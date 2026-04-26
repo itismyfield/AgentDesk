@@ -493,7 +493,7 @@ fn cmd_promote(
     }
 
     if state.state == MigrationState::CanaryActive {
-        let canary_evidence = canary_promotion_evidence(&root, &state, evidence)?;
+        let canary_evidence = canary_promotion_evidence(&root, &state, evidence, force_recreate_active)?;
         advance_to(
             &mut state,
             MigrationState::CanaryPassed,

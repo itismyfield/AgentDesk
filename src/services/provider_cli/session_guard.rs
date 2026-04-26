@@ -73,19 +73,27 @@ pub fn evaluate_session_migration_guards(
         let agent_artifacts = artifacts_for_agent(&artifacts, &agent_id);
         if agent_artifacts.is_empty() {
             let mut guard = build_guard(provider, &agent_id, target_channel, force_recreate_active);
-            guard.safe_to_recreate = false;
             guard.recreate_required = true;
-            guard.active_turn_state = "missing_launch_artifact".to_string();
-            let blocker = format!(
-                "{provider}/{agent_id} has no launch artifact; cannot verify current channel before migrating to {target_channel}"
-            );
-            guard
-                .evidence
-                .insert("status".to_string(), "missing_launch_artifact".to_string());
-            guard
-                .evidence
-                .insert("blocker".to_string(), blocker.clone());
-            blockers.push(blocker);
+            if force_recreate_active {
+                guard.safe_to_recreate = true;
+                guard.active_turn_state = "force_recreate_missing_artifact".to_string();
+                guard
+                    .evidence
+                    .insert("status".to_string(), "force_recreate_missing_artifact".to_string());
+            } else {
+                guard.safe_to_recreate = false;
+                guard.active_turn_state = "missing_launch_artifact".to_string();
+                let blocker = format!(
+                    "{provider}/{agent_id} has no launch artifact; cannot verify current channel before migrating to {target_channel}"
+                );
+                guard
+                    .evidence
+                    .insert("status".to_string(), "missing_launch_artifact".to_string());
+                guard
+                    .evidence
+                    .insert("blocker".to_string(), blocker.clone());
+                blockers.push(blocker);
+            }
             guards.push(guard);
             continue;
         }
@@ -261,6 +269,33 @@ mod tests {
                 .get("status")
                 .map(String::as_str),
             Some("missing_launch_artifact")
+        );
+    }
+
+    #[test]
+    fn guard_allows_force_recreate_with_no_launch_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let evaluation = evaluate_session_migration_guards(
+            root.path(),
+            "codex",
+            &["codex-agent".to_string()],
+            "candidate",
+            true,
+        );
+
+        assert!(evaluation.is_clear());
+        assert_eq!(evaluation.guards.len(), 1);
+        assert!(evaluation.guards[0].safe_to_recreate);
+        assert_eq!(
+            evaluation.guards[0].active_turn_state,
+            "force_recreate_missing_artifact"
+        );
+        assert_eq!(
+            evaluation.guards[0]
+                .evidence
+                .get("status")
+                .map(String::as_str),
+            Some("force_recreate_missing_artifact")
         );
     }
 

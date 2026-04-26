@@ -156,7 +156,7 @@ pub async fn patch_provider_cli(
 
     let transition_result = if matches!(action, ProviderCliApiAction::ConfirmPromote) {
         let canary_ready_result = if migration.state == MigrationState::CanaryActive {
-            canary_promotion_evidence(&root, &migration, body.evidence.as_deref())
+            canary_promotion_evidence(&root, &migration, body.evidence.as_deref(), body.force_recreate_active)
                 .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))
                 .and_then(|canary_evidence| {
                     advance_to(

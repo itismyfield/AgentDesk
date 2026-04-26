@@ -64,7 +64,8 @@ pub fn verified_candidate_launch_artifact(
     agent_id: &str,
     candidate: &ProviderCliChannel,
     not_before: DateTime<Utc>,
-) -> Result<LaunchArtifact, String> {
+    force_recreate_active: bool,
+) -> Result<Option<LaunchArtifact>, String> {
     let mut artifacts = load_launch_artifacts(root, provider)
         .into_iter()
         .filter(|artifact| {
@@ -76,6 +77,9 @@ pub fn verified_candidate_launch_artifact(
     artifacts.sort_by_key(|artifact| artifact.launched_at);
 
     let Some(artifact) = artifacts.pop() else {
+        if force_recreate_active {
+            return Ok(None);
+        }
         return Err(format!(
             "no candidate launch artifact recorded for {provider}/{agent_id} after canary activation; run a canary turn before promotion"
         ));
@@ -89,7 +93,7 @@ pub fn verified_candidate_launch_artifact(
         ));
     }
 
-    Ok(artifact)
+    Ok(Some(artifact))
 }
 
 #[cfg(test)]
@@ -141,5 +145,48 @@ mod tests {
         let agents = vec![agent("claude-1", "claude", false)];
         let selected = select_canary_agent("codex", &agents, None);
         assert!(selected.is_none());
+    }
+
+    fn candidate_channel(canonical_path: &str, version: &str) -> ProviderCliChannel {
+        ProviderCliChannel {
+            path: canonical_path.to_string(),
+            canonical_path: canonical_path.to_string(),
+            version: version.to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        }
+    }
+
+    #[test]
+    fn verified_artifact_errors_without_force_when_no_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = candidate_channel("/tmp/codex", "1.0.0");
+        let result = verified_candidate_launch_artifact(
+            root.path(),
+            "codex",
+            "codex-agent",
+            &candidate,
+            Utc::now() - chrono::Duration::seconds(60),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verified_artifact_returns_none_with_force_when_no_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = candidate_channel("/tmp/codex", "1.0.0");
+        let result = verified_candidate_launch_artifact(
+            root.path(),
+            "codex",
+            "codex-agent",
+            &candidate,
+            Utc::now() - chrono::Duration::seconds(60),
+            true,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

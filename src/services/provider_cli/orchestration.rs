@@ -118,6 +118,7 @@ pub fn canary_promotion_evidence(
     root: &std::path::Path,
     state: &ProviderCliMigrationState,
     operator_evidence: Option<&str>,
+    force_recreate_active: bool,
 ) -> Result<String, String> {
     let operator_evidence = operator_evidence
         .map(str::trim)
@@ -142,6 +143,7 @@ pub fn canary_promotion_evidence(
         agent_id,
         candidate,
         canary_active_since(state),
+        force_recreate_active,
     )?;
 
     Ok(serde_json::to_string(&json!({
