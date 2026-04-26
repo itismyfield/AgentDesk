@@ -68,8 +68,8 @@
 | `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:135` | `src/server/routes/domains/integrations.rs:39` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:88` | `src/server/routes/domains/integrations.rs:35` |
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:654` | `src/server/routes/domains/access.rs:20` |
-| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:759` | `src/server/routes/domains/access.rs:27` |
-| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:726` | `src/server/routes/domains/access.rs:22` |
+| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:761` | `src/server/routes/domains/access.rs:27` |
+| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:727` | `src/server/routes/domains/access.rs:22` |
 | `GET` | `/api/dispatched-sessions` | `dispatched_sessions::list_dispatched_sessions` | `src/server/routes/dispatched_sessions.rs:933` | `src/server/routes/domains/ops.rs:81` |
 | `GET` | `/api/dispatched-sessions/claude-session-id` | `dispatched_sessions::get_claude_session_id` | `src/server/routes/dispatched_sessions.rs:1067` | `src/server/routes/domains/ops.rs:107` |
 | `DELETE` | `/api/dispatched-sessions/cleanup` | `dispatched_sessions::cleanup_sessions` | `src/server/routes/dispatched_sessions.rs:970` | `src/server/routes/domains/ops.rs:85` |
@@ -106,7 +106,7 @@
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/ops.rs:101` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/ops.rs:103` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/ops.rs:102` |
-| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:693` | `src/server/routes/domains/access.rs:29` |
+| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:694` | `src/server/routes/domains/access.rs:29` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1344` | `src/server/routes/domains/ops.rs:41` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1756` | `src/server/routes/domains/admin.rs:64` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:1249` | `src/server/routes/domains/ops.rs:37` |
