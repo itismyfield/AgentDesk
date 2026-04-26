@@ -114,6 +114,20 @@ impl DiscordOutboundPolicy {
             minimal_fallback: minimal,
         }
     }
+
+    /// Preset for streaming gateway messages: caller-side planning already
+    /// chunks content to Discord's hard per-message limit, so this policy must
+    /// preserve the planned text verbatim or fail before sending. Silent
+    /// truncation would corrupt the stream offset bookkeeping.
+    pub(crate) fn preserve_inline_content() -> Self {
+        Self {
+            max_len: DISCORD_HARD_LIMIT_CHARS,
+            split_strategy: SplitStrategy::RejectOverLimit,
+            thread_fallback: ThreadFallback::None,
+            file_fallback: FileFallback::None,
+            minimal_fallback: None,
+        }
+    }
 }
 
 /// Semantic identifiers used to deduplicate outbound deliveries. The
@@ -801,6 +815,53 @@ mod tests {
             )]
         );
         assert!(client.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserve_inline_policy_keeps_1900_to_2000_char_edit_intact() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let content = "x".repeat(DISCORD_SAFE_LIMIT_CHARS + 75);
+        assert!(content.chars().count() > DISCORD_SAFE_LIMIT_CHARS);
+        assert!(content.chars().count() <= DISCORD_HARD_LIMIT_CHARS);
+        let msg =
+            DiscordOutboundMessage::new("chan-1", &content).with_edit_message_id("msg-placeholder");
+
+        let result = deliver_outbound(
+            &client,
+            &dedup,
+            msg,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            DeliveryResult::Success {
+                message_id: "msg-placeholder".to_string()
+            }
+        );
+        assert_eq!(client.edits()[0].2, content);
+    }
+
+    #[tokio::test]
+    async fn preserve_inline_policy_rejects_above_hard_limit_without_editing() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let content = "x".repeat(DISCORD_HARD_LIMIT_CHARS + 1);
+        let msg =
+            DiscordOutboundMessage::new("chan-1", &content).with_edit_message_id("msg-placeholder");
+
+        let result = deliver_outbound(
+            &client,
+            &dedup,
+            msg,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await;
+
+        assert!(matches!(result, DeliveryResult::PermanentFailure { .. }));
+        assert!(client.edits().is_empty());
     }
 
     #[tokio::test]

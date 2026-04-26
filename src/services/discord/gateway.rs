@@ -164,9 +164,7 @@ fn parse_message_id(message_id: &str) -> Result<MessageId, String> {
 }
 
 fn outbound_policy() -> DiscordOutboundPolicy {
-    DiscordOutboundPolicy::review_notification(Some(
-        "[AgentDesk] Discord message exceeded the inline limit.".to_string(),
-    ))
+    DiscordOutboundPolicy::preserve_inline_content()
 }
 
 fn gateway_deduper() -> &'static OutboundDeduper {
@@ -599,10 +597,23 @@ impl TurnGateway for HeadlessGateway {
 
 #[cfg(test)]
 mod tests {
-    use super::live_bot_owner_provider;
+    use super::{live_bot_owner_provider, outbound_policy};
+    use crate::services::discord::outbound::{
+        DISCORD_HARD_LIMIT_CHARS, SplitStrategy, ThreadFallback,
+    };
 
     #[test]
     fn live_bot_owner_provider_requires_live_turn_context() {
         assert!(live_bot_owner_provider(None).is_none());
+    }
+
+    #[test]
+    fn gateway_outbound_policy_preserves_streaming_chunks() {
+        let policy = outbound_policy();
+
+        assert_eq!(policy.max_len, DISCORD_HARD_LIMIT_CHARS);
+        assert_eq!(policy.split_strategy, SplitStrategy::RejectOverLimit);
+        assert_eq!(policy.thread_fallback, ThreadFallback::None);
+        assert!(policy.minimal_fallback.is_none());
     }
 }
