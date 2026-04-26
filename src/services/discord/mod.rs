@@ -20,6 +20,7 @@ pub(crate) mod monitoring_status;
 mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
+mod placeholder_cleanup;
 mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
@@ -820,6 +821,11 @@ pub(super) struct SharedData {
     /// watcher and an incoming watcher share the same emission-slot atomic
     /// and confirmed-offset watermark. See `TmuxRelayCoord`.
     pub(super) tmux_relay_coords: dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>,
+    /// Last known placeholder cleanup outcome keyed by provider/channel/message.
+    /// This local tombstone lets watcher finalization reason about cleanup
+    /// even after the inflight file has already been cleared.
+    pub(in crate::services::discord) placeholder_cleanup:
+        Arc<placeholder_cleanup::PlaceholderCleanupRegistry>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -1325,6 +1331,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         skills_cache: tokio::sync::RwLock::new(Vec::new()),
         tmux_watchers: TmuxWatcherRegistry::new(),
         tmux_relay_coords: dashmap::DashMap::new(),
+        placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

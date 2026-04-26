@@ -1829,9 +1829,41 @@ pub(super) fn spawn_turn_bridge(
                 current_tool_line.as_deref(),
                 None,
             );
-            let _ = gateway
+            let handoff_edit = gateway
                 .edit_message(channel_id, current_msg_id, &placeholder_text)
                 .await;
+            let handoff_operation =
+                super::placeholder_cleanup::PlaceholderCleanupOperation::EditHandoff;
+            let handoff_outcome = match handoff_edit {
+                Ok(_) => super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+                Err(error) => super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(error),
+            };
+            if let super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed {
+                class,
+                detail,
+            } = &handoff_outcome
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
+                    handoff_operation.as_str(),
+                    class.as_str(),
+                    channel_id.get(),
+                    current_msg_id.get(),
+                    detail
+                );
+            }
+            shared_owned.placeholder_cleanup.record(
+                super::placeholder_cleanup::PlaceholderCleanupRecord {
+                    provider: provider.clone(),
+                    channel_id,
+                    message_id: current_msg_id,
+                    tmux_session_name: inflight_state.tmux_session_name.clone(),
+                    operation: handoff_operation,
+                    outcome: handoff_outcome,
+                    source: "turn_bridge_tmux_handoff",
+                },
+            );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ✓ tmux handoff complete, placeholder cleaned up, watcher handles response (channel {})",

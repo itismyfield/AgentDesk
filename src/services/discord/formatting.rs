@@ -2072,6 +2072,28 @@ pub(super) async fn replace_long_message_raw(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
+    replace_long_message_raw_with_outcome(http, channel_id, message_id, text, shared)
+        .await
+        .map(|_| ())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReplaceLongMessageOutcome {
+    EditedOriginal,
+    SentFallbackAfterEditFailure { edit_error: String },
+}
+
+/// Replace an existing Discord message and report whether the original
+/// placeholder was actually edited. If the edit fails but the fallback send
+/// succeeds, callers that own placeholder lifecycle can still delete or
+/// terminal-edit the stale original.
+pub(super) async fn replace_long_message_raw_with_outcome(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
+) -> Result<ReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
     let total = chunks.len();
@@ -2084,7 +2106,7 @@ pub(super) async fn replace_long_message_raw(
             total_chunks = 0usize,
             "discord replace: no chunks"
         );
-        return Ok(());
+        return Ok(ReplaceLongMessageOutcome::EditedOriginal);
     };
 
     tracing::debug!(
@@ -2123,7 +2145,9 @@ pub(super) async fn replace_long_message_raw(
             error = %e,
             "discord first-chunk edit failed; falling back to send_long_message_raw (issue #1043)"
         );
-        return send_long_message_raw(http, channel_id, text, shared).await;
+        let edit_error = e.to_string();
+        send_long_message_raw(http, channel_id, text, shared).await?;
+        return Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error });
     }
 
     if total == 1 {
@@ -2191,7 +2215,7 @@ pub(super) async fn replace_long_message_raw(
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    Ok(())
+    Ok(ReplaceLongMessageOutcome::EditedOriginal)
 }
 
 /// Split a message into chunks that fit within Discord's 2000 char limit.

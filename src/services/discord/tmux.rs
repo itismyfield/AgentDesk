@@ -22,8 +22,13 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    build_streaming_placeholder_text, escape_for_code_fence, format_tool_input,
-    plan_streaming_rollover, replace_long_message_raw, send_long_message_raw, truncate_str,
+    ReplaceLongMessageOutcome, build_streaming_placeholder_text, escape_for_code_fence,
+    format_tool_input, plan_streaming_rollover, replace_long_message_raw_with_outcome,
+    send_long_message_raw, truncate_str,
+};
+use super::placeholder_cleanup::{
+    PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
+    classify_delete_error,
 };
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
@@ -751,6 +756,8 @@ async fn apply_placeholder_suppression(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
     placeholder_msg_id: Option<serenity::MessageId>,
     origin: PlaceholderSuppressOrigin,
     decision: PlaceholderSuppressDecision,
@@ -770,53 +777,154 @@ async fn apply_placeholder_suppression(
             );
             if let Some(msg_id) = placeholder_msg_id {
                 if cleaned_body.is_empty() {
-                    let _ = channel_id.delete_message(http, msg_id).await;
+                    delete_terminal_placeholder(
+                        http,
+                        channel_id,
+                        shared,
+                        provider,
+                        tmux_session_name,
+                        msg_id,
+                        origin.log_scope(),
+                    )
+                    .await;
                 } else {
-                    rate_limit_wait(shared, channel_id).await;
-                    if let Err(error) = channel_id
-                        .edit_message(
-                            http,
-                            msg_id,
-                            serenity::EditMessage::new().content(&cleaned_body),
-                        )
-                        .await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⚠ {} preserve finalize edit failed for channel {} msg {}: {}",
-                            origin.log_scope(),
-                            channel_id.get(),
-                            msg_id.get(),
-                            error
-                        );
-                    }
+                    edit_terminal_placeholder(
+                        http,
+                        channel_id,
+                        shared,
+                        provider,
+                        tmux_session_name,
+                        msg_id,
+                        &cleaned_body,
+                        origin.log_scope(),
+                    )
+                    .await;
                 }
             }
         }
         PlaceholderSuppressDecision::Delete => {
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(http, msg_id).await;
+                delete_terminal_placeholder(
+                    http,
+                    channel_id,
+                    shared,
+                    provider,
+                    tmux_session_name,
+                    msg_id,
+                    origin.log_scope(),
+                )
+                .await;
             }
         }
         PlaceholderSuppressDecision::Edit(content) => {
             if let Some(msg_id) = placeholder_msg_id {
-                rate_limit_wait(shared, channel_id).await;
-                if let Err(error) = channel_id
-                    .edit_message(http, msg_id, serenity::EditMessage::new().content(&content))
-                    .await
-                {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ {} final edit failed for channel {} msg {}: {}",
-                        origin.log_scope(),
-                        channel_id.get(),
-                        msg_id.get(),
-                        error
-                    );
-                }
+                edit_terminal_placeholder(
+                    http,
+                    channel_id,
+                    shared,
+                    provider,
+                    tmux_session_name,
+                    msg_id,
+                    &content,
+                    origin.log_scope(),
+                )
+                .await;
             }
         }
     }
+}
+
+fn record_placeholder_cleanup(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    tmux_session_name: &str,
+    operation: PlaceholderCleanupOperation,
+    outcome: PlaceholderCleanupOutcome,
+    source: &'static str,
+) {
+    if let PlaceholderCleanupOutcome::Failed { class, detail } = &outcome {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
+            operation.as_str(),
+            class.as_str(),
+            channel_id.get(),
+            message_id.get(),
+            detail
+        );
+    }
+    shared.placeholder_cleanup.record(PlaceholderCleanupRecord {
+        provider: provider.clone(),
+        channel_id,
+        message_id,
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        operation,
+        outcome,
+        source,
+    });
+}
+
+async fn delete_terminal_placeholder(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    source: &'static str,
+) -> PlaceholderCleanupOutcome {
+    let outcome = match channel_id.delete_message(http, message_id).await {
+        Ok(_) => PlaceholderCleanupOutcome::Succeeded,
+        Err(error) => classify_delete_error(&error.to_string()),
+    };
+    record_placeholder_cleanup(
+        shared,
+        provider,
+        channel_id,
+        message_id,
+        tmux_session_name,
+        PlaceholderCleanupOperation::Delete,
+        outcome.clone(),
+        source,
+    );
+    outcome
+}
+
+async fn edit_terminal_placeholder(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    content: &str,
+    source: &'static str,
+) -> PlaceholderCleanupOutcome {
+    rate_limit_wait(shared, channel_id).await;
+    let outcome = match channel_id
+        .edit_message(
+            http,
+            message_id,
+            serenity::EditMessage::new().content(content),
+        )
+        .await
+    {
+        Ok(_) => PlaceholderCleanupOutcome::Succeeded,
+        Err(error) => PlaceholderCleanupOutcome::failed(error.to_string()),
+    };
+    record_placeholder_cleanup(
+        shared,
+        provider,
+        channel_id,
+        message_id,
+        tmux_session_name,
+        PlaceholderCleanupOperation::EditTerminal,
+        outcome.clone(),
+        source,
+    );
+    outcome
 }
 
 fn suppressed_placeholder_action(
@@ -2751,14 +2859,16 @@ fn missing_inflight_fallback_plan(
     dispatch_resolved: bool,
     terminal_output_committed: bool,
     recent_turn_stop: bool,
+    placeholder_cleanup_committed: bool,
     tmux_alive: bool,
 ) -> MissingInflightFallbackPlan {
     let would_trigger =
         inflight_missing && !dispatch_resolved && terminal_output_committed && tmux_alive;
+    let suppressed = recent_turn_stop || placeholder_cleanup_committed;
     MissingInflightFallbackPlan {
         warn: inflight_missing,
-        trigger_reattach: would_trigger && !recent_turn_stop,
-        suppressed_by_recent_stop: would_trigger && recent_turn_stop,
+        trigger_reattach: would_trigger && !suppressed,
+        suppressed_by_recent_stop: would_trigger && suppressed,
     }
 }
 
@@ -3324,6 +3434,8 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
         http,
         channel_id,
         shared,
+        provider,
+        state.tmux_session_name.as_deref().unwrap_or("unknown"),
         ctx.placeholder_msg_id,
         ctx.origin,
         decision,
@@ -4794,6 +4906,8 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 &http,
                 channel_id,
                 &shared,
+                &watcher_provider,
+                &tmux_session_name,
                 placeholder_msg_id,
                 ctx.origin,
                 decide_placeholder_suppression(&ctx),
@@ -5090,7 +5204,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             match placeholder_msg_id {
                 Some(msg_id) => {
                     if has_current_response {
-                        match replace_long_message_raw(
+                        match replace_long_message_raw_with_outcome(
                             &http,
                             channel_id,
                             msg_id,
@@ -5099,8 +5213,51 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         )
                         .await
                         {
-                            Ok(_) => {
+                            Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                                 direct_send_delivered = true;
+                                record_placeholder_cleanup(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    msg_id,
+                                    &tmux_session_name,
+                                    PlaceholderCleanupOperation::EditTerminal,
+                                    PlaceholderCleanupOutcome::Succeeded,
+                                    "watcher_terminal_relay",
+                                );
+                            }
+                            Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                                edit_error,
+                            }) => {
+                                direct_send_delivered = true;
+                                record_placeholder_cleanup(
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    msg_id,
+                                    &tmux_session_name,
+                                    PlaceholderCleanupOperation::EditTerminal,
+                                    PlaceholderCleanupOutcome::failed(edit_error),
+                                    "watcher_terminal_relay",
+                                );
+                                let cleanup = delete_terminal_placeholder(
+                                    &http,
+                                    channel_id,
+                                    &shared,
+                                    &watcher_provider,
+                                    &tmux_session_name,
+                                    msg_id,
+                                    "watcher_terminal_relay_fallback_cleanup",
+                                )
+                                .await;
+                                if !cleanup.is_committed() {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ watcher: terminal response was delivered via fallback send, but stale placeholder cleanup did not commit for channel {} msg {}",
+                                        channel_id.get(),
+                                        msg_id.get()
+                                    );
+                                }
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -5109,7 +5266,19 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             }
                         }
                     } else {
-                        let _ = channel_id.delete_message(&http, msg_id).await;
+                        let outcome = delete_terminal_placeholder(
+                            &http,
+                            channel_id,
+                            &shared,
+                            &watcher_provider,
+                            &tmux_session_name,
+                            msg_id,
+                            "watcher_empty_terminal_cleanup",
+                        )
+                        .await;
+                        if !outcome.is_committed() {
+                            relay_ok = false;
+                        }
                     }
                 }
                 None => {
@@ -5224,6 +5393,8 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 &http,
                 channel_id,
                 &shared,
+                &watcher_provider,
+                &tmux_session_name,
                 placeholder_msg_id,
                 ctx.origin,
                 decision,
@@ -5244,7 +5415,16 @@ pub(super) async fn tmux_output_watcher_with_restore(
         } else {
             if let Some(msg_id) = placeholder_msg_id {
                 // No response text but placeholder exists — clean up
-                let _ = channel_id.delete_message(&http, msg_id).await;
+                let _ = delete_terminal_placeholder(
+                    &http,
+                    channel_id,
+                    &shared,
+                    &watcher_provider,
+                    &tmux_session_name,
+                    msg_id,
+                    "watcher_no_response_cleanup",
+                )
+                .await;
             }
             false
         };
@@ -5613,11 +5793,19 @@ pub(super) async fn tmux_output_watcher_with_restore(
             };
         let recent_turn_stop =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset);
+        let placeholder_cleanup_committed = placeholder_msg_id.is_some_and(|msg_id| {
+            shared.placeholder_cleanup.terminal_cleanup_committed(
+                &provider_kind,
+                channel_id,
+                msg_id,
+            )
+        });
         let missing_inflight_plan = missing_inflight_fallback_plan(
             inflight_state.is_none(),
             resolved_did.is_some(),
             terminal_output_committed,
             recent_turn_stop.is_some(),
+            placeholder_cleanup_committed,
             tmux_alive_for_missing_inflight,
         );
         if missing_inflight_plan.trigger_reattach {
@@ -5689,7 +5877,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 }
             }
         } else if missing_inflight_plan.suppressed_by_recent_stop {
-            if let Some(stop) = recent_turn_stop {
+            if placeholder_cleanup_committed {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — terminal placeholder cleanup already committed",
+                    channel_id.get()
+                );
+            } else if let Some(stop) = recent_turn_stop {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ↻ watcher: explicit reattach skipped for channel {} — recent turn stop still active ({})",
@@ -7758,25 +7952,33 @@ mod tests {
 
     #[test]
     fn missing_inflight_fallback_warns_and_triggers_reattach_on_db_miss() {
-        let plan = missing_inflight_fallback_plan(true, false, true, false, true);
+        let plan = missing_inflight_fallback_plan(true, false, true, false, false, true);
         assert!(plan.warn);
         assert!(plan.trigger_reattach);
         assert!(!plan.suppressed_by_recent_stop);
 
-        let resolved = missing_inflight_fallback_plan(true, true, true, false, true);
+        let resolved = missing_inflight_fallback_plan(true, true, true, false, false, true);
         assert!(resolved.warn);
         assert!(!resolved.trigger_reattach);
 
-        let uncommitted = missing_inflight_fallback_plan(true, false, false, false, true);
+        let uncommitted = missing_inflight_fallback_plan(true, false, false, false, false, true);
         assert!(uncommitted.warn);
         assert!(!uncommitted.trigger_reattach);
 
-        let stopped = missing_inflight_fallback_plan(true, false, true, true, true);
+        let stopped = missing_inflight_fallback_plan(true, false, true, true, false, true);
         assert!(stopped.warn);
         assert!(!stopped.trigger_reattach);
         assert!(stopped.suppressed_by_recent_stop);
 
-        let dead_tmux = missing_inflight_fallback_plan(true, false, true, false, false);
+        let cleaned = missing_inflight_fallback_plan(true, false, true, false, true, true);
+        assert!(cleaned.warn);
+        assert!(!cleaned.trigger_reattach);
+        assert!(
+            cleaned.suppressed_by_recent_stop,
+            "terminal placeholder cleanup tombstone suppresses stale reattach"
+        );
+
+        let dead_tmux = missing_inflight_fallback_plan(true, false, true, false, false, false);
         assert!(dead_tmux.warn);
         assert!(!dead_tmux.trigger_reattach);
         assert!(!dead_tmux.suppressed_by_recent_stop);
@@ -7835,7 +8037,7 @@ mod tests {
         // refactor that drops the increment fails loudly.
         crate::services::observability::metrics::reset_for_tests();
 
-        let plan = missing_inflight_fallback_plan(true, false, true, false, true);
+        let plan = missing_inflight_fallback_plan(true, false, true, false, false, true);
         assert!(
             plan.trigger_reattach,
             "DB fallback resolve failure on a committed terminal output should request reattach"
@@ -8009,7 +8211,7 @@ mod tests {
             "cancelled turn range should match the stop tombstone"
         );
 
-        let plan = missing_inflight_fallback_plan(true, false, true, true, true);
+        let plan = missing_inflight_fallback_plan(true, false, true, true, false, true);
         assert!(!plan.trigger_reattach);
         assert!(plan.suppressed_by_recent_stop);
 
@@ -8046,6 +8248,7 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 127).is_some(),
+            false,
             true,
         );
         assert!(!stopped.trigger_reattach);
@@ -8056,6 +8259,7 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 129).is_some(),
+            false,
             true,
         );
         assert!(later.trigger_reattach);
@@ -8089,6 +8293,7 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 2048).is_some(),
+            false,
             true,
         );
         assert!(later.trigger_reattach);
@@ -8123,6 +8328,7 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4096).is_some(),
+            false,
             true,
         );
         assert!(!fallback.trigger_reattach);
@@ -8147,6 +8353,7 @@ mod tests {
             false,
             true,
             recent_turn_stop_for_watcher_range(channel, tmux_name, 4097).is_some(),
+            false,
             true,
         );
         assert!(later.trigger_reattach);
@@ -8244,7 +8451,8 @@ mod tests {
         let tmux_name = provider.build_tmux_session_name(channel_name);
         let turn_offset = 44_096_u64;
 
-        let terminal_success_plan = missing_inflight_fallback_plan(true, false, true, false, true);
+        let terminal_success_plan =
+            missing_inflight_fallback_plan(true, false, true, false, false, true);
         assert!(terminal_success_plan.trigger_reattach);
         assert!(super::super::inflight::load_inflight_state(&provider, channel.get()).is_none());
 
@@ -8335,7 +8543,7 @@ mod tests {
         let test_result = async {
             super::super::inflight::clear_inflight_state(&provider, channel.get());
             let terminal_success_plan =
-                missing_inflight_fallback_plan(true, false, true, false, true);
+                missing_inflight_fallback_plan(true, false, true, false, false, true);
             assert!(terminal_success_plan.trigger_reattach);
             assert!(
                 super::super::inflight::load_inflight_state(&provider, channel.get()).is_none()
