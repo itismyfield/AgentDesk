@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Flame,
   FolderKanban,
+  Gauge,
   GripVertical,
   Home,
   LayoutDashboard,
@@ -122,13 +123,10 @@ const HOME_DEFAULT_WIDGETS = [
   "m_tokens",
   "m_cost",
   "m_progress",
-  "m_streak",
-  "office",
-  "missions",
-  "quality",
-  "roster",
-  "activity",
+  "m_rate_limit",
   "kanban",
+  "quality",
+  "missions",
 ];
 const MOBILE_PRIMARY_ROUTE_IDS: AppRouteId[] = [
   "home",
@@ -2176,6 +2174,24 @@ function HomeOverviewPage({
           />
         ),
       },
+      m_rate_limit: {
+        className: "lg:col-span-3",
+        render: () => (
+          <HomeMetricTile
+            icon={<Gauge size={14} />}
+            title={tr("한도", "Rate limit")}
+            value="—"
+            sub={tr(
+              "프로바이더 한도 데이터 수집 대기",
+              "Awaiting provider rate-limit telemetry",
+            )}
+            delta={tr("placeholder", "placeholder")}
+            deltaTone="flat"
+            accent="var(--th-accent-info)"
+            trend={[]}
+          />
+        ),
+      },
       office: {
         className: "lg:col-span-8",
         render: () => (
@@ -2237,7 +2253,7 @@ function HomeOverviewPage({
         ),
       },
       missions: {
-        className: "lg:col-span-4",
+        className: "lg:col-span-6",
         render: () => (
           <HomeWidgetShell
             title={tr("데일리 미션", "Daily missions")}
@@ -2662,13 +2678,13 @@ function HomeMetricTile({
         <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
           {sub}
         </div>
-        {strokePoints ? (
-          <svg
-            viewBox="0 0 100 30"
-            preserveAspectRatio="none"
-            className="mt-3 h-8 w-full"
-            aria-hidden="true"
-          >
+        <svg
+          viewBox="0 0 100 30"
+          preserveAspectRatio="none"
+          className="mt-3 h-8 w-full"
+          aria-hidden="true"
+        >
+          {strokePoints ? (
             <polyline
               fill="none"
               stroke={accent}
@@ -2677,12 +2693,20 @@ function HomeMetricTile({
               strokeLinecap="round"
               points={strokePoints}
             />
-          </svg>
-        ) : (
-          <div className="mt-3 h-1.5 rounded-full" style={{ background: "color-mix(in srgb, var(--th-border-subtle) 68%, transparent)" }}>
-            <div className="h-full rounded-full" style={{ width: "100%", background: accent }} />
-          </div>
-        )}
+          ) : (
+            <line
+              x1="0"
+              x2="100"
+              y1="16"
+              y2="16"
+              stroke={accent}
+              strokeWidth="1.4"
+              strokeDasharray="2.5 4"
+              strokeLinecap="round"
+              opacity="0.55"
+            />
+          )}
+        </svg>
       </div>
     </div>
   );
