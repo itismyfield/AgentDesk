@@ -22,8 +22,8 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    build_streaming_placeholder_text, format_tool_input, plan_streaming_rollover,
-    replace_long_message_raw, send_long_message_raw, truncate_str,
+    build_streaming_placeholder_text, escape_for_code_fence, format_tool_input,
+    plan_streaming_rollover, replace_long_message_raw, send_long_message_raw, truncate_str,
 };
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
@@ -6173,6 +6173,16 @@ pub(super) fn process_watcher_lines(
                         let display = tool_state.thinking_buffer.trim().to_string();
                         if !display.is_empty() {
                             tool_state.set_current_tool_line(Some(format!("💭 {display}")));
+                            // #1199 follow-up: production traffic flows through this
+                            // legacy raw-JSON parser, not the unified
+                            // `StreamMessage::Thinking` arm. Mirror the body
+                            // code-fence append here so users actually see CoT.
+                            if !full_response.is_empty() && !full_response.ends_with('\n') {
+                                full_response.push('\n');
+                            }
+                            full_response.push_str("\n💭 **Reasoning**\n```\n");
+                            full_response.push_str(&escape_for_code_fence(&display));
+                            full_response.push_str("\n```\n");
                             push_transcript_event(
                                 &mut tool_state.transcript_events,
                                 SessionTranscriptEvent {
