@@ -689,6 +689,24 @@ pub(super) async fn auto_restore_session_with_dm_hint(
         return;
     }
 
+    auto_restore_session_force(shared, channel_id, serenity_ctx, dm_hint).await;
+}
+
+/// Same as [`auto_restore_session_with_dm_hint`] but skips the
+/// `RuntimeChannelBindingStatus::Unowned` early-return. Intended for callers
+/// that have already decided an unbound channel deserves restoration —
+/// e.g. the BINDING-GUARD's `can_route_unbound_direct_session` path which
+/// only proceeds when persistent state already names a workspace for that
+/// channel. Without this escape hatch the BINDING-GUARD's restoration step
+/// silently no-ops on unowned channels and the channel stops responding
+/// after a dcserver restart drops the in-memory session map (#1190 followup,
+/// agentless direct sessions regression observed 2026-04-26).
+pub(super) async fn auto_restore_session_force(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    serenity_ctx: &serenity::prelude::Context,
+    dm_hint: Option<bool>,
+) {
     // Resolve channel/category before taking the lock for mutation
     let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
     let existing_channel_name = {

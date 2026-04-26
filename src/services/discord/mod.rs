@@ -394,8 +394,8 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
 
 use session_runtime::{
     DiscordSession, RuntimeChannelBindingStatus, WorktreeInfo, auto_restore_session,
-    auto_restore_session_with_dm_hint, bootstrap_thread_session, cleanup_git_worktree,
-    create_git_worktree, detect_worktree_conflict, provider_handles_channel,
+    auto_restore_session_force, auto_restore_session_with_dm_hint, bootstrap_thread_session,
+    cleanup_git_worktree, create_git_worktree, detect_worktree_conflict, provider_handles_channel,
     resolve_channel_category, resolve_is_dm_channel, resolve_runtime_channel_binding_status,
     resolve_thread_parent, select_restored_session_path, synthetic_thread_channel_name,
     validate_live_channel_routing, validate_live_channel_routing_with_dm_hint,

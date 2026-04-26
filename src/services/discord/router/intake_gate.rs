@@ -57,9 +57,13 @@ async fn can_route_unbound_direct_session(
         return true;
     }
 
-    auto_restore_session_with_dm_hint(&data.shared, channel_id, ctx, Some(is_dm)).await;
+    // Use the `_force` variant: standard `auto_restore_session_*` early-returns
+    // for unbound channels, but here we have already classified this as the
+    // legitimate agentless-direct case and want disk/DB restoration to run so
+    // the in-memory session is recreated after a dcserver restart.
+    auto_restore_session_force(&data.shared, channel_id, ctx, Some(is_dm)).await;
     if effective_channel_id != channel_id {
-        auto_restore_session(&data.shared, effective_channel_id, ctx).await;
+        auto_restore_session_force(&data.shared, effective_channel_id, ctx, None).await;
     }
 
     has_direct_runtime_session(data, channel_id, effective_channel_id).await
