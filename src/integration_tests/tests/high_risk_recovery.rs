@@ -1217,6 +1217,7 @@ mod delayed_worker {
 
         seed_agent(&db);
         set_kv(&db, "deadlock_manager_channel_id", "999");
+        set_kv(&db, "server_port", "8791");
 
         write_codex_inflight(
             runtime_root.path(),
@@ -1253,6 +1254,18 @@ mod delayed_worker {
         let messages = message_outbox_rows(&db);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].1.contains("경과: 31분 (30분 단계)"));
+        assert!(messages[0].1.contains("watchdog: +60분 연장 요청 완료"));
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        assert_eq!(http_last["body"]["extend_secs"], 3600);
+        assert!(
+            http_last["url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/api/turns/111/extend-timeout"),
+            "30-minute long-turn tier must extend beyond the original 60-minute watchdog"
+        );
 
         engine
             .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
@@ -1262,6 +1275,32 @@ mod delayed_worker {
             message_outbox_rows(&db).len(),
             1,
             "same tier must not alert twice"
+        );
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("1"),
+            "same tier must not extend twice"
+        );
+
+        let old_extension_ms = chrono::Utc::now().timestamp_millis() - 21 * 60 * 1000;
+        set_kv(
+            &db,
+            "long_turn_watchdog_extension:codex:111",
+            &old_extension_ms.to_string(),
+        );
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+        assert_eq!(
+            message_outbox_rows(&db).len(),
+            1,
+            "extension cooldown retry must not duplicate the same alert tier"
+        );
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("2"),
+            "long-turn extension must be cadence-based, not alert-tier-only"
         );
 
         write_codex_inflight(
@@ -1273,6 +1312,11 @@ mod delayed_worker {
             "tmux-421-long",
             None,
         );
+        set_kv(
+            &db,
+            "long_turn_watchdog_extension:codex:111",
+            &old_extension_ms.to_string(),
+        );
         engine
             .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
             .unwrap();
@@ -1281,6 +1325,88 @@ mod delayed_worker {
         let messages = message_outbox_rows(&db);
         assert_eq!(messages.len(), 2);
         assert!(messages[1].1.contains("경과: 61분 (60분 단계)"));
+        assert!(messages[1].1.contains("watchdog: +60분 연장 요청 완료"));
+        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("3"));
+        let http_last: serde_json::Value =
+            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        assert_eq!(http_last["body"]["extend_secs"], 3600);
+        assert!(
+            http_last["url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/api/turns/111/extend-timeout"),
+            "60-minute long-turn tier must extend the inflight channel watchdog"
+        );
+
+        write_codex_inflight(
+            runtime_root.path(),
+            "222",
+            &relative_local_time(31),
+            &relative_local_time(20),
+            "host:tmux-421-long-stale",
+            "tmux-421-long-stale",
+            None,
+        );
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 3);
+        assert!(messages[2].1.contains("경과: 31분 (30분 단계)"));
+        assert!(messages[2].1.contains("최근 progress 없음"));
+        assert!(messages[2].1.contains("연장 안 함"));
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("3"),
+            "20-minute-old long-turn progress must alert without extending the watchdog"
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("DELETE FROM kv_meta WHERE key = ?1", ["server_port"])
+                .unwrap();
+        }
+        write_codex_inflight(
+            runtime_root.path(),
+            "333",
+            &relative_local_time(31),
+            &relative_local_time(1),
+            "host:tmux-421-long-retry",
+            "tmux-421-long-retry",
+            None,
+        );
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 4);
+        assert!(messages[3].1.contains("연장 실패"));
+        assert!(messages[3].1.contains("server_port missing"));
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("3"),
+            "extension failure before HTTP must not create a cooldown record"
+        );
+
+        set_kv(&db, "server_port", "8791");
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+        assert_eq!(
+            message_outbox_rows(&db).len(),
+            4,
+            "extension retry after failure must not duplicate the same alert tier"
+        );
+        assert_eq!(
+            kv_value(&db, "test_http_count").as_deref(),
+            Some("4"),
+            "failed extension must retry before the next alert tier"
+        );
 
         write_codex_inflight(
             runtime_root.path(),
@@ -1291,14 +1417,19 @@ mod delayed_worker {
             "tmux-421-long",
             None,
         );
+        set_kv(
+            &db,
+            "long_turn_watchdog_extension:codex:111",
+            &old_extension_ms.to_string(),
+        );
         engine
             .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
         let messages = message_outbox_rows(&db);
-        assert_eq!(messages.len(), 3);
-        assert!(messages[2].1.contains("경과: 121분 (120분 단계)"));
+        assert_eq!(messages.len(), 5);
+        assert!(messages[4].1.contains("경과: 121분 (120분 단계)"));
     }
 }
 

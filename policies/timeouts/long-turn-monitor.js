@@ -31,6 +31,9 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
       // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
       // Prevents alarm fatigue while still notifying at key thresholds.
       var ALERT_THRESHOLDS = [30, 60, 120]; // minutes
+      var WATCHDOG_EXTENSION_MINUTES = 60;
+      var WATCHDOG_EXTENSION_COOLDOWN_MINUTES = 20;
+      var WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES = 5;
       try {
         var inflights = agentdesk.inflight.list();
         for (var li = 0; li < inflights.length; li++) {
@@ -52,6 +55,42 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           var tierKey = "long_turn_tier:" + inf.provider + ":" + inf.channel_id;
           var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
           var lastAlertedTier = lastTier.length > 0 ? parseInt(lastTier[0].value, 10) : -1;
+          var updatedAtMs = parseLocalTimestampMs(inf.updated_at);
+          var updatedAgeMin = updatedAtMs > 0 ? (Date.now() - updatedAtMs) / 60000 : null;
+          var recentProgress = updatedAgeMin !== null && updatedAgeMin <= WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES;
+          var extensionLine = "";
+          var extensionKey = "long_turn_watchdog_extension:" + inf.provider + ":" + inf.channel_id;
+          var lastExtensionRows = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [extensionKey]);
+          var lastExtensionAt = lastExtensionRows.length > 0 ? parseInt(lastExtensionRows[0].value, 10) : 0;
+          var nowMs = Date.now();
+          var extensionCooldownElapsed = !lastExtensionAt ||
+            (nowMs - lastExtensionAt) >= WATCHDOG_EXTENSION_COOLDOWN_MINUTES * 60 * 1000;
+          if (recentProgress) {
+            if (extensionCooldownElapsed) {
+              var extendResp = requestTurnWatchdogExtension(inf.channel_id, WATCHDOG_EXTENSION_MINUTES);
+              if (extendResp.ok) {
+                extensionLine = "\nwatchdog: +" + WATCHDOG_EXTENSION_MINUTES + "분 연장 요청 완료";
+                agentdesk.db.execute(
+                  "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+                  [extensionKey, "" + nowMs]
+                );
+                agentdesk.log.info("[long-turn] " + (inf.channel_name || inf.channel_id) +
+                  " — recent inflight progress; extended watchdog +" + WATCHDOG_EXTENSION_MINUTES + "min");
+              } else {
+                extensionLine = "\nwatchdog: 연장 실패 — " + extendResp.error;
+                agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) +
+                  " — recent inflight progress but watchdog extension failed: " + extendResp.error);
+              }
+            } else {
+              extensionLine = "\nwatchdog: 최근 progress 확인, 최근 연장 cooldown 중";
+              agentdesk.log.info("[long-turn] " + (inf.channel_name || inf.channel_id) +
+                " — recent inflight progress; watchdog extension cooldown still active");
+            }
+          } else if (updatedAgeMin !== null) {
+            extensionLine = "\nwatchdog: 최근 progress 없음 (" + Math.round(updatedAgeMin) + "분 전) — 연장 안 함";
+          } else {
+            extensionLine = "\nwatchdog: progress timestamp 없음 — 연장 안 함";
+          }
           if (currentTier <= lastAlertedTier) continue; // already alerted at this tier or higher
           // Resolve agent_id: prefer dispatch target, fallback to channel owner (#130)
           var agentId = "?";
@@ -79,7 +118,8 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
             "dispatch_id: " + (inf.dispatch_id || "?") + "\n" +
             "tmux: " + (inf.tmux_session_name || "?") + "\n" +
             "경과: " + Math.round(elapsedMin) + "분 (" + ALERT_THRESHOLDS[currentTier] + "분 단계)\n" +
-            "provider: " + (inf.provider || "?")
+            "provider: " + (inf.provider || "?") +
+            extensionLine
           );
           agentdesk.db.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
@@ -107,6 +147,21 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
         var oldKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_alert:%'");
         for (var ok = 0; ok < oldKeys.length; ok++) {
           agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [oldKeys[ok].key]);
+        }
+        var extensionKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_watchdog_extension:%'");
+        for (var ek = 0; ek < extensionKeys.length; ek++) {
+          var eParts = extensionKeys[ek].key.split(":");
+          var eProvider = eParts[1];
+          var eChannel = eParts[2];
+          var extensionStillActive = false;
+          for (var ei = 0; ei < inflights.length; ei++) {
+            if (inflights[ei].provider === eProvider && inflights[ei].channel_id === eChannel) {
+              extensionStillActive = true; break;
+            }
+          }
+          if (!extensionStillActive) {
+            agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [extensionKeys[ek].key]);
+          }
         }
       } catch(de) {
         agentdesk.log.warn("[long-turn] inflight scan error: " + de);
