@@ -269,6 +269,33 @@ fn attach_paused_turn_watcher(
     watcher_owner_channel_id
 }
 
+#[cfg(test)]
+pub(crate) mod test_harness_exports {
+    use super::*;
+
+    pub(crate) fn attach_paused_turn_watcher(
+        shared: &Arc<SharedData>,
+        http: Arc<serenity::Http>,
+        provider: &ProviderKind,
+        channel_id: serenity::ChannelId,
+        tmux_session_name: Option<String>,
+        output_path: Option<String>,
+        initial_offset: u64,
+        source: &'static str,
+    ) -> serenity::ChannelId {
+        super::attach_paused_turn_watcher(
+            shared,
+            http,
+            provider,
+            channel_id,
+            tmux_session_name,
+            output_path,
+            initial_offset,
+            source,
+        )
+    }
+}
+
 fn build_memory_injection_plan<'a>(
     provider: &ProviderKind,
     has_session_id: bool,

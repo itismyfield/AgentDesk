@@ -86,17 +86,16 @@ duplicate relay races.
 
 Normal watcher shutdown is tmux-liveness driven. A terminal-success event does
 not detach the watcher while the tmux pane remains alive; the watcher stops
-only after tmux death is observed, then removes its slot quietly. Operator stop,
-cancel, and force-kill are explicit lifecycle interrupts: they remove the
-watcher slot and raise the watcher's cancel flag so the loop exits without
-issuing session-ended relay noise.
+only after tmux death is observed, then removes its slot quietly. Operator
+stop/cancel paths that report `killed=false` preserve watcher ownership and do
+not raise the watcher's cancel flag, so the live tmux session remains the
+watcher's lifecycle authority. Force-kill and hard-stop paths are different:
+they remove the watcher slot and raise the watcher's cancel flag so the loop
+exits without issuing session-ended relay noise.
 
 Manual rebind is route adoption, not relay multiplication. If a live watcher
 already owns the target tmux session, `rebind_inflight_for_channel` returns a
 non-spawning reuse result and leaves delivery with the incumbent watcher.
-Outbound dedupe still keys terminal relay attempts by correlation/semantic
-identity, so a stale or racing rebind path cannot post the same terminal output
-twice.
 
 ## Common Finalizer Shape
 
