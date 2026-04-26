@@ -851,7 +851,7 @@ pub async fn agent_dispatched_sessions(
                 model, tokens, cwd, last_heartbeat, thread_channel_id
          FROM sessions
          WHERE agent_id = $1
-         ORDER BY id",
+         ORDER BY last_heartbeat DESC NULLS LAST, id DESC",
     )
     .bind(&id)
     .fetch_all(pool)
@@ -866,40 +866,89 @@ pub async fn agent_dispatched_sessions(
         }
     };
 
+    let guild_id = state
+        .config
+        .discord
+        .guild_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let mut resolver = SessionActivityResolver::new();
-    let sessions: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            let session_key = row.try_get::<Option<String>, _>("session_key").ok().flatten();
-            let status = row.try_get::<Option<String>, _>("status").ok().flatten();
-            let active_dispatch_id = row
-                .try_get::<Option<String>, _>("active_dispatch_id")
-                .ok()
-                .flatten();
-            let last_heartbeat = pg_timestamp_to_rfc3339(row.try_get("last_heartbeat").ok().flatten());
-            let effective = resolver.resolve(
-                session_key.as_deref(),
-                status.as_deref(),
-                active_dispatch_id.as_deref(),
-                last_heartbeat.as_deref(),
-            );
-            json!({
-                "id": row.try_get::<i64, _>("id").unwrap_or(0),
-                "session_key": session_key,
-                "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
-                "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
-                "status": effective.status,
-                "active_dispatch_id": effective.active_dispatch_id,
-                "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
-                "tokens": row.try_get::<i64, _>("tokens").unwrap_or(0),
-                "cwd": row.try_get::<Option<String>, _>("cwd").ok().flatten(),
-                "last_heartbeat": last_heartbeat,
-                "thread_channel_id": row.try_get::<Option<String>, _>("thread_channel_id").ok().flatten(),
-            })
-        })
-        .collect();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut sessions: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let session_key = row
+            .try_get::<Option<String>, _>("session_key")
+            .ok()
+            .flatten();
+        let status = row.try_get::<Option<String>, _>("status").ok().flatten();
+        let active_dispatch_id = row
+            .try_get::<Option<String>, _>("active_dispatch_id")
+            .ok()
+            .flatten();
+        let last_heartbeat = pg_timestamp_to_rfc3339(row.try_get("last_heartbeat").ok().flatten());
+        let provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
+        let thread_channel_id = row
+            .try_get::<Option<String>, _>("thread_channel_id")
+            .ok()
+            .flatten();
+
+        // Dedup by (thread_channel_id, provider) when both are present so the same
+        // Discord channel doesn't show twice for one agent. NULL channels keep all rows.
+        if let (Some(cid), Some(prov)) = (&thread_channel_id, &provider) {
+            if !seen.insert((cid.clone(), prov.clone())) {
+                continue;
+            }
+        }
+
+        let effective = resolver.resolve(
+            session_key.as_deref(),
+            status.as_deref(),
+            active_dispatch_id.as_deref(),
+            last_heartbeat.as_deref(),
+        );
+
+        let (channel_web_url, channel_deeplink_url) =
+            build_channel_deeplinks(thread_channel_id.as_deref(), guild_id.as_deref());
+
+        sessions.push(json!({
+            "id": row.try_get::<i64, _>("id").unwrap_or(0),
+            "session_key": session_key,
+            "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            "provider": provider,
+            "status": effective.status,
+            "active_dispatch_id": effective.active_dispatch_id,
+            "model": row.try_get::<Option<String>, _>("model").ok().flatten(),
+            "tokens": row.try_get::<i64, _>("tokens").unwrap_or(0),
+            "cwd": row.try_get::<Option<String>, _>("cwd").ok().flatten(),
+            "last_heartbeat": last_heartbeat,
+            "thread_channel_id": thread_channel_id,
+            "guild_id": guild_id.clone(),
+            "channel_web_url": channel_web_url,
+            "channel_deeplink_url": channel_deeplink_url,
+        }));
+    }
 
     (StatusCode::OK, Json(json!({"sessions": sessions})))
+}
+
+/// Build Discord web + deep-link URLs for a channel. Returns (None, None) when either
+/// channel_id or guild_id is missing so the caller can render plain text fallback.
+fn build_channel_deeplinks(
+    channel_id: Option<&str>,
+    guild_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let channel = channel_id.map(str::trim).filter(|s| !s.is_empty());
+    let guild = guild_id.map(str::trim).filter(|s| !s.is_empty());
+    match (channel, guild) {
+        (Some(c), Some(g)) => (
+            Some(format!("https://discord.com/channels/{g}/{c}")),
+            Some(format!("discord://discord.com/channels/{g}/{c}")),
+        ),
+        _ => (None, None),
+    }
 }
 
 /// GET /api/agents/:id/turn

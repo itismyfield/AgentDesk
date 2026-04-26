@@ -1,7 +1,13 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+};
 use chrono::{Datelike, Local, TimeZone};
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Instant;
 
 use super::AppState;
 use crate::receipt;
@@ -102,7 +108,8 @@ pub async fn get_receipt(
 pub async fn get_token_analytics(
     State(_state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<TokenAnalyticsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Response {
+    let started = Instant::now();
     let period = params.period.as_deref().unwrap_or("30d");
     let now = chrono::Utc::now();
     let local_now = now.with_timezone(&Local);
@@ -128,12 +135,28 @@ pub async fn get_token_analytics(
     {
         Ok(d) => d,
         Err(e) => {
+            let elapsed_ms = started.elapsed().as_millis();
+            tracing::warn!(period = period_id, elapsed_ms, error = %e, "token-analytics failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("collection failed: {e}")})),
-            );
+            )
+                .into_response();
         }
     };
 
-    (StatusCode::OK, Json(json!(data)))
+    let elapsed_ms = started.elapsed().as_millis();
+    tracing::info!(period = period_id, elapsed_ms, "token-analytics responded");
+
+    let mut response = (StatusCode::OK, Json(json!(data))).into_response();
+    let headers = response.headers_mut();
+    // SWR-friendly cache: stable for 30s, dashboard can serve stale up to 2 min while revalidating.
+    headers.insert(
+        "Cache-Control",
+        HeaderValue::from_static("private, max-age=30, stale-while-revalidate=120"),
+    );
+    if let Ok(value) = HeaderValue::from_str(&elapsed_ms.to_string()) {
+        headers.insert("X-Response-Time-Ms", value);
+    }
+    response
 }
