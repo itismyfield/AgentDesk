@@ -1084,6 +1084,132 @@ fn reset_stale_local_relay_offset_if_output_regressed(
     true
 }
 
+fn advance_watcher_confirmed_end(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    committed_end_offset: u64,
+    context: &'static str,
+) {
+    let relay_coord = shared.tmux_relay_coord(channel_id);
+    let mut cur = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    while cur < committed_end_offset {
+        match relay_coord.confirmed_end_offset.compare_exchange(
+            cur,
+            committed_end_offset,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => cur = observed,
+        }
+    }
+    let confirmed_end = relay_coord
+        .confirmed_end_offset
+        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_reached_current = confirmed_end >= committed_end_offset;
+    record_watcher_invariant(
+        confirmed_reached_current,
+        Some(provider),
+        channel_id,
+        "tmux_confirmed_end_monotonic",
+        context,
+        "watcher confirmed_end_offset must reach the committed tmux output end",
+        serde_json::json!({
+            "current_offset": committed_end_offset,
+            "confirmed_end": confirmed_end,
+            "tmux_session_name": tmux_session_name,
+        }),
+    );
+    debug_assert!(
+        confirmed_reached_current,
+        "watcher confirmed_end_offset must reach committed output end"
+    );
+}
+
+async fn drain_watcher_output_tail_to_eof(
+    output_path: &str,
+    mut current_offset: u64,
+) -> Result<u64, String> {
+    loop {
+        let read_more = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking({
+                let path = output_path.to_string();
+                let offset = current_offset;
+                move || -> Result<(Vec<u8>, u64), String> {
+                    use std::io::{Read as _, Seek as _};
+
+                    let mut file =
+                        std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
+                    file.seek(std::io::SeekFrom::Start(offset))
+                        .map_err(|e| format!("seek: {}", e))?;
+                    let mut buf = vec![0u8; 16384];
+                    let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
+                    buf.truncate(n);
+                    Ok((buf, offset + n as u64))
+                }
+            }),
+        )
+        .await;
+
+        match read_more {
+            Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
+                current_offset = off;
+            }
+            Ok(Ok(Ok((_, off)))) => return Ok(off),
+            Ok(Ok(Err(error))) => return Err(error),
+            Ok(Err(error)) => return Err(format!("join error: {error}")),
+            Err(_) => return Err("timeout reading tmux output tail".to_string()),
+        }
+    }
+}
+
+async fn drain_missing_inflight_dead_tmux_tail_to_eof(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
+    current_offset: u64,
+) -> u64 {
+    match drain_watcher_output_tail_to_eof(output_path, current_offset).await {
+        Ok(drained_offset) => {
+            if drained_offset > current_offset {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 missing-inflight dead-tmux drain advanced {} from offset {} to EOF {} before watcher shutdown",
+                    tmux_session_name,
+                    current_offset,
+                    drained_offset
+                );
+            }
+            advance_watcher_confirmed_end(
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                drained_offset,
+                "src/services/discord/tmux.rs:missing_inflight_dead_tmux_tail_drain",
+            );
+            drained_offset
+        }
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ missing-inflight dead-tmux drain failed for {} at offset {}: {}",
+                tmux_session_name,
+                current_offset,
+                error
+            );
+            current_offset
+        }
+    }
+}
+
 /// #826 P1 #2 (option b): Decide which of the two offset watermarks
 /// (`last_relayed_offset`, `last_enqueued_offset`) a watcher tick should
 /// advance after attempting to deliver a terminal response.
@@ -4916,40 +5042,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
         // direct emission or empty-turn cleanup. CAS loop ensures we only ever move the
         // watermark FORWARD, even if some other instance has raced ahead.
         if relay_ok || relay_suppressed {
-            let mut cur = relay_coord
-                .confirmed_end_offset
-                .load(std::sync::atomic::Ordering::Acquire);
-            while cur < current_offset {
-                match relay_coord.confirmed_end_offset.compare_exchange(
-                    cur,
-                    current_offset,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                ) {
-                    Ok(_) => break,
-                    Err(observed) => cur = observed,
-                }
-            }
-            let confirmed_end = relay_coord
-                .confirmed_end_offset
-                .load(std::sync::atomic::Ordering::Acquire);
-            let confirmed_reached_current = confirmed_end >= current_offset;
-            record_watcher_invariant(
-                confirmed_reached_current,
-                Some(&watcher_provider),
+            advance_watcher_confirmed_end(
+                &shared,
+                &watcher_provider,
                 channel_id,
-                "tmux_confirmed_end_monotonic",
+                &tmux_session_name,
+                current_offset,
                 "src/services/discord/tmux.rs:tmux_output_watcher_confirmed_end",
-                "watcher confirmed_end_offset must reach the committed tmux output end",
-                serde_json::json!({
-                    "current_offset": current_offset,
-                    "confirmed_end": confirmed_end,
-                    "tmux_session_name": tmux_session_name.as_str(),
-                }),
-            );
-            debug_assert!(
-                confirmed_reached_current,
-                "watcher confirmed_end_offset must reach committed output end"
             );
         }
         // Release the emission slot regardless of success. If delivery failed
@@ -5385,6 +5484,15 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 );
             }
         } else if !tmux_alive_for_missing_inflight {
+            let _drained_offset = drain_missing_inflight_dead_tmux_tail_to_eof(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                &output_path,
+                current_offset,
+            )
+            .await;
             handle_tmux_watcher_observed_death(
                 channel_id,
                 &http,
@@ -7445,6 +7553,49 @@ mod tests {
         assert!(dead_tmux.warn);
         assert!(!dead_tmux.trigger_reattach);
         assert!(!dead_tmux.suppressed_by_recent_stop);
+    }
+
+    #[tokio::test]
+    async fn missing_inflight_dead_tmux_branch_drains_post_result_tail_to_eof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempfile::tempdir()?;
+        let output_path = tmp.path().join("tmux-output.jsonl");
+        let result_chunk = b"{\"type\":\"result\",\"subtype\":\"success\"}\n";
+        let post_result_tail = b"{\"type\":\"session_configured\",\"session_id\":\"tail\"}\n";
+        let mut output = Vec::new();
+        output.extend_from_slice(result_chunk);
+        output.extend_from_slice(post_result_tail);
+        std::fs::write(&output_path, output)?;
+
+        let current_offset = result_chunk.len() as u64;
+        let expected_eof = current_offset + post_result_tail.len() as u64;
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(987_1171_001);
+        let tmux_name = "AgentDesk-codex-test-1171-tail-drain";
+        let relay_coord = shared.tmux_relay_coord(channel_id);
+        relay_coord
+            .confirmed_end_offset
+            .store(current_offset, Ordering::Release);
+
+        let drained_offset = super::drain_missing_inflight_dead_tmux_tail_to_eof(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            tmux_name,
+            output_path.to_str().expect("utf8 temp path"),
+            current_offset,
+        )
+        .await;
+
+        assert_eq!(drained_offset, expected_eof);
+        assert_eq!(
+            relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+            expected_eof,
+            "missing-inflight dead-tmux shutdown must commit the readable post-result tail"
+        );
+
+        Ok(())
     }
 
     #[test]
