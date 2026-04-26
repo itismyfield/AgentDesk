@@ -478,6 +478,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "latest_startup_doctor": {
+                    "available": true,
+                    "status": "warned",
+                    "artifact_path": "/Users/kunkun/.adk/release/runtime/doctor/startup/123-456.json",
+                    "started_at": "2026-04-26T14:49:14+09:00",
+                    "completed_at": "2026-04-26T14:49:17+09:00",
+                    "boot_id": "123-456",
+                    "summary": {"passed": 21, "warned": 3, "failed": 0, "total": 24},
+                    "failed_count": 0,
+                    "warned_count": 3,
+                    "detail_endpoint": "/api/doctor/startup/latest"
+                },
                 "db": true,
                 "dashboard": true,
                 "deferred_hooks": 0,
@@ -493,6 +505,87 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"status": "degraded", "server_up": true, "fully_recovered": false, "db": false, "error": "db connection failing"}),
         )
         .with_curl("curl http://localhost:8787/api/health"),
+        ep(
+            "GET",
+            "/api/health/detail",
+            "health",
+            "Local/protected detailed health with provider diagnostics and latest startup doctor detail.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "status": "healthy",
+                "server_up": true,
+                "fully_recovered": true,
+                "latest_startup_doctor": {
+                    "available": true,
+                    "status": "failed",
+                    "artifact_path": "/Users/kunkun/.adk/release/runtime/doctor/startup/123-456.json",
+                    "summary": {"passed": 21, "warned": 3, "failed": 1, "total": 25},
+                    "failed_count": 1,
+                    "warned_count": 3,
+                    "detail_endpoint": "/api/doctor/startup/latest",
+                    "run_context": "startup_once",
+                    "non_fatal": true,
+                    "failed_checks": [{"id": "dispatch_outbox", "status": "fail"}],
+                    "warned_checks": [{"id": "disk_usage", "status": "warn"}],
+                    "followup_context": "restart_followup"
+                }
+            }),
+        )
+        .with_error_example(
+            403,
+            json!({}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl http://localhost:8787/api/health/detail"),
+        ep(
+            "GET",
+            "/api/doctor/startup/latest",
+            "health",
+            "Local/protected latest startup doctor artifact envelope for agent rescue and diagnosis.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "ok": true,
+                "available": true,
+                "artifact_path": "/Users/kunkun/.adk/release/runtime/doctor/startup/123-456.json",
+                "detail_source": "startup_doctor_artifact",
+                "followup_context": "restart_followup",
+                "summary": {"passed": 21, "warned": 3, "failed": 1, "total": 25},
+                "artifact": {"schema_version": 1, "boot_id": "123-456", "checks": []}
+            }),
+        )
+        .with_error_example(
+            200,
+            json!({}),
+            json!({"ok": true, "available": false, "artifact_path": null, "reason": "startup_doctor_artifact_missing", "artifact": null}),
+        )
+        .with_curl("curl http://localhost:8787/api/doctor/startup/latest"),
+        ep(
+            "POST",
+            "/api/doctor/stale-mailbox/repair",
+            "health",
+            "Local/protected stale mailbox repair endpoint used by doctor follow-up workflows.",
+        )
+        .with_params([
+            ("channel_id", body_param("integer", true, "Discord channel snowflake")),
+            (
+                "expected_has_cancel_token",
+                body_param("boolean", false, "Optional guard for the observed mailbox token state"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"channel_id": "1486017489027469493", "expected_has_cancel_token": true}}),
+            json!({"ok": true, "applied": true}),
+        )
+        .with_error_example(
+            403,
+            json!({"body": {"channel_id": "1486017489027469493"}}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/doctor/stale-mailbox/repair -H 'Content-Type: application/json' -d '{\"channel_id\":1486017489027469493}'"),
         ep(
             "POST",
             "/api/discord/send",

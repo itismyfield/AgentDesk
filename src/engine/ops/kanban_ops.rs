@@ -1324,7 +1324,7 @@ pub(super) fn review_state_sync_on_conn(
          VALUES (?1, ?2, COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0), ?4, ?5, ?6, ?7, ?8, COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
          ON CONFLICT(card_id) DO UPDATE SET \
          state = ?2, \
-         review_round = COALESCE(?3, review_round), \
+         review_round = COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), review_round), \
          last_verdict = COALESCE(?4, last_verdict), \
          last_decision = COALESCE(?5, last_decision), \
          pending_dispatch_id = CASE \

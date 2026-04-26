@@ -3,7 +3,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{Value, json};
+
+pub(crate) const LATEST_STARTUP_DOCTOR_ENDPOINT: &str = "/api/doctor/startup/latest";
 
 pub(crate) fn startup_artifact_root() -> Option<PathBuf> {
     crate::cli::agentdesk_runtime_root()
@@ -42,6 +44,210 @@ pub(crate) fn latest_startup_artifact_path() -> Option<PathBuf> {
     let root = startup_artifact_root()?;
     let boot_id = current_boot_id().ok()?;
     Some(root.join(format!("{boot_id}.json")))
+}
+
+enum LatestStartupDoctorArtifact {
+    Available {
+        path: PathBuf,
+        report: Value,
+    },
+    Missing {
+        path: Option<PathBuf>,
+        reason: &'static str,
+    },
+    Error {
+        path: Option<PathBuf>,
+        error: &'static str,
+        detail: String,
+    },
+}
+
+fn load_latest_startup_doctor_artifact() -> LatestStartupDoctorArtifact {
+    let Some(path) = latest_startup_artifact_path() else {
+        return LatestStartupDoctorArtifact::Missing {
+            path: None,
+            reason: "startup_doctor_runtime_root_unavailable",
+        };
+    };
+
+    if !path.exists() {
+        return LatestStartupDoctorArtifact::Missing {
+            path: Some(path),
+            reason: "startup_doctor_artifact_missing",
+        };
+    }
+
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            return LatestStartupDoctorArtifact::Error {
+                path: Some(path),
+                error: "startup_doctor_artifact_read_failed",
+                detail: error.to_string(),
+            };
+        }
+    };
+
+    match serde_json::from_str::<Value>(&content) {
+        Ok(report) => LatestStartupDoctorArtifact::Available { path, report },
+        Err(error) => LatestStartupDoctorArtifact::Error {
+            path: Some(path),
+            error: "invalid_startup_doctor_artifact",
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn path_json(path: Option<&PathBuf>) -> Value {
+    path.map(|path| json!(path.display().to_string()))
+        .unwrap_or(Value::Null)
+}
+
+fn count_checks_with_status(report: &Value, status: &str) -> u64 {
+    report
+        .get("checks")
+        .and_then(Value::as_array)
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| check.get("status").and_then(Value::as_str) == Some(status))
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+fn summary_count(report: &Value, key: &str, fallback_status: &str) -> u64 {
+    report
+        .get("summary")
+        .and_then(|summary| summary.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| count_checks_with_status(report, fallback_status))
+}
+
+fn filtered_checks(report: &Value, status: &str) -> Value {
+    report
+        .get("checks")
+        .and_then(Value::as_array)
+        .map(|checks| {
+            Value::Array(
+                checks
+                    .iter()
+                    .filter(|check| check.get("status").and_then(Value::as_str) == Some(status))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn startup_doctor_status(failed_count: u64, warned_count: u64) -> &'static str {
+    if failed_count > 0 {
+        "failed"
+    } else if warned_count > 0 {
+        "warned"
+    } else {
+        "passed"
+    }
+}
+
+fn followup_context() -> &'static str {
+    super::contract::RunContext::RestartFollowup.as_str()
+}
+
+fn startup_doctor_summary_json(path: &PathBuf, report: &Value, detailed: bool) -> Value {
+    let failed_count = summary_count(report, "failed", "fail");
+    let warned_count = summary_count(report, "warned", "warn");
+    let mut summary = json!({
+        "available": true,
+        "status": startup_doctor_status(failed_count, warned_count),
+        "artifact_path": path.display().to_string(),
+        "started_at": report.get("started_at").cloned().unwrap_or(Value::Null),
+        "completed_at": report.get("completed_at").cloned().unwrap_or(Value::Null),
+        "boot_id": report.get("boot_id").cloned().unwrap_or(Value::Null),
+        "summary": report.get("summary").cloned().unwrap_or(Value::Null),
+        "failed_count": failed_count,
+        "warned_count": warned_count,
+        "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
+    });
+
+    if detailed {
+        summary["run_context"] = report.get("run_context").cloned().unwrap_or(Value::Null);
+        summary["non_fatal"] = report.get("non_fatal").cloned().unwrap_or(Value::Null);
+        summary["failed_checks"] = filtered_checks(report, "fail");
+        summary["warned_checks"] = filtered_checks(report, "warn");
+        summary["followup_context"] = json!(followup_context());
+    }
+
+    summary
+}
+
+pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
+    match load_latest_startup_doctor_artifact() {
+        LatestStartupDoctorArtifact::Available { path, report } => {
+            startup_doctor_summary_json(&path, &report, detailed)
+        }
+        LatestStartupDoctorArtifact::Missing { path, reason } => json!({
+            "available": false,
+            "status": "missing",
+            "artifact_path": path_json(path.as_ref()),
+            "summary": Value::Null,
+            "failed_count": 0,
+            "warned_count": 0,
+            "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
+            "reason": reason,
+        }),
+        LatestStartupDoctorArtifact::Error {
+            path,
+            error,
+            detail: _,
+        } => json!({
+            "available": false,
+            "status": "error",
+            "artifact_path": path_json(path.as_ref()),
+            "summary": Value::Null,
+            "failed_count": 0,
+            "warned_count": 0,
+            "detail_endpoint": LATEST_STARTUP_DOCTOR_ENDPOINT,
+            "error": error,
+        }),
+    }
+}
+
+pub(crate) fn latest_startup_doctor_response_json() -> Value {
+    match load_latest_startup_doctor_artifact() {
+        LatestStartupDoctorArtifact::Available { path, report } => json!({
+            "ok": true,
+            "available": true,
+            "artifact_path": path.display().to_string(),
+            "detail_source": "startup_doctor_artifact",
+            "followup_context": followup_context(),
+            "summary": report.get("summary").cloned().unwrap_or(Value::Null),
+            "artifact": report,
+        }),
+        LatestStartupDoctorArtifact::Missing { path, reason } => json!({
+            "ok": true,
+            "available": false,
+            "artifact_path": path_json(path.as_ref()),
+            "detail_source": "startup_doctor_artifact",
+            "followup_context": followup_context(),
+            "reason": reason,
+            "artifact": Value::Null,
+        }),
+        LatestStartupDoctorArtifact::Error {
+            path,
+            error,
+            detail,
+        } => json!({
+            "ok": false,
+            "available": false,
+            "artifact_path": path_json(path.as_ref()),
+            "detail_source": "startup_doctor_artifact",
+            "followup_context": followup_context(),
+            "error": error,
+            "detail": detail,
+            "artifact": Value::Null,
+        }),
+    }
 }
 
 pub(crate) fn run_startup_diagnostic_once() -> Result<Option<PathBuf>, String> {

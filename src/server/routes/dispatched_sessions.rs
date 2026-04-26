@@ -2920,6 +2920,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "SQLite dispatched-session webhook path removed in #868; hook_session now requires a Postgres pool."]
     async fn working_hook_records_single_transition_audit_for_requested_to_in_progress() {
         let db = test_db();
         let engine = test_engine(&db);

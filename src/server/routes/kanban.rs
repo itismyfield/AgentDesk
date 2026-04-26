@@ -3420,7 +3420,11 @@ pub async fn reopen_card(
         return response;
     }
 
-    let caller_source = {
+    let caller_source = if let Some(pool) = state.pg_pool_ref() {
+        resolve_requesting_agent_id_with_pg(pool, &headers)
+            .await
+            .unwrap_or_else(|| "api".to_string())
+    } else {
         let conn = match legacy_db(&state).lock() {
             Ok(c) => c,
             Err(e) => {
@@ -4520,7 +4524,11 @@ pub async fn force_transition(
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
     let target_status = body.status;
     let mut cleanup_counts = (0, 0);
-    let caller_source = {
+    let caller_source = if let Some(pool) = state.pg_pool_ref() {
+        resolve_requesting_agent_id_with_pg(pool, &headers)
+            .await
+            .unwrap_or_else(|| "api".to_string())
+    } else {
         let conn = match legacy_db(&state).lock() {
             Ok(c) => c,
             Err(e) => {
@@ -4691,7 +4699,11 @@ pub async fn force_transition(
     match transition_result {
         Ok(result) => {
             let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
-            crate::kanban::drain_hook_side_effects(legacy_db(&state), &state.engine);
+            if state.pg_pool_ref().is_some() {
+                crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+            } else {
+                crate::kanban::drain_hook_side_effects(legacy_db(&state), &state.engine);
+            }
 
             let card = if let Some(pool) = state.pg_pool_ref() {
                 load_card_json_pg(pool, &id)

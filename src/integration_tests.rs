@@ -1777,6 +1777,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SQLite retrospective runtime path removed in #868; PG retrospective persistence is covered in services::retrospectives tests."]
     fn terminal_transition_records_card_retrospective_from_latest_completed_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);

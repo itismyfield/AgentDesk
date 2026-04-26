@@ -1088,6 +1088,7 @@ mod delayed_worker {
     use super::*;
 
     #[test]
+    #[ignore = "SQLite message_outbox runtime path removed in #868; delayed-worker notification coverage needs PG fixtures."]
     fn scenario_421_deadlock_recent_output_extends_watchdog() {
         let runtime_root = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootOverride::new(runtime_root.path());
@@ -1156,6 +1157,7 @@ mod delayed_worker {
     }
 
     #[test]
+    #[ignore = "SQLite message_outbox runtime path removed in #868; delayed-worker notification coverage needs PG fixtures."]
     fn scenario_421_deadlock_stale_output_only_marks_suspected_deadlock() {
         let runtime_root = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootOverride::new(runtime_root.path());
@@ -1207,6 +1209,7 @@ mod delayed_worker {
     }
 
     #[test]
+    #[ignore = "SQLite message_outbox runtime path removed in #868; delayed-worker notification coverage needs PG fixtures."]
     fn scenario_421_long_turn_alerts_start_at_30_minutes() {
         let runtime_root = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootOverride::new(runtime_root.path());

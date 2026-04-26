@@ -53,7 +53,7 @@
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 182 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4362 | giant-file |
-| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 147 |  |
+| `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 353 |  |
 | `cli::init` | `src/cli/init.rs` | 1597 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3144 | giant-file |
@@ -159,7 +159,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2882 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1531 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 3536 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 3629 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 62 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 88 |  |
@@ -167,12 +167,12 @@
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 85 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 61 |  |
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 |  |
-| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 248 |  |
+| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 252 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 69 |  |
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2205 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 537 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 914 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 936 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4775 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
@@ -266,7 +266,7 @@
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 59 |  |
 | `services::discord::restart_ctrl` | `src/services/discord/restart_ctrl.rs` | 113 |  |
 | `services::discord::restart_mode` | `src/services/discord/restart_mode.rs` | 32 |  |
-| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 513 |  |
+| `services::discord::restart_report` | `src/services/discord/restart_report.rs` | 499 |  |
 | `services::discord::role_map` | `src/services/discord/role_map.rs` | 860 |  |
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 17 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |

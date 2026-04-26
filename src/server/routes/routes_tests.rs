@@ -282,6 +282,52 @@ impl Drop for EnvVarGuard {
     }
 }
 
+fn seed_startup_doctor_artifact(
+    runtime_root: &std::path::Path,
+    artifact: serde_json::Value,
+) -> std::path::PathBuf {
+    let runtime_dir = runtime_root.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join("dcserver.pid"), "4242\n").unwrap();
+    let boot_id = crate::cli::doctor::startup::current_boot_id().unwrap();
+    let artifact_dir = runtime_dir.join("doctor").join("startup");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    let artifact_path = artifact_dir.join(format!("{boot_id}.json"));
+    fs::write(
+        &artifact_path,
+        serde_json::to_string_pretty(&artifact).unwrap(),
+    )
+    .unwrap();
+    artifact_path
+}
+
+fn sample_startup_doctor_artifact() -> serde_json::Value {
+    json!({
+        "schema_version": 1,
+        "ok": false,
+        "boot_id": "4242-test",
+        "started_at": "2026-04-26T14:49:14+09:00",
+        "completed_at": "2026-04-26T14:49:17+09:00",
+        "run_context": "startup_once",
+        "non_fatal": true,
+        "summary": {"passed": 2, "warned": 1, "failed": 1, "total": 4},
+        "checks": [
+            {"id": "server", "status": "pass", "ok": true},
+            {"id": "disk_usage", "status": "warn", "ok": true},
+            {"id": "dispatch_outbox", "status": "fail", "ok": false},
+            {"id": "credentials", "status": "pass", "ok": true}
+        ]
+    })
+}
+
+fn local_get_request(uri: &str) -> Request<Body> {
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    request
+}
+
 fn write_test_skill(runtime_root: &std::path::Path, skill_name: &str, description: &str) {
     let skill_dir = runtime_root.join("skills").join(skill_name);
     fs::create_dir_all(&skill_dir).unwrap();
@@ -811,6 +857,18 @@ async fn health_detail_and_stale_mailbox_repair_require_bearer_when_auth_enabled
     let repair_response = app.clone().oneshot(repair_request).await.unwrap();
     assert_eq!(repair_response.status(), StatusCode::UNAUTHORIZED);
 
+    let mut startup_doctor_request = Request::builder()
+        .uri("/doctor/startup/latest")
+        .body(Body::empty())
+        .unwrap();
+    startup_doctor_request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(
+            "10.0.0.5:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    let startup_doctor_response = app.clone().oneshot(startup_doctor_request).await.unwrap();
+    assert_eq!(startup_doctor_response.status(), StatusCode::UNAUTHORIZED);
+
     let mut authorized_detail_request = Request::builder()
         .uri("/health/detail")
         .header("authorization", "Bearer secret-token")
@@ -823,6 +881,291 @@ async fn health_detail_and_stale_mailbox_repair_require_bearer_when_auth_enabled
         ));
     let authorized_detail_response = app.oneshot(authorized_detail_request).await.unwrap();
     assert_eq!(authorized_detail_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn health_surfaces_latest_startup_doctor_summary_without_raw_checks() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let artifact_path =
+        seed_startup_doctor_artifact(runtime_root.path(), sample_startup_doctor_artifact());
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let doctor = &json["latest_startup_doctor"];
+    assert_eq!(doctor["available"], true);
+    assert_eq!(doctor["status"], "failed");
+    assert_eq!(doctor["artifact_path"], artifact_path.display().to_string());
+    assert_eq!(doctor["failed_count"], 1);
+    assert_eq!(doctor["warned_count"], 1);
+    assert_eq!(doctor["detail_endpoint"], "/api/doctor/startup/latest");
+    assert!(doctor.get("failed_checks").is_none());
+    assert!(doctor.get("warned_checks").is_none());
+    assert!(doctor.get("checks").is_none());
+}
+
+#[tokio::test]
+async fn startup_doctor_latest_endpoint_returns_json_artifact_envelope() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let artifact_path =
+        seed_startup_doctor_artifact(runtime_root.path(), sample_startup_doctor_artifact());
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(local_get_request("/doctor/startup/latest"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("application/json"),
+        "latest startup doctor endpoint must return JSON, got {content_type}"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["available"], true);
+    assert_eq!(json["artifact_path"], artifact_path.display().to_string());
+    assert_eq!(json["detail_source"], "startup_doctor_artifact");
+    assert_eq!(json["followup_context"], "restart_followup");
+    assert_eq!(json["summary"]["failed"], 1);
+    assert_eq!(json["artifact"]["checks"][2]["id"], "dispatch_outbox");
+}
+
+#[tokio::test]
+async fn startup_doctor_latest_endpoint_reports_missing_artifact_as_json() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    fs::create_dir_all(runtime_root.path().join("runtime")).unwrap();
+    fs::write(
+        runtime_root.path().join("runtime").join("dcserver.pid"),
+        "4242\n",
+    )
+    .unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(local_get_request("/doctor/startup/latest"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["available"], false);
+    assert_eq!(json["reason"], "startup_doctor_artifact_missing");
+    assert_eq!(json["artifact"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn startup_doctor_latest_endpoint_reports_corrupt_artifact_as_parse_error() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+
+    let runtime_dir = runtime_root.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join("dcserver.pid"), "4242\n").unwrap();
+
+    let boot_id = crate::cli::doctor::startup::current_boot_id().unwrap();
+    let artifact_dir = runtime_dir.join("doctor").join("startup");
+    fs::create_dir_all(&artifact_dir).unwrap();
+    fs::write(
+        artifact_dir.join(format!("{boot_id}.json")),
+        b"{ not valid json {{",
+    )
+    .unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(local_get_request("/doctor/startup/latest"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["available"], false);
+    assert_eq!(json["error"], "invalid_startup_doctor_artifact");
+    assert!(
+        !json["detail"].is_null(),
+        "parse error detail string must be present"
+    );
+    assert_eq!(json["artifact"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn health_detail_includes_latest_startup_doctor_detailed_fields() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let artifact_path =
+        seed_startup_doctor_artifact(runtime_root.path(), sample_startup_doctor_artifact());
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let doctor = &json["latest_startup_doctor"];
+    assert_eq!(doctor["available"], true);
+    assert_eq!(doctor["artifact_path"], artifact_path.display().to_string());
+    assert_eq!(
+        doctor["failed_checks"]
+            .as_array()
+            .expect("failed_checks must be an array in detail")
+            .len(),
+        1,
+        "sample artifact has 1 failed check"
+    );
+    assert_eq!(
+        doctor["warned_checks"]
+            .as_array()
+            .expect("warned_checks must be an array in detail")
+            .len(),
+        1,
+        "sample artifact has 1 warned check"
+    );
+    assert_eq!(doctor["run_context"], "startup_once");
+    assert_eq!(doctor["non_fatal"], true);
+    assert_eq!(doctor["followup_context"], "restart_followup");
+    assert!(
+        doctor.get("checks").is_none(),
+        "raw checks array must not be present at top level of doctor object"
+    );
+}
+
+#[tokio::test]
+async fn health_detail_and_latest_endpoint_share_same_artifact_contract() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let artifact_path =
+        seed_startup_doctor_artifact(runtime_root.path(), sample_startup_doctor_artifact());
+    let artifact_path_str = artifact_path.display().to_string();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let health_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let health_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(health_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let detail_response = app
+        .clone()
+        .oneshot(local_get_request("/health/detail"))
+        .await
+        .unwrap();
+    let detail_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(detail_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let latest_response = app
+        .clone()
+        .oneshot(local_get_request("/doctor/startup/latest"))
+        .await
+        .unwrap();
+    let latest_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(latest_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        health_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,
+        "public health must report correct artifact_path"
+    );
+    assert_eq!(
+        detail_json["latest_startup_doctor"]["artifact_path"], artifact_path_str,
+        "detail health must report correct artifact_path"
+    );
+    assert_eq!(
+        latest_json["artifact_path"], artifact_path_str,
+        "latest endpoint must report correct artifact_path"
+    );
+    assert_eq!(
+        health_json["latest_startup_doctor"]["detail_endpoint"], "/api/doctor/startup/latest",
+        "public health must expose detail_endpoint"
+    );
+    assert_eq!(
+        detail_json["latest_startup_doctor"]["detail_endpoint"], "/api/doctor/startup/latest",
+        "detail health must expose detail_endpoint"
+    );
+    assert_eq!(
+        detail_json["latest_startup_doctor"]["followup_context"], latest_json["followup_context"],
+        "followup_context must be consistent between detail and latest endpoint"
+    );
 }
 
 #[tokio::test]
@@ -8024,6 +8367,49 @@ async fn health_docs_describe_server_up_and_fully_recovered() {
     assert!(description.contains("fully_recovered"));
     assert_eq!(health["example"]["response"]["server_up"], true);
     assert_eq!(health["example"]["response"]["fully_recovered"], true);
+    assert_eq!(
+        health["example"]["response"]["latest_startup_doctor"]["detail_endpoint"],
+        "/api/doctor/startup/latest"
+    );
+}
+
+#[tokio::test]
+async fn health_docs_list_doctor_discovery_endpoints() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/observability/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs/observability/health must return endpoint array");
+    for (method, path) in [
+        ("GET", "/api/health"),
+        ("GET", "/api/health/detail"),
+        ("GET", "/api/doctor/startup/latest"),
+        ("POST", "/api/doctor/stale-mailbox/repair"),
+    ] {
+        assert!(
+            endpoints
+                .iter()
+                .any(|ep| ep["method"] == method && ep["path"] == path),
+            "health docs must include {method} {path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -8061,6 +8447,9 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/help",
         "/api/docs/{group}",
         "/api/docs/{group}/{category}",
+        "/api/health/detail",
+        "/api/doctor/startup/latest",
+        "/api/doctor/stale-mailbox/repair",
         "/api/github/issues/create",
         "/api/sessions/{id}/tmux-output",
         "/api/stats/memento",
