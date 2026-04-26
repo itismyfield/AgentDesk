@@ -45,7 +45,7 @@ import * as api from "../api/client";
 import { useKanban } from "../contexts/KanbanContext";
 import { useOffice } from "../contexts/OfficeContext";
 import { useSettings } from "../contexts/SettingsContext";
-import { useSpriteMap } from "../components/AgentAvatar";
+import AgentAvatar, { useSpriteMap } from "../components/AgentAvatar";
 import {
   ToastOverlay,
   type Notification,
@@ -2215,8 +2215,8 @@ function HomeOverviewPage({
                     const progress = Math.min(100, Math.max(12, Math.round(agent.stats_tokens / 100_000)));
                     return (
                       <div key={agent.id} className="rounded-2xl border px-3 py-3 text-center" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)" }}>
-                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border text-xl" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-card-bg)" }}>
-                          {agent.avatar_emoji || "🤖"}
+                        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl border" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-card-bg)" }}>
+                          <AgentAvatar agent={agent} agents={agents} size={40} rounded="2xl" />
                         </div>
                         <div className="mt-3 truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
                           {isKo ? agent.name_ko : agent.name}
@@ -2285,8 +2285,8 @@ function HomeOverviewPage({
               ) : (
                 topAgents.map((agent) => (
                   <div key={agent.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-2xl border px-3 py-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl border text-lg" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-bg-surface)" }}>
-                      {agent.avatar_emoji || "🤖"}
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl border" style={{ borderColor: "var(--th-border-subtle)", background: "var(--th-bg-surface)" }}>
+                      <AgentAvatar agent={agent} agents={agents} size={32} rounded="2xl" />
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>

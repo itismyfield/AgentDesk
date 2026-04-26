@@ -36,6 +36,7 @@ import {
   Users,
 } from "lucide-react";
 import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
+import AgentAvatar from "./AgentAvatar";
 
 type Period = "7d" | "30d" | "90d";
 type DailySeriesKey =
@@ -105,7 +106,7 @@ interface AgentSkillRow {
 interface LeaderboardRow {
   id: string;
   label: string;
-  avatar: string;
+  agent: Agent | null;
   tasksDone: number;
   xp: number;
   tokens: number;
@@ -756,7 +757,7 @@ function buildLeaderboardRows(
     return topAgents.slice(0, 5).map((agent) => ({
       id: agent.id,
       label: agent.alias?.trim() || agent.name_ko || agent.name,
-      avatar: agent.avatar_emoji,
+      agent,
       tasksDone: agent.stats_tasks_done,
       xp: agent.stats_xp,
       tokens: agent.stats_tokens,
@@ -769,7 +770,7 @@ function buildLeaderboardRows(
     .map((agent) => ({
       id: agent.id,
       label: agent.alias?.trim() || agent.name_ko || agent.name,
-      avatar: agent.avatar_emoji,
+      agent,
       tasksDone: agent.stats_tasks_done,
       xp: agent.stats_xp,
       tokens: agent.stats_tokens,
@@ -2396,10 +2397,10 @@ function AgentLeaderboardCard({
                     {index + 1}
                   </span>
                   <span
-                    className="inline-grid h-9 w-9 place-items-center rounded-full text-lg"
+                    className="inline-grid h-9 w-9 place-items-center overflow-hidden rounded-full"
                     style={{ background: "var(--th-overlay-subtle)" }}
                   >
-                    {row.avatar}
+                    <AgentAvatar agent={row.agent ?? undefined} agents={agents} size={32} rounded="full" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-3">

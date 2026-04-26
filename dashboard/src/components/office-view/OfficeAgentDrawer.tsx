@@ -400,58 +400,63 @@ export default function OfficeAgentDrawer({
             </div>
           )}
         >
-          <div className="mt-4 flex items-start gap-3">
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
             <AgentAvatar agent={agent} spriteMap={spriteMap} size={56} rounded="2xl" />
-            <div className="min-w-0 flex-1 space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <SurfaceMetricPill
-                  label={t(isKo, "레벨", "Level")}
-                  tone="accent"
-                  value={`Lv.${level.level} ${levelTitle}`}
-                />
-                <SurfaceMetricPill
-                  label="XP"
-                  tone="info"
-                  value={agent.stats_xp.toLocaleString(locale)}
-                />
-                <SurfaceMetricPill
-                  label={t(isKo, "완료", "Done")}
-                  tone="success"
-                  value={`${agent.stats_tasks_done}`}
-                />
+            {agent.session_info && (
+              <div
+                className="min-w-0 flex-1 text-sm leading-6"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                {agent.session_info}
               </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <SummaryRow
-                  label={t(isKo, "상태", "Status")}
-                  value={t(
-                    isKo,
-                    agent.status === "working"
-                      ? "작업 중"
-                      : agent.status === "offline"
-                        ? "오프라인"
-                        : agent.status === "break"
-                          ? "휴식"
-                          : "대기",
-                    agent.status === "working"
-                      ? "Working"
-                      : agent.status === "offline"
-                        ? "Offline"
-                        : agent.status === "break"
-                          ? "Break"
-                          : "Idle",
-                  )}
-                />
-                <SummaryRow
-                  label={t(isKo, "부서", "Department")}
-                  value={department ? `${department.icon} ${localeName(locale, department)}` : t(isKo, "미배정", "Unassigned")}
-                />
-              </div>
-              {agent.session_info && (
-                <div className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                  {agent.session_info}
-                </div>
+            )}
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <SurfaceMetricPill
+              label={t(isKo, "레벨", "Level")}
+              tone="accent"
+              value={`Lv.${level.level} ${levelTitle}`}
+            />
+            <SurfaceMetricPill
+              label="XP"
+              tone="info"
+              value={agent.stats_xp.toLocaleString(locale)}
+            />
+            <SurfaceMetricPill
+              label={t(isKo, "완료", "Done")}
+              tone="success"
+              value={`${agent.stats_tasks_done}`}
+            />
+            <SurfaceMetricPill
+              label={t(isKo, "상태", "Status")}
+              tone="neutral"
+              value={t(
+                isKo,
+                agent.status === "working"
+                  ? "작업 중"
+                  : agent.status === "offline"
+                    ? "오프라인"
+                    : agent.status === "break"
+                      ? "휴식"
+                      : "대기",
+                agent.status === "working"
+                  ? "Working"
+                  : agent.status === "offline"
+                    ? "Offline"
+                    : agent.status === "break"
+                      ? "Break"
+                      : "Idle",
               )}
-            </div>
+            />
+            <SurfaceMetricPill
+              label={t(isKo, "부서", "Department")}
+              tone="neutral"
+              value={
+                department
+                  ? `${department.icon} ${localeName(locale, department)}`
+                  : t(isKo, "미배정", "Unassigned")
+              }
+            />
           </div>
         </SurfaceSection>
 
@@ -640,15 +645,3 @@ export default function OfficeAgentDrawer({
   );
 }
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border px-3 py-2" style={{ borderColor: "color-mix(in srgb, var(--th-border) 66%, transparent)" }}>
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-        {label}
-      </div>
-      <div className="mt-1 text-sm" style={{ color: "var(--th-text-primary)" }}>
-        {value}
-      </div>
-    </div>
-  );
-}
