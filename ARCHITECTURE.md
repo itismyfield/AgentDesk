@@ -323,11 +323,14 @@ src/
 │   │   ├── shell.rs
 │   │   └── tmux.rs
 │   ├── provider_cli/
+│   │   ├── canary.rs
 │   │   ├── context.rs
+│   │   ├── diagnostics.rs
 │   │   ├── io.rs
 │   │   ├── mod.rs
 │   │   ├── paths.rs
 │   │   ├── registry.rs
+│   │   ├── retention.rs
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
