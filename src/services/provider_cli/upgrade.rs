@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use super::registry::{
@@ -12,6 +13,7 @@ use super::registry::{
 use super::snapshot::snapshot_current_channel;
 
 const UPGRADE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const UPGRADE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const UPGRADE_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
@@ -107,6 +109,41 @@ where
     output
 }
 
+fn spawn_limited_output_drain<R>(reader: R) -> Receiver<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(drain_limited_output(reader));
+    });
+    receiver
+}
+
+fn receive_limited_output(
+    receiver: Option<Receiver<Vec<u8>>>,
+    child_pid: u32,
+    process_tree_killed: &mut bool,
+) -> Vec<u8> {
+    let Some(receiver) = receiver else {
+        return Vec::new();
+    };
+
+    match receiver.recv_timeout(UPGRADE_OUTPUT_DRAIN_TIMEOUT) {
+        Ok(output) => output,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if !*process_tree_killed {
+                crate::services::process::kill_pid_tree(child_pid);
+                *process_tree_killed = true;
+            }
+            receiver
+                .recv_timeout(UPGRADE_OUTPUT_DRAIN_TIMEOUT)
+                .unwrap_or_default()
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Vec::new(),
+    }
+}
+
 fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeError> {
     let (cmd, args) = argv.split_first().expect("command_argv is non-empty");
     let mut command = Command::new(cmd);
@@ -116,14 +153,9 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command.spawn().map_err(UpgradeError::Io)?;
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|reader| std::thread::spawn(move || drain_limited_output(reader)));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|reader| std::thread::spawn(move || drain_limited_output(reader)));
+    let stdout_reader = child.stdout.take().map(spawn_limited_output_drain);
+    let stderr_reader = child.stderr.take().map(spawn_limited_output_drain);
+    let child_pid = child.id();
 
     let deadline = Instant::now() + UPGRADE_COMMAND_TIMEOUT;
     let status = loop {
@@ -145,12 +177,9 @@ fn run_upgrade_command(argv: &[&str]) -> Result<UpgradeCommandOutput, UpgradeErr
         }
     };
 
-    let _stdout = stdout_reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+    let mut process_tree_killed = false;
+    let _stdout = receive_limited_output(stdout_reader, child_pid, &mut process_tree_killed);
+    let stderr = receive_limited_output(stderr_reader, child_pid, &mut process_tree_killed);
 
     Ok(UpgradeCommandOutput {
         success: status.success(),
