@@ -9,7 +9,7 @@ pub mod session_transcripts;
 pub mod table_metadata;
 pub mod turns;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use libsql_rusqlite::Connection; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -158,22 +158,10 @@ pub fn wrap_conn(conn: Connection) -> Db {
 }
 
 pub fn init(config: &Config) -> Result<Db> {
-    let db_path = config.data.dir.join(&config.data.db_name);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(&db_path)?;
-
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-    )?;
-    schema::migrate(&conn)?;
-
-    tracing::info!("Database initialized at {}", db_path.display());
-    Ok(Arc::new(DbPool {
-        path: db_path,
-        write_gate: Mutex::new(()),
-    }))
+    let _ = config;
+    bail!(
+        "SQLite init has been removed from server startup; use crate::db::postgres::connect_and_migrate"
+    )
 }
 
 #[cfg(test)]
