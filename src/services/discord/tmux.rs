@@ -6274,15 +6274,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
         }
     }
 
-    // #1261 (codex P2): the watcher slot is released *after* the kill +
-    // `cleanup_session_temp_files` block below, not here. Releasing it
-    // earlier opens a race where an immediate next message claims the
-    // (empty) slot, spawns a fresh tmux session with the same name, and
-    // its new wrapper creates the canonical jsonl/FIFO/generation files
-    // — only for our `spawn_blocking` cleanup to delete them and break
-    // the new turn. Holding the slot until cleanup completes blocks
-    // `try_claim_watcher` (`tmux.rs:7334`) so the next watcher can only
-    // spawn after our files are gone.
+    // Cleanup: only remove from DashMap if we weren't cancelled/replaced.
+    // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
+    // the replacement already occupies the slot — removing would delete the new entry.
+    if !cancel.load(Ordering::Relaxed) {
+        shared.tmux_watchers.remove(&channel_id);
+    }
 
     let api_port = shared.api_port;
     let provider = shared.settings.read().await.provider.clone();
@@ -6366,37 +6363,26 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         let _ = std::fs::write(&path, stamped);
                     }
 
-                    let killed = crate::services::platform::tmux::kill_session_with_reason(
+                    crate::services::platform::tmux::kill_session_with_reason(
                         &sess,
                         "watcher cleanup: dead session after turn",
                     );
-                    // #1261 (Fix C): pair the kill with `cleanup_session_temp_files`
-                    // so the jsonl capture file (and FIFO/owner/prompt/sh markers)
-                    // is gone before the next message respawns the session.
-                    // Otherwise `RotatingJsonlWriter` reopens the path in append
-                    // mode (`tmux_common.rs:230`), the new wrapper writes on top of
-                    // the old buffer, and the next watcher walks the file from
-                    // offset 0 — flooding Discord with stale assistant output. The
-                    // `force_kill` path in `turn_lifecycle.rs:163` already pairs
-                    // the two; the watcher cleanup was the only kill site that
-                    // omitted it.
-                    if killed {
-                        crate::services::tmux_common::cleanup_session_temp_files(&sess);
-                    }
+                    // NOTE: jsonl/FIFO/etc. cleanup intentionally NOT done here.
+                    // `claude.rs::start_claude` calls
+                    // `cleanup_session_temp_files` at spawn time
+                    // (`claude.rs:1304`) before recreating the canonical paths,
+                    // which already covers the "next-spawn against stale jsonl"
+                    // case. Pairing a watcher-side cleanup with the kill races
+                    // with that spawn-side cleanup + recreate (#1261 codex P1):
+                    // if the next message lands between our `kill_session` and
+                    // our cleanup, claude's spawn already laid down fresh files
+                    // and our cleanup deletes them, breaking the new turn.
+                    // Keep cleanup as a single-source-of-truth on the spawn
+                    // path.
                 }
             })
             .await;
         }
-    }
-
-    // #1261 (codex P2): slot release MUST run after the cleanup block
-    // above so an immediate next message that comes in while we're
-    // mid-cleanup is blocked by `try_claim_watcher` until our jsonl/
-    // FIFO/etc. cleanup finishes. The original (#243) semantics still
-    // hold: skip the remove when `cancel` is set, because a replacement
-    // watcher already occupies the slot.
-    if !cancel.load(Ordering::Relaxed) {
-        shared.tmux_watchers.remove(&channel_id);
     }
 
     if cleanup_plan.report_idle_status {
