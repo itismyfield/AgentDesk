@@ -339,7 +339,7 @@
 | `services::provider_cli::io` | `src/services/provider_cli/io.rs` | 151 |  |
 | `services::provider_cli::paths` | `src/services/provider_cli/paths.rs` | 149 |  |
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 303 |  |
-| `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 196 |  |
+| `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 200 |  |
 | `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 234 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 123 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 706 |  |

@@ -70,6 +70,9 @@ pub fn build_retention_set(
         }
         if let Some(path) = state.rollback_target.as_deref() {
             set.protect(path);
+            set.protect(
+                crate::services::provider_cli::paths::preserved_previous_tree_path(Path::new(path)),
+            );
         }
     }
 
@@ -192,5 +195,6 @@ mod tests {
 
         let set = build_retention_set(&ProviderCliRegistry::default(), &[state]);
         assert!(set.is_protected("/tmp/codex.rollback"));
+        assert!(set.is_protected("/tmp/codex.rollback.tree"));
     }
 }
