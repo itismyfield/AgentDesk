@@ -1380,9 +1380,17 @@ fn reset_stale_relay_watermark_if_output_regressed(
         .load(std::sync::atomic::Ordering::Acquire);
 
     while confirmed != 0 && observed_output_end < confirmed {
+        // Resetting to 0 makes the watcher relay every byte already in the
+        // capture file from offset 0, which surfaces as an avalanche of stale
+        // assistant output to the Discord channel whenever the capture file
+        // is rotated/truncated (deploy restart, watcher death recovery, tmux
+        // session respawn). Treat the current end as "already past the
+        // watermark" instead — only output that arrives *after* this reset
+        // gets relayed, which matches what the user expects after a session
+        // rotation.
         match relay_coord.confirmed_end_offset.compare_exchange(
             confirmed,
-            0,
+            observed_output_end,
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
         ) {
@@ -1422,7 +1430,12 @@ fn reset_stale_local_relay_offset_if_output_regressed(
         return false;
     }
 
-    *last_relayed_offset = None;
+    // See `reset_stale_relay_watermark_if_output_regressed` — clearing this to
+    // None lets the watcher loop relay from offset 0 again, which floods
+    // Discord with stale capture-file content after rotation. Pin to the
+    // observed end instead so subsequent ticks only relay genuinely new
+    // bytes.
+    *last_relayed_offset = Some(observed_output_end);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 👁 Reset stale tmux local relay offset for {} (channel {}, context={}, observed_output_end={}, stale_last_relayed={})",
@@ -8184,6 +8197,11 @@ mod tests {
             .store(1_548_758, Ordering::Release);
         relay_coord.last_relay_ts_ms.store(12345, Ordering::Release);
 
+        // The capture file was rotated: confirmed=1.5MB but the on-disk file
+        // only has 438_675 bytes. The reset must move the watermark to the
+        // current end, NOT to 0 — otherwise the watcher would re-relay every
+        // byte still in the rotated file as "new" output and flood the
+        // channel with stale assistant content.
         assert!(reset_stale_relay_watermark_if_output_regressed(
             shared.as_ref(),
             channel_id,
@@ -8191,7 +8209,10 @@ mod tests {
             438_675,
             "unit-test",
         ));
-        assert_eq!(relay_coord.confirmed_end_offset.load(Ordering::Acquire), 0);
+        assert_eq!(
+            relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+            438_675
+        );
         assert_eq!(relay_coord.last_relay_ts_ms.load(Ordering::Acquire), 0);
     }
 
@@ -8234,6 +8255,10 @@ mod tests {
         let channel_id = ChannelId::new(1485506232256168127);
         let mut last_relayed_offset = Some(1_548_758);
 
+        // Same fix as the shared watermark: pin the local offset to the
+        // current capture-file end after rotation instead of clearing it,
+        // so the watcher does not re-relay everything in the rotated file
+        // from offset 0.
         assert!(reset_stale_local_relay_offset_if_output_regressed(
             &mut last_relayed_offset,
             channel_id,
@@ -8241,7 +8266,7 @@ mod tests {
             438_675,
             "unit-test",
         ));
-        assert_eq!(last_relayed_offset, None);
+        assert_eq!(last_relayed_offset, Some(438_675));
     }
 
     #[test]
