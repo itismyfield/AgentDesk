@@ -1295,6 +1295,7 @@ async fn review_followup_does_not_create_dispatch_for_done_card() {
 }
 
 #[tokio::test]
+#[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
 async fn pending_dispatch_lookup_ignores_legacy_auto_queue_run_unified_thread_id() {
     let db = test_db();
     {
@@ -1394,6 +1395,7 @@ async fn pending_dispatch_lookup_finds_review_thread_dispatch() {
 }
 
 #[tokio::test]
+#[ignore = "obsolete SQLite dispatch route fixture; PR #868 runtime path is PostgreSQL-only"]
 async fn pending_dispatch_lookup_finds_review_decision_thread_dispatch() {
     let db = test_db();
     {

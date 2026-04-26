@@ -1246,6 +1246,7 @@ fn test_review_state_sync_json_wrapper() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
 async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
     crate::pipeline::ensure_loaded();
 

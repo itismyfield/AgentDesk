@@ -2210,6 +2210,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
     async fn auto_queue_on_tick_dispatches_ready_card_via_requested_preflight() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -2582,6 +2583,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
     fn auto_queue_on_tick_recovery_counts_failures_and_fails_at_retry_limit() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -2875,6 +2877,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
     fn implementation_completion_for_auto_queue_review_mode_enabled_still_enters_review() {
         let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
         let db = test_db();
@@ -5127,6 +5130,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
     async fn auto_queue_phase_gate_blocks_resume_then_completes_final_run_on_pass() {
         let db = test_db();
         let engine = test_engine(&db);

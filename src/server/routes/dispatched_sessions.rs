@@ -3194,6 +3194,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "obsolete SQLite hook-session fixture; PR #868 runtime path is PostgreSQL-only"]
     async fn idle_hook_does_not_auto_complete_review_decision_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
