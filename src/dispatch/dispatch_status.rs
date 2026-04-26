@@ -1,4 +1,5 @@
 use anyhow::Result;
+#[cfg(test)]
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -6,8 +7,11 @@ use sqlx::{PgPool, Row};
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 
+#[cfg(test)]
 use super::dispatch_context::validate_dispatch_completion_evidence_on_conn;
-use super::{query_dispatch_row, query_dispatch_row_pg};
+#[cfg(test)]
+use super::query_dispatch_row;
+use super::query_dispatch_row_pg;
 
 /// #750: Sources whose completion path already writes ✅ to the Discord
 /// message via the command bot (turn_bridge / tmux watcher). For those, the
@@ -77,6 +81,7 @@ fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
     })
 }
 
+#[cfg(test)]
 fn auto_queue_review_disabled_for_dispatch_on_conn(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -95,6 +100,7 @@ fn auto_queue_review_disabled_for_dispatch_on_conn(
     .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn restore_auto_queue_mainline_after_review_skip_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -735,6 +741,7 @@ async fn maybe_inject_phase_gate_verdict_pg(
 ///
 /// Used both by the authoritative dispatch creation transaction and by
 /// fallback/backfill paths that must avoid duplicate notify entries.
+#[cfg(test)]
 pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -779,6 +786,21 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
     }
 }
 
+#[cfg(not(test))]
+pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
+    _conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+    _agent_id: &str,
+    _card_id: &str,
+    _title: &str,
+) -> libsql_rusqlite::Result<bool> {
+    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+        std::io::Error::other(format!(
+            "Postgres pool required to ensure notify outbox for dispatch {dispatch_id}"
+        )),
+    )))
+}
+
 /// Ensure a pending status-reaction outbox row exists for a dispatch.
 ///
 /// At most one in-flight status sync is needed: when the worker drains it, the
@@ -794,6 +816,7 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
 /// that returned any text would otherwise show a false green check. This
 /// enqueue is also the only repair path for status transitions that bypass
 /// turn_bridge entirely (queue/API cancellation, orphan recovery).
+#[cfg(test)]
 pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -817,6 +840,19 @@ pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
     Ok(true)
 }
 
+#[cfg(not(test))]
+pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
+    _conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+) -> libsql_rusqlite::Result<bool> {
+    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+        std::io::Error::other(format!(
+            "Postgres pool required to ensure status reaction outbox for dispatch {dispatch_id}"
+        )),
+    )))
+}
+
+#[cfg(test)]
 pub(crate) fn record_dispatch_status_event_on_conn(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -880,6 +916,23 @@ pub(crate) fn record_dispatch_status_event_on_conn(
     Ok(())
 }
 
+#[cfg(not(test))]
+pub(crate) fn record_dispatch_status_event_on_conn(
+    _conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+    _from_status: Option<&str>,
+    _to_status: &str,
+    _transition_source: &str,
+    _payload: Option<&serde_json::Value>,
+) -> libsql_rusqlite::Result<()> {
+    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
+        std::io::Error::other(format!(
+            "Postgres pool required to record dispatch status event for {dispatch_id}"
+        )),
+    )))
+}
+
+#[cfg(test)]
 fn set_dispatch_status_on_conn_with_sync(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -1045,6 +1098,22 @@ fn set_dispatch_status_on_conn_with_sync(
     }
 }
 
+#[cfg(not(test))]
+fn set_dispatch_status_on_conn_with_sync(
+    _conn: &libsql_rusqlite::Connection,
+    dispatch_id: &str,
+    _to_status: &str,
+    _result: Option<&serde_json::Value>,
+    _transition_source: &str,
+    _allowed_from: Option<&[&str]>,
+    _touch_completed_at: bool,
+    _sync_auto_queue_terminal_entries: bool,
+) -> Result<usize> {
+    Err(anyhow::anyhow!(
+        "Postgres pool required to set dispatch status for {dispatch_id}"
+    ))
+}
+
 pub(crate) fn set_dispatch_status_on_conn(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,
@@ -1117,19 +1186,29 @@ pub fn mark_dispatch_completed(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<usize> {
-    let conn = db
-        .separate_conn()
-        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-    let changed = set_dispatch_status_on_conn(
-        &conn,
-        dispatch_id,
-        "completed",
-        Some(result),
-        "mark_dispatch_completed",
-        Some(&["pending", "dispatched"]),
-        true,
-    )?;
-    Ok(changed)
+    #[cfg(test)]
+    {
+        let conn = db
+            .separate_conn()
+            .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+        let changed = set_dispatch_status_on_conn(
+            &conn,
+            dispatch_id,
+            "completed",
+            Some(result),
+            "mark_dispatch_completed",
+            Some(&["pending", "dispatched"]),
+            true,
+        )?;
+        Ok(changed)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (db, result);
+        Err(anyhow::anyhow!(
+            "Postgres pool required to mark dispatch completed for {dispatch_id}"
+        ))
+    }
 }
 
 pub fn mark_dispatch_completed_pg_first(
@@ -1252,24 +1331,34 @@ fn set_dispatch_status_with_backends_and_sync(
         });
     }
 
-    let Some(db) = db else {
-        return Err(anyhow::anyhow!(
-            "dispatch status backend unavailable for {dispatch_id}"
-        ));
-    };
-    let conn = db
-        .separate_conn()
-        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-    set_dispatch_status_on_conn_with_sync(
-        &conn,
-        dispatch_id,
-        to_status,
-        result,
-        transition_source,
-        allowed_from,
-        touch_completed_at,
-        sync_auto_queue_terminal_entries,
-    )
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return Err(anyhow::anyhow!(
+                "dispatch status backend unavailable for {dispatch_id}"
+            ));
+        };
+        let conn = db
+            .separate_conn()
+            .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+        set_dispatch_status_on_conn_with_sync(
+            &conn,
+            dispatch_id,
+            to_status,
+            result,
+            transition_source,
+            allowed_from,
+            touch_completed_at,
+            sync_auto_queue_terminal_entries,
+        )
+    }
+    #[cfg(not(test))]
+    {
+        let _ = db;
+        Err(anyhow::anyhow!(
+            "Postgres pool required to set dispatch status for {dispatch_id}"
+        ))
+    }
 }
 
 pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
@@ -1346,25 +1435,35 @@ pub fn load_dispatch_row_with_backends(
         });
     }
 
-    let Some(db) = db else {
-        return Err(anyhow::anyhow!(
-            "dispatch row backend unavailable for {dispatch_id}"
-        ));
-    };
-    let conn = db
-        .separate_conn()
-        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !exists {
-        return Ok(None);
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return Err(anyhow::anyhow!(
+                "dispatch row backend unavailable for {dispatch_id}"
+            ));
+        };
+        let conn = db
+            .separate_conn()
+            .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            return Ok(None);
+        }
+        query_dispatch_row(&conn, dispatch_id).map(Some)
     }
-    query_dispatch_row(&conn, dispatch_id).map(Some)
+    #[cfg(not(test))]
+    {
+        let _ = db;
+        Err(anyhow::anyhow!(
+            "Postgres pool required to load dispatch row {dispatch_id}"
+        ))
+    }
 }
 
 /// Legacy wrapper — delegates to [`finalize_dispatch`] for callers that already
@@ -1469,75 +1568,79 @@ fn complete_dispatch_inner_with_backends(
             ))
         })?
     } else {
-        let Some(db) = db else {
-            return Err(anyhow::anyhow!(
-                "dispatch completion backend unavailable for {dispatch_id}"
-            ));
-        };
-        let conn = db
-            .separate_conn()
-            .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+        #[cfg(test)]
+        {
+            let Some(db) = db else {
+                return Err(anyhow::anyhow!(
+                    "dispatch completion backend unavailable for {dispatch_id}"
+                ));
+            };
+            let conn = db
+                .separate_conn()
+                .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
 
-        validate_dispatch_completion_evidence_on_conn(
-            &conn,
-            db,
-            engine.pg_pool(),
-            dispatch_id,
-            result,
-        )?;
+            validate_dispatch_completion_evidence_on_conn(
+                &conn,
+                db,
+                engine.pg_pool(),
+                dispatch_id,
+                result,
+            )?;
 
-        let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
-        let effective_result = result_owned.unwrap_or_else(|| result.clone());
+            let result_owned = maybe_inject_phase_gate_verdict(&conn, dispatch_id, result);
+            let effective_result = result_owned.unwrap_or_else(|| result.clone());
 
-        let changed = set_dispatch_status_on_conn(
-            &conn,
-            dispatch_id,
-            "completed",
-            Some(&effective_result),
-            effective_result
-                .get("completion_source")
-                .and_then(|value| value.as_str())
-                .unwrap_or("complete_dispatch"),
-            Some(&["pending", "dispatched"]),
-            true,
-        )?;
+            let changed = set_dispatch_status_on_conn(
+                &conn,
+                dispatch_id,
+                "completed",
+                Some(&effective_result),
+                effective_result
+                    .get("completion_source")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("complete_dispatch"),
+                Some(&["pending", "dispatched"]),
+                true,
+            )?;
 
-        if changed == 0 {
-            let exists: bool = conn
+            if changed == 0 {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                        [dispatch_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    tracing::info!(
+                        "skipping completion hooks because dispatch is already finalized"
+                    );
+                    let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+                    drop(conn);
+                    return Ok(dispatch);
+                }
+                return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+            }
+
+            let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+            let kanban_card_id: Option<String> = conn
                 .query_row(
-                    "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                    "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
                     [dispatch_id],
                     |row| row.get(0),
                 )
-                .unwrap_or(false);
-            if exists {
-                tracing::info!("skipping completion hooks because dispatch is already finalized");
-                let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-                drop(conn);
-                return Ok(dispatch);
-            }
-            return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
-        }
+                .ok();
+            let dispatch_type = dispatch
+                .get("dispatch_type")
+                .and_then(|value| value.as_str());
+            let skip_dispatch_completed_hooks =
+                matches!(dispatch_type, Some("implementation" | "rework"))
+                    && auto_queue_review_disabled_for_dispatch_on_conn(&conn, dispatch_id);
 
-        let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-        let kanban_card_id: Option<String> = conn
-            .query_row(
-                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .ok();
-        let dispatch_type = dispatch
-            .get("dispatch_type")
-            .and_then(|value| value.as_str());
-        let skip_dispatch_completed_hooks =
-            matches!(dispatch_type, Some("implementation" | "rework"))
-                && auto_queue_review_disabled_for_dispatch_on_conn(&conn, dispatch_id);
-
-        let needs_review_dispatch = if skip_dispatch_completed_hooks {
-            false
-        } else {
-            db.lock()
+            let needs_review_dispatch = if skip_dispatch_completed_hooks {
+                false
+            } else {
+                db.lock()
                     .ok()
                     .map(|conn| {
                         let (card_status, repo_id, agent_id): (
@@ -1581,20 +1684,28 @@ fn complete_dispatch_inner_with_backends(
                         is_review_state && !has_review_dispatch && !has_active_work
                     })
                     .unwrap_or(false)
-        };
+            };
 
-        if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
-            restore_auto_queue_mainline_after_review_skip_on_conn(&conn, card_id, dispatch_id)?;
+            if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
+                restore_auto_queue_mainline_after_review_skip_on_conn(&conn, card_id, dispatch_id)?;
+            }
+
+            drop(conn);
+            (
+                dispatch,
+                kanban_card_id,
+                needs_review_dispatch,
+                effective_result,
+                skip_dispatch_completed_hooks,
+            )
         }
-
-        drop(conn);
-        (
-            dispatch,
-            kanban_card_id,
-            needs_review_dispatch,
-            effective_result,
-            skip_dispatch_completed_hooks,
-        )
+        #[cfg(not(test))]
+        {
+            let _ = db;
+            return Err(anyhow::anyhow!(
+                "Postgres pool required to complete dispatch {dispatch_id}"
+            ));
+        }
     };
 
     // Auto-queue review_mode=disabled keeps implementation/rework completions on
@@ -1639,6 +1750,7 @@ fn complete_dispatch_inner_with_backends(
 /// fall back to the original `result` otherwise. Never overrides an explicit
 /// verdict/decision (even `"fail"`) and never injects when any check is not
 /// `pass`.
+#[cfg(test)]
 pub(super) fn maybe_inject_phase_gate_verdict(
     conn: &libsql_rusqlite::Connection,
     dispatch_id: &str,

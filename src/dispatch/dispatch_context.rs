@@ -1,10 +1,13 @@
 use anyhow::Result;
+#[cfg(test)]
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::PgPool;
 
 use crate::db::Db;
-use crate::db::agents::{load_agent_channel_bindings, load_agent_channel_bindings_pg};
+#[cfg(test)]
+use crate::db::agents::load_agent_channel_bindings;
+use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::services::provider::ProviderKind;
 
 use super::dispatch_channel::provider_from_channel_suffix;
@@ -17,6 +20,7 @@ struct DispatchExecutionTarget {
     target_repo: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 struct CardDispatchInfo {
     issue_number: Option<i64>,
@@ -210,6 +214,7 @@ pub(super) fn dispatch_context_worktree_target(
     Ok(Some((path.to_string(), branch)))
 }
 
+#[cfg(test)]
 pub(super) fn resolve_parent_dispatch_context_sqlite_test(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -262,6 +267,7 @@ fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
     !is_repo_root || is_non_main_branch
 }
 
+#[cfg(test)]
 fn load_card_dispatch_info(db: &Db, card_id: &str) -> Option<CardDispatchInfo> {
     db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
@@ -278,10 +284,12 @@ fn load_card_dispatch_info(db: &Db, card_id: &str) -> Option<CardDispatchInfo> {
     })
 }
 
+#[cfg(test)]
 fn load_card_issue_repo(db: &Db, card_id: &str) -> Option<(Option<i64>, Option<String>)> {
     load_card_dispatch_info(db, card_id).map(|info| (info.issue_number, info.repo_id))
 }
 
+#[cfg(test)]
 fn load_card_pr_number(db: &Db, card_id: &str) -> Option<i64> {
     db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
@@ -296,6 +304,7 @@ fn load_card_pr_number(db: &Db, card_id: &str) -> Option<i64> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn inject_review_dispatch_identifiers_sqlite_test(
     db: &Db,
     card_id: &str,
@@ -333,6 +342,7 @@ pub(crate) fn inject_review_dispatch_identifiers_sqlite_test(
         _ => {}
     }
 }
+#[cfg(test)]
 pub(super) fn resolve_card_target_repo_ref_sqlite_test(
     db: &Db,
     card_id: &str,
@@ -357,6 +367,7 @@ pub(super) fn resolve_card_target_repo_ref_sqlite_test(
     info.repo_id
 }
 
+#[cfg(test)]
 fn resolve_card_repo_dir_with_context(
     db: &Db,
     card_id: &str,
@@ -368,6 +379,7 @@ fn resolve_card_repo_dir_with_context(
         .map_err(|e| anyhow::anyhow!("Cannot {purpose} for card {}: {}", card_id, e))
 }
 
+#[cfg(test)]
 fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option<String>> {
     resolve_card_repo_dir_with_context(db, card_id, None, purpose)
 }
@@ -382,6 +394,7 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// design ensures the fallback chain always reaches `resolve_card_worktree()` or
 /// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
 /// be confirmed as belonging to this issue.
+#[cfg(test)]
 pub(crate) fn commit_belongs_to_card_issue(
     db: &Db,
     card_id: &str,
@@ -435,6 +448,21 @@ pub(crate) fn commit_belongs_to_card_issue(
     subject.contains(&pattern)
 }
 
+#[cfg(not(test))]
+pub(crate) fn commit_belongs_to_card_issue(
+    _db: &Db,
+    card_id: &str,
+    commit_sha: &str,
+    _target_repo: Option<&str>,
+) -> bool {
+    tracing::warn!(
+        "[dispatch] sqlite commit/card validation disabled for card {} commit {}; postgres pool required",
+        card_id,
+        &commit_sha[..8.min(commit_sha.len())]
+    );
+    false
+}
+
 fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
     std::process::Command::new("git")
         .args(["cat-file", "-e", &format!("{commit_sha}^{{commit}}")])
@@ -469,6 +497,7 @@ fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
     head == commit_sha
 }
 
+#[cfg(test)]
 fn resolve_review_target_branch(
     db: &Db,
     card_id: &str,
@@ -488,6 +517,7 @@ fn resolve_review_target_branch(
     .or_else(|| crate::services::platform::shell::git_branch_name(dir))
 }
 
+#[cfg(test)]
 fn refresh_review_target_worktree(
     db: &Db,
     card_id: &str,
@@ -662,6 +692,7 @@ fn refresh_review_target_worktree(
     Ok(None)
 }
 
+#[cfg(test)]
 fn latest_completed_work_dispatch_target(
     db: &Db,
     kanban_card_id: &str,
@@ -838,6 +869,7 @@ fn result_has_work_completion_evidence(result: &serde_json::Value) -> bool {
         || json_string_field(result, "work_outcome").is_some()
 }
 
+#[cfg(test)]
 pub(super) fn validate_dispatch_completion_evidence_on_conn(
     conn: &libsql_rusqlite::Connection,
     db: &Db,
@@ -882,6 +914,7 @@ pub(super) fn validate_dispatch_completion_evidence_on_conn(
 }
 
 #[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn validate_dispatch_completion_evidence(
     db: &Db,
     dispatch_id: &str,
@@ -891,6 +924,17 @@ pub(crate) fn validate_dispatch_completion_evidence(
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
     validate_dispatch_completion_evidence_on_conn(&conn, db, None, dispatch_id, result)
+}
+
+#[cfg(not(test))]
+pub(crate) fn validate_dispatch_completion_evidence(
+    _db: &Db,
+    dispatch_id: &str,
+    _result: &serde_json::Value,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "Postgres pool required to validate dispatch completion evidence for {dispatch_id}"
+    ))
 }
 
 fn apply_review_target_context(
@@ -1076,6 +1120,7 @@ pub(super) fn inject_review_merge_base_context(
 /// canonical worktree. If the card points at a repo without a configured
 /// local mapping, this fails instead of silently falling back to the default
 /// repo.
+#[cfg(test)]
 pub(crate) fn resolve_card_worktree_sqlite_test(
     db: &Db,
     card_id: &str,
@@ -1098,6 +1143,7 @@ pub(crate) fn resolve_card_worktree_sqlite_test(
     )
 }
 
+#[cfg(test)]
 fn resolve_card_issue_commit_target(
     db: &Db,
     card_id: &str,
@@ -1136,6 +1182,7 @@ fn resolve_card_issue_commit_target(
     }))
 }
 
+#[cfg(test)]
 fn resolve_repo_head_fallback_target(
     db: &Db,
     kanban_card_id: &str,
@@ -1232,6 +1279,7 @@ pub(crate) enum ReviewTargetTrust {
 /// callers (anyone reaching `POST /api/dispatches`) MUST pass `Untrusted`;
 /// internal callers that already have first-party review-target values may
 /// opt into `Trusted`.
+#[cfg(test)]
 pub(super) fn build_review_context_sqlite_test(
     db: &Db,
     kanban_card_id: &str,
