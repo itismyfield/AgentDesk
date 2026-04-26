@@ -575,6 +575,23 @@ function retryDirectMergePush(mainWorktreePath, mainBranch) {
   };
 }
 
+function tryFastForwardMain(mainWorktreePath, mainBranch, branch) {
+  var baseCheck = agentdesk.exec("git", [
+    "-C",
+    mainWorktreePath,
+    "merge-base",
+    "--is-ancestor",
+    mainBranch,
+    branch
+  ]);
+  if (typeof baseCheck === "string" && baseCheck.indexOf("ERROR") === 0) {
+    return false;
+  }
+
+  execGitOrThrow(["-C", mainWorktreePath, "merge", "--ff-only", branch]);
+  return true;
+}
+
 function parsePrNumberFromOutput(output) {
   var match = String(output || "").match(/\/pull\/(\d+)/);
   return match ? parseInt(match[1], 10) : null;
@@ -822,18 +839,39 @@ function attemptDirectMerge(candidate) {
     stashCreated = true;
   }
 
-  var cherryPickArgs = ["-C", mainWorktree.path, "cherry-pick"].concat(commits);
-  var cherryPickOutput = agentdesk.exec("git", cherryPickArgs);
-  if (typeof cherryPickOutput === "string" && cherryPickOutput.indexOf("ERROR") === 0) {
-    execGitMaybe(["-C", mainWorktree.path, "cherry-pick", "--abort"]);
+  var fastForwarded = false;
+  try {
+    fastForwarded = tryFastForwardMain(mainWorktree.path, mainBranch, candidate.branch);
+  } catch (e) {
+    var fastForwardCleanupNotes = [];
+    var fastForwardResetStatus = maybeResetDirectMergeHead(mainWorktree.path, originalHead);
+    if (fastForwardResetStatus) fastForwardCleanupNotes.push(fastForwardResetStatus);
+    var fastForwardStashStatus = maybeRestoreMergeStash(mainWorktree.path, stashCreated);
+    if (fastForwardStashStatus) fastForwardCleanupNotes.push(fastForwardStashStatus);
     return {
       ok: false,
-      conflict: isCherryPickConflict(cherryPickOutput),
+      conflict: false,
       branch: candidate.branch,
       main_branch: mainBranch,
-      error: cherryPickOutput.replace(/^ERROR:\s*/, ""),
-      stash: maybeRestoreMergeStash(mainWorktree.path, stashCreated)
+      error: String(e),
+      stash: fastForwardCleanupNotes.length > 0 ? fastForwardCleanupNotes.join("; ") : null
     };
+  }
+
+  if (!fastForwarded) {
+    var cherryPickArgs = ["-C", mainWorktree.path, "cherry-pick"].concat(commits);
+    var cherryPickOutput = agentdesk.exec("git", cherryPickArgs);
+    if (typeof cherryPickOutput === "string" && cherryPickOutput.indexOf("ERROR") === 0) {
+      execGitMaybe(["-C", mainWorktree.path, "cherry-pick", "--abort"]);
+      return {
+        ok: false,
+        conflict: isCherryPickConflict(cherryPickOutput),
+        branch: candidate.branch,
+        main_branch: mainBranch,
+        error: cherryPickOutput.replace(/^ERROR:\s*/, ""),
+        stash: maybeRestoreMergeStash(mainWorktree.path, stashCreated)
+      };
+    }
   }
 
   try {
@@ -860,6 +898,7 @@ function attemptDirectMerge(candidate) {
     branch: candidate.branch,
     main_branch: mainBranch,
     commits: commits,
+    fast_forwarded: fastForwarded,
     stash: maybeRestoreMergeStash(mainWorktree.path, stashCreated)
   };
 }
