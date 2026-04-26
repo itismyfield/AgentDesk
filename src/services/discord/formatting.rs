@@ -211,10 +211,11 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
-        build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
-        escape_for_code_fence, filter_codex_tool_logs, finalize_in_progress_tool_status,
-        normalize_allowed_tools, preserve_previous_tool_status,
+        MonitorHandoffReason, MonitorHandoffStatus, ReplaceLongMessageOutcome,
+        build_monitor_handoff_placeholder, build_placeholder_status_block, canonical_tool_name,
+        convert_markdown_tables, escape_for_code_fence, filter_codex_tool_logs,
+        finalize_in_progress_tool_status, normalize_allowed_tools, preserve_previous_tool_status,
+        replace_long_message_outcome_to_result,
     };
 
     #[test]
@@ -242,6 +243,22 @@ mod tests {
             escape_for_code_fence("a``` b ```c"),
             format!("a``{zwsp}` b ``{zwsp}`c"),
         );
+    }
+
+    #[test]
+    fn replace_long_message_wrapper_does_not_report_fallback_send_as_success() {
+        assert!(
+            replace_long_message_outcome_to_result(ReplaceLongMessageOutcome::EditedOriginal)
+                .is_ok()
+        );
+
+        let error = replace_long_message_outcome_to_result(
+            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error: "HTTP 403 Forbidden".to_string(),
+            },
+        )
+        .expect_err("fallback send leaves original replace obligation open");
+        assert!(error.to_string().contains("HTTP 403"));
     }
 
     #[test]
@@ -2072,9 +2089,19 @@ pub(super) async fn replace_long_message_raw(
     text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    replace_long_message_raw_with_outcome(http, channel_id, message_id, text, shared)
-        .await
-        .map(|_| ())
+    replace_long_message_outcome_to_result(
+        replace_long_message_raw_with_outcome(http, channel_id, message_id, text, shared).await?,
+    )
+}
+
+fn replace_long_message_outcome_to_result(outcome: ReplaceLongMessageOutcome) -> Result<(), Error> {
+    match outcome {
+        ReplaceLongMessageOutcome::EditedOriginal => Ok(()),
+        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => Err(format!(
+            "original message edit failed before fallback send succeeded: {edit_error}"
+        )
+        .into()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

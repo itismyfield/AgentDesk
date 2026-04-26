@@ -1,4 +1,3 @@
-use super::advance_tmux_relay_confirmed_end;
 use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
     extract_review_decision,
@@ -25,15 +24,20 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
+use super::{advance_tmux_relay_confirmed_end, turn_bridge_replace_outcome_committed};
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::MessageId;
+use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::HeadlessGateway;
 use crate::services::discord::make_shared_data_for_tests;
 use crate::services::discord::make_shared_data_for_tests_with_storage;
+use crate::services::discord::placeholder_cleanup::{
+    PlaceholderCleanupFailureClass, PlaceholderCleanupOperation, PlaceholderCleanupOutcome,
+};
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::memory::{SessionEndReason, TokenUsage};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -118,6 +122,50 @@ fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
     );
+}
+
+#[test]
+fn replace_fallback_records_failed_cleanup_and_does_not_commit_delivery() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1486333430516945999);
+    let message_id = MessageId::new(1487799916758827138);
+    let tmux_session_name = "AgentDesk-codex-adk-cdx";
+
+    let committed = turn_bridge_replace_outcome_committed(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        message_id,
+        Some(tmux_session_name),
+        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+            edit_error: "HTTP 403 Forbidden: Missing Permissions".to_string(),
+        }),
+        "unit_test",
+    );
+
+    assert!(!committed);
+    assert!(
+        !shared
+            .placeholder_cleanup
+            .terminal_cleanup_committed(&provider, channel_id, message_id)
+    );
+    let record = shared
+        .placeholder_cleanup
+        .latest(&provider, channel_id, message_id)
+        .expect("cleanup record");
+    assert_eq!(record.operation, PlaceholderCleanupOperation::EditTerminal);
+    assert_eq!(record.tmux_session_name.as_deref(), Some(tmux_session_name));
+    match record.outcome {
+        PlaceholderCleanupOutcome::Failed { class, detail } => {
+            assert_eq!(
+                class,
+                PlaceholderCleanupFailureClass::PermissionOrRoutingDiagnostic
+            );
+            assert!(detail.contains("403"));
+        }
+        other => panic!("expected failed cleanup outcome, got {other:?}"),
+    }
 }
 
 #[tokio::test]

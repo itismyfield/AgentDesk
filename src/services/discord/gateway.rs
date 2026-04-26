@@ -18,6 +18,7 @@ use super::{
     validate_live_channel_routing,
 };
 use crate::services::provider::ProviderKind;
+use formatting::ReplaceLongMessageOutcome;
 
 type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -35,12 +36,12 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>>;
 
-    fn replace_message<'a>(
+    fn replace_message_with_outcome<'a>(
         &'a self,
         channel_id: ChannelId,
         message_id: MessageId,
         content: &'a str,
-    ) -> GatewayFuture<'a, Result<(), String>>;
+    ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>;
 
     fn add_reaction<'a>(
         &'a self,
@@ -359,20 +360,14 @@ impl TurnGateway for DiscordGateway {
         })
     }
 
-    fn replace_message<'a>(
+    fn replace_message_with_outcome<'a>(
         &'a self,
         channel_id: ChannelId,
         message_id: MessageId,
         content: &'a str,
-    ) -> GatewayFuture<'a, Result<(), String>> {
+    ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
         Box::pin(async move {
-            // Explicitly keep the streaming replace helper here: terminal
-            // assistant responses must preserve full output by editing the
-            // placeholder then posting continuation chunks. The shared
-            // outbound API currently owns single-message send/edit length
-            // safety; split-continuation replacement remains a distinct
-            // streaming concern.
-            formatting::replace_long_message_raw(
+            formatting::replace_long_message_raw_with_outcome(
                 &self.http,
                 channel_id,
                 message_id,
@@ -524,13 +519,13 @@ impl TurnGateway for HeadlessGateway {
         Box::pin(async move { Ok(()) })
     }
 
-    fn replace_message<'a>(
+    fn replace_message_with_outcome<'a>(
         &'a self,
         _channel_id: ChannelId,
         _message_id: MessageId,
         _content: &'a str,
-    ) -> GatewayFuture<'a, Result<(), String>> {
-        Box::pin(async move { Ok(()) })
+    ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+        Box::pin(async move { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
     }
 
     fn add_reaction<'a>(
