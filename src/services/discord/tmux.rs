@@ -1631,6 +1631,14 @@ enum TmuxLivenessDecision {
     TmuxDied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatcherOutputPollDecision {
+    DrainOutput,
+    Continue,
+    QuietStop,
+    TmuxDied,
+}
+
 fn tmux_liveness_decision(
     cancelled: bool,
     shutting_down: bool,
@@ -1642,6 +1650,21 @@ fn tmux_liveness_decision(
         TmuxLivenessDecision::Continue
     } else {
         TmuxLivenessDecision::TmuxDied
+    }
+}
+
+fn watcher_output_poll_decision(
+    bytes_read: usize,
+    liveness_after_empty_read: Option<TmuxLivenessDecision>,
+) -> WatcherOutputPollDecision {
+    if bytes_read > 0 {
+        return WatcherOutputPollDecision::DrainOutput;
+    }
+
+    match liveness_after_empty_read.expect("empty watcher read must probe tmux liveness") {
+        TmuxLivenessDecision::Continue => WatcherOutputPollDecision::Continue,
+        TmuxLivenessDecision::QuietStop => WatcherOutputPollDecision::QuietStop,
+        TmuxLivenessDecision::TmuxDied => WatcherOutputPollDecision::TmuxDied,
     }
 }
 
@@ -3305,10 +3328,40 @@ pub(super) async fn tmux_output_watcher_with_restore(
             break;
         }
 
-        // If paused (Discord handler is processing its own turn), wait
+        // If paused (Discord handler is processing its own turn), keep the
+        // liveness monitor active so a dead pane still clears watcher state.
         if paused.load(Ordering::Relaxed) {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            continue;
+            match tmux_liveness_decision(
+                cancel.load(Ordering::Relaxed),
+                shared.shutting_down.load(Ordering::Relaxed),
+                probe_tmux_session_liveness(&tmux_session_name).await,
+            ) {
+                TmuxLivenessDecision::Continue => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+                TmuxLivenessDecision::QuietStop => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
+                    );
+                    break;
+                }
+                TmuxLivenessDecision::TmuxDied => {
+                    handle_tmux_watcher_observed_death(
+                        channel_id,
+                        &http,
+                        &shared,
+                        &tmux_session_name,
+                        &output_path,
+                        &watcher_provider,
+                        prompt_too_long_killed,
+                        turn_result_relayed,
+                    )
+                    .await;
+                    break;
+                }
+            }
         }
 
         // Periodic size-cap rotation for the session jsonl. Running this off
@@ -3364,35 +3417,6 @@ pub(super) async fn tmux_output_watcher_with_restore(
         // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
         let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);
 
-        match tmux_liveness_decision(
-            cancel.load(Ordering::Relaxed),
-            shared.shutting_down.load(Ordering::Relaxed),
-            probe_tmux_session_liveness(&tmux_session_name).await,
-        ) {
-            TmuxLivenessDecision::Continue => {}
-            TmuxLivenessDecision::QuietStop => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
-                );
-                break;
-            }
-            TmuxLivenessDecision::TmuxDied => {
-                handle_tmux_watcher_observed_death(
-                    channel_id,
-                    &http,
-                    &shared,
-                    &tmux_session_name,
-                    &output_path,
-                    &watcher_provider,
-                    prompt_too_long_killed,
-                    turn_result_relayed,
-                )
-                .await;
-                break;
-            }
-        }
-
         // Try to read new data from output file
         let read_result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -3416,15 +3440,79 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let (data, new_offset) = match read_result {
             Ok(Ok(Ok((data, off)))) => (data, off),
             _ => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                continue;
+                match tmux_liveness_decision(
+                    cancel.load(Ordering::Relaxed),
+                    shared.shutting_down.load(Ordering::Relaxed),
+                    probe_tmux_session_liveness(&tmux_session_name).await,
+                ) {
+                    TmuxLivenessDecision::Continue => {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    TmuxLivenessDecision::QuietStop => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
+                        );
+                        break;
+                    }
+                    TmuxLivenessDecision::TmuxDied => {
+                        handle_tmux_watcher_observed_death(
+                            channel_id,
+                            &http,
+                            &shared,
+                            &tmux_session_name,
+                            &output_path,
+                            &watcher_provider,
+                            prompt_too_long_killed,
+                            turn_result_relayed,
+                        )
+                        .await;
+                        break;
+                    }
+                }
             }
         };
 
-        if data.is_empty() {
-            // No new data, sleep and retry
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            continue;
+        let poll_decision = if data.is_empty() {
+            watcher_output_poll_decision(
+                data.len(),
+                Some(tmux_liveness_decision(
+                    cancel.load(Ordering::Relaxed),
+                    shared.shutting_down.load(Ordering::Relaxed),
+                    probe_tmux_session_liveness(&tmux_session_name).await,
+                )),
+            )
+        } else {
+            watcher_output_poll_decision(data.len(), None)
+        };
+        match poll_decision {
+            WatcherOutputPollDecision::DrainOutput => {}
+            WatcherOutputPollDecision::Continue => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                continue;
+            }
+            WatcherOutputPollDecision::QuietStop => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
+                );
+                break;
+            }
+            WatcherOutputPollDecision::TmuxDied => {
+                handle_tmux_watcher_observed_death(
+                    channel_id,
+                    &http,
+                    &shared,
+                    &tmux_session_name,
+                    &output_path,
+                    &watcher_provider,
+                    prompt_too_long_killed,
+                    turn_result_relayed,
+                )
+                .await;
+                break;
+            }
         }
 
         // We got new data while not paused — this means terminal input triggered a response
@@ -3556,21 +3644,6 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     was_paused = true;
                     break;
                 }
-                if last_liveness_probe_at.elapsed() >= TMUX_LIVENESS_PROBE_INTERVAL {
-                    last_liveness_probe_at = tokio::time::Instant::now();
-                    match tmux_liveness_decision(
-                        cancel.load(Ordering::Relaxed),
-                        shared.shutting_down.load(Ordering::Relaxed),
-                        probe_tmux_session_liveness(&tmux_session_name).await,
-                    ) {
-                        TmuxLivenessDecision::Continue => {}
-                        TmuxLivenessDecision::QuietStop => break,
-                        TmuxLivenessDecision::TmuxDied => {
-                            tmux_death_observed = true;
-                            break;
-                        }
-                    }
-                }
 
                 let read_more = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
@@ -3690,6 +3763,25 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     }
                     Ok(Ok(Ok((_, off)))) => {
                         current_offset = off;
+                        if last_liveness_probe_at.elapsed() >= TMUX_LIVENESS_PROBE_INTERVAL {
+                            last_liveness_probe_at = tokio::time::Instant::now();
+                            match watcher_output_poll_decision(
+                                0,
+                                Some(tmux_liveness_decision(
+                                    cancel.load(Ordering::Relaxed),
+                                    shared.shutting_down.load(Ordering::Relaxed),
+                                    probe_tmux_session_liveness(&tmux_session_name).await,
+                                )),
+                            ) {
+                                WatcherOutputPollDecision::DrainOutput => {}
+                                WatcherOutputPollDecision::Continue => {}
+                                WatcherOutputPollDecision::QuietStop => break,
+                                WatcherOutputPollDecision::TmuxDied => {
+                                    tmux_death_observed = true;
+                                    break;
+                                }
+                            }
+                        }
                         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                         let now = std::time::Instant::now();
                         let should_probe_ready = last_ready_probe_at
@@ -8104,6 +8196,37 @@ mod tests {
             super::tmux_liveness_decision(false, false, true),
             super::TmuxLivenessDecision::Continue
         );
+        assert_eq!(
+            super::tmux_liveness_decision(false, false, false),
+            super::TmuxLivenessDecision::TmuxDied
+        );
+        assert_eq!(
+            super::tmux_liveness_decision(true, false, false),
+            super::TmuxLivenessDecision::QuietStop
+        );
+        assert_eq!(
+            super::tmux_liveness_decision(false, true, false),
+            super::TmuxLivenessDecision::QuietStop
+        );
+    }
+
+    #[test]
+    fn watcher_output_poll_drains_final_chunk_before_dead_tmux_shutdown() {
+        assert_eq!(
+            super::watcher_output_poll_decision(128, None),
+            super::WatcherOutputPollDecision::DrainOutput
+        );
+        assert_eq!(
+            super::watcher_output_poll_decision(
+                0,
+                Some(super::tmux_liveness_decision(false, false, false)),
+            ),
+            super::WatcherOutputPollDecision::TmuxDied
+        );
+    }
+
+    #[test]
+    fn paused_watcher_liveness_detects_dead_tmux_unless_operator_stopped() {
         assert_eq!(
             super::tmux_liveness_decision(false, false, false),
             super::TmuxLivenessDecision::TmuxDied
