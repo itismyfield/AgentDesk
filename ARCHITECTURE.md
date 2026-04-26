@@ -273,6 +273,7 @@ src/
 │   │   ├── monitoring_status.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
+│   │   ├── placeholder_cleanup.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── prompt_builder.rs
 │   │   ├── queue_io.rs
