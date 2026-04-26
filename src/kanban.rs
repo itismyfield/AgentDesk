@@ -1180,11 +1180,11 @@ async fn transition_status_with_opts_pg_inner(
     );
 
     if effective.is_terminal(new_status)
-        && record_true_negative_if_pass_with_backends(db, engine.pg_pool(), card_id)
+        && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
             db,
-            engine.pg_pool().cloned(),
+            Some(pg_pool.clone()),
         );
     }
 
@@ -1946,7 +1946,7 @@ fn fire_transition_hooks_pg(
         {
             crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
                 db,
-                engine.pg_pool().cloned(),
+                Some(pg_pool.clone()),
             );
         }
     }
