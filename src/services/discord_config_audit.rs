@@ -173,10 +173,21 @@ pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, St
 
 pub(crate) fn audit_and_reconcile(
     root: &Path,
+    config: Config,
+    yaml_path: PathBuf,
+    yaml_present: bool,
+    _legacy_db: &Db,
+    legacy_scan: &LegacySourceScan,
+    dry_run: bool,
+) -> Result<AuditRunOutcome, String> {
+    audit_and_reconcile_config_only(root, config, yaml_path, yaml_present, legacy_scan, dry_run)
+}
+
+pub(crate) fn audit_and_reconcile_config_only(
+    root: &Path,
     mut config: Config,
     yaml_path: PathBuf,
     yaml_present: bool,
-    sqlite: &Db,
     legacy_scan: &LegacySourceScan,
     dry_run: bool,
 ) -> Result<AuditRunOutcome, String> {
@@ -207,7 +218,7 @@ pub(crate) fn audit_and_reconcile(
         write_runtime_config(root, &config)?;
     }
 
-    audit_db_agents(&config, yaml_present, sqlite, dry_run, &mut report)?;
+    audit_db_agents(&config, yaml_present, dry_run, &mut report)?;
     report.finalize();
 
     for warning in &report.warnings {
@@ -218,7 +229,7 @@ pub(crate) fn audit_and_reconcile(
     }
 
     if !dry_run {
-        persist_report(&config, sqlite, &report);
+        persist_report(&config, &report);
     }
 
     Ok(AuditRunOutcome { config, report })
@@ -227,16 +238,6 @@ pub(crate) fn audit_and_reconcile(
 fn direct_api_context_unavailable(error: &str) -> bool {
     error.contains("direct runtime API context is unavailable")
         || error.contains("direct runtime pg context is unavailable")
-}
-
-fn load_persisted_report_sqlite(sqlite: &Db) -> Option<String> {
-    let conn = sqlite.read_conn().ok()?;
-    conn.query_row(
-        "SELECT value FROM kv_meta WHERE key = ?1",
-        [CONFIG_AUDIT_KV_KEY],
-        |row| row.get(0),
-    )
-    .ok()
 }
 
 fn load_persisted_report_pg(pg_pool: Option<&sqlx::PgPool>) -> Option<String> {
@@ -283,7 +284,7 @@ fn persist_report_pg(config: &Config, rendered: &str) -> bool {
 }
 
 pub(crate) fn load_persisted_report(
-    sqlite: &Db,
+    _legacy_db: &Db,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> Option<ConfigAuditReport> {
     match internal_api::get_kv_value(CONFIG_AUDIT_KV_KEY) {
@@ -293,25 +294,11 @@ pub(crate) fn load_persisted_report(
         Err(_) => {}
     }
 
-    let raw = if pg_pool.is_some() {
-        load_persisted_report_pg(pg_pool)
-    } else {
-        load_persisted_report_sqlite(sqlite)
-    }?;
+    let raw = load_persisted_report_pg(pg_pool)?;
     serde_json::from_str(&raw).ok()
 }
 
-fn persist_report_sqlite(sqlite: &Db, rendered: &str) {
-    let Ok(conn) = sqlite.lock() else {
-        return;
-    };
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        [CONFIG_AUDIT_KV_KEY, rendered],
-    );
-}
-
-fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
+fn persist_report(config: &Config, report: &ConfigAuditReport) {
     let Ok(rendered) = serde_json::to_string(report) else {
         return;
     };
@@ -322,11 +309,11 @@ fn persist_report(config: &Config, sqlite: &Db, report: &ConfigAuditReport) {
         Err(_) => {}
     }
 
-    if persist_report_pg(config, &rendered) {
-        return;
+    if !persist_report_pg(config, &rendered) {
+        tracing::warn!(
+            "[config-audit] PostgreSQL unavailable; config audit report was not persisted"
+        );
     }
-
-    persist_report_sqlite(sqlite, &rendered);
 }
 
 fn audit_role_map(
@@ -597,18 +584,22 @@ fn audit_bot_settings(
 fn audit_db_agents(
     config: &Config,
     yaml_present: bool,
-    sqlite: &Db,
     dry_run: bool,
     report: &mut ConfigAuditReport,
 ) -> Result<(), String> {
     let db_agents = match load_db_agents_pg(config) {
         Ok(Some(agents)) => agents,
-        Ok(None) => load_db_agents_sqlite(sqlite)?,
+        Ok(None) => {
+            report
+                .actions
+                .push("skipped DB agent audit because PostgreSQL is not enabled".to_string());
+            return Ok(());
+        }
         Err(error) => {
             report.warnings.push(format!(
-                "Failed to load agents from PostgreSQL during config audit: {error}; falling back to sqlite"
+                "Failed to load agents from PostgreSQL during config audit: {error}; legacy fallback disabled"
             ));
-            load_db_agents_sqlite(sqlite)?
+            return Ok(());
         }
     };
     let yaml_agents = config
@@ -674,20 +665,7 @@ fn audit_db_agents(
         }
         Ok(None) => {}
         Err(error) => report.warnings.push(format!(
-            "Failed to sync agents from agentdesk.yaml into PostgreSQL: {error}; falling back to sqlite"
-        )),
-    }
-
-    match crate::db::agents::sync_agents_from_config(sqlite, &config.agents) {
-        Ok(count) => {
-            report.storage.synced_agents = Some(count);
-            report.actions.push(format!(
-                "synced {} agent definitions from agentdesk.yaml into the sqlite agents table",
-                count
-            ));
-        }
-        Err(err) => report.warnings.push(format!(
-            "Failed to sync agents from agentdesk.yaml into DB: {err}"
+            "Failed to sync agents from agentdesk.yaml into PostgreSQL: {error}; legacy fallback disabled"
         )),
     }
 
@@ -751,38 +729,6 @@ fn load_db_agents_pg(config: &Config) -> Result<Option<BTreeMap<String, Comparab
         },
         |message| message,
     )
-}
-
-fn load_db_agents_sqlite(sqlite: &Db) -> Result<BTreeMap<String, ComparableAgent>, String> {
-    let conn = sqlite
-        .lock()
-        .map_err(|err| format!("DB lock error while auditing config: {err}"))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-             FROM agents",
-        )
-        .map_err(|err| format!("Failed to prepare agent audit query: {err}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(ComparableAgent {
-                id: row.get::<_, String>(0)?,
-                provider: normalize_provider(row.get::<_, Option<String>>(1)?.as_deref())
-                    .unwrap_or_else(|| "claude".to_string()),
-                discord_channel_id: normalize_optional_string(row.get(2)?),
-                discord_channel_alt: normalize_optional_string(row.get(3)?),
-                discord_channel_cc: normalize_optional_string(row.get(4)?),
-                discord_channel_cdx: normalize_optional_string(row.get(5)?),
-            })
-        })
-        .map_err(|err| format!("Failed to query agent audit rows: {err}"))?;
-
-    let mut agents = BTreeMap::new();
-    for row in rows {
-        let agent = row.map_err(|err| format!("Failed to decode agent audit row: {err}"))?;
-        agents.insert(agent.id.clone(), agent);
-    }
-    Ok(agents)
 }
 
 fn parse_legacy_bot_entry(entry_key: &str, entry_value: &Value) -> LegacyBotEntry {
@@ -1215,13 +1161,11 @@ discord:
         );
 
         let loaded = load_runtime_config(root).unwrap();
-        let db = crate::db::init(&loaded.config).unwrap();
-        let outcome = audit_and_reconcile(
+        let outcome = audit_and_reconcile_config_only(
             root,
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
             &LegacySourceScan::default(),
             false,
         )
@@ -1281,14 +1225,12 @@ discord:
         );
 
         let loaded = load_runtime_config(root).unwrap();
-        let db = crate::db::init(&loaded.config).unwrap();
         let scan = scan_legacy_sources(root);
-        let outcome = audit_and_reconcile(
+        let outcome = audit_and_reconcile_config_only(
             root,
             loaded.config,
             loaded.path,
             loaded.existed,
-            &db,
             &scan,
             true,
         )

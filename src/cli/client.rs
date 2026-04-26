@@ -714,13 +714,11 @@ pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
     }
 
     let loaded = crate::services::discord_config_audit::load_runtime_config(&root)?;
-    let db = crate::db::init(&loaded.config).map_err(|err| err.to_string())?;
-    let outcome = crate::services::discord_config_audit::audit_and_reconcile(
+    let outcome = crate::services::discord_config_audit::audit_and_reconcile_config_only(
         &root,
         loaded.config,
         loaded.path,
         loaded.existed,
-        &db,
         &legacy_scan,
         dry_run,
     )?;

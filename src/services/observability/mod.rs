@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
-use libsql_rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -171,7 +170,6 @@ enum WorkerMessage {
 
 #[derive(Clone, Default)]
 struct StorageHandles {
-    db: Option<Db>,
     pg_pool: Option<PgPool>,
 }
 
@@ -468,10 +466,9 @@ fn runtime() -> Arc<ObservabilityRuntime> {
         .clone()
 }
 
-pub fn init_observability(db: Db, pg_pool: Option<PgPool>) {
+pub fn init_observability(_db: Db, pg_pool: Option<PgPool>) {
     let runtime = runtime();
     if let Ok(mut storage) = runtime.storage.lock() {
-        storage.db = if pg_pool.is_some() { None } else { Some(db) };
         storage.pg_pool = pg_pool;
     }
     ensure_worker(&runtime);
@@ -915,12 +912,6 @@ async fn flush_event_batch(runtime: &Arc<ObservabilityRuntime>, batch: &mut Vec<
             }
         }
     }
-
-    if let Some(db) = handles.db.as_ref()
-        && let Err(error) = insert_events_sqlite(db, &events)
-    {
-        tracing::warn!("[observability] sqlite event flush failed: {error}");
-    }
 }
 
 async fn flush_quality_event_batch(
@@ -941,12 +932,6 @@ async fn flush_quality_event_batch(
             }
         }
     }
-
-    if let Some(db) = handles.db.as_ref()
-        && let Err(error) = insert_quality_events_sqlite(db, &events)
-    {
-        tracing::warn!("[quality] sqlite event flush failed: {error}");
-    }
 }
 
 async fn flush_counter_snapshots(runtime: &Arc<ObservabilityRuntime>) {
@@ -963,12 +948,6 @@ async fn flush_counter_snapshots(runtime: &Arc<ObservabilityRuntime>) {
                 tracing::warn!("[observability] postgres snapshot flush failed: {error}");
             }
         }
-    }
-
-    if let Some(db) = handles.db.as_ref()
-        && let Err(error) = insert_snapshots_sqlite(db, &snapshots)
-    {
-        tracing::warn!("[observability] sqlite snapshot flush failed: {error}");
     }
 }
 
@@ -1016,7 +995,7 @@ fn snapshot_rows(
 }
 
 pub async fn query_analytics(
-    db: &Db,
+    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AnalyticsFilters,
 ) -> Result<AnalyticsResponse> {
@@ -1039,8 +1018,7 @@ pub async fn query_analytics(
         })
         .collect::<Vec<_>>();
 
-    let persisted_counters =
-        query_counter_snapshots_db(db, pg_pool, filters, counter_limit).await?;
+    let persisted_counters = query_counter_snapshots_db(pg_pool, filters, counter_limit).await?;
     let mut seen = counters
         .iter()
         .map(|snapshot| (snapshot.provider.clone(), snapshot.channel_id.clone()))
@@ -1052,7 +1030,7 @@ pub async fn query_analytics(
     }
     counters.truncate(counter_limit);
 
-    let events = query_events_db(db, pg_pool, filters, event_limit).await?;
+    let events = query_events_db(pg_pool, filters, event_limit).await?;
     Ok(AnalyticsResponse {
         generated_at: now_kst(),
         counters,
@@ -1061,25 +1039,18 @@ pub async fn query_analytics(
 }
 
 pub async fn query_agent_quality_events(
-    db: &Db,
+    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AgentQualityFilters,
 ) -> Result<Vec<AgentQualityEventRecord>> {
     let days = normalized_quality_days(filters.days);
     let limit = normalized_quality_limit(filters.limit);
-    if let Some(pool) = pg_pool {
-        match query_agent_quality_events_pg(pool, filters.agent_id.as_deref(), days, limit).await {
-            Ok(records) => return Ok(records),
-            Err(error) => {
-                tracing::warn!("[quality] postgres event query failed: {error}");
-            }
-        }
-    }
-
-    let conn = db
-        .read_conn()
-        .map_err(|error| anyhow!("db read connection for agent quality events: {error}"))?;
-    query_agent_quality_events_sqlite(&conn, filters.agent_id.as_deref(), days, limit)
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!(
+            "postgres pool unavailable for agent quality events"
+        ));
+    };
+    query_agent_quality_events_pg(pool, filters.agent_id.as_deref(), days, limit).await
 }
 
 pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRollupReport> {
@@ -1092,7 +1063,7 @@ pub async fn run_agent_quality_rollup_pg(pool: &PgPool) -> Result<AgentQualityRo
 }
 
 pub async fn query_agent_quality_summary(
-    db: &Db,
+    _db: &Db,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     days: i64,
@@ -1100,52 +1071,23 @@ pub async fn query_agent_quality_summary(
 ) -> Result<AgentQualitySummary> {
     let days = normalized_quality_days(days);
     let limit = normalized_quality_daily_limit(limit);
-    let daily = if let Some(pool) = pg_pool {
-        match query_agent_quality_daily_pg(pool, Some(agent_id), days, limit).await {
-            Ok(records) => records,
-            Err(error) => {
-                tracing::warn!("[quality] postgres daily query failed: {error}");
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!(
+            "postgres pool unavailable for agent quality summary"
+        ));
     };
-
-    let daily = if pg_pool.is_some() {
-        daily
-    } else {
-        let conn = db
-            .read_conn()
-            .map_err(|error| anyhow!("db read connection for agent quality daily: {error}"))?;
-        query_agent_quality_daily_sqlite(&conn, Some(agent_id), days, limit)?
-    };
+    let daily = query_agent_quality_daily_pg(pool, Some(agent_id), days, limit).await?;
 
     // #1102 fallback: when the daily rollup is empty (e.g. the rollup job
     // from #1101 hasn't run yet in this environment), synthesize a mini
     // rollup directly from `agent_quality_event`.
     let (daily, fallback_from_events) = if daily.is_empty() {
-        let synthetic = match pg_pool {
-            Some(pool) => synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
-                .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
-                    Vec::new()
-                }),
-            None => match db.read_conn() {
-                Ok(conn) => synth_agent_quality_daily_from_events_sqlite(&conn, agent_id, 30)
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(
-                            "[quality] sqlite event-fallback mini-rollup failed: {error}"
-                        );
-                        Vec::new()
-                    }),
-                Err(error) => {
-                    tracing::warn!("[quality] event-fallback sqlite conn failed: {error}");
-                    Vec::new()
-                }
-            },
-        };
+        let synthetic = synth_agent_quality_daily_from_events_pg(pool, agent_id, 30)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("[quality] pg event-fallback mini-rollup failed: {error}");
+                Vec::new()
+            });
         let fallback = !synthetic.is_empty();
         (synthetic, fallback)
     } else {
@@ -1192,7 +1134,7 @@ pub async fn query_agent_quality_ranking(
 }
 
 pub async fn query_agent_quality_ranking_with(
-    db: &Db,
+    _db: &Db,
     pg_pool: Option<&PgPool>,
     limit: usize,
     metric: QualityRankingMetric,
@@ -1201,26 +1143,12 @@ pub async fn query_agent_quality_ranking_with(
 ) -> Result<AgentQualityRankingResponse> {
     let limit = normalized_quality_ranking_limit(limit);
     let min_sample_size = min_sample_size.max(0);
-    let agents = if let Some(pool) = pg_pool {
-        match query_agent_quality_ranking_pg(pool, limit).await {
-            Ok(records) => records,
-            Err(error) => {
-                tracing::warn!("[quality] postgres ranking query failed: {error}");
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!(
+            "postgres pool unavailable for agent quality ranking"
+        ));
     };
-
-    let agents = if pg_pool.is_some() {
-        agents
-    } else {
-        let conn = db
-            .read_conn()
-            .map_err(|error| anyhow!("db read connection for agent quality ranking: {error}"))?;
-        query_agent_quality_ranking_sqlite(&conn, limit)?
-    };
+    let agents = query_agent_quality_ranking_pg(pool, limit).await?;
 
     // Filter by sample_size >= min_sample_size (#1102 DoD), then attach
     // metric_value and re-rank by the requested (metric, window) pair.
@@ -1268,14 +1196,14 @@ pub async fn query_agent_quality_ranking_with(
 }
 
 pub async fn query_invariant_analytics(
-    db: &Db,
+    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &InvariantAnalyticsFilters,
 ) -> Result<InvariantAnalyticsResponse> {
     let limit = normalized_invariant_limit(filters.limit);
-    let counts = query_invariant_counts_db(db, pg_pool, filters).await?;
+    let counts = query_invariant_counts_db(pg_pool, filters).await?;
     let total_violations = counts.iter().map(|count| count.count).sum();
-    let recent = query_invariant_events_db(db, pg_pool, filters, limit).await?;
+    let recent = query_invariant_events_db(pg_pool, filters, limit).await?;
 
     Ok(InvariantAnalyticsResponse {
         generated_at: now_kst(),
@@ -1286,225 +1214,46 @@ pub async fn query_invariant_analytics(
 }
 
 async fn query_invariant_counts_db(
-    db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &InvariantAnalyticsFilters,
 ) -> Result<Vec<InvariantViolationCount>> {
-    if let Some(pool) = pg_pool {
-        match query_invariant_counts_pg(pool, filters).await {
-            Ok(records) => return Ok(records),
-            Err(error) => {
-                tracing::warn!("[observability] postgres invariant count query failed: {error}");
-            }
-        }
-    }
-
-    let conn = db
-        .read_conn()
-        .map_err(|error| anyhow!("db read connection for invariant counts: {error}"))?;
-    query_invariant_counts_sqlite(&conn, filters)
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!("postgres pool unavailable for invariant counts"));
+    };
+    query_invariant_counts_pg(pool, filters).await
 }
 
 async fn query_invariant_events_db(
-    db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &InvariantAnalyticsFilters,
     limit: usize,
 ) -> Result<Vec<InvariantViolationRecord>> {
-    if let Some(pool) = pg_pool {
-        match query_invariant_events_pg(pool, filters, limit).await {
-            Ok(records) => return Ok(records),
-            Err(error) => {
-                tracing::warn!("[observability] postgres invariant event query failed: {error}");
-            }
-        }
-    }
-
-    let conn = db
-        .read_conn()
-        .map_err(|error| anyhow!("db read connection for invariant events: {error}"))?;
-    query_invariant_events_sqlite(&conn, filters, limit)
+    let Some(pool) = pg_pool else {
+        return Err(anyhow!("postgres pool unavailable for invariant events"));
+    };
+    query_invariant_events_pg(pool, filters, limit).await
 }
 
 async fn query_events_db(
-    db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AnalyticsFilters,
     limit: usize,
 ) -> Result<Vec<AnalyticsEventRecord>> {
-    if let Some(pool) = pg_pool {
-        match query_events_pg(pool, filters, limit).await {
-            Ok(records) => return Ok(records),
-            Err(error) => {
-                tracing::warn!("[observability] postgres event query failed: {error}");
-            }
-        }
-    }
-
-    let conn = db
-        .read_conn()
-        .map_err(|error| anyhow!("db read connection for observability events: {error}"))?;
-    query_events_sqlite(&conn, filters, limit)
+    let Some(pool) = pg_pool else {
+        return Ok(Vec::new());
+    };
+    query_events_pg(pool, filters, limit).await
 }
 
 async fn query_counter_snapshots_db(
-    db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AnalyticsFilters,
     limit: usize,
 ) -> Result<Vec<AnalyticsCounterSnapshot>> {
-    if let Some(pool) = pg_pool {
-        match query_counter_snapshots_pg(pool, filters, limit).await {
-            Ok(records) => return Ok(records),
-            Err(error) => {
-                tracing::warn!("[observability] postgres snapshot query failed: {error}");
-            }
-        }
-    }
-
-    let conn = db
-        .read_conn()
-        .map_err(|error| anyhow!("db read connection for observability snapshots: {error}"))?;
-    query_counter_snapshots_sqlite(&conn, filters, limit)
-}
-
-fn query_events_sqlite(
-    conn: &Connection,
-    filters: &AnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<AnalyticsEventRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id,
-                event_type,
-                provider,
-                channel_id,
-                dispatch_id,
-                session_key,
-                turn_id,
-                status,
-                payload_json,
-                datetime(created_at, '+9 hours') AS created_at_kst
-         FROM observability_events
-         WHERE (?1 IS NULL OR provider = ?1)
-           AND (?2 IS NULL OR channel_id = ?2)
-           AND (?3 IS NULL OR event_type = ?3)
-         ORDER BY id DESC
-         LIMIT ?4",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![
-            filters.provider.as_deref(),
-            filters.channel_id.as_deref(),
-            filters.event_type.as_deref(),
-            limit as i64,
-        ],
-        |row| {
-            let payload_json: Option<String> = row.get(8)?;
-            Ok(AnalyticsEventRecord {
-                id: row.get(0)?,
-                event_type: row.get(1)?,
-                provider: row.get(2)?,
-                channel_id: row.get(3)?,
-                dispatch_id: row.get(4)?,
-                session_key: row.get(5)?,
-                turn_id: row.get(6)?,
-                status: row.get(7)?,
-                payload: payload_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok())
-                    .unwrap_or_else(|| json!({})),
-                created_at: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-            })
-        },
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
-}
-
-fn query_invariant_counts_sqlite(
-    conn: &Connection,
-    filters: &InvariantAnalyticsFilters,
-) -> Result<Vec<InvariantViolationCount>> {
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(status, 'unknown') AS invariant,
-                COUNT(*) AS violation_count
-         FROM observability_events
-         WHERE event_type = 'invariant_violation'
-           AND (?1 IS NULL OR provider = ?1)
-           AND (?2 IS NULL OR channel_id = ?2)
-           AND (?3 IS NULL OR status = ?3)
-         GROUP BY COALESCE(status, 'unknown')
-         ORDER BY violation_count DESC, invariant ASC",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![
-            filters.provider.as_deref(),
-            filters.channel_id.as_deref(),
-            filters.invariant.as_deref(),
-        ],
-        |row| {
-            Ok(InvariantViolationCount {
-                invariant: row.get(0)?,
-                count: row.get::<_, i64>(1)?.max(0) as u64,
-            })
-        },
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
-}
-
-fn query_invariant_events_sqlite(
-    conn: &Connection,
-    filters: &InvariantAnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<InvariantViolationRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id,
-                provider,
-                channel_id,
-                dispatch_id,
-                session_key,
-                turn_id,
-                status,
-                payload_json,
-                datetime(created_at, '+9 hours') AS created_at_kst
-         FROM observability_events
-         WHERE event_type = 'invariant_violation'
-           AND (?1 IS NULL OR provider = ?1)
-           AND (?2 IS NULL OR channel_id = ?2)
-           AND (?3 IS NULL OR status = ?3)
-         ORDER BY id DESC
-         LIMIT ?4",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![
-            filters.provider.as_deref(),
-            filters.channel_id.as_deref(),
-            filters.invariant.as_deref(),
-            limit as i64,
-        ],
-        |row| {
-            let payload_json: Option<String> = row.get(7)?;
-            let payload = payload_json
-                .as_deref()
-                .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                .unwrap_or_else(|| json!({}));
-            let invariant = row
-                .get::<_, Option<String>>(6)?
-                .or_else(|| payload.get("invariant").and_then(value_as_string))
-                .unwrap_or_else(|| "unknown".to_string());
-            Ok(invariant_record_from_parts(
-                row.get(0)?,
-                invariant,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                payload,
-                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            ))
-        },
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
+    let Some(pool) = pg_pool else {
+        return Ok(Vec::new());
+    };
+    query_counter_snapshots_pg(pool, filters, limit).await
 }
 
 async fn query_events_pg(
@@ -1682,55 +1431,6 @@ async fn query_invariant_events_pg(
             ))
         })
         .collect()
-}
-
-fn query_agent_quality_events_sqlite(
-    conn: &Connection,
-    agent_id: Option<&str>,
-    days: i64,
-    limit: usize,
-) -> Result<Vec<AgentQualityEventRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id,
-                source_event_id,
-                correlation_id,
-                agent_id,
-                provider,
-                channel_id,
-                card_id,
-                dispatch_id,
-                event_type,
-                payload_json,
-                datetime(created_at, '+9 hours') AS created_at_kst
-         FROM agent_quality_event
-         WHERE (?1 IS NULL OR agent_id = ?1)
-           AND created_at >= datetime('now', '-' || ?2 || ' days')
-         ORDER BY id DESC
-         LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![agent_id, days, limit as i64],
-        |row| {
-            let payload_json: Option<String> = row.get(9)?;
-            Ok(AgentQualityEventRecord {
-                id: row.get(0)?,
-                source_event_id: row.get(1)?,
-                correlation_id: row.get(2)?,
-                agent_id: row.get(3)?,
-                provider: row.get(4)?,
-                channel_id: row.get(5)?,
-                card_id: row.get(6)?,
-                dispatch_id: row.get(7)?,
-                event_type: row.get(8)?,
-                payload: payload_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok())
-                    .unwrap_or_else(|| json!({})),
-                created_at: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-            })
-        },
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 async fn query_agent_quality_events_pg(
@@ -2131,44 +1831,6 @@ async fn synth_agent_quality_daily_from_events_pg(
     Ok(buckets_to_synth_records(agent_id, buckets))
 }
 
-/// #1102 event-based fallback (sqlite): same as the pg variant but uses
-/// SQLite's date() on a localtime-shifted timestamp.
-fn synth_agent_quality_daily_from_events_sqlite(
-    conn: &Connection,
-    agent_id: &str,
-    days: i64,
-) -> Result<Vec<AgentQualityDailyRecord>> {
-    let days = days.clamp(1, MAX_QUALITY_DAYS);
-    let mut stmt = conn.prepare(
-        "SELECT date(created_at, '+9 hours') AS day_text,
-                MAX(provider) AS provider,
-                MAX(channel_id) AS channel_id,
-                SUM(CASE WHEN event_type = 'turn_complete' THEN 1 ELSE 0 END) AS turn_success_count,
-                SUM(CASE WHEN event_type = 'turn_error' THEN 1 ELSE 0 END) AS turn_error_count,
-                SUM(CASE WHEN event_type = 'review_pass' THEN 1 ELSE 0 END) AS review_pass_count,
-                SUM(CASE WHEN event_type = 'review_fail' THEN 1 ELSE 0 END) AS review_fail_count
-         FROM agent_quality_event
-         WHERE agent_id = ?1
-           AND created_at >= datetime('now', ?2)
-         GROUP BY day_text
-         ORDER BY day_text DESC",
-    )?;
-    let interval = format!("-{days} days");
-    let rows = stmt.query_map(libsql_rusqlite::params![agent_id, interval], |row| {
-        Ok(SynthDailyBucket {
-            day: row.get::<_, String>(0)?,
-            provider: row.get::<_, Option<String>>(1)?,
-            channel_id: row.get::<_, Option<String>>(2)?,
-            turn_success: row.get::<_, i64>(3).unwrap_or(0).max(0),
-            turn_error: row.get::<_, i64>(4).unwrap_or(0).max(0),
-            review_pass: row.get::<_, i64>(5).unwrap_or(0).max(0),
-            review_fail: row.get::<_, i64>(6).unwrap_or(0).max(0),
-        })
-    })?;
-    let buckets = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
-    Ok(buckets_to_synth_records(agent_id, buckets))
-}
-
 #[derive(Debug, Clone)]
 struct SynthDailyBucket {
     day: String,
@@ -2184,15 +1846,12 @@ fn buckets_to_synth_records(
     agent_id: &str,
     buckets: Vec<SynthDailyBucket>,
 ) -> Vec<AgentQualityDailyRecord> {
-    // Buckets come in DESC order; compute rolling 7d/30d windows via a
-    // forward sum over ascending index.
     let now = now_kst();
     buckets
         .iter()
         .enumerate()
         .map(|(idx, bucket)| {
             let window = |size: usize| -> (i64, i64, i64, i64) {
-                // idx is position in DESC list → next `size` items are older.
                 let end = (idx + size).min(buckets.len());
                 let slice = &buckets[idx..end];
                 let ts = slice.iter().map(|b| b.turn_success).sum::<i64>();
@@ -2303,47 +1962,6 @@ fn quality_window(
     }
 }
 
-fn quality_daily_record_from_sqlite_row(
-    row: &libsql_rusqlite::Row<'_>,
-) -> libsql_rusqlite::Result<AgentQualityDailyRecord> {
-    let measurement_unavailable_7d = row.get::<_, i64>(18)? != 0;
-    let measurement_unavailable_30d = row.get::<_, i64>(24)? != 0;
-    Ok(AgentQualityDailyRecord {
-        agent_id: row.get(0)?,
-        day: row.get(1)?,
-        provider: row.get(2)?,
-        channel_id: row.get(3)?,
-        turn_success_count: row.get::<_, i64>(4)?.max(0),
-        turn_error_count: row.get::<_, i64>(5)?.max(0),
-        review_pass_count: row.get::<_, i64>(6)?.max(0),
-        review_fail_count: row.get::<_, i64>(7)?.max(0),
-        turn_sample_size: row.get::<_, i64>(8)?.max(0),
-        review_sample_size: row.get::<_, i64>(9)?.max(0),
-        sample_size: row.get::<_, i64>(10)?.max(0),
-        turn_success_rate: row.get(11)?,
-        review_pass_rate: row.get(12)?,
-        rolling_7d: quality_window(
-            7,
-            row.get(14)?,
-            measurement_unavailable_7d,
-            row.get(13)?,
-            row.get(15)?,
-            row.get(16)?,
-            row.get(17)?,
-        ),
-        rolling_30d: quality_window(
-            30,
-            row.get(20)?,
-            measurement_unavailable_30d,
-            row.get(19)?,
-            row.get(21)?,
-            row.get(22)?,
-            row.get(23)?,
-        ),
-        computed_at: row.get::<_, Option<String>>(25)?.unwrap_or_default(),
-    })
-}
-
 fn quality_daily_record_from_pg_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<AgentQualityDailyRecord> {
@@ -2434,36 +2052,6 @@ fn quality_daily_record_from_pg_row(
     })
 }
 
-fn agent_quality_daily_select_sqlite() -> &'static str {
-    "SELECT agent_id,
-            day,
-            provider,
-            channel_id,
-            turn_success_count,
-            turn_error_count,
-            review_pass_count,
-            review_fail_count,
-            turn_sample_size,
-            review_sample_size,
-            sample_size,
-            turn_success_rate,
-            review_pass_rate,
-            turn_sample_size_7d,
-            sample_size_7d,
-            turn_success_rate_7d,
-            review_sample_size_7d,
-            review_pass_rate_7d,
-            measurement_unavailable_7d,
-            turn_sample_size_30d,
-            sample_size_30d,
-            turn_success_rate_30d,
-            review_sample_size_30d,
-            review_pass_rate_30d,
-            measurement_unavailable_30d,
-            datetime(computed_at, '+9 hours') AS computed_at_kst
-     FROM agent_quality_daily"
-}
-
 fn agent_quality_daily_select_pg() -> &'static str {
     "SELECT agent_id,
             to_char(day, 'YYYY-MM-DD') AS day_text,
@@ -2492,27 +2080,6 @@ fn agent_quality_daily_select_pg() -> &'static str {
             measurement_unavailable_30d,
             to_char(computed_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI:SS') AS computed_at_kst
      FROM agent_quality_daily"
-}
-
-fn query_agent_quality_daily_sqlite(
-    conn: &Connection,
-    agent_id: Option<&str>,
-    days: i64,
-    limit: usize,
-) -> Result<Vec<AgentQualityDailyRecord>> {
-    let sql = format!(
-        "{} WHERE (?1 IS NULL OR agent_id = ?1)
-              AND day >= date('now', '-' || ?2 || ' days')
-            ORDER BY day DESC, agent_id ASC
-            LIMIT ?3",
-        agent_quality_daily_select_sqlite()
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![agent_id, days, limit as i64],
-        quality_daily_record_from_sqlite_row,
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
 }
 
 async fn query_agent_quality_daily_pg(
@@ -2587,74 +2154,6 @@ fn ranking_window_sample_size(
         QualityRankingWindow::Seven => entry.rolling_7d.sample_size,
         QualityRankingWindow::Thirty => entry.rolling_30d.sample_size,
     }
-}
-
-fn query_agent_quality_ranking_sqlite(
-    conn: &Connection,
-    limit: usize,
-) -> Result<Vec<AgentQualityRankingEntry>> {
-    let sql = format!(
-        "WITH latest_day AS (
-             SELECT agent_id, MAX(day) AS day
-             FROM agent_quality_daily
-             GROUP BY agent_id
-         )
-         SELECT d.agent_id,
-                d.day,
-                d.provider,
-                d.channel_id,
-                d.turn_success_count,
-                d.turn_error_count,
-                d.review_pass_count,
-                d.review_fail_count,
-                d.turn_sample_size,
-                d.review_sample_size,
-                d.sample_size,
-                d.turn_success_rate,
-                d.review_pass_rate,
-                d.turn_sample_size_7d,
-                d.sample_size_7d,
-                d.turn_success_rate_7d,
-                d.review_sample_size_7d,
-                d.review_pass_rate_7d,
-                d.measurement_unavailable_7d,
-                d.turn_sample_size_30d,
-                d.sample_size_30d,
-                d.turn_success_rate_30d,
-                d.review_sample_size_30d,
-                d.review_pass_rate_30d,
-                d.measurement_unavailable_30d,
-                datetime(d.computed_at, '+9 hours') AS computed_at_kst,
-                COALESCE(a.name_ko, a.name) AS agent_name
-         FROM agent_quality_daily d
-         JOIN latest_day latest
-           ON latest.agent_id = d.agent_id
-          AND latest.day = d.day
-         LEFT JOIN agents a
-           ON a.id = d.agent_id
-         ORDER BY d.measurement_unavailable_7d ASC,
-                  d.turn_success_rate_7d IS NULL ASC,
-                  d.turn_success_rate_7d DESC,
-                  d.review_pass_rate_7d IS NULL ASC,
-                  d.review_pass_rate_7d DESC,
-                  d.sample_size_7d DESC,
-                  d.agent_id ASC
-         LIMIT ?1"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([limit as i64], |row| {
-        let record = quality_daily_record_from_sqlite_row(row)?;
-        let agent_name = row.get::<_, Option<String>>(26)?;
-        Ok((record, agent_name))
-    })?;
-    let records = rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?;
-    Ok(records
-        .into_iter()
-        .enumerate()
-        .map(|(index, (record, agent_name))| {
-            quality_ranking_entry_from_daily((index + 1) as i64, record, agent_name)
-        })
-        .collect())
 }
 
 async fn query_agent_quality_ranking_pg(
@@ -2953,60 +2452,6 @@ async fn enqueue_quality_regression_alerts_pg(pool: &PgPool) -> Result<u64> {
     Ok(alert_count)
 }
 
-fn query_counter_snapshots_sqlite(
-    conn: &Connection,
-    filters: &AnalyticsFilters,
-    limit: usize,
-) -> Result<Vec<AnalyticsCounterSnapshot>> {
-    let mut stmt = conn.prepare(
-        "SELECT s.provider,
-                s.channel_id,
-                s.turn_attempts,
-                s.guard_fires,
-                s.watcher_replacements,
-                s.recovery_fires,
-                s.turn_successes,
-                s.turn_failures,
-                datetime(s.snapshot_at, '+9 hours') AS snapshot_at_kst
-         FROM observability_counter_snapshots s
-         JOIN (
-             SELECT MAX(id) AS max_id
-             FROM observability_counter_snapshots
-             WHERE (?1 IS NULL OR provider = ?1)
-               AND (?2 IS NULL OR channel_id = ?2)
-             GROUP BY provider, channel_id
-         ) latest
-           ON latest.max_id = s.id
-         ORDER BY s.turn_attempts DESC, s.provider, s.channel_id
-         LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![
-            filters.provider.as_deref(),
-            filters.channel_id.as_deref(),
-            limit as i64,
-        ],
-        |row| {
-            let values = CounterValues {
-                turn_attempts: row.get::<_, i64>(2)?.max(0) as u64,
-                guard_fires: row.get::<_, i64>(3)?.max(0) as u64,
-                watcher_replacements: row.get::<_, i64>(4)?.max(0) as u64,
-                recovery_fires: row.get::<_, i64>(5)?.max(0) as u64,
-                turn_successes: row.get::<_, i64>(6)?.max(0) as u64,
-                turn_failures: row.get::<_, i64>(7)?.max(0) as u64,
-            };
-            Ok(counter_snapshot_from_values(
-                &row.get::<_, String>(0)?,
-                &row.get::<_, String>(1)?,
-                values,
-                "persisted",
-                row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            ))
-        },
-    )?;
-    Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
-}
-
 async fn query_counter_snapshots_pg(
     pool: &PgPool,
     filters: &AnalyticsFilters,
@@ -3091,43 +2536,6 @@ async fn query_counter_snapshots_pg(
         .collect()
 }
 
-fn insert_events_sqlite(db: &Db, events: &[QueuedEvent]) -> Result<()> {
-    let mut conn = db
-        .separate_conn()
-        .map_err(|error| anyhow!("open sqlite observability event connection: {error}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| anyhow!("begin sqlite observability event tx: {error}"))?;
-    for event in events {
-        tx.execute(
-            "INSERT INTO observability_events (
-                event_type,
-                provider,
-                channel_id,
-                dispatch_id,
-                session_key,
-                turn_id,
-                status,
-                payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql_rusqlite::params![
-                event.event_type,
-                event.provider,
-                event.channel_id,
-                event.dispatch_id,
-                event.session_key,
-                event.turn_id,
-                event.status,
-                event.payload_json,
-            ],
-        )
-        .map_err(|error| anyhow!("insert sqlite observability event: {error}"))?;
-    }
-    tx.commit()
-        .map_err(|error| anyhow!("commit sqlite observability event tx: {error}"))?;
-    Ok(())
-}
-
 async fn insert_events_pg(pool: &PgPool, events: &[QueuedEvent]) -> Result<()> {
     let mut tx = pool
         .begin()
@@ -3161,45 +2569,6 @@ async fn insert_events_pg(pool: &PgPool, events: &[QueuedEvent]) -> Result<()> {
     tx.commit()
         .await
         .map_err(|error| anyhow!("commit postgres observability event tx: {error}"))?;
-    Ok(())
-}
-
-fn insert_quality_events_sqlite(db: &Db, events: &[QueuedQualityEvent]) -> Result<()> {
-    let mut conn = db
-        .separate_conn()
-        .map_err(|error| anyhow!("open sqlite agent quality event connection: {error}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| anyhow!("begin sqlite agent quality event tx: {error}"))?;
-    for event in events {
-        tx.execute(
-            "INSERT INTO agent_quality_event (
-                source_event_id,
-                correlation_id,
-                agent_id,
-                provider,
-                channel_id,
-                card_id,
-                dispatch_id,
-                event_type,
-                payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            libsql_rusqlite::params![
-                event.source_event_id,
-                event.correlation_id,
-                event.agent_id,
-                event.provider,
-                event.channel_id,
-                event.card_id,
-                event.dispatch_id,
-                event.event_type,
-                event.payload_json,
-            ],
-        )
-        .map_err(|error| anyhow!("insert sqlite agent quality event: {error}"))?;
-    }
-    tx.commit()
-        .map_err(|error| anyhow!("commit sqlite agent quality event tx: {error}"))?;
     Ok(())
 }
 
@@ -3238,43 +2607,6 @@ async fn insert_quality_events_pg(pool: &PgPool, events: &[QueuedQualityEvent]) 
     tx.commit()
         .await
         .map_err(|error| anyhow!("commit postgres agent quality event tx: {error}"))?;
-    Ok(())
-}
-
-fn insert_snapshots_sqlite(db: &Db, snapshots: &[SnapshotRow]) -> Result<()> {
-    let mut conn = db
-        .separate_conn()
-        .map_err(|error| anyhow!("open sqlite observability snapshot connection: {error}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|error| anyhow!("begin sqlite observability snapshot tx: {error}"))?;
-    for snapshot in snapshots {
-        tx.execute(
-            "INSERT INTO observability_counter_snapshots (
-                provider,
-                channel_id,
-                turn_attempts,
-                guard_fires,
-                watcher_replacements,
-                recovery_fires,
-                turn_successes,
-                turn_failures
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            libsql_rusqlite::params![
-                snapshot.provider,
-                snapshot.channel_id,
-                saturating_i64(snapshot.values.turn_attempts),
-                saturating_i64(snapshot.values.guard_fires),
-                saturating_i64(snapshot.values.watcher_replacements),
-                saturating_i64(snapshot.values.recovery_fires),
-                saturating_i64(snapshot.values.turn_successes),
-                saturating_i64(snapshot.values.turn_failures),
-            ],
-        )
-        .map_err(|error| anyhow!("insert sqlite observability snapshot: {error}"))?;
-    }
-    tx.commit()
-        .map_err(|error| anyhow!("commit sqlite observability snapshot tx: {error}"))?;
     Ok(())
 }
 
@@ -3504,7 +2836,7 @@ pub(crate) fn test_runtime_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 fn test_storage_presence() -> (bool, bool) {
     let handles = storage_handles(&runtime());
-    (handles.db.is_some(), handles.pg_pool.is_some())
+    (false, handles.pg_pool.is_some())
 }
 
 #[cfg(test)]
@@ -3513,7 +2845,7 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     #[tokio::test]
-    async fn event_flush_persists_records_and_snapshots() {
+    async fn event_flush_without_pg_keeps_live_counters() {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
@@ -3562,18 +2894,7 @@ mod tests {
         assert_eq!(response.counters[0].turn_attempts, 1);
         assert_eq!(response.counters[0].guard_fires, 1);
         assert_eq!(response.counters[0].turn_successes, 1);
-        assert!(
-            response
-                .events
-                .iter()
-                .any(|event| event.event_type == "turn_started")
-        );
-        assert!(
-            response
-                .events
-                .iter()
-                .any(|event| event.event_type == "turn_finished")
-        );
+        assert!(response.events.is_empty());
     }
 
     #[tokio::test]
@@ -3602,7 +2923,7 @@ mod tests {
         ));
         flush_for_tests().await;
 
-        let response = query_invariant_analytics(
+        let error = query_invariant_analytics(
             &db,
             None,
             &InvariantAnalyticsFilters {
@@ -3613,11 +2934,8 @@ mod tests {
             },
         )
         .await
-        .expect("query invariant analytics");
-
-        assert_eq!(response.total_violations, 0);
-        assert!(response.counts.is_empty());
-        assert!(response.recent.is_empty());
+        .expect_err("invariant analytics requires postgres");
+        assert!(error.to_string().contains("postgres pool unavailable"));
     }
 
     #[tokio::test]
@@ -3645,7 +2963,7 @@ mod tests {
         ));
         flush_for_tests().await;
 
-        let response = query_invariant_analytics(
+        let error = query_invariant_analytics(
             &db,
             None,
             &InvariantAnalyticsFilters {
@@ -3656,20 +2974,8 @@ mod tests {
             },
         )
         .await
-        .expect("query invariant analytics");
-
-        assert_eq!(response.total_violations, 1);
-        assert_eq!(response.counts[0].invariant, "inflight_tmux_one_to_one");
-        assert_eq!(response.counts[0].count, 1);
-        assert_eq!(response.recent.len(), 1);
-        assert_eq!(
-            response.recent[0].message.as_deref(),
-            Some("test violation")
-        );
-        assert_eq!(
-            response.recent[0].details["tmux_session_name"],
-            "AgentDesk-claude-test"
-        );
+        .expect_err("invariant analytics requires postgres");
+        assert!(error.to_string().contains("postgres pool unavailable"));
     }
 
     #[tokio::test]
@@ -3694,7 +3000,7 @@ mod tests {
         });
         flush_for_tests().await;
 
-        let events = query_agent_quality_events(
+        let error = query_agent_quality_events(
             &db,
             None,
             &AgentQualityFilters {
@@ -3703,45 +3009,21 @@ mod tests {
                 limit: 10,
             },
         )
-        .await?;
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "review_pass");
-        assert_eq!(events[0].agent_id.as_deref(), Some("agent-1"));
-        assert_eq!(events[0].dispatch_id.as_deref(), Some("dispatch-1"));
-        assert_eq!(events[0].payload["verdict"], "pass");
+        .await
+        .expect_err("agent quality events require postgres");
+        assert!(error.to_string().contains("postgres pool unavailable"));
 
         Ok(())
     }
 
-    /// #930: query_agent_quality_events must filter out rows older than the
-    /// requested `days` window.
     #[tokio::test]
-    async fn agent_quality_query_excludes_rows_older_than_days_window() -> Result<()> {
+    async fn agent_quality_query_without_pg_pool_is_unavailable() -> Result<()> {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
         init_observability(db.clone(), None);
 
-        // Insert directly so we can control created_at: one row at "now" and
-        // one row 30 days in the past for the same agent.
-        let conn = db
-            .separate_conn()
-            .expect("open sqlite agent quality test connection");
-        conn.execute(
-            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
-        )
-        .expect("insert recent quality event");
-        conn.execute(
-            "INSERT INTO agent_quality_event (agent_id, event_type, payload_json, created_at)
-             VALUES (?1, ?2, ?3, datetime('now', '-30 days'))",
-            libsql_rusqlite::params!["agent-window", "turn_complete", "{}"],
-        )
-        .expect("insert old quality event");
-
-        let recent = query_agent_quality_events(
+        let error = query_agent_quality_events(
             &db,
             None,
             &AgentQualityFilters {
@@ -3750,78 +3032,21 @@ mod tests {
                 limit: 50,
             },
         )
-        .await?;
-        assert_eq!(
-            recent.len(),
-            1,
-            "days=7 must exclude the 30-day-old row, got {recent:?}"
-        );
-
-        // days=60 must include both rows.
-        let wide = query_agent_quality_events(
-            &db,
-            None,
-            &AgentQualityFilters {
-                agent_id: Some("agent-window".to_string()),
-                days: 60,
-                limit: 50,
-            },
-        )
-        .await?;
-        assert_eq!(
-            wide.len(),
-            2,
-            "days=60 must include both rows, got {wide:?}"
-        );
+        .await
+        .expect_err("agent quality events require postgres");
+        assert!(error.to_string().contains("postgres pool unavailable"));
 
         Ok(())
     }
 
-    /// #930: query_agent_quality_events must scope rows to the requested
-    /// `agent_id` and never bleed events from other agents.
     #[tokio::test]
-    async fn agent_quality_query_filters_by_agent_id() -> Result<()> {
+    async fn agent_quality_unscoped_query_without_pg_pool_is_unavailable() -> Result<()> {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
         init_observability(db.clone(), None);
 
-        emit_agent_quality_event(AgentQualityEvent {
-            source_event_id: Some("turn-A".to_string()),
-            correlation_id: Some("dispatch-A".to_string()),
-            agent_id: Some("agent-A".to_string()),
-            provider: Some("codex".to_string()),
-            channel_id: Some("100".to_string()),
-            card_id: None,
-            dispatch_id: Some("dispatch-A".to_string()),
-            event_type: "turn_complete".to_string(),
-            payload: json!({"who": "A"}),
-        });
-        emit_agent_quality_event(AgentQualityEvent {
-            source_event_id: Some("turn-B".to_string()),
-            correlation_id: Some("dispatch-B".to_string()),
-            agent_id: Some("agent-B".to_string()),
-            provider: Some("codex".to_string()),
-            channel_id: Some("200".to_string()),
-            card_id: None,
-            dispatch_id: Some("dispatch-B".to_string()),
-            event_type: "turn_complete".to_string(),
-            payload: json!({"who": "B"}),
-        });
-        emit_agent_quality_event(AgentQualityEvent {
-            source_event_id: Some("turn-A2".to_string()),
-            correlation_id: Some("dispatch-A2".to_string()),
-            agent_id: Some("agent-A".to_string()),
-            provider: Some("codex".to_string()),
-            channel_id: Some("100".to_string()),
-            card_id: None,
-            dispatch_id: Some("dispatch-A2".to_string()),
-            event_type: "review_pass".to_string(),
-            payload: json!({"who": "A2"}),
-        });
-        flush_for_tests().await;
-
-        let only_a = query_agent_quality_events(
+        let error = query_agent_quality_events(
             &db,
             None,
             &AgentQualityFilters {
@@ -3830,43 +3055,9 @@ mod tests {
                 limit: 50,
             },
         )
-        .await?;
-        assert_eq!(only_a.len(), 2, "agent-A should have 2 events");
-        assert!(
-            only_a
-                .iter()
-                .all(|e| e.agent_id.as_deref() == Some("agent-A")),
-            "filter must not return rows from other agents: {only_a:?}"
-        );
-
-        let only_b = query_agent_quality_events(
-            &db,
-            None,
-            &AgentQualityFilters {
-                agent_id: Some("agent-B".to_string()),
-                days: 7,
-                limit: 50,
-            },
-        )
-        .await?;
-        assert_eq!(only_b.len(), 1);
-        assert_eq!(only_b[0].agent_id.as_deref(), Some("agent-B"));
-
-        // No agent_id filter → both agents' events come back.
-        let unscoped = query_agent_quality_events(
-            &db,
-            None,
-            &AgentQualityFilters {
-                agent_id: None,
-                days: 7,
-                limit: 50,
-            },
-        )
-        .await?;
-        assert!(
-            unscoped.len() >= 3,
-            "unscoped query should include events from both agents, got {unscoped:?}"
-        );
+        .await
+        .expect_err("agent quality events require postgres");
+        assert!(error.to_string().contains("postgres pool unavailable"));
 
         Ok(())
     }
@@ -3908,7 +3099,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn init_observability_drops_sqlite_fallback_when_pg_pool_is_configured() {
+    async fn init_observability_retains_only_pg_pool_when_configured() {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
@@ -3924,7 +3115,7 @@ mod tests {
         let (has_db, has_pg_pool) = test_storage_presence();
         assert!(
             !has_db,
-            "PG runtime should not retain sqlite fallback storage"
+            "PG runtime should not retain legacy fallback storage"
         );
         assert!(has_pg_pool, "PG runtime should retain the postgres pool");
     }
