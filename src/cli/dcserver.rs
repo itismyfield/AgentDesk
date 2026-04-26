@@ -1365,6 +1365,14 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         });
 
+        // #1203: 30 s disk-space probe. Fans a "💾 디스크 부족" banner out to
+        // every channel that already has a monitoring row whenever free space
+        // dips below 5 GiB or an ENOSPC fault was recorded in the last 5 min,
+        // and removes the row when health returns.
+        let disk_probe_path = crate::cli::agentdesk_runtime_root()
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        services::disk_monitor::spawn_disk_monitor_tick(disk_probe_path);
+
         match token {
             Some(token) => {
                 let provider = services::discord::resolve_discord_bot_provider(&token);
