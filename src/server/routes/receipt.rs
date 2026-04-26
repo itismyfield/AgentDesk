@@ -7,7 +7,9 @@ use axum::{
 use chrono::{Datelike, Local, TimeZone};
 use serde::Deserialize;
 use serde_json::json;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant};
 
 use super::AppState;
 use crate::receipt;
@@ -22,6 +24,56 @@ pub struct ReceiptQuery {
 pub struct TokenAnalyticsQuery {
     /// Period: "7d", "30d", or "90d"
     period: Option<String>,
+    /// When true, bypass the in-process cache and re-scan disk. Set by the
+    /// dashboard's explicit Refresh button so manual refreshes always see
+    /// the freshest possible numbers.
+    fresh: Option<bool>,
+}
+
+/// In-process cache for the heavy token-analytics computation. Each call to
+/// `collect_token_analytics` does a multi-hundred-MB filesystem scan across
+/// `~/.claude/projects` + `~/.codex/sessions`, which takes ~1-9 s depending
+/// on workspace age. The HTTP-level SWR cache (Cache-Control: max-age=15)
+/// already absorbs same-tab re-entry, but cross-tab / new-session loads still
+/// hit the origin and pay the full cost.
+///
+/// 30 s TTL is short enough that "live" data is still close-to-current
+/// (token usage doesn't materially shift in 30 s) and long enough to cover
+/// the typical "open dashboard, navigate around, settle on /stats" pattern.
+/// The cache holds at most 3 entries (7d / 30d / 90d), so no LRU eviction
+/// is needed.
+const TOKEN_ANALYTICS_CACHE_TTL: StdDuration = StdDuration::from_secs(30);
+
+struct CachedAnalytics {
+    cached_at: Instant,
+    data: Arc<receipt::TokenAnalyticsData>,
+}
+
+static TOKEN_ANALYTICS_CACHE: OnceLock<Mutex<HashMap<String, CachedAnalytics>>> = OnceLock::new();
+
+fn token_analytics_cache() -> &'static Mutex<HashMap<String, CachedAnalytics>> {
+    TOKEN_ANALYTICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn read_cached_token_analytics(period: &str) -> Option<Arc<receipt::TokenAnalyticsData>> {
+    let cache = token_analytics_cache().lock().ok()?;
+    let entry = cache.get(period)?;
+    if entry.cached_at.elapsed() > TOKEN_ANALYTICS_CACHE_TTL {
+        return None;
+    }
+    Some(Arc::clone(&entry.data))
+}
+
+fn write_cached_token_analytics(period: &str, data: Arc<receipt::TokenAnalyticsData>) {
+    if let Ok(mut cache) = token_analytics_cache().lock() {
+        cache.insert(
+            period.to_string(),
+            CachedAnalytics {
+                cached_at: Instant::now(),
+                data,
+            },
+        );
+    }
 }
 
 /// GET /api/receipt?period=month
@@ -104,13 +156,14 @@ pub async fn get_receipt(
     (StatusCode::OK, Json(json!(data)))
 }
 
-/// GET /api/token-analytics?period=30d
+/// GET /api/token-analytics?period=30d&fresh=1
 pub async fn get_token_analytics(
     State(_state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<TokenAnalyticsQuery>,
 ) -> Response {
     let started = Instant::now();
     let period = params.period.as_deref().unwrap_or("30d");
+    let bypass_cache = params.fresh.unwrap_or(false);
     let now = chrono::Utc::now();
     let local_now = now.with_timezone(&Local);
 
@@ -119,6 +172,15 @@ pub async fn get_token_analytics(
         "90d" => (90_i64, "Last 90 Days", "90d"),
         _ => (30_i64, "Last 30 Days", "30d"),
     };
+
+    if !bypass_cache {
+        if let Some(cached) = read_cached_token_analytics(period_id) {
+            let elapsed_ms = started.elapsed().as_millis();
+            tracing::debug!(period = period_id, elapsed_ms, "token-analytics cache hit");
+            return build_token_analytics_response(&cached, period_id, elapsed_ms, "hit");
+        }
+    }
+
     let start_date = local_now.date_naive() - chrono::Duration::days(days.saturating_sub(1));
     let start = Local
         .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
@@ -146,21 +208,32 @@ pub async fn get_token_analytics(
     };
 
     let elapsed_ms = started.elapsed().as_millis();
-    tracing::info!(period = period_id, elapsed_ms, "token-analytics responded");
+    tracing::info!(
+        period = period_id,
+        elapsed_ms,
+        bypass_cache,
+        "token-analytics responded"
+    );
 
+    let arc_data = Arc::new(data);
+    write_cached_token_analytics(period_id, Arc::clone(&arc_data));
+    let cache_state = if bypass_cache { "bypass" } else { "miss" };
+    build_token_analytics_response(&arc_data, period_id, elapsed_ms, cache_state)
+}
+
+fn build_token_analytics_response(
+    data: &receipt::TokenAnalyticsData,
+    period_id: &str,
+    elapsed_ms: u128,
+    cache_state: &'static str,
+) -> Response {
     let mut response = (StatusCode::OK, Json(json!(data))).into_response();
     let headers = response.headers_mut();
-    // The endpoint scans `~/.claude/projects` + `~/.codex/sessions` on every
-    // request through `spawn_blocking`, which costs ~1-2 s. Without an HTTP
-    // cache, every same-tab navigation back to /stats re-pays that cost.
-    //
-    // Codex review on PR #1258 (3rd pass) removed the previous SWR header
-    // because the Stats Refresh button was being silently served from the
-    // 30 s window. The frontend now passes `cache: "reload"` whenever the
-    // Refresh button or `reloadKey` increments, so we can re-enable a small
-    // fresh window + a longer SWR window without regressing the explicit
-    // refresh path. Background re-entry hits the cache instantly while the
-    // user opts in to a hard refresh.
+    // Browser-side SWR window: served instantly within 15 s, falls back to
+    // stale-while-revalidate for 5 min so cross-page navigation paints
+    // immediately while the in-process cache below absorbs the actual
+    // origin work. The frontend explicit Refresh button passes `?fresh=1`
+    // (and `cache: "reload"`) so the response also bypasses both layers.
     headers.insert(
         "Cache-Control",
         HeaderValue::from_static("private, max-age=15, stale-while-revalidate=300"),
@@ -173,5 +246,9 @@ pub async fn get_token_analytics(
     if let Ok(value) = HeaderValue::from_str(&elapsed_ms.to_string()) {
         headers.insert("X-Response-Time-Ms", value);
     }
+    headers.insert(
+        "X-Token-Analytics-Cache",
+        HeaderValue::from_static(cache_state),
+    );
     response
 }
