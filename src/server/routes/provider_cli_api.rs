@@ -10,8 +10,8 @@ use crate::services::provider_cli::io::{
     load_migration_state, load_registry, load_smoke_result, save_migration_state,
 };
 use crate::services::provider_cli::orchestration::{
-    clear_provider_channel_overrides, evaluate_provider_session_guard, promote_registry_candidate,
-    rollback_registry_previous, session_guard_evidence,
+    canary_promotion_evidence, clear_provider_channel_overrides, evaluate_provider_session_guard,
+    promote_registry_candidate, rollback_registry_previous, session_guard_evidence,
 };
 use crate::services::provider_cli::registry::MigrationState;
 use crate::services::provider_cli::upgrade::{migration_state_rank, transition};
@@ -140,7 +140,90 @@ pub async fn patch_provider_cli(
         }
     };
 
+    if matches!(action, ProviderCliApiAction::ConfirmPromote)
+        && migration.state == MigrationState::ProviderAgentsMigrated
+    {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "provider": provider,
+                "action": body.action,
+                "state": migration_state_wire_value(&migration.state),
+                "updated_at": migration.updated_at,
+            })),
+        );
+    }
+
     let transition_result = if matches!(action, ProviderCliApiAction::ConfirmPromote) {
+        let canary_ready_result = if migration.state == MigrationState::CanaryActive {
+            canary_promotion_evidence(&root, &migration, body.evidence.as_deref())
+                .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))
+                .and_then(|canary_evidence| {
+                    advance_to(
+                        &mut migration,
+                        MigrationState::CanaryPassed,
+                        Some(canary_evidence),
+                    )
+                    .map_err(|e| {
+                        (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("invalid transition: {e}"),
+                        )
+                    })
+                })
+                .and_then(|_| {
+                    advance_to(
+                        &mut migration,
+                        MigrationState::AwaitingOperatorPromote,
+                        body.evidence.clone(),
+                    )
+                    .map_err(|e| {
+                        (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("invalid transition: {e}"),
+                        )
+                    })
+                })
+                .and_then(|_| {
+                    save_migration_state(&root, &migration).map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("save migration state: {e}"),
+                        )
+                    })
+                })
+        } else if migration.state == MigrationState::CanaryPassed {
+            advance_to(
+                &mut migration,
+                MigrationState::AwaitingOperatorPromote,
+                body.evidence.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("invalid transition: {e}"),
+                )
+            })
+            .and_then(|_| {
+                save_migration_state(&root, &migration).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("save migration state: {e}"),
+                    )
+                })
+            })
+        } else if migration.state == MigrationState::AwaitingOperatorPromote {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "promotion requires canary_active, canary_passed, or awaiting_operator_promote state; current state is {:?}",
+                    migration.state
+                ),
+            ))
+        };
+
         let guard = evaluate_provider_session_guard(
             &root,
             &provider,
@@ -149,7 +232,9 @@ pub async fn patch_provider_cli(
             body.force_recreate_active,
         );
 
-        if guard.is_clear() {
+        if let Err(error) = canary_ready_result {
+            Err(error)
+        } else if guard.is_clear() {
             advance_to(
                 &mut migration,
                 MigrationState::ProviderSessionsSafeEnding,

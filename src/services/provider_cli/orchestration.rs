@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::io::{load_registry, save_registry};
-use super::registry::ProviderChannels;
+use super::registry::{MigrationState, ProviderChannels, ProviderCliMigrationState};
 use super::session_guard::{SessionGuardEvaluation, evaluate_session_migration_guards};
 
 pub fn apply_canary_override(
@@ -112,6 +112,53 @@ pub fn session_guard_evidence(
         "session_guard": guard,
     }))
     .unwrap_or_else(|_| guard.evidence_json())
+}
+
+pub fn canary_promotion_evidence(
+    root: &std::path::Path,
+    state: &ProviderCliMigrationState,
+    operator_evidence: Option<&str>,
+) -> Result<String, String> {
+    let operator_evidence = operator_evidence
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "promotion from canary_active requires --evidence describing canary verification"
+                .to_string()
+        })?;
+    let agent_id = state
+        .selected_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "promotion requires a selected canary agent".to_string())?;
+    let candidate = state
+        .candidate_channel
+        .as_ref()
+        .ok_or_else(|| "promotion requires a candidate channel in migration state".to_string())?;
+    let canary_launch = super::canary::verified_candidate_launch_artifact(
+        root,
+        &state.provider,
+        agent_id,
+        candidate,
+        canary_active_since(state),
+    )?;
+
+    Ok(serde_json::to_string(&json!({
+        "operator_evidence": operator_evidence,
+        "canary_launch": canary_launch,
+    }))
+    .unwrap_or_else(|_| operator_evidence.to_string()))
+}
+
+fn canary_active_since(state: &ProviderCliMigrationState) -> chrono::DateTime<chrono::Utc> {
+    state
+        .history
+        .iter()
+        .rev()
+        .find(|entry| entry.to_state == MigrationState::CanaryActive)
+        .map(|entry| entry.transitioned_at)
+        .unwrap_or(state.updated_at)
 }
 
 fn provider_target_agent_ids(provider: &str, selected_agent_id: Option<&str>) -> Vec<String> {

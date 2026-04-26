@@ -5,9 +5,9 @@ use crate::services::provider_cli::io::{
     load_migration_state, load_registry, save_migration_state, save_registry, save_smoke_result,
 };
 use crate::services::provider_cli::orchestration::{
-    apply_canary_override, clear_canary_override, configured_provider_agents,
-    evaluate_provider_session_guard, promote_registry_candidate, rollback_registry_previous,
-    session_guard_evidence,
+    apply_canary_override, canary_promotion_evidence, clear_canary_override,
+    configured_provider_agents, evaluate_provider_session_guard, promote_registry_candidate,
+    rollback_registry_previous, session_guard_evidence,
 };
 use crate::services::provider_cli::registry::{
     MigrationState, PROVIDER_UPDATE_STRATEGIES, ProviderCliChannel, ProviderCliMigrationState,
@@ -93,7 +93,7 @@ pub enum ProviderCliAction {
         #[arg(long, default_value_t = true)]
         dry_run: bool,
     },
-    /// Run full migration orchestration up to AwaitingOperatorPromote
+    /// Run full migration orchestration up to CanaryActive
     Run {
         /// Provider to migrate
         provider: String,
@@ -428,6 +428,13 @@ fn cmd_canary(provider: &str, canary_agent: Option<&str>) -> Result<(), String> 
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no migration state for provider: {provider}"))?;
 
+    if !canary_override_allowed(&state.state) {
+        return Err(format!(
+            "canary override requires smoke_candidate_passed or canary_selected state; current state is {:?}",
+            state.state
+        ));
+    }
+
     // In a CLI context we don't have live session info; set the agent id directly.
     let agent_id = canary_agent
         .filter(|agent| !agent.trim().is_empty())
@@ -446,14 +453,21 @@ fn cmd_canary(provider: &str, canary_agent: Option<&str>) -> Result<(), String> 
         transition(&mut state, MigrationState::CanarySelected, None)
             .map_err(|e| format!("transition error: {e}"))?;
     }
-    apply_canary_override(&root, provider, &agent_id)?;
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+    apply_canary_override(&root, provider, &agent_id)?;
 
     print_json(&json!({
         "provider": provider,
         "canary_agent_id": agent_id,
     }));
     Ok(())
+}
+
+fn canary_override_allowed(state: &MigrationState) -> bool {
+    matches!(
+        state,
+        MigrationState::SmokeCandidatePassed | MigrationState::CanarySelected
+    )
 }
 
 fn cmd_promote(
@@ -465,6 +479,47 @@ fn cmd_promote(
     let mut state = load_migration_state(&root, provider)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no migration state for provider: {provider}"))?;
+
+    if state.state == MigrationState::ProviderAgentsMigrated {
+        print_json(&json!({
+            "provider": provider,
+            "state": format!("{:?}", state.state),
+        }));
+        return Ok(());
+    }
+
+    if state.state == MigrationState::CanaryActive {
+        let canary_evidence = canary_promotion_evidence(&root, &state, evidence)?;
+        advance_to(
+            &mut state,
+            MigrationState::CanaryPassed,
+            Some(canary_evidence),
+        )
+        .map_err(|e| format!("transition error: {e}"))?;
+        advance_to(
+            &mut state,
+            MigrationState::AwaitingOperatorPromote,
+            evidence.map(str::to_string),
+        )
+        .map_err(|e| format!("transition error: {e}"))?;
+        save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+    } else if !matches!(
+        state.state,
+        MigrationState::CanaryPassed | MigrationState::AwaitingOperatorPromote
+    ) {
+        return Err(format!(
+            "promotion requires canary_active, canary_passed, or awaiting_operator_promote state; current state is {:?}",
+            state.state
+        ));
+    } else if state.state == MigrationState::CanaryPassed {
+        advance_to(
+            &mut state,
+            MigrationState::AwaitingOperatorPromote,
+            evidence.map(str::to_string),
+        )
+        .map_err(|e| format!("transition error: {e}"))?;
+        save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+    }
 
     let guard = evaluate_provider_session_guard(
         &root,
@@ -616,7 +671,7 @@ fn should_reuse_migration_state(state: &ProviderCliMigrationState) -> bool {
 }
 
 /// Full migration orchestration: runs through the state machine up to
-/// `AwaitingOperatorPromote` (or `ProviderAgentsMigrated` when `auto_promote=true`).
+/// `CanaryActive`. Promotion requires a recorded candidate canary launch.
 fn cmd_run(
     provider: &str,
     candidate_path: Option<&str>,
@@ -784,52 +839,17 @@ fn cmd_run(
         Some(canary_guard.evidence_json()),
     )?;
     advance_to(&mut state, MigrationState::CanaryActive, None)?;
-    advance_to(&mut state, MigrationState::CanaryPassed, None)?;
-    advance_to(&mut state, MigrationState::AwaitingOperatorPromote, None)?;
     save_migration_state(&root, &state).map_err(|e| e.to_string())?;
-    eprintln!("[6/7] Canary override active — awaiting operator promote");
+    eprintln!("[6/7] Canary override active — run one canary turn before promotion");
 
     // Step 7: auto-promote if requested.
     if auto_promote {
-        let provider_guard = evaluate_provider_session_guard(
-            &root,
-            provider,
-            state.selected_agent_id.as_deref(),
-            "candidate",
-            force_recreate_active,
-        );
-        if !provider_guard.is_clear() {
-            transition(
-                &mut state,
-                MigrationState::Failed,
-                Some(provider_guard.evidence_json()),
-            )?;
-            save_migration_state(&root, &state).map_err(|e| e.to_string())?;
-            return Err(format!(
-                "safe session guard blocked provider migration: {}",
-                provider_guard.blockers.join("; ")
-            ));
-        }
-        advance_to(
-            &mut state,
-            MigrationState::ProviderSessionsSafeEnding,
-            Some(session_guard_evidence(
-                Some("auto-promote"),
-                &provider_guard,
-            )),
-        )?;
-        advance_to(
-            &mut state,
-            MigrationState::ProviderSessionsRecreated,
-            Some(provider_guard.evidence_json()),
-        )?;
-        advance_to(&mut state, MigrationState::ProviderAgentsMigrated, None)?;
-        promote_registry_candidate(&root, provider)?;
-        save_migration_state(&root, &state).map_err(|e| e.to_string())?;
-        eprintln!("[7/7] Auto-promoted — migration complete");
+        return Err(format!(
+            "--auto-promote requires a recorded candidate canary launch artifact; run a canary turn, then `agentdesk provider-cli resume {provider} --auto-promote`"
+        ));
     } else {
         eprintln!(
-            "[7/7] Stopped at AwaitingOperatorPromote — run `agentdesk provider-cli promote {provider}` to continue"
+            "[7/7] Stopped at CanaryActive — run a canary turn, then `agentdesk provider-cli promote {provider} --evidence <note>`"
         );
     }
 
@@ -858,6 +878,36 @@ fn cmd_resume(
     );
 
     match state.state {
+        MigrationState::CanaryActive => {
+            if auto_promote {
+                cmd_promote(
+                    provider,
+                    Some("resumed with --auto-promote after verified canary"),
+                    force_recreate_active,
+                )
+            } else {
+                eprintln!(
+                    "Migration is at CanaryActive. Run a canary turn, then use --auto-promote or run `agentdesk provider-cli promote {provider} --evidence <note>`."
+                );
+                print_json(&json!({ "provider": provider, "state": "canary_active" }));
+                Ok(())
+            }
+        }
+        MigrationState::CanaryPassed => {
+            if auto_promote {
+                cmd_promote(
+                    provider,
+                    Some("resumed with --auto-promote"),
+                    force_recreate_active,
+                )
+            } else {
+                eprintln!(
+                    "Migration is at CanaryPassed. Use --auto-promote or run `agentdesk provider-cli promote {provider}`."
+                );
+                print_json(&json!({ "provider": provider, "state": "canary_passed" }));
+                Ok(())
+            }
+        }
         MigrationState::AwaitingOperatorPromote => {
             if auto_promote {
                 cmd_promote(
@@ -1034,6 +1084,54 @@ mod tests {
     }
 
     #[test]
+    fn canary_rejects_non_canary_ready_state_without_registry_override() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderChannels, ProviderCliMigrationState, ProviderCliRegistry,
+        };
+        use chrono::Utc;
+        let candidate = test_channel("/tmp/candidate-codex");
+        let ms = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::Planned,
+            selected_agent_id: None,
+            current_channel: None,
+            candidate_channel: Some(candidate.clone()),
+            rollback_target: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            history: vec![],
+        };
+        save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                candidate: Some(candidate),
+                ..Default::default()
+            },
+        );
+        save_registry(dir.path(), &registry).unwrap();
+
+        let result = cmd_canary("codex", Some("codex-agent"));
+        let registry = load_registry(dir.path()).unwrap().unwrap();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
+        assert!(result.is_err());
+        assert!(
+            registry
+                .providers
+                .get("codex")
+                .unwrap()
+                .agent_overrides
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn promote_transitions_to_provider_agents_migrated_and_clears_canary_override() {
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
@@ -1091,6 +1189,118 @@ mod tests {
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        assert!(result.is_ok());
+        assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
+        let channels = registry.providers.get("codex").unwrap();
+        assert_eq!(channels.current.as_ref(), Some(&candidate));
+        assert!(channels.agent_overrides.is_empty());
+    }
+
+    #[test]
+    fn promote_from_canary_active_requires_verified_candidate_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderChannels, ProviderCliMigrationState, ProviderCliRegistry,
+        };
+        use chrono::{Duration, Utc};
+        let current = test_channel("/tmp/current-codex");
+        let candidate = test_channel("/tmp/candidate-codex");
+        let ms = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::CanaryActive,
+            selected_agent_id: Some("codex-agent".to_string()),
+            current_channel: Some(current.clone()),
+            candidate_channel: Some(candidate.clone()),
+            rollback_target: None,
+            started_at: Utc::now() - Duration::seconds(1),
+            updated_at: Utc::now(),
+            history: vec![],
+        };
+        save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                current: Some(current.clone()),
+                candidate: Some(candidate),
+                ..Default::default()
+            },
+        );
+        save_registry(dir.path(), &registry).unwrap();
+
+        let result = cmd_promote("codex", Some("operator approval"), false);
+        let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
+        let registry = load_registry(dir.path()).unwrap().unwrap();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
+        assert!(result.is_err());
+        assert_eq!(state.state, MigrationState::CanaryActive);
+        let channels = registry.providers.get("codex").unwrap();
+        assert_eq!(channels.current.as_ref(), Some(&current));
+    }
+
+    #[test]
+    fn promote_from_canary_active_accepts_verified_candidate_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+
+        use crate::services::provider_cli::registry::{
+            LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
+            ProviderCliRegistry,
+        };
+        use chrono::{Duration, Utc};
+        let current = test_channel("/tmp/current-codex");
+        let candidate = test_channel("/tmp/candidate-codex");
+        let ms = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::CanaryActive,
+            selected_agent_id: Some("codex-agent".to_string()),
+            current_channel: Some(current.clone()),
+            candidate_channel: Some(candidate.clone()),
+            rollback_target: None,
+            started_at: Utc::now() - Duration::seconds(2),
+            updated_at: Utc::now() - Duration::seconds(1),
+            history: vec![],
+        };
+        save_migration_state(dir.path(), &ms).unwrap();
+        let mut registry = ProviderCliRegistry::default();
+        let mut channels = ProviderChannels {
+            current: Some(current),
+            candidate: Some(candidate.clone()),
+            ..Default::default()
+        };
+        channels
+            .agent_overrides
+            .insert("codex-agent".to_string(), "candidate".to_string());
+        registry.providers.insert("codex".to_string(), channels);
+        save_registry(dir.path(), &registry).unwrap();
+        crate::services::provider_cli::io::save_launch_artifact(
+            dir.path(),
+            &LaunchArtifact {
+                provider: "codex".to_string(),
+                agent_id: Some("codex-agent".to_string()),
+                channel_id: Some("123".to_string()),
+                session_key: Some("codex-agent-session".to_string()),
+                channel: "candidate".to_string(),
+                cli_path: candidate.path.clone(),
+                canonical_path: candidate.canonical_path.clone(),
+                cli_version: candidate.version.clone(),
+                process_id: None,
+                tmux_session: Some("agentdesk-codex-agent".to_string()),
+                launched_at: Utc::now(),
+            },
+        )
+        .unwrap();
+
+        let result = cmd_promote("codex", Some("operator approval"), false);
+        let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
+        let registry = load_registry(dir.path()).unwrap().unwrap();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
         assert!(result.is_ok());
         assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
         let channels = registry.providers.get("codex").unwrap();

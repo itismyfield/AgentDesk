@@ -4,7 +4,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::paths;
+use super::io::load_launch_artifacts;
 use super::registry::LaunchArtifact;
 
 const DEFAULT_SAFE_END_TIMEOUT_SECONDS: u64 = 5 * 60;
@@ -181,20 +181,6 @@ fn artifacts_for_agent(artifacts: &[LaunchArtifact], agent_id: &str) -> Vec<Laun
         .collect::<Vec<_>>();
     matches.sort_by_key(|artifact| artifact.launched_at);
     matches
-}
-
-fn load_launch_artifacts(root: &Path, provider: &str) -> Vec<LaunchArtifact> {
-    let dir = paths::launch_artifacts_dir(root);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|content| serde_json::from_str::<LaunchArtifact>(&content).ok())
-        .filter(|artifact| artifact.provider == provider)
-        .collect()
 }
 
 fn artifact_active(artifact: &LaunchArtifact, evidence: &mut HashMap<String, String>) -> bool {
