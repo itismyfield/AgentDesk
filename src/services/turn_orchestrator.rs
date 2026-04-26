@@ -130,6 +130,7 @@ pub(crate) fn enqueue_intervention(
     {
         return EnqueueInterventionResult {
             enqueued: false,
+            merged: false,
             queue_exit_events,
         };
     }
@@ -143,6 +144,7 @@ pub(crate) fn enqueue_intervention(
         {
             return EnqueueInterventionResult {
                 enqueued: false,
+                merged: false,
                 queue_exit_events,
             };
         }
@@ -162,6 +164,7 @@ pub(crate) fn enqueue_intervention(
             last.created_at = intervention.created_at;
             return EnqueueInterventionResult {
                 enqueued: true,
+                merged: true,
                 queue_exit_events,
             };
         }
@@ -178,6 +181,7 @@ pub(crate) fn enqueue_intervention(
     }
     EnqueueInterventionResult {
         enqueued: true,
+        merged: false,
         queue_exit_events,
     }
 }
@@ -611,6 +615,11 @@ pub(crate) struct RestartDrainResult {
 
 pub(crate) struct EnqueueInterventionResult {
     pub(crate) enqueued: bool,
+    /// True when the incoming intervention was folded into the previous queue
+    /// entry via `should_merge_intervention` (text concatenated, source IDs
+    /// accumulated). Callers use this to surface a different reaction emoji
+    /// for merged messages so users can tell merged from standalone entries.
+    pub(crate) merged: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
 }
 
@@ -755,6 +764,7 @@ impl ChannelMailboxHandle {
             },
             EnqueueInterventionResult {
                 enqueued: false,
+                merged: false,
                 queue_exit_events: Vec::new(),
             },
         )
@@ -1852,24 +1862,28 @@ mod tests {
         let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
         let now = Instant::now();
 
-        assert!(
-            handle
-                .enqueue(
-                    make_mergeable_intervention(20, "first", now),
-                    persistence.clone(),
-                )
-                .await
-                .enqueued
-        );
-        assert!(
-            handle
-                .enqueue(
-                    make_mergeable_intervention(21, "second", now + Duration::from_secs(1)),
-                    persistence.clone(),
-                )
-                .await
-                .enqueued
-        );
+        let first = handle
+            .enqueue(
+                make_mergeable_intervention(20, "first", now),
+                persistence.clone(),
+            )
+            .await;
+        assert!(first.enqueued);
+        // First message into an empty queue must not be classified as merged
+        // — there is nothing to merge with. The reaction emoji selector relies
+        // on this distinction (📬 for standalone vs ➕ for merged).
+        assert!(!first.merged);
+
+        let second = handle
+            .enqueue(
+                make_mergeable_intervention(21, "second", now + Duration::from_secs(1)),
+                persistence.clone(),
+            )
+            .await;
+        assert!(second.enqueued);
+        // Second mergeable message folds into the first → merged=true so the
+        // caller can pick the ➕ reaction emoji.
+        assert!(second.merged);
 
         let snapshot = handle.snapshot().await;
         assert_eq!(snapshot.intervention_queue.len(), 1);

@@ -438,7 +438,11 @@ impl TurnGateway for DiscordGateway {
             };
 
             for message_id in &intervention.source_message_ids {
+                // Both the standalone-queue (📬) and merged-queue (➕) reactions
+                // must be cleaned up — `source_message_ids` collects every
+                // message that contributed to this intervention.
                 formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '📬').await;
+                formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '➕').await;
             }
             handle_text_message(
                 &live_turn.ctx,

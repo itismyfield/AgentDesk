@@ -2591,7 +2591,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     .await;
     if !started {
         let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
-        let enqueued = super::super::mailbox_enqueue_intervention(
+        let enqueue_outcome = super::super::mailbox_enqueue_intervention(
             shared,
             &bot_owner_provider,
             channel_id,
@@ -2605,6 +2605,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             ),
         )
         .await;
+        let enqueued = enqueue_outcome.enqueued;
         // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
         // ✅ done. Restore 📬 on race-loss only after the intervention is
         // actually published to the mailbox; pre-enqueue add was rejected
@@ -2644,7 +2645,14 @@ pub(in crate::services::discord) async fn handle_text_message(
             && !is_thread_routed
             && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         {
-            add_reaction(ctx, channel_id, user_msg_id, '📬').await;
+            // #1190 follow-up: merged messages get ➕ so the user can tell
+            // them apart from standalone queue head entries (📬).
+            let emoji = if enqueue_outcome.merged {
+                '➕'
+            } else {
+                '📬'
+            };
+            add_reaction(ctx, channel_id, user_msg_id, emoji).await;
         }
         // #796: Background-trigger turns (notify-bot driven, info-only) must
         // NOT have their placeholder deleted on race-loss. The placeholder is

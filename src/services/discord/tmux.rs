@@ -9700,7 +9700,7 @@ mod tests {
             },
         )
         .await;
-        assert!(queued);
+        assert!(queued.enqueued);
 
         let snapshot = super::super::mailbox_snapshot(&shared, channel).await;
         assert!(snapshot.cancel_token.is_some());

@@ -111,7 +111,7 @@ async fn enqueue_soft_intervention(
     reply_context: Option<String>,
     has_reply_boundary: bool,
     merge_consecutive: bool,
-) -> bool {
+) -> super::super::MailboxEnqueueOutcome {
     mailbox_enqueue_intervention(
         &data.shared,
         &data.provider,
@@ -143,6 +143,14 @@ pub(super) async fn enqueue_soft_intervention_for_test(
         build_soft_intervention(author_id, message_id, text, None, false, false),
     )
     .await
+    .enqueued
+}
+
+/// Pick the queue-pending reaction emoji based on the enqueue outcome.
+/// Standalone queue head entries get `📬`; merged-into-previous entries get
+/// `➕` so users can tell merged from standalone at a glance (#1190 follow-up).
+pub(super) fn queue_pending_reaction_for(outcome: super::super::MailboxEnqueueOutcome) -> char {
+    if outcome.merged { '➕' } else { '📬' }
 }
 
 fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
@@ -857,7 +865,7 @@ pub(in crate::services::discord) async fn handle_event(
                             channel_id,
                             thread_id
                         );
-                        let _ = enqueue_soft_intervention(
+                        let outcome = enqueue_soft_intervention(
                             data,
                             channel_id,
                             user_id,
@@ -868,7 +876,13 @@ pub(in crate::services::discord) async fn handle_event(
                             false,
                         )
                         .await;
-                        add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                        add_reaction(
+                            ctx,
+                            channel_id,
+                            new_message.id,
+                            queue_pending_reaction_for(outcome),
+                        )
+                        .await;
                         data.shared
                             .last_message_ids
                             .insert(channel_id, new_message.id.get());
@@ -887,7 +901,7 @@ pub(in crate::services::discord) async fn handle_event(
             // placeholder.
             if text.starts_with("DISPATCH:") {
                 if mailbox_has_active_turn(&data.shared, channel_id).await {
-                    let _ = enqueue_soft_intervention(
+                    let outcome = enqueue_soft_intervention(
                         data,
                         channel_id,
                         user_id,
@@ -903,7 +917,13 @@ pub(in crate::services::discord) async fn handle_event(
                         "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
                         channel_id
                     );
-                    add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                    add_reaction(
+                        ctx,
+                        channel_id,
+                        new_message.id,
+                        queue_pending_reaction_for(outcome),
+                    )
+                    .await;
                     data.shared
                         .last_message_ids
                         .insert(channel_id, new_message.id.get());
@@ -914,7 +934,7 @@ pub(in crate::services::discord) async fn handle_event(
 
             // Queue messages while AI is in progress (executed as next turn after current finishes)
             if mailbox_has_active_turn(&data.shared, channel_id).await {
-                let inserted = enqueue_soft_intervention(
+                let outcome = enqueue_soft_intervention(
                     data,
                     channel_id,
                     user_id,
@@ -930,7 +950,7 @@ pub(in crate::services::discord) async fn handle_event(
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                if !inserted {
+                if !outcome.enqueued {
                     rate_limit_wait(&data.shared, channel_id).await;
                     let _ = channel_id
                         .say(&ctx.http, "↪ 같은 메시지가 방금 이미 큐잉되어서 무시했어.")
@@ -938,8 +958,14 @@ pub(in crate::services::discord) async fn handle_event(
                     return Ok(());
                 }
 
-                // React with 📬 to indicate message is queued
-                add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                // React 📬 (standalone queue head) or ➕ (merged into previous head).
+                add_reaction(
+                    ctx,
+                    channel_id,
+                    new_message.id,
+                    queue_pending_reaction_for(outcome),
+                )
+                .await;
 
                 // Checkpoint: message successfully queued
                 data.shared
@@ -994,7 +1020,7 @@ pub(in crate::services::discord) async fn handle_event(
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                let _ = enqueue_soft_intervention(
+                let outcome = enqueue_soft_intervention(
                     data,
                     channel_id,
                     user_id,
@@ -1012,8 +1038,14 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id
                 );
 
-                // React with 📬 to indicate message is queued
-                add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                // React 📬 (standalone) or ➕ (merged into previous queue head).
+                add_reaction(
+                    ctx,
+                    channel_id,
+                    new_message.id,
+                    queue_pending_reaction_for(outcome),
+                )
+                .await;
 
                 // Checkpoint: message successfully queued in drain mode
                 data.shared
@@ -1069,14 +1101,20 @@ pub(in crate::services::discord) async fn handle_event(
                     )
                 }
             };
-            if let Some(inserted) = queued_behind_idle_backlog {
+            if let Some(outcome) = queued_behind_idle_backlog {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                if inserted {
+                if outcome.enqueued {
                     tracing::info!(
                         "  [{ts}] 📬 IDLE-QUEUE: queued message from [{user_name}] in channel {} behind pending backlog",
                         channel_id
                     );
-                    add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                    add_reaction(
+                        ctx,
+                        channel_id,
+                        new_message.id,
+                        queue_pending_reaction_for(outcome),
+                    )
+                    .await;
                     data.shared
                         .last_message_ids
                         .insert(channel_id, new_message.id.get());

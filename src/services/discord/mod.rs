@@ -1385,12 +1385,22 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
     shared.mailbox(channel_id).clear_recovery_marker().await;
 }
 
+/// Outcome of `mailbox_enqueue_intervention` — exposes both the enqueue
+/// success and whether the incoming intervention was merged into the previous
+/// queue entry, so callers can pick a different reaction emoji for merged
+/// vs standalone queue entries (#1190 follow-up).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct MailboxEnqueueOutcome {
+    pub(super) enqueued: bool,
+    pub(super) merged: bool,
+}
+
 async fn mailbox_enqueue_intervention(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: Intervention,
-) -> bool {
+) -> MailboxEnqueueOutcome {
     let result = shared
         .mailbox(channel_id)
         .enqueue(
@@ -1399,7 +1409,10 @@ async fn mailbox_enqueue_intervention(
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    result.enqueued
+    MailboxEnqueueOutcome {
+        enqueued: result.enqueued,
+        merged: result.merged,
+    }
 }
 
 fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
@@ -1434,8 +1447,14 @@ async fn apply_queue_exit_feedback(
     };
 
     for event in queue_exit_events {
-        formatting::remove_reaction_raw(&ctx.http, channel_id, event.intervention.message_id, '📬')
-            .await;
+        // Clean up the queue-pending reactions on EVERY message that contributed
+        // to this intervention. After #1190 follow-up, merged messages carry ➕
+        // and standalone heads carry 📬; remove both unconditionally so cancel /
+        // expiry / supersede leaves only the exit-state reaction visible.
+        for message_id in &event.intervention.source_message_ids {
+            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '📬').await;
+            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '➕').await;
+        }
         formatting::add_reaction_raw(
             &ctx.http,
             channel_id,
@@ -1454,7 +1473,7 @@ async fn enqueue_internal_followup(
     text: impl Into<String>,
     reason: &'static str,
 ) -> bool {
-    let enqueued = mailbox_enqueue_intervention(
+    let outcome = mailbox_enqueue_intervention(
         shared,
         provider,
         channel_id,
@@ -1472,11 +1491,11 @@ async fn enqueue_internal_followup(
     )
     .await;
 
-    if enqueued {
+    if outcome.enqueued {
         schedule_deferred_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id, reason);
     }
 
-    enqueued
+    outcome.enqueued
 }
 
 async fn mailbox_has_pending_soft_queue(
