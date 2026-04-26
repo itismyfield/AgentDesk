@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 
 use super::AppState;
 use crate::github;
@@ -137,48 +138,47 @@ pub async fn close_issue(
 
 /// Returns kanban cards marked "done" today that have a github_issue_url.
 pub async fn closed_today(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return Json(json!({
-                "count": 0,
-                "issues": [],
-                "error": format!("db lock: {e}")
-            }));
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return Json(json!({
+            "count": 0,
+            "issues": [],
+            "error": "postgres pool unavailable"
+        }));
     };
 
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, github_issue_url, github_issue_number, updated_at
+    let rows = match sqlx::query(
+        "SELECT id, title, github_issue_url, github_issue_number, updated_at::text AS updated_at
          FROM kanban_cards
          WHERE status = 'done'
            AND github_issue_url IS NOT NULL
-           AND date(updated_at) = date('now')
+           AND updated_at::date = CURRENT_DATE
          ORDER BY updated_at DESC",
-    ) {
-        Ok(s) => s,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
         Err(e) => {
             return Json(json!({
                 "count": 0,
                 "issues": [],
-                "error": format!("prepare: {e}")
+                "error": format!("query: {e}")
             }));
         }
     };
 
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "title": row.get::<_, String>(1)?,
-                "github_issue_url": row.get::<_, Option<String>>(2)?,
-                "github_issue_number": row.get::<_, Option<i64>>(3)?,
-                "updated_at": row.get::<_, Option<String>>(4)?,
-            }))
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                "title": row.try_get::<String, _>("title").unwrap_or_default(),
+                "github_issue_url": row.try_get::<Option<String>, _>("github_issue_url").ok().flatten(),
+                "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").ok().flatten(),
+                "updated_at": row.try_get::<Option<String>, _>("updated_at").ok().flatten(),
+            })
         })
-        .ok()
-        .map(|iter| iter.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+        .collect();
 
     let count = rows.len();
     Json(json!({

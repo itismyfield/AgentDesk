@@ -42,86 +42,19 @@ pub async fn list_messages(
     State(state): State<AppState>,
     Query(params): Query<ListMessagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match list_messages_pg(pool, &params).await {
-            Ok(messages) => (StatusCode::OK, Json(json!({"messages": messages}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
-
-    let limit = params.limit.unwrap_or(20);
-
-    let mut sql = String::from(
-        "SELECT m.id, m.sender_type, m.sender_id, m.receiver_type, m.receiver_id,
-                m.content, m.message_type, m.created_at,
-                sa.name AS sender_name, sa.name_ko AS sender_name_ko, sa.avatar_emoji AS sender_avatar,
-                ra.name AS receiver_name, ra.name_ko AS receiver_name_ko
-         FROM messages m
-         LEFT JOIN agents sa ON sa.id = m.sender_id
-         LEFT JOIN agents ra ON ra.id = m.receiver_id
-         WHERE 1=1",
-    );
-    let mut bind_values: Vec<String> = Vec::new();
-
-    if let Some(ref receiver_id) = params.receiver_id {
-        bind_values.push(receiver_id.clone());
-        sql.push_str(&format!(" AND m.receiver_id = ?{}", bind_values.len()));
+    match list_messages_pg(pool, &params).await {
+        Ok(messages) => (StatusCode::OK, Json(json!({"messages": messages}))),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        ),
     }
-    if let Some(ref receiver_type) = params.receiver_type {
-        bind_values.push(receiver_type.clone());
-        sql.push_str(&format!(" AND m.receiver_type = ?{}", bind_values.len()));
-    }
-    if let Some(ref message_type) = params.message_type {
-        bind_values.push(message_type.clone());
-        sql.push_str(&format!(" AND m.message_type = ?{}", bind_values.len()));
-    }
-    if let Some(ref before) = params.before {
-        bind_values.push(before.clone());
-        sql.push_str(&format!(" AND m.created_at < ?{}", bind_values.len()));
-    }
-
-    sql.push_str(" ORDER BY m.created_at DESC");
-    bind_values.push(limit.to_string());
-    sql.push_str(&format!(" LIMIT ?{}", bind_values.len()));
-
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("prepare: {e}")})),
-            );
-        }
-    };
-
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
-        .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql)
-        .collect();
-
-    let rows = stmt
-        .query_map(params_ref.as_slice(), |row| message_row_to_json(row))
-        .ok();
-
-    let messages: Vec<serde_json::Value> = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    };
-
-    (StatusCode::OK, Json(json!({"messages": messages})))
 }
 
 /// POST /api/messages
@@ -138,62 +71,17 @@ pub async fn create_message(
         .clone()
         .unwrap_or_else(|| "chat".to_string());
 
-    if let Some(pool) = state.pg_pool_ref() {
-        return match create_message_pg(pool, &body, &sender_type, &message_type).await {
-            Ok(message) => (StatusCode::CREATED, Json(message)),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    if let Err(e) = conn.execute(
-        "INSERT INTO messages (sender_type, sender_id, receiver_type, receiver_id, content, message_type, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
-        libsql_rusqlite::params![
-            sender_type,
-            body.sender_id,
-            body.receiver_type,
-            body.receiver_id,
-            body.content,
-            message_type,
-        ],
-    ) {
+    let Some(pool) = state.pg_pool_ref() else {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
         );
-    }
-
-    let last_id = conn.last_insert_rowid();
-
-    match conn.query_row(
-        "SELECT m.id, m.sender_type, m.sender_id, m.receiver_type, m.receiver_id,
-                m.content, m.message_type, m.created_at,
-                sa.name AS sender_name, sa.name_ko AS sender_name_ko, sa.avatar_emoji AS sender_avatar,
-                ra.name AS receiver_name, ra.name_ko AS receiver_name_ko
-         FROM messages m
-         LEFT JOIN agents sa ON sa.id = m.sender_id
-         LEFT JOIN agents ra ON ra.id = m.receiver_id
-         WHERE m.id = ?1",
-        [last_id],
-        |row| message_row_to_json(row),
-    ) {
-        Ok(msg) => (StatusCode::CREATED, Json(msg)),
-        Err(e) => (
+    };
+    match create_message_pg(pool, &body, &sender_type, &message_type).await {
+        Ok(message) => (StatusCode::CREATED, Json(message)),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
+            Json(json!({"error": format!("{error}")})),
         ),
     }
 }
@@ -276,24 +164,6 @@ async fn create_message_pg(
     .fetch_one(pool)
     .await
     .map(|row| message_row_to_json_pg(row))
-}
-
-fn message_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<serde_json::Value> {
-    Ok(json!({
-        "id": row.get::<_, i64>(0)?,
-        "sender_type": row.get::<_, Option<String>>(1)?,
-        "sender_id": row.get::<_, Option<String>>(2)?,
-        "receiver_type": row.get::<_, Option<String>>(3)?,
-        "receiver_id": row.get::<_, Option<String>>(4)?,
-        "content": row.get::<_, Option<String>>(5)?,
-        "message_type": row.get::<_, Option<String>>(6)?,
-        "created_at": row.get::<_, Option<String>>(7)?,
-        "sender_name": row.get::<_, Option<String>>(8)?,
-        "sender_name_ko": row.get::<_, Option<String>>(9)?,
-        "sender_avatar": row.get::<_, Option<String>>(10)?,
-        "receiver_name": row.get::<_, Option<String>>(11)?,
-        "receiver_name_ko": row.get::<_, Option<String>>(12)?,
-    }))
 }
 
 fn message_row_to_json_pg(row: sqlx::postgres::PgRow) -> serde_json::Value {

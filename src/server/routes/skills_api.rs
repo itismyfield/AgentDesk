@@ -6,6 +6,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::{PgPool, Row};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -14,7 +15,7 @@ use std::{
 
 use super::{
     AppState,
-    skill_usage_analytics::{SkillUsageRecord, collect_skill_usage},
+    skill_usage_analytics::{SkillUsageRecord, collect_skill_usage_pg},
 };
 
 fn skill_description_from_markdown(content: &str) -> String {
@@ -195,74 +196,6 @@ fn discover_skills_from_disk() -> DiscoveryResult {
     }
 }
 
-pub(super) fn sync_skills_from_disk(conn: &libsql_rusqlite::Connection) -> HashSet<String> {
-    sync_skills_from_disk_with_prune(conn, true)
-}
-
-pub(super) fn sync_skills_from_disk_with_prune(
-    conn: &libsql_rusqlite::Connection,
-    prune_missing: bool,
-) -> HashSet<String> {
-    let discovery = discover_skills_from_disk();
-    let mut disk_skill_ids = HashSet::new();
-
-    for skill in discovery.skills {
-        disk_skill_ids.insert(skill.id.clone());
-        let _ = conn.execute(
-            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL)
-                 ON CONFLICT(id) DO UPDATE SET
-                   name = excluded.name,
-                   description = excluded.description,
-                   source_path = excluded.source_path,
-                   updated_at = excluded.updated_at,
-                   deleted_at = NULL",
-            libsql_rusqlite::params![
-                skill.id,
-                skill.id,
-                skill.description,
-                skill.source_path,
-                skill.updated_at
-            ],
-        );
-    }
-
-    if prune_missing {
-        if discovery.any_root_errored {
-            tracing::warn!(
-                "sync_skills_from_disk: pruning skipped due to partial disk failure \
-                 (at least one skill root failed to enumerate)"
-            );
-        } else {
-            prune_missing_skills(conn, &disk_skill_ids);
-        }
-    }
-
-    disk_skill_ids
-}
-
-fn prune_missing_skills(conn: &libsql_rusqlite::Connection, seen: &HashSet<String>) {
-    let existing_ids: Vec<String> =
-        match conn.prepare("SELECT id FROM skills WHERE deleted_at IS NULL") {
-            Ok(mut stmt) => match stmt.query_map([], |row| row.get::<_, String>(0)) {
-                Ok(rows) => rows.filter_map(|row| row.ok()).collect(),
-                Err(_) => return,
-            },
-            Err(_) => return,
-        };
-
-    let now_secs = Utc::now().timestamp();
-    for id in existing_ids {
-        if seen.contains(&id) {
-            continue;
-        }
-        let _ = conn.execute(
-            "UPDATE skills SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
-            libsql_rusqlite::params![id, now_secs],
-        );
-    }
-}
-
 #[derive(Default)]
 struct UsageAggregate {
     calls: i64,
@@ -291,55 +224,112 @@ struct SkillMetadata {
     description: String,
 }
 
-fn load_skill_metadata(
-    conn: &libsql_rusqlite::Connection,
-) -> libsql_rusqlite::Result<HashMap<String, SkillMetadata>> {
-    let mut stmt = conn.prepare(
+pub(super) async fn sync_skills_from_disk_pg(
+    pool: &PgPool,
+) -> Result<HashSet<String>, sqlx::Error> {
+    sync_skills_from_disk_with_prune_pg(pool, true).await
+}
+
+async fn sync_skills_from_disk_with_prune_pg(
+    pool: &PgPool,
+    prune_missing: bool,
+) -> Result<HashSet<String>, sqlx::Error> {
+    let discovery = discover_skills_from_disk();
+    let mut disk_skill_ids = HashSet::new();
+
+    for skill in discovery.skills {
+        disk_skill_ids.insert(skill.id.clone());
+        sqlx::query(
+            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at, deleted_at)
+             VALUES ($1, $2, $3, $4, NULL, $5::TIMESTAMPTZ, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+               name = EXCLUDED.name,
+               description = EXCLUDED.description,
+               source_path = EXCLUDED.source_path,
+               updated_at = EXCLUDED.updated_at,
+               deleted_at = NULL",
+        )
+        .bind(&skill.id)
+        .bind(&skill.id)
+        .bind(&skill.description)
+        .bind(&skill.source_path)
+        .bind(skill.updated_at.as_deref())
+        .execute(pool)
+        .await?;
+    }
+
+    if prune_missing {
+        if discovery.any_root_errored {
+            tracing::warn!(
+                "sync_skills_from_disk: pruning skipped due to partial disk failure \
+                 (at least one skill root failed to enumerate)"
+            );
+        } else {
+            prune_missing_skills_pg(pool, &disk_skill_ids).await?;
+        }
+    }
+
+    Ok(disk_skill_ids)
+}
+
+async fn prune_missing_skills_pg(pool: &PgPool, seen: &HashSet<String>) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query("SELECT id FROM skills WHERE deleted_at IS NULL")
+        .fetch_all(pool)
+        .await?;
+    let now_secs = Utc::now().timestamp();
+    for row in rows {
+        let skill_id = row.try_get::<String, _>("id").unwrap_or_default();
+        if seen.contains(&skill_id) {
+            continue;
+        }
+        sqlx::query("UPDATE skills SET deleted_at = $2 WHERE id = $1 AND deleted_at IS NULL")
+            .bind(skill_id)
+            .bind(now_secs)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn load_skill_metadata_pg(
+    pool: &PgPool,
+) -> Result<HashMap<String, SkillMetadata>, sqlx::Error> {
+    let rows = sqlx::query(
         "SELECT id,
                 COALESCE(name, id) AS skill_name,
                 COALESCE(description, name, id) AS skill_desc
          FROM skills
          WHERE deleted_at IS NULL",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
+    )
+    .fetch_all(pool)
+    .await?;
 
     let mut metadata = HashMap::new();
     for row in rows {
-        let (skill_id, skill_name, skill_desc) = row?;
+        let skill_id = row.try_get::<String, _>("id").unwrap_or_default();
         metadata.insert(
             skill_id,
             SkillMetadata {
-                name: skill_name,
-                description: skill_desc,
+                name: row.try_get::<String, _>("skill_name").unwrap_or_default(),
+                description: row.try_get::<String, _>("skill_desc").unwrap_or_default(),
             },
         );
     }
-
     Ok(metadata)
 }
 
-fn load_stale_skill_ids(
-    conn: &libsql_rusqlite::Connection,
+async fn load_stale_skill_ids_pg(
+    pool: &PgPool,
     disk_skill_ids: &HashSet<String>,
-) -> libsql_rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT id FROM skills ORDER BY id ASC")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-
-    let mut stale_skill_ids = Vec::new();
-    for row in rows {
-        let skill_id = row?;
-        if !disk_skill_ids.contains(&skill_id) {
-            stale_skill_ids.push(skill_id);
-        }
-    }
-
-    Ok(stale_skill_ids)
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id FROM skills ORDER BY id ASC")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("id").ok())
+        .filter(|skill_id| !disk_skill_ids.contains(skill_id))
+        .collect())
 }
 
 fn apply_usage(aggregate: &mut UsageAggregate, used_at_ms: i64) {
@@ -372,18 +362,23 @@ pub async fn catalog(
     State(state): State<AppState>,
     Query(params): Query<SkillCatalogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    let disk_skill_ids = match sync_skills_from_disk_pg(pool).await {
+        Ok(ids) => ids,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                Json(json!({"error": format!("skill sync failed: {e}")})),
             );
         }
     };
-    let disk_skill_ids = sync_skills_from_disk(&conn);
     let include_stale = params.include_stale.unwrap_or(false);
-    let metadata = match load_skill_metadata(&conn) {
+    let metadata = match load_skill_metadata_pg(pool).await {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -392,7 +387,7 @@ pub async fn catalog(
             );
         }
     };
-    let usage = match collect_skill_usage(&conn, None) {
+    let usage = match collect_skill_usage_pg(pool, None).await {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -478,21 +473,26 @@ pub async fn ranking(
     State(state): State<AppState>,
     Query(params): Query<RankingQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    let disk_skill_ids = match sync_skills_from_disk_pg(pool).await {
+        Ok(ids) => ids,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                Json(json!({"error": format!("skill sync failed: {e}")})),
             );
         }
     };
-    let disk_skill_ids = sync_skills_from_disk(&conn);
 
     let window = params.window.as_deref().unwrap_or("7d");
     let limit = params.limit.unwrap_or(20);
     let include_stale = params.include_stale.unwrap_or(false);
-    let metadata = match load_skill_metadata(&conn) {
+    let metadata = match load_skill_metadata_pg(pool).await {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -501,7 +501,7 @@ pub async fn ranking(
             );
         }
     };
-    let usage = match collect_skill_usage(&conn, ranking_days(window)) {
+    let usage = match collect_skill_usage_pg(pool, ranking_days(window)).await {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -652,19 +652,24 @@ pub async fn prune(
     State(state): State<AppState>,
     Query(params): Query<PruneSkillsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
     let dry_run = params.dry_run.unwrap_or(false);
-    let disk_skill_ids = sync_skills_from_disk_with_prune(&conn, !dry_run);
-    let stale_skill_ids = match load_stale_skill_ids(&conn, &disk_skill_ids) {
+    let disk_skill_ids = match sync_skills_from_disk_with_prune_pg(pool, !dry_run).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("skill sync failed: {e}")})),
+            );
+        }
+    };
+    let stale_skill_ids = match load_stale_skill_ids_pg(pool, &disk_skill_ids).await {
         Ok(ids) => ids,
         Err(e) => {
             return (
@@ -685,100 +690,4 @@ pub async fn prune(
             "skill_usage_policy": "preserved",
         })),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn setup_skills_conn() -> libsql_rusqlite::Connection {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE skills (
-                id TEXT PRIMARY KEY,
-                name TEXT,
-                description TEXT,
-                source_path TEXT,
-                trigger_patterns TEXT,
-                updated_at TEXT,
-                deleted_at INTEGER
-            );",
-        )
-        .unwrap();
-        conn
-    }
-
-    fn insert_skill(conn: &libsql_rusqlite::Connection, id: &str, description: &str) {
-        conn.execute(
-            "INSERT INTO skills (id, name, description, source_path) VALUES (?1, ?1, ?2, ?3)",
-            libsql_rusqlite::params![id, description, format!("/tmp/skills/{id}/SKILL.md")],
-        )
-        .unwrap();
-    }
-
-    fn deleted_at(conn: &libsql_rusqlite::Connection, id: &str) -> Option<i64> {
-        conn.query_row(
-            "SELECT deleted_at FROM skills WHERE id = ?1",
-            libsql_rusqlite::params![id],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn prune_soft_deletes_rows_not_present_on_disk() {
-        let conn = setup_skills_conn();
-        insert_skill(&conn, "alive-skill", "still on disk");
-        insert_skill(&conn, "deleted-skill", "removed from disk");
-
-        let mut seen = HashSet::new();
-        seen.insert("alive-skill".to_string());
-
-        prune_missing_skills(&conn, &seen);
-
-        assert_eq!(deleted_at(&conn, "alive-skill"), None);
-        assert!(deleted_at(&conn, "deleted-skill").is_some());
-    }
-
-    #[test]
-    fn load_skill_metadata_excludes_soft_deleted_rows() {
-        let conn = setup_skills_conn();
-        insert_skill(&conn, "alive", "alive desc");
-        insert_skill(&conn, "stale", "stale desc");
-
-        let mut seen = HashSet::new();
-        seen.insert("alive".to_string());
-        prune_missing_skills(&conn, &seen);
-
-        let metadata = load_skill_metadata(&conn).unwrap();
-        assert!(metadata.contains_key("alive"));
-        assert!(!metadata.contains_key("stale"));
-    }
-
-    #[test]
-    fn sync_upsert_clears_deleted_at_when_skill_returns() {
-        let conn = setup_skills_conn();
-        insert_skill(&conn, "resurrected", "old desc");
-        prune_missing_skills(&conn, &HashSet::new());
-        assert!(deleted_at(&conn, "resurrected").is_some());
-
-        conn.execute(
-            "INSERT INTO skills (id, name, description, source_path, trigger_patterns, updated_at, deleted_at)
-             VALUES (?1, ?1, ?2, ?3, NULL, NULL, NULL)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name,
-               description = excluded.description,
-               source_path = excluded.source_path,
-               updated_at = excluded.updated_at,
-               deleted_at = NULL",
-            libsql_rusqlite::params![
-                "resurrected",
-                "new desc",
-                "/tmp/skills/resurrected/SKILL.md"
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(deleted_at(&conn, "resurrected"), None);
-    }
 }

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use libsql_rusqlite::Connection;
 use regex::Regex;
 use serde_json::Value;
+use sqlx::{PgPool, Row};
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 
@@ -27,7 +27,7 @@ fn skill_markdown_re() -> &'static Regex {
     })
 }
 
-fn sqlite_datetime_to_millis(value: &str) -> Option<i64> {
+fn transcript_datetime_to_millis(value: &str) -> Option<i64> {
     if let Ok(ts) = DateTime::parse_from_rfc3339(value) {
         return Some(ts.timestamp_millis());
     }
@@ -84,185 +84,6 @@ fn infer_skills_from_transcript(
     }
 
     used
-}
-
-fn collect_known_skills(conn: &Connection) -> libsql_rusqlite::Result<HashSet<String>> {
-    let mut stmt = conn.prepare("SELECT id FROM skills")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut skills = HashSet::new();
-    for skill_id in rows.flatten() {
-        if let Some(normalized) = normalize_skill_id(&skill_id) {
-            skills.insert(normalized);
-        }
-    }
-    Ok(skills)
-}
-
-fn load_transcript_skill_usage(
-    conn: &Connection,
-    days: Option<i64>,
-    known_skills: &HashSet<String>,
-) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
-    let sql_all = "SELECT st.session_key,
-                          st.agent_id,
-                          COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
-                          st.created_at,
-                          DATE(st.created_at) AS stat_day,
-                          st.assistant_message,
-                          st.events_json
-                   FROM session_transcripts st
-                   LEFT JOIN agents a ON a.id = st.agent_id
-                   WHERE st.assistant_message LIKE '%SKILL.md%'
-                      OR st.events_json LIKE '%SKILL.md%'
-                      OR st.events_json LIKE '%\"tool_name\":\"Skill\"%'";
-    let sql_window = "SELECT st.session_key,
-                             st.agent_id,
-                             COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
-                             st.created_at,
-                             DATE(st.created_at) AS stat_day,
-                             st.assistant_message,
-                             st.events_json
-                      FROM session_transcripts st
-                      LEFT JOIN agents a ON a.id = st.agent_id
-                      WHERE st.created_at >= datetime('now', '-' || ?1 || ' days')
-                        AND (
-                            st.assistant_message LIKE '%SKILL.md%'
-                            OR st.events_json LIKE '%SKILL.md%'
-                            OR st.events_json LIKE '%\"tool_name\":\"Skill\"%'
-                        )";
-
-    let mut records = Vec::new();
-    let mut push_rows = |stmt: &mut libsql_rusqlite::Statement<'_>,
-                         params: &[&dyn libsql_rusqlite::ToSql]|
-     -> libsql_rusqlite::Result<()> {
-        let rows = stmt.query_map(params, |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                row.get::<_, String>(6)?,
-            ))
-        })?;
-
-        for row in rows {
-            let (
-                session_key,
-                agent_id,
-                agent_name,
-                created_at,
-                day,
-                assistant_message,
-                events_json,
-            ) = match row {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            let Some(used_at_ms) = sqlite_datetime_to_millis(&created_at) else {
-                continue;
-            };
-            let events = serde_json::from_str::<Vec<SessionTranscriptEvent>>(&events_json)
-                .unwrap_or_default();
-            for skill_id in infer_skills_from_transcript(&assistant_message, &events, known_skills)
-            {
-                records.push(SkillUsageRecord {
-                    skill_id,
-                    agent_id: agent_id.clone(),
-                    agent_name: agent_name.clone(),
-                    session_key: session_key.clone(),
-                    used_at_ms,
-                    day: day.clone(),
-                });
-            }
-        }
-        Ok(())
-    };
-
-    if let Some(days) = days {
-        let mut stmt = conn.prepare(sql_window)?;
-        push_rows(&mut stmt, &[&days])?;
-    } else {
-        let mut stmt = conn.prepare(sql_all)?;
-        push_rows(&mut stmt, &[])?;
-    }
-
-    Ok(records)
-}
-
-fn load_direct_skill_usage(
-    conn: &Connection,
-    days: Option<i64>,
-) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
-    let sql_all = "SELECT su.skill_id,
-                          su.agent_id,
-                          COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
-                          su.session_key,
-                          CAST(strftime('%s', su.used_at) AS INTEGER) * 1000 AS used_at_ms,
-                          DATE(su.used_at) AS stat_day
-                   FROM skill_usage su
-                   LEFT JOIN agents a ON a.id = su.agent_id";
-    let sql_window = "SELECT su.skill_id,
-                             su.agent_id,
-                             COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
-                             su.session_key,
-                             CAST(strftime('%s', su.used_at) AS INTEGER) * 1000 AS used_at_ms,
-                             DATE(su.used_at) AS stat_day
-                      FROM skill_usage su
-                      LEFT JOIN agents a ON a.id = su.agent_id
-                      WHERE su.used_at >= datetime('now', '-' || ?1 || ' days')";
-
-    let mut records = Vec::new();
-    let mut push_rows = |stmt: &mut libsql_rusqlite::Statement<'_>,
-                         params: &[&dyn libsql_rusqlite::ToSql]|
-     -> libsql_rusqlite::Result<()> {
-        let rows = stmt.query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })?;
-
-        for row in rows {
-            let (skill_id, agent_id, agent_name, session_key, used_at_ms, day) = match row {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            let Some(skill_id) = normalize_skill_id(&skill_id) else {
-                continue;
-            };
-            let Some(used_at_ms) = used_at_ms else {
-                continue;
-            };
-            let Some(day) = day else {
-                continue;
-            };
-            records.push(SkillUsageRecord {
-                skill_id,
-                agent_id,
-                agent_name,
-                session_key,
-                used_at_ms,
-                day,
-            });
-        }
-        Ok(())
-    };
-
-    if let Some(days) = days {
-        let mut stmt = conn.prepare(sql_window)?;
-        push_rows(&mut stmt, &[&days])?;
-    } else {
-        let mut stmt = conn.prepare(sql_all)?;
-        push_rows(&mut stmt, &[])?;
-    }
-
-    Ok(records)
 }
 
 struct TranscriptUsageMatcher {
@@ -337,13 +158,164 @@ impl TranscriptUsageMatcher {
     }
 }
 
-pub(super) fn collect_skill_usage(
-    conn: &Connection,
+async fn collect_known_skills_pg(pool: &PgPool) -> Result<HashSet<String>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id FROM skills").fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("id").ok())
+        .filter_map(|skill_id| normalize_skill_id(&skill_id))
+        .collect())
+}
+
+async fn load_transcript_skill_usage_pg(
+    pool: &PgPool,
     days: Option<i64>,
-) -> libsql_rusqlite::Result<Vec<SkillUsageRecord>> {
-    let known_skills = collect_known_skills(conn)?;
-    let mut transcript_records = load_transcript_skill_usage(conn, days, &known_skills)?;
-    let direct_records = load_direct_skill_usage(conn, days)?;
+    known_skills: &HashSet<String>,
+) -> Result<Vec<SkillUsageRecord>, sqlx::Error> {
+    let sql_all = "SELECT st.session_key,
+                          st.agent_id,
+                          COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
+                          TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+                          TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day,
+                          st.assistant_message,
+                          st.events_json::TEXT AS events_json
+                   FROM session_transcripts st
+                   LEFT JOIN agents a ON a.id = st.agent_id
+                   WHERE st.assistant_message LIKE '%SKILL.md%'
+                      OR st.events_json::TEXT LIKE '%SKILL.md%'
+                      OR st.events_json::TEXT LIKE '%\"tool_name\":\"Skill\"%'";
+    let sql_window = "SELECT st.session_key,
+                             st.agent_id,
+                             COALESCE(a.name_ko, a.name, st.agent_id) AS agent_name,
+                             TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+                             TO_CHAR(st.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day,
+                             st.assistant_message,
+                             st.events_json::TEXT AS events_json
+                      FROM session_transcripts st
+                      LEFT JOIN agents a ON a.id = st.agent_id
+                      WHERE st.created_at >= NOW() - ($1::BIGINT * INTERVAL '1 day')
+                        AND (
+                            st.assistant_message LIKE '%SKILL.md%'
+                            OR st.events_json::TEXT LIKE '%SKILL.md%'
+                            OR st.events_json::TEXT LIKE '%\"tool_name\":\"Skill\"%'
+                        )";
+
+    let rows = if let Some(days) = days {
+        sqlx::query(sql_window).bind(days).fetch_all(pool).await?
+    } else {
+        sqlx::query(sql_all).fetch_all(pool).await?
+    };
+
+    let mut records = Vec::new();
+    for row in rows {
+        let session_key = row
+            .try_get::<Option<String>, _>("session_key")
+            .ok()
+            .flatten();
+        let agent_id = row.try_get::<Option<String>, _>("agent_id").ok().flatten();
+        let agent_name = row
+            .try_get::<Option<String>, _>("agent_name")
+            .ok()
+            .flatten();
+        let created_at = row.try_get::<String, _>("created_at").unwrap_or_default();
+        let day = row.try_get::<String, _>("stat_day").unwrap_or_default();
+        let assistant_message = row
+            .try_get::<Option<String>, _>("assistant_message")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let events_json = row
+            .try_get::<String, _>("events_json")
+            .unwrap_or_else(|_| "[]".to_string());
+        let Some(used_at_ms) = transcript_datetime_to_millis(&created_at) else {
+            continue;
+        };
+        let events =
+            serde_json::from_str::<Vec<SessionTranscriptEvent>>(&events_json).unwrap_or_default();
+        for skill_id in infer_skills_from_transcript(&assistant_message, &events, known_skills) {
+            records.push(SkillUsageRecord {
+                skill_id,
+                agent_id: agent_id.clone(),
+                agent_name: agent_name.clone(),
+                session_key: session_key.clone(),
+                used_at_ms,
+                day: day.clone(),
+            });
+        }
+    }
+
+    Ok(records)
+}
+
+async fn load_direct_skill_usage_pg(
+    pool: &PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageRecord>, sqlx::Error> {
+    let sql_all = "SELECT su.skill_id,
+                          su.agent_id,
+                          COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                          su.session_key,
+                          (EXTRACT(EPOCH FROM su.used_at)::BIGINT * 1000) AS used_at_ms,
+                          TO_CHAR(su.used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day
+                   FROM skill_usage su
+                   LEFT JOIN agents a ON a.id = su.agent_id";
+    let sql_window = "SELECT su.skill_id,
+                             su.agent_id,
+                             COALESCE(a.name_ko, a.name, su.agent_id) AS agent_name,
+                             su.session_key,
+                             (EXTRACT(EPOCH FROM su.used_at)::BIGINT * 1000) AS used_at_ms,
+                             TO_CHAR(su.used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS stat_day
+                      FROM skill_usage su
+                      LEFT JOIN agents a ON a.id = su.agent_id
+                      WHERE su.used_at >= NOW() - ($1::BIGINT * INTERVAL '1 day')";
+
+    let rows = if let Some(days) = days {
+        sqlx::query(sql_window).bind(days).fetch_all(pool).await?
+    } else {
+        sqlx::query(sql_all).fetch_all(pool).await?
+    };
+
+    let mut records = Vec::new();
+    for row in rows {
+        let Some(skill_id) = row
+            .try_get::<String, _>("skill_id")
+            .ok()
+            .and_then(|skill_id| normalize_skill_id(&skill_id))
+        else {
+            continue;
+        };
+        let Some(used_at_ms) = row.try_get::<Option<i64>, _>("used_at_ms").ok().flatten() else {
+            continue;
+        };
+        let Some(day) = row.try_get::<Option<String>, _>("stat_day").ok().flatten() else {
+            continue;
+        };
+        records.push(SkillUsageRecord {
+            skill_id,
+            agent_id: row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            agent_name: row
+                .try_get::<Option<String>, _>("agent_name")
+                .ok()
+                .flatten(),
+            session_key: row
+                .try_get::<Option<String>, _>("session_key")
+                .ok()
+                .flatten(),
+            used_at_ms,
+            day,
+        });
+    }
+
+    Ok(records)
+}
+
+pub(super) async fn collect_skill_usage_pg(
+    pool: &PgPool,
+    days: Option<i64>,
+) -> Result<Vec<SkillUsageRecord>, sqlx::Error> {
+    let known_skills = collect_known_skills_pg(pool).await?;
+    let mut transcript_records = load_transcript_skill_usage_pg(pool, days, &known_skills).await?;
+    let direct_records = load_direct_skill_usage_pg(pool, days).await?;
     let mut matcher = TranscriptUsageMatcher::new(&transcript_records);
 
     transcript_records.extend(
@@ -353,160 +325,4 @@ pub(super) fn collect_skill_usage(
     );
     transcript_records.sort_by_key(|record| record.used_at_ms);
     Ok(transcript_records)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::collect_skill_usage;
-    use std::collections::HashMap;
-
-    fn setup_conn() -> libsql_rusqlite::Connection {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE skills (
-                id TEXT PRIMARY KEY,
-                name TEXT,
-                description TEXT,
-                source_path TEXT,
-                trigger_patterns TEXT,
-                updated_at TEXT
-            );
-            CREATE TABLE agents (
-                id TEXT PRIMARY KEY,
-                name TEXT,
-                name_ko TEXT
-            );
-            CREATE TABLE session_transcripts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                turn_id TEXT NOT NULL UNIQUE,
-                session_key TEXT,
-                channel_id TEXT,
-                agent_id TEXT,
-                provider TEXT,
-                dispatch_id TEXT,
-                user_message TEXT NOT NULL DEFAULT '',
-                assistant_message TEXT NOT NULL DEFAULT '',
-                events_json TEXT NOT NULL DEFAULT '[]',
-                duration_ms INTEGER,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE skill_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                skill_id TEXT NOT NULL,
-                agent_id TEXT,
-                session_key TEXT,
-                used_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );",
-        )
-        .unwrap();
-        conn
-    }
-
-    #[test]
-    fn hybrid_usage_uses_transcripts_and_keeps_only_unmatched_direct_rows() {
-        let conn = setup_conn();
-        conn.execute(
-            "INSERT INTO skills (id, name, description) VALUES (?1, ?2, ?3)",
-            libsql_rusqlite::params!["create-issue", "create-issue", "issue"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skills (id, name, description) VALUES (?1, ?2, ?3)",
-            libsql_rusqlite::params!["memory-write", "memory-write", "memory"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, name_ko) VALUES (?1, ?2, ?3)",
-            libsql_rusqlite::params!["project-agentdesk", "AgentDesk", "AgentDesk 에이전트"],
-        )
-        .unwrap();
-
-        let events = serde_json::json!([
-            {
-                "kind": "tool_use",
-                "tool_name": "Skill",
-                "summary": "create-issue",
-                "content": "{\"skill\":\"create-issue\"}",
-                "status": "running",
-                "is_error": false
-            },
-            {
-                "kind": "tool_use",
-                "tool_name": "Read",
-                "summary": null,
-                "content": "{\"file_path\":\"/tmp/skills/create-issue/SKILL.md\"}",
-                "status": "running",
-                "is_error": false
-            }
-        ]);
-        conn.execute(
-            "INSERT INTO session_transcripts (
-                turn_id,
-                session_key,
-                agent_id,
-                assistant_message,
-                events_json,
-                created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql_rusqlite::params![
-                "turn-1",
-                "sess-1",
-                "project-agentdesk",
-                "99_Skills/create-issue/SKILL.md 를 읽습니다",
-                events.to_string(),
-                "2026-04-12 12:00:00"
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO session_transcripts (
-                turn_id,
-                session_key,
-                agent_id,
-                assistant_message,
-                events_json,
-                created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql_rusqlite::params![
-                "turn-2",
-                "sess-2",
-                "project-agentdesk",
-                "memory-write/SKILL.md 를 읽고 메모리를 정리합니다",
-                "[]",
-                "2026-04-12 13:00:00"
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            libsql_rusqlite::params![
-                "create-issue",
-                "project-agentdesk",
-                "sess-1",
-                "2026-04-12 12:01:00"
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            libsql_rusqlite::params![
-                "create-issue",
-                "project-agentdesk",
-                "sess-other",
-                "2026-04-12 14:00:00"
-            ],
-        )
-        .unwrap();
-
-        let records = collect_skill_usage(&conn, None).unwrap();
-        let mut counts = HashMap::new();
-        for record in records {
-            *counts.entry(record.skill_id).or_insert(0) += 1;
-        }
-
-        assert_eq!(counts.get("create-issue"), Some(&2));
-        assert_eq!(counts.get("memory-write"), Some(&1));
-    }
 }

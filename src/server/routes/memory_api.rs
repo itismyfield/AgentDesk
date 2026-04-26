@@ -4,7 +4,7 @@
 //! * `Memento` — reuses the existing `MementoBackend` to call the local
 //!   memento MCP server. Requires a runtime-configured memento endpoint +
 //!   access key env var, and a memento MCP entry in the agent MCP config.
-//! * `Local` — sqlite-backed `local_memory` table with LIKE-based recall.
+//! * `Local` — PostgreSQL-backed `local_memory` table with LIKE-based recall.
 //!   Used as the default fallback when memento is not available or when
 //!   `ADK_FORCE_LOCAL_MEMORY=1` is set.
 //!
@@ -17,9 +17,9 @@
 //! callers can distinguish.
 
 use axum::{Json, extract::State, http::StatusCode};
-use libsql_rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::{PgPool, QueryBuilder, Row};
 
 use super::AppState;
 use crate::services::memory::MementoRememberRequest;
@@ -113,7 +113,7 @@ pub async fn memory_recall(
     // Memento recall bridge is TBD (see module docs). Fall back to local for
     // the moment; the response still reports the detected backend and a
     // deferred-bridge note so callers can tell.
-    let (fragments, effective_source, note) = match local_recall(&state, &body) {
+    let (fragments, effective_source, note) = match local_recall_pg(&state, &body).await {
         Ok(fragments) => {
             let note = if backend == MemoryBackend::Memento {
                 Some("memento recall bridge TBD; served from local_memory")
@@ -193,7 +193,7 @@ pub async fn memory_remember(
         }
     }
 
-    match local_remember(&state, &body) {
+    match local_remember_pg(&state, &body).await {
         Ok(id) => (
             StatusCode::OK,
             Json(json!({
@@ -228,7 +228,7 @@ pub async fn memory_forget(
     // deletion so id prefixes the caller may have received ("memento:...")
     // do not silently succeed against a local row. Return 404 if nothing
     // matched locally.
-    match local_forget(&state, &id) {
+    match local_forget_pg(&state, &id).await {
         Ok(true) => (
             StatusCode::OK,
             Json(json!({
@@ -259,19 +259,37 @@ pub async fn memory_forget(
     }
 }
 
-// ── Local backend (sqlite) ───────────────────────────────────────
+// ── Local backend (PostgreSQL) ───────────────────────────────────
 
-fn local_recall(state: &AppState, body: &RecallBody) -> Result<Vec<Value>, String> {
+async fn ensure_local_memory_table(pool: &PgPool) -> Result<(), String> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS local_memory (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            importance DOUBLE PRECISION,
+            workspace TEXT,
+            keywords JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )",
+    )
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("ensure local_memory: {error}"))
+}
+
+async fn local_recall_pg(state: &AppState, body: &RecallBody) -> Result<Vec<Value>, String> {
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err("postgres pool unavailable".to_string());
+    };
+    ensure_local_memory_table(pool).await?;
     let limit = body.limit.map(|value| value.clamp(1, 200)).unwrap_or(20) as i64;
-
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("db lock: {error}"))?;
-
-    // Build WHERE with up to N keyword LIKE clauses (AND workspace filter).
-    let mut clauses: Vec<String> = Vec::new();
-    let mut args: Vec<String> = Vec::new();
+    let mut query = QueryBuilder::new(
+        "SELECT id, content, topic, kind, importance, workspace, keywords::TEXT AS keywords, created_at::TEXT AS created_at
+           FROM local_memory WHERE 1=1",
+    );
 
     if let Some(ws) = body
         .workspace
@@ -279,8 +297,7 @@ fn local_recall(state: &AppState, body: &RecallBody) -> Result<Vec<Value>, Strin
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        clauses.push("workspace = ?".to_string());
-        args.push(ws.to_string());
+        query.push(" AND workspace = ").push_bind(ws);
     }
 
     let mut keyword_terms: Vec<String> = Vec::new();
@@ -302,79 +319,56 @@ fn local_recall(state: &AppState, body: &RecallBody) -> Result<Vec<Value>, Strin
     }
 
     for term in &keyword_terms {
-        clauses
-            .push("(content LIKE ? OR topic LIKE ? OR COALESCE(keywords, '') LIKE ?)".to_string());
         let like = format!("%{term}%");
-        args.push(like.clone());
-        args.push(like.clone());
-        args.push(like);
+        query
+            .push(" AND (content ILIKE ")
+            .push_bind(like.clone())
+            .push(" OR topic ILIKE ")
+            .push_bind(like.clone())
+            .push(" OR COALESCE(keywords::TEXT, '') ILIKE ")
+            .push_bind(like)
+            .push(")");
     }
 
-    let where_sql = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" AND "))
-    };
+    query
+        .push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(limit);
 
-    let sql = format!(
-        "SELECT id, content, topic, kind, importance, workspace, keywords, created_at \
-         FROM local_memory{where_sql} \
-         ORDER BY datetime(created_at) DESC \
-         LIMIT ?"
-    );
+    let rows = query
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| format!("query recall: {error}"))?;
 
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|error| format!("prepare recall: {error}"))?;
-
-    let mut param_values: Vec<libsql_rusqlite::types::Value> = Vec::with_capacity(args.len() + 1);
-    for value in args {
-        param_values.push(libsql_rusqlite::types::Value::Text(value));
-    }
-    param_values.push(libsql_rusqlite::types::Value::Integer(limit));
-
-    let rows = stmt
-        .query_map(libsql_rusqlite::params_from_iter(param_values), |row| {
-            let id: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let topic: String = row.get(2)?;
-            let kind: String = row.get(3)?;
-            let importance: Option<f64> = row.get(4).ok();
-            let workspace: Option<String> = row.get(5).ok();
-            let keywords: Option<String> = row.get(6).ok();
-            let created_at: Option<String> = row.get(7).ok();
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let keywords = row.try_get::<Option<String>, _>("keywords").ok().flatten();
             let keywords_value = keywords
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .unwrap_or_else(|| json!([]));
-            Ok(json!({
-                "id": id,
-                "content": content,
-                "topic": topic,
-                "type": kind,
-                "importance": importance,
-                "workspace": workspace,
+            json!({
+                "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                "content": row.try_get::<String, _>("content").unwrap_or_default(),
+                "topic": row.try_get::<String, _>("topic").unwrap_or_default(),
+                "type": row.try_get::<String, _>("kind").unwrap_or_default(),
+                "importance": row.try_get::<Option<f64>, _>("importance").ok().flatten(),
+                "workspace": row.try_get::<Option<String>, _>("workspace").ok().flatten(),
                 "keywords": keywords_value,
-                "created_at": created_at,
-            }))
+                "created_at": row.try_get::<Option<String>, _>("created_at").ok().flatten(),
+            })
         })
-        .map_err(|error| format!("query recall: {error}"))?;
-
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|error| format!("row recall: {error}"))?);
-    }
-    Ok(out)
+        .collect())
 }
 
-fn local_remember(state: &AppState, body: &RememberBody) -> Result<String, String> {
+async fn local_remember_pg(state: &AppState, body: &RememberBody) -> Result<String, String> {
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err("postgres pool unavailable".to_string());
+    };
+    ensure_local_memory_table(pool).await?;
     let id = format!("mem-{}", uuid_like());
-
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("db lock: {error}"))?;
 
     let keywords_json = body
         .keywords
@@ -389,47 +383,35 @@ fn local_remember(state: &AppState, body: &RememberBody) -> Result<String, Strin
         })
         .filter(|s| s != "[]");
 
-    conn.execute(
-        "INSERT INTO local_memory (id, content, topic, kind, importance, workspace, keywords) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            id,
-            body.content.trim().to_string(),
-            body.topic.trim().to_string(),
-            body.kind.trim().to_string(),
-            body.importance,
-            body.workspace.as_ref().map(|v| v.trim().to_string()),
-            keywords_json,
-        ],
+    sqlx::query(
+        "INSERT INTO local_memory (id, content, topic, kind, importance, workspace, keywords)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB)",
     )
+    .bind(&id)
+    .bind(body.content.trim())
+    .bind(body.topic.trim())
+    .bind(body.kind.trim())
+    .bind(body.importance)
+    .bind(body.workspace.as_ref().map(|v| v.trim().to_string()))
+    .bind(keywords_json)
+    .execute(pool)
+    .await
     .map_err(|error| format!("insert local_memory: {error}"))?;
 
     Ok(id)
 }
 
-fn local_forget(state: &AppState, id: &str) -> Result<bool, String> {
-    let conn = state
-        .sqlite_db()
-        .lock()
-        .map_err(|error| format!("db lock: {error}"))?;
-
-    let existed = conn
-        .query_row(
-            "SELECT 1 FROM local_memory WHERE id = ?1",
-            params![id],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(|error| format!("check local_memory: {error}"))?
-        .is_some();
-
-    if !existed {
-        return Ok(false);
-    }
-
-    conn.execute("DELETE FROM local_memory WHERE id = ?1", params![id])
-        .map_err(|error| format!("delete local_memory: {error}"))?;
-    Ok(true)
+async fn local_forget_pg(state: &AppState, id: &str) -> Result<bool, String> {
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err("postgres pool unavailable".to_string());
+    };
+    ensure_local_memory_table(pool).await?;
+    sqlx::query("DELETE FROM local_memory WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .map_err(|error| format!("delete local_memory: {error}"))
 }
 
 fn uuid_like() -> String {
@@ -533,7 +515,7 @@ mod tests {
     fn test_state() -> AppState {
         let db = test_db();
         let engine = test_engine(&db);
-        AppState::test_state(db, engine)
+        AppState::test_state(engine)
     }
 
     #[tokio::test]

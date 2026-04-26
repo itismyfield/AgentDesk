@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::net::SocketAddr;
 
-use crate::db::Db;
 use crate::services::discord::health;
 use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
@@ -66,7 +65,7 @@ fn discord_control_endpoints_allowed(
 /// Public callers receive only a redacted safe summary; authenticated/local
 /// detail callers receive provider/config/outbox diagnostics.
 async fn health_response(state: &AppState, detailed: bool) -> Response {
-    let server_up = probe_server_up(state.sqlite_db(), state.pg_pool_ref()).await;
+    let server_up = probe_server_up(state.pg_pool_ref()).await;
 
     // Check if dashboard dist is available
     let dashboard_ok = {
@@ -83,7 +82,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
 
-    let outbox_stats = load_dispatch_outbox_stats(state.sqlite_db(), state.pg_pool_ref()).await;
+    let outbox_stats = load_dispatch_outbox_stats(state.pg_pool_ref()).await;
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
             "pending": stats.pending,
@@ -96,17 +95,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
-    let config_audit_report = crate::services::discord_config_audit::load_persisted_report(
-        state.sqlite_db(),
-        state.pg_pool_ref(),
-    )
-    .and_then(|report| serde_json::to_value(report).ok());
-    let pipeline_override_report = crate::pipeline::load_persisted_override_health_report(
-        state.sqlite_db(),
-        state.pg_pool_ref(),
-    )
-    .await
-    .and_then(|report| serde_json::to_value(report).ok());
+    let config_audit_report = load_config_audit_report_pg(state.pg_pool_ref()).await;
+    let pipeline_override_report = load_pipeline_override_report_pg(state.pg_pool_ref()).await;
 
     if let Some(ref registry) = state.health_registry {
         let discord_snapshot = if detailed {
@@ -280,8 +270,29 @@ fn stale_mailbox_repair_applied(
     removed_token || inflight_cleared || session_disconnected_count > 0
 }
 
+async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
+    let pool = pg_pool?;
+    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+        .bind("config_audit_report")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&raw).ok()
+}
+
+async fn load_pipeline_override_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
+    let pool = pg_pool?;
+    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+        .bind("pipeline_override_health_report")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    serde_json::from_str(&raw).ok()
+}
+
 async fn load_channel_session_state(
-    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     channel_id: u64,
 ) -> Option<ChannelSessionState> {
@@ -307,30 +318,10 @@ async fn load_channel_session_state(
             thread_channel_id: row.try_get("thread_channel_id").ok(),
         });
     }
-
-    let conn = sqlite.read_conn().ok()?;
-    conn.query_row(
-        "SELECT agent_id, provider, status, active_dispatch_id, thread_channel_id
-           FROM sessions
-          WHERE thread_channel_id = ?1
-          ORDER BY COALESCE(last_heartbeat, '') DESC, id DESC
-          LIMIT 1",
-        [&channel_id],
-        |row| {
-            Ok(ChannelSessionState {
-                agent_id: row.get(0)?,
-                provider: row.get(1)?,
-                status: row.get(2)?,
-                active_dispatch_id: row.get(3)?,
-                thread_channel_id: row.get(4)?,
-            })
-        },
-    )
-    .ok()
+    None
 }
 
 async fn mark_channel_sessions_disconnected(
-    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     channel_id: u64,
 ) -> Result<usize, String> {
@@ -350,21 +341,7 @@ async fn mark_channel_sessions_disconnected(
         .map(|result| result.rows_affected() as usize)
         .map_err(|error| format!("mark postgres sessions disconnected: {error}"));
     }
-
-    let conn = sqlite
-        .lock()
-        .map_err(|error| format!("open sqlite write connection: {error}"))?;
-    conn.execute(
-        "UPDATE sessions
-            SET status = 'disconnected',
-                active_dispatch_id = NULL
-          WHERE thread_channel_id = ?1
-            AND status = 'working'
-            AND (active_dispatch_id IS NULL OR active_dispatch_id = '')",
-        [&channel_id],
-    )
-    .map(|rows| rows as usize)
-    .map_err(|error| format!("mark sqlite sessions disconnected: {error}"))
+    Err("postgres pool unavailable".to_string())
 }
 
 async fn enrich_mailbox_session_state(json: &mut serde_json::Value, state: &AppState) {
@@ -381,9 +358,7 @@ async fn enrich_mailbox_session_state(json: &mut serde_json::Value, state: &AppS
         else {
             continue;
         };
-        if let Some(session) =
-            load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), channel_id).await
-        {
+        if let Some(session) = load_channel_session_state(state.pg_pool_ref(), channel_id).await {
             let active_dispatch_present = session
                 .active_dispatch_id
                 .as_deref()
@@ -525,8 +500,7 @@ pub async fn stale_mailbox_repair_handler(
         None
     };
     let before_session_state =
-        load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), request.channel_id)
-            .await;
+        load_channel_session_state(state.pg_pool_ref(), request.channel_id).await;
     if before_session_state
         .as_ref()
         .and_then(|session| session.active_dispatch_id.as_deref())
@@ -580,12 +554,8 @@ pub async fn stale_mailbox_repair_handler(
     }
 
     let repair = handle.hard_stop().await;
-    let session_disconnect_result = mark_channel_sessions_disconnected(
-        state.sqlite_db(),
-        state.pg_pool_ref(),
-        request.channel_id,
-    )
-    .await;
+    let session_disconnect_result =
+        mark_channel_sessions_disconnected(state.pg_pool_ref(), request.channel_id).await;
     let (session_disconnected_count, session_disconnect_error) = match session_disconnect_result {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error)),
@@ -606,8 +576,7 @@ pub async fn stale_mailbox_repair_handler(
         None
     };
     let after_session_state =
-        load_channel_session_state(state.sqlite_db(), state.pg_pool_ref(), request.channel_id)
-            .await;
+        load_channel_session_state(state.pg_pool_ref(), request.channel_id).await;
     let residual_inflight = after_watcher_inflight
         .as_ref()
         .is_some_and(|snapshot| snapshot.inflight_state_present || snapshot.attached);
@@ -681,13 +650,12 @@ pub async fn send_handler(
             .into_response();
     };
 
-    let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) =
-        health::handle_send(registry, state.sqlite_db(), &body_str).await;
-    let status = parse_status_code(status_str);
-    let json: serde_json::Value =
-        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
-    (status, Json(json)).into_response()
+    let _ = (registry, body);
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"ok": false, "error": "send API requires PostgreSQL routing support"})),
+    )
+        .into_response()
 }
 
 /// POST /api/inflight/rebind — #896 orphan recovery endpoint.
@@ -754,13 +722,12 @@ pub async fn send_to_agent_handler(
             .into_response();
     };
 
-    let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) =
-        health::handle_send_to_agent(registry, state.sqlite_db(), &body_str).await;
-    let status = parse_status_code(status_str);
-    let json: serde_json::Value =
-        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
-    (status, Json(json)).into_response()
+    let _ = (registry, body);
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"ok": false, "error": "send_to_agent API requires PostgreSQL routing support"})),
+    )
+        .into_response()
 }
 
 /// POST /api/senddm — send a DM to a Discord user.
@@ -877,33 +844,24 @@ fn parse_status_code(s: &str) -> StatusCode {
     }
 }
 
-async fn load_dispatch_outbox_stats(
-    db: &crate::db::Db,
-    pg_pool: Option<&PgPool>,
-) -> Option<DispatchOutboxStats> {
+async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<DispatchOutboxStats> {
     if let Some(pool) = pg_pool {
         if let Some(stats) = load_dispatch_outbox_stats_pg(pool).await {
             return Some(stats);
         }
-        tracing::warn!(
-            "[health] failed to load dispatch_outbox stats from PostgreSQL; falling back to SQLite"
-        );
+        tracing::warn!("[health] failed to load dispatch_outbox stats from PostgreSQL");
     }
-
-    load_dispatch_outbox_stats_sqlite(db)
+    None
 }
 
-async fn probe_server_up(db: &crate::db::Db, pg_pool: Option<&PgPool>) -> bool {
+async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
     if let Some(pool) = pg_pool {
         return sqlx::query_scalar::<_, i32>("SELECT 1")
             .fetch_one(pool)
             .await
             .is_ok();
     }
-
-    db.lock()
-        .map(|conn| conn.execute_batch("SELECT 1").is_ok())
-        .unwrap_or(false)
+    false
 }
 
 async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxStats> {
@@ -952,46 +910,5 @@ async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxSt
         retrying,
         permanent_failures: failed,
         oldest_pending_age,
-    })
-}
-
-fn load_dispatch_outbox_stats_sqlite(db: &crate::db::Db) -> Option<DispatchOutboxStats> {
-    db.lock().ok().map(|conn| {
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let retrying: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let failed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let oldest_pending_age: i64 = conn
-            .query_row(
-                "SELECT COALESCE(CAST(MAX((julianday('now') - julianday(created_at)) * 86400.0) AS INTEGER), 0) \
-                 FROM dispatch_outbox WHERE status = 'pending'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        DispatchOutboxStats {
-            pending,
-            retrying,
-            permanent_failures: failed,
-            oldest_pending_age,
-        }
     })
 }

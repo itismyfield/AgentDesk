@@ -6,6 +6,7 @@ use axum::{
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
@@ -522,41 +523,153 @@ fn apply_selection_reason_fallback(
     }
 }
 
+async fn load_transcripts_pg(pool: &PgPool, meeting_id: &str) -> Vec<serde_json::Value> {
+    sqlx::query(
+        "SELECT id, seq, round, speaker_agent_id, speaker_name, content, is_summary
+         FROM meeting_transcripts
+         WHERE meeting_id = $1
+         ORDER BY seq ASC, id ASC",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| {
+        let speaker_agent_id = row
+            .try_get::<Option<String>, _>("speaker_agent_id")
+            .ok()
+            .flatten();
+        json!({
+            "id": row.try_get::<i64, _>("id").unwrap_or(0),
+            "seq": row.try_get::<Option<i64>, _>("seq").ok().flatten(),
+            "round": row.try_get::<Option<i64>, _>("round").ok().flatten(),
+            "speaker_role_id": speaker_agent_id,
+            "speaker_agent_id": row.try_get::<Option<String>, _>("speaker_agent_id").ok().flatten(),
+            "speaker_name": row.try_get::<Option<String>, _>("speaker_name").ok().flatten(),
+            "content": row.try_get::<Option<String>, _>("content").ok().flatten(),
+            "is_summary": row.try_get::<Option<bool>, _>("is_summary").ok().flatten().unwrap_or(false),
+        })
+    })
+    .collect()
+}
+
+async fn enrich_meeting_with_issue_data_pg(
+    pool: &PgPool,
+    meeting_id: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let issue_repo = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+        .bind(format!("meeting_issue_repo:{meeting_id}"))
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    obj.insert("issue_repo".to_string(), json!(issue_repo));
+
+    let rows = sqlx::query("SELECT key, value FROM kv_meta WHERE key LIKE $1 ORDER BY key")
+        .bind(format!("meeting:{meeting_id}:issue:%:url"))
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    let mut issue_urls = serde_json::Map::new();
+    for row in rows {
+        let key = row.try_get::<String, _>("key").unwrap_or_default();
+        let value = row.try_get::<Option<String>, _>("value").ok().flatten();
+        if let Some(issue_key) = key
+            .strip_prefix(&format!("meeting:{meeting_id}:issue:"))
+            .and_then(|rest| rest.strip_suffix(":url"))
+        {
+            issue_urls.insert(issue_key.to_string(), json!(value));
+        }
+    }
+    obj.insert(
+        "issue_urls".to_string(),
+        serde_json::Value::Object(issue_urls),
+    );
+}
+
+fn meeting_row_to_json_pg(row: &sqlx::postgres::PgRow) -> serde_json::Value {
+    let participant_names = row
+        .try_get::<Option<String>, _>("participant_names")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .unwrap_or_else(|| json!([]));
+    json!({
+        "id": row.try_get::<String, _>("id").unwrap_or_default(),
+        "channel_id": row.try_get::<Option<String>, _>("channel_id").ok().flatten(),
+        "thread_id": row.try_get::<Option<String>, _>("thread_id").ok().flatten(),
+        "agenda": row.try_get::<Option<String>, _>("title").ok().flatten(),
+        "title": row.try_get::<Option<String>, _>("title").ok().flatten(),
+        "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
+        "effective_rounds": row.try_get::<Option<i64>, _>("effective_rounds").ok().flatten(),
+        "started_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("started_at").ok().flatten().map(|ts| ts.timestamp_millis()),
+        "completed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at").ok().flatten().map(|ts| ts.timestamp_millis()),
+        "summary": row.try_get::<Option<String>, _>("summary").ok().flatten(),
+        "primary_provider": row.try_get::<Option<String>, _>("primary_provider").ok().flatten(),
+        "reviewer_provider": row.try_get::<Option<String>, _>("reviewer_provider").ok().flatten(),
+        "participant_names": participant_names,
+        "selection_reason": row.try_get::<Option<String>, _>("selection_reason").ok().flatten(),
+        "created_at": row.try_get::<Option<i64>, _>("created_at").ok().flatten(),
+    })
+}
+
+async fn load_meeting_pg(
+    pool: &PgPool,
+    id: &str,
+) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let Some(row) = sqlx::query(
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
+         FROM meetings WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let mut meeting = meeting_row_to_json_pg(&row);
+    let transcripts = load_transcripts_pg(pool, id).await;
+    let obj = meeting.as_object_mut().expect("meeting json object");
+    obj.insert("transcripts".to_string(), json!(&transcripts));
+    obj.insert("entries".to_string(), json!(&transcripts));
+    enrich_meeting_with_issue_data_pg(pool, id, obj).await;
+    apply_selection_reason_fallback(obj, &transcripts);
+    Ok(Some(meeting))
+}
+
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/round-table-meetings
 pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    let mut stmt = match conn.prepare(
+    let rows = match sqlx::query(
         "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings
          ORDER BY started_at DESC",
-    ) {
-        Ok(s) => s,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("prepare: {e}")})),
+                Json(json!({"error": format!("query: {e}")})),
             );
         }
     };
 
-    let rows = stmt.query_map([], |row| meeting_row_to_json(row)).ok();
-
-    let mut meetings: Vec<serde_json::Value> = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    };
+    let mut meetings: Vec<serde_json::Value> = rows.iter().map(meeting_row_to_json_pg).collect();
 
     // Attach transcripts + issue data to each meeting
     for meeting in meetings.iter_mut() {
@@ -565,11 +678,11 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         if let Some(mid) = meeting_id {
-            let transcripts = load_transcripts(&conn, &mid);
+            let transcripts = load_transcripts_pg(pool, &mid).await;
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
             obj.insert("entries".to_string(), json!(&transcripts));
-            enrich_meeting_with_issue_data(&conn, &mid, obj);
+            enrich_meeting_with_issue_data_pg(pool, &mid, obj).await;
             apply_selection_reason_fallback(obj, &transcripts);
         }
     }
@@ -639,33 +752,16 @@ pub async fn get_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    match conn.query_row(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-         FROM meetings WHERE id = ?1",
-        [&id],
-        |row| meeting_row_to_json(row),
-    ) {
-        Ok(mut meeting) => {
-            let transcripts = load_transcripts(&conn, &id);
-            let obj = meeting.as_object_mut().unwrap();
-            obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(&transcripts));
-            enrich_meeting_with_issue_data(&conn, &id, obj);
-            apply_selection_reason_fallback(obj, &transcripts);
-            (StatusCode::OK, Json(json!({"meeting": meeting})))
-        }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => (
+    match load_meeting_pg(pool, &id).await {
+        Ok(Some(meeting)) => (StatusCode::OK, Json(json!({"meeting": meeting}))),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meeting not found"})),
         ),
@@ -681,24 +777,24 @@ pub async fn delete_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    // Delete transcripts first
-    let _ = conn.execute(
-        "DELETE FROM meeting_transcripts WHERE meeting_id = ?1",
-        [&id],
-    );
+    let _ = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
+        .bind(&id)
+        .execute(pool)
+        .await;
 
-    match conn.execute("DELETE FROM meetings WHERE id = ?1", [&id]) {
-        Ok(0) => (
+    match sqlx::query("DELETE FROM meetings WHERE id = $1")
+        .bind(&id)
+        .execute(pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 0 => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meeting not found"})),
         ),
@@ -716,25 +812,20 @@ pub async fn update_issue_repo(
     Path(id): Path<String>,
     Json(body): Json<IssueRepoBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    // Check meeting exists
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM meetings WHERE id = ?1",
-            [&id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|c| c > 0)
-        .unwrap_or(false);
+    let exists =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM meetings WHERE id = $1")
+            .bind(&id)
+            .fetch_one(pool)
+            .await
+            .map(|count| count > 0)
+            .unwrap_or(false);
 
     if !exists {
         return (
@@ -747,25 +838,23 @@ pub async fn update_issue_repo(
     let key = format!("meeting_issue_repo:{}", id);
     let value = body.repo.as_deref().unwrap_or("");
 
-    if let Err(e) = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![key, value],
-    ) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         );
     }
 
-    // Read back meeting
-    match conn.query_row(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-         FROM meetings WHERE id = ?1",
-        [&id],
-        |row| meeting_row_to_json(row),
-    ) {
-        Ok(mut meeting) => {
+    match load_meeting_pg(pool, &id).await {
+        Ok(Some(mut meeting)) => {
             meeting
                 .as_object_mut()
                 .unwrap()
@@ -775,6 +864,10 @@ pub async fn update_issue_repo(
                 Json(json!({"ok": true, "meeting": meeting})),
             )
         }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "meeting not found"})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -795,25 +888,20 @@ pub async fn create_issues(
     Path(id): Path<String>,
     Json(body): Json<CreateIssuesBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
     let (repo, summaries) = {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-
-        // Verify meeting exists
-        let meeting_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM meetings WHERE id = ?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let meeting_exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM meetings WHERE id = $1")
+                .bind(&id)
+                .fetch_one(pool)
+                .await
+                .map(|count| count > 0)
+                .unwrap_or(false);
         if !meeting_exists {
             return (
                 StatusCode::NOT_FOUND,
@@ -822,14 +910,16 @@ pub async fn create_issues(
         }
 
         // Get issue repo from kv_meta or request body
-        let repo: Option<String> = body.repo.clone().or_else(|| {
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("meeting_issue_repo:{id}")],
-                |row| row.get(0),
-            )
-            .ok()
-        });
+        let repo: Option<String> = if body.repo.is_some() {
+            body.repo.clone()
+        } else {
+            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+                .bind(format!("meeting_issue_repo:{id}"))
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        };
 
         let Some(repo) = repo else {
             return (
@@ -841,19 +931,15 @@ pub async fn create_issues(
         };
 
         // Get summary transcripts (action items)
-        let summaries: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT content FROM meeting_transcripts
-                     WHERE meeting_id = ?1 AND is_summary = 1
-                     ORDER BY seq ASC",
-                )
-                .unwrap();
-            stmt.query_map([&id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        };
+        let summaries: Vec<String> = sqlx::query_scalar::<_, String>(
+            "SELECT content FROM meeting_transcripts
+             WHERE meeting_id = $1 AND is_summary = true
+             ORDER BY seq ASC",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
         (repo, summaries)
     };
@@ -877,32 +963,27 @@ pub async fn create_issues(
     for (i, summary) in summaries.iter().enumerate() {
         let key = format!("item-{i}");
         // Check if already discarded
-        let discarded = {
-            let conn = state.sqlite_db().lock().unwrap();
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("meeting:{id}:issue:{key}:discarded")],
-                |row| row.get::<_, String>(0),
-            )
+        let discarded = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+            .bind(format!("meeting:{id}:issue:{key}:discarded"))
+            .fetch_optional(pool)
+            .await
             .ok()
+            .flatten()
             .map(|v| v == "true")
-            .unwrap_or(false)
-        };
+            .unwrap_or(false);
         if discarded {
             results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "discarded": true, "attempted_at": 0}));
             continue;
         }
 
         // Check if already created
-        let already_url: Option<String> = {
-            let conn = state.sqlite_db().lock().unwrap();
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("meeting:{id}:issue:{key}:url")],
-                |row| row.get(0),
-            )
-            .ok()
-        };
+        let already_url =
+            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+                .bind(format!("meeting:{id}:issue:{key}:url"))
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
         if let Some(url) = already_url {
             results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "issue_url": url, "attempted_at": 0}));
             created += 1;
@@ -927,13 +1008,14 @@ pub async fn create_issues(
             Ok(issue) => {
                 let url = issue.url;
                 // Store result
-                let conn = state.sqlite_db().lock().unwrap();
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    libsql_rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
+                let _ = sqlx::query(
+                    "INSERT INTO kv_meta (key, value) VALUES ($1, $2)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 )
-                .ok();
-                drop(conn);
+                .bind(format!("meeting:{id}:issue:{key}:url"))
+                .bind(&url)
+                .execute(pool)
+                .await;
                 results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
                 created += 1;
             }
@@ -988,31 +1070,26 @@ pub async fn discard_issue(
         );
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'true')",
-        [&format!("meeting:{id}:issue:{key}:discarded")],
+    let _ = sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ($1, 'true')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
-    .ok();
+    .bind(format!("meeting:{id}:issue:{key}:discarded"))
+    .execute(pool)
+    .await;
 
     // Return meeting + summary for UI refresh
-    let meeting = conn
-        .query_row(
-            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-                    primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-             FROM meetings WHERE id = ?1",
-            [&id],
-            |row| meeting_row_to_json(row),
-        )
+    let meeting = load_meeting_pg(pool, &id)
+        .await
+        .ok()
+        .flatten()
         .unwrap_or(json!(null));
 
     (
@@ -1028,41 +1105,36 @@ pub async fn discard_all_issues(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
     // Count summary items and mark all as discarded
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM meeting_transcripts WHERE meeting_id = ?1 AND is_summary = 1",
-            [&id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM meeting_transcripts WHERE meeting_id = $1 AND is_summary = true",
+    )
+    .bind(&id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
 
     for i in 0..count {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'true')",
-            [&format!("meeting:{id}:issue:item-{i}:discarded")],
+        let _ = sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ($1, 'true')
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         )
-        .ok();
+        .bind(format!("meeting:{id}:issue:item-{i}:discarded"))
+        .execute(pool)
+        .await;
     }
 
-    let meeting = conn
-        .query_row(
-            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-                    primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-             FROM meetings WHERE id = ?1",
-            [&id],
-            |row| meeting_row_to_json(row),
-        )
+    let meeting = load_meeting_pg(pool, &id)
+        .await
+        .ok()
+        .flatten()
         .unwrap_or(json!(null));
 
     (
@@ -1222,116 +1294,122 @@ pub async fn upsert_meeting(
         .as_deref()
         .and_then(normalize_selection_reason);
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    if let Err(e) = conn.execute(
+    let started_at_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let completed_at_dt = body
+        .completed_at
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+
+    if let Err(e) = sqlx::query(
         "INSERT INTO meetings (
             id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
             primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         ON CONFLICT(id) DO UPDATE SET
-            channel_id = COALESCE(excluded.channel_id, meetings.channel_id),
-            thread_id = COALESCE(excluded.thread_id, meetings.thread_id),
-            title = COALESCE(?15, meetings.title),
-            status = COALESCE(?16, meetings.status),
-            effective_rounds = COALESCE(?17, meetings.effective_rounds),
+            channel_id = COALESCE(EXCLUDED.channel_id, meetings.channel_id),
+            thread_id = COALESCE(EXCLUDED.thread_id, meetings.thread_id),
+            title = COALESCE($15, meetings.title),
+            status = COALESCE($16, meetings.status),
+            effective_rounds = COALESCE($17, meetings.effective_rounds),
             started_at = COALESCE(meetings.started_at, excluded.started_at),
-            completed_at = COALESCE(?18, meetings.completed_at),
-            summary = COALESCE(?19, meetings.summary),
-            primary_provider = COALESCE(?20, meetings.primary_provider),
-            reviewer_provider = COALESCE(?21, meetings.reviewer_provider),
-            participant_names = COALESCE(?22, meetings.participant_names),
-            selection_reason = COALESCE(?23, meetings.selection_reason),
-            created_at = COALESCE(meetings.created_at, excluded.created_at)",
-        libsql_rusqlite::params![
-            body.id,
-            body.channel_id,
-            body.thread_id,
-            agenda,
-            status,
-            total_rounds,
-            started_at,
-            body.completed_at,
-            summary,
-            primary_provider.as_ref().map(ProviderKind::as_str),
-            reviewer_provider.as_ref().map(ProviderKind::as_str),
-            participant_names_json,
-            selection_reason.clone(),
-            started_at,
-            agenda_update,
-            status_update,
-            total_rounds_update,
-            body.completed_at,
-            summary,
-            primary_provider.as_ref().map(ProviderKind::as_str),
-            reviewer_provider.as_ref().map(ProviderKind::as_str),
-            participant_names_update_json,
-            selection_reason,
-        ],
-    ) {
+            completed_at = COALESCE($18, meetings.completed_at),
+            summary = COALESCE($19, meetings.summary),
+            primary_provider = COALESCE($20, meetings.primary_provider),
+            reviewer_provider = COALESCE($21, meetings.reviewer_provider),
+            participant_names = COALESCE($22, meetings.participant_names),
+            selection_reason = COALESCE($23, meetings.selection_reason),
+            created_at = COALESCE(meetings.created_at, EXCLUDED.created_at)",
+    )
+    .bind(&body.id)
+    .bind(body.channel_id.as_deref())
+    .bind(body.thread_id.as_deref())
+    .bind(agenda)
+    .bind(status)
+    .bind(total_rounds)
+    .bind(started_at_dt)
+    .bind(completed_at_dt)
+    .bind(summary)
+    .bind(primary_provider.as_ref().map(ProviderKind::as_str))
+    .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
+    .bind(&participant_names_json)
+    .bind(selection_reason.as_deref())
+    .bind(started_at)
+    .bind(agenda_update)
+    .bind(status_update)
+    .bind(total_rounds_update)
+    .bind(completed_at_dt)
+    .bind(summary)
+    .bind(primary_provider.as_ref().map(ProviderKind::as_str))
+    .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
+    .bind(participant_names_update_json.as_deref())
+    .bind(selection_reason.as_deref())
+    .execute(pool)
+    .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         );
     }
 
-    let saved_thread_id: Option<String> = conn
-        .query_row(
-            "SELECT thread_id FROM meetings WHERE id = ?1",
-            [&body.id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    if let Err(e) = persist_meeting_query_hashes(&conn, &body.id, saved_thread_id.as_deref()) {
+    let saved_thread_id =
+        sqlx::query_scalar::<_, String>("SELECT thread_id FROM meetings WHERE id = $1")
+            .bind(&body.id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if let Err(e) =
+        persist_meeting_query_hashes_pg(pool, &body.id, saved_thread_id.as_deref()).await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         );
     }
 
-    let mut next_seq = conn
-        .query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM meeting_transcripts WHERE meeting_id = ?1",
-            [&body.id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(1);
+    let mut next_seq = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(seq), 0)::BIGINT + 1 FROM meeting_transcripts WHERE meeting_id = $1",
+    )
+    .bind(&body.id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(1);
     let entries = body.entries;
     let replacing_entries = entries.is_some();
 
     if let Some(entries) = entries {
-        let _ = conn.execute(
-            "DELETE FROM meeting_transcripts WHERE meeting_id = ?1",
-            [&body.id],
-        );
+        let _ = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
+            .bind(&body.id)
+            .execute(pool)
+            .await;
 
         next_seq = 1;
         for (idx, entry) in entries.into_iter().enumerate() {
             let seq = entry.seq.unwrap_or((idx as i64) + 1);
             next_seq = next_seq.max(seq + 1);
-            if let Err(e) = conn.execute(
+            if let Err(e) = sqlx::query(
                 "INSERT INTO meeting_transcripts (
                     meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                libsql_rusqlite::params![
-                    body.id,
-                    seq,
-                    entry.round,
-                    entry.speaker_role_id,
-                    entry.speaker_name,
-                    entry.content,
-                    entry.is_summary.unwrap_or(false),
-                ],
-            ) {
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(&body.id)
+            .bind(seq)
+            .bind(entry.round)
+            .bind(entry.speaker_role_id.as_deref())
+            .bind(entry.speaker_name.as_deref())
+            .bind(entry.content.as_deref())
+            .bind(entry.is_summary.unwrap_or(false))
+            .execute(pool)
+            .await
+            {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{e}")})),
@@ -1341,60 +1419,61 @@ pub async fn upsert_meeting(
     }
 
     if let Some(summary_text) = summary {
-        let summary_round = conn
-            .query_row(
-                "SELECT effective_rounds FROM meetings WHERE id = ?1",
-                [&body.id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
-            .ok()
-            .flatten()
-            .unwrap_or(total_rounds);
+        let summary_round = sqlx::query_scalar::<_, i64>(
+            "SELECT effective_rounds::BIGINT FROM meetings WHERE id = $1",
+        )
+        .bind(&body.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(total_rounds);
         let existing_summary_id = if replacing_entries {
             None
         } else {
-            conn.query_row(
+            sqlx::query_scalar::<_, i64>(
                 "SELECT id
                  FROM meeting_transcripts
-                 WHERE meeting_id = ?1 AND is_summary = 1
+                 WHERE meeting_id = $1 AND is_summary = true
                  ORDER BY seq DESC, id DESC
                  LIMIT 1",
-                [&body.id],
-                |row| row.get::<_, i64>(0),
             )
+            .bind(&body.id)
+            .fetch_optional(pool)
+            .await
             .ok()
+            .flatten()
         };
 
         let summary_result = if let Some(summary_id) = existing_summary_id {
-            conn.execute(
+            sqlx::query(
                 "UPDATE meeting_transcripts
-                 SET round = ?2,
+                 SET round = $2,
                      speaker_agent_id = NULL,
-                     speaker_name = ?3,
-                     content = ?4,
-                     is_summary = 1
-                 WHERE id = ?1",
-                libsql_rusqlite::params![
-                    summary_id,
-                    summary_round,
-                    Some("Summary".to_string()),
-                    summary_text,
-                ],
+                     speaker_name = $3,
+                     content = $4,
+                     is_summary = true
+                 WHERE id = $1",
             )
+            .bind(summary_id)
+            .bind(summary_round)
+            .bind("Summary")
+            .bind(summary_text)
+            .execute(pool)
+            .await
         } else {
-            conn.execute(
+            sqlx::query(
                 "INSERT INTO meeting_transcripts (
                     meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-                libsql_rusqlite::params![
-                    body.id,
-                    next_seq,
-                    summary_round,
-                    Option::<String>::None,
-                    Some("Summary".to_string()),
-                    summary_text,
-                ],
+                ) VALUES ($1, $2, $3, NULL, $4, $5, true)",
             )
+            .bind(&body.id)
+            .bind(next_seq)
+            .bind(summary_round)
+            .bind("Summary")
+            .bind(summary_text)
+            .execute(pool)
+            .await
         };
 
         if let Err(e) = summary_result {
@@ -1405,25 +1484,15 @@ pub async fn upsert_meeting(
         }
     }
 
-    match conn.query_row(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-         FROM meetings WHERE id = ?1",
-        [&body.id],
-        |row| meeting_row_to_json(row),
-    ) {
-        Ok(mut meeting) => {
-            let transcripts = load_transcripts(&conn, &body.id);
-            let obj = meeting.as_object_mut().unwrap();
-            obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(&transcripts));
-            enrich_meeting_with_issue_data(&conn, &body.id, obj);
-            apply_selection_reason_fallback(obj, &transcripts);
-            (
-                StatusCode::OK,
-                Json(json!({"ok": true, "meeting": meeting})),
-            )
-        }
+    match load_meeting_pg(pool, &body.id).await {
+        Ok(Some(meeting)) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "meeting": meeting})),
+        ),
+        Ok(None) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "meeting was not persisted"})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -1539,224 +1608,55 @@ fn thread_query_hash(thread_id: &str) -> String {
     )
 }
 
-fn persist_meeting_query_hashes(
-    conn: &libsql_rusqlite::Connection,
+async fn persist_meeting_query_hashes_pg(
+    pool: &PgPool,
     meeting_id: &str,
     thread_id: Option<&str>,
-) -> libsql_rusqlite::Result<()> {
+) -> Result<(), sqlx::Error> {
     let meeting_hash = meeting_query_hash(meeting_id);
     let normalized_thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
     let thread_hash = normalized_thread_id.map(thread_query_hash);
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![
-            format!("meeting_query_hash:{meeting_id}"),
-            meeting_hash.clone()
-        ],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![
-            format!("meeting_query_hash_lookup:{meeting_hash}"),
-            meeting_id
-        ],
-    )?;
+    upsert_kv_meta_pg(
+        pool,
+        &format!("meeting_query_hash:{meeting_id}"),
+        &meeting_hash,
+    )
+    .await?;
+    upsert_kv_meta_pg(
+        pool,
+        &format!("meeting_query_hash_lookup:{meeting_hash}"),
+        meeting_id,
+    )
+    .await?;
 
     if let (Some(thread_id), Some(thread_hash)) = (normalized_thread_id, thread_hash.as_deref()) {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![format!("meeting_thread_hash:{meeting_id}"), thread_hash],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![
-                format!("meeting_thread_hash_lookup:{thread_hash}"),
-                json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string()
-            ],
-        )?;
+        upsert_kv_meta_pg(
+            pool,
+            &format!("meeting_thread_hash:{meeting_id}"),
+            thread_hash,
+        )
+        .await?;
+        upsert_kv_meta_pg(
+            pool,
+            &format!("meeting_thread_hash_lookup:{thread_hash}"),
+            &json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string(),
+        )
+        .await?;
     }
-
-    tracing::info!(
-        meeting_id = %meeting_id,
-        meeting_hash = %meeting_hash,
-        thread_hash = thread_hash.as_deref().unwrap_or("-"),
-        "[meetings] persisted meeting query hashes"
-    );
-
     Ok(())
 }
 
-fn row_optional_timestamp(row: &libsql_rusqlite::Row, idx: usize) -> Option<i64> {
-    use libsql_rusqlite::types::ValueRef;
-
-    match row.get_ref(idx).ok()? {
-        ValueRef::Null => None,
-        ValueRef::Integer(v) => Some(v),
-        ValueRef::Real(v) => Some(v as i64),
-        ValueRef::Text(bytes) => {
-            let text = std::str::from_utf8(bytes).ok()?.trim();
-            if text.is_empty() {
-                None
-            } else if let Ok(ts) = text.parse::<i64>() {
-                Some(ts)
-            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
-                Some(dt.timestamp_millis())
-            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
-            {
-                Some(dt.and_utc().timestamp_millis())
-            } else {
-                None
-            }
-        }
-        ValueRef::Blob(_) => None,
-    }
-}
-
-fn meeting_row_to_json(row: &libsql_rusqlite::Row) -> libsql_rusqlite::Result<serde_json::Value> {
-    let meeting_id = row.get::<_, String>(0)?;
-    let channel_id = row.get::<_, Option<String>>(1)?;
-    let thread_id = row.get::<_, Option<String>>(2)?;
-    let title = row.get::<_, Option<String>>(3)?;
-    let effective_rounds = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
-    let participant_names = row
-        .get::<_, Option<String>>(11)?
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .unwrap_or_default();
-    let started_at = row_optional_timestamp(row, 6).unwrap_or(0);
-    let completed_at = row_optional_timestamp(row, 7);
-    let created_at = row_optional_timestamp(row, 13).unwrap_or(started_at);
-    let thread_hash = thread_id.as_deref().map(thread_query_hash);
-    let selection_reason = row
-        .get::<_, Option<String>>(12)?
-        .as_deref()
-        .and_then(normalize_selection_reason);
-    Ok(json!({
-        "id": meeting_id.clone(),
-        "channel_id": channel_id,
-        "thread_id": thread_id,
-        "meeting_hash": meeting_query_hash(&meeting_id),
-        "thread_hash": thread_hash,
-        "title": title,
-        "status": row.get::<_, Option<String>>(4)?,
-        "effective_rounds": effective_rounds,
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "summary": row.get::<_, Option<String>>(8)?,
-        "selection_reason": selection_reason,
-        // alias fields for frontend compatibility
-        "agenda": title,
-        "total_rounds": effective_rounds,
-        "primary_provider": row.get::<_, Option<String>>(9)?,
-        "reviewer_provider": row.get::<_, Option<String>>(10)?,
-        "participant_names": participant_names,
-        "issues_created": 0,
-        "proposed_issues": null,
-        "issue_creation_results": null,
-        "issue_repo": null,
-        "created_at": created_at,
-    }))
-}
-
-/// Enrich meeting JSON with issue_repo, issue_creation_results from kv_meta.
-fn enrich_meeting_with_issue_data(
-    conn: &libsql_rusqlite::Connection,
-    meeting_id: &str,
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    // issue_repo
-    let issue_repo: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
-            [&format!("meeting_issue_repo:{meeting_id}")],
-            |row| row.get(0),
-        )
-        .ok();
-    if let Some(ref repo) = issue_repo {
-        obj.insert("issue_repo".to_string(), json!(repo));
-    }
-
-    // Collect issue creation results from kv_meta
-    let mut results = Vec::new();
-    let mut i = 0;
-    loop {
-        let key = format!("meeting:{meeting_id}:issue:item-{i}");
-        let url: Option<String> = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("{key}:url")],
-                |row| row.get(0),
-            )
-            .ok();
-        let discarded: bool = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("{key}:discarded")],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        if url.is_none() && !discarded && i > 0 {
-            break; // No more items
-        }
-        if url.is_some() || discarded {
-            results.push(json!({
-                "key": format!("item-{i}"),
-                "ok": url.is_some(),
-                "discarded": discarded,
-                "issue_url": url,
-            }));
-        }
-        i += 1;
-        if i > 100 {
-            break;
-        } // safety limit
-    }
-
-    if !results.is_empty() {
-        let created_count = results
-            .iter()
-            .filter(|entry| entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
-            .count();
-        obj.insert("issue_creation_results".to_string(), json!(results));
-        obj.insert("issues_created".to_string(), json!(created_count));
-    }
-}
-
-fn load_transcripts(
-    conn: &libsql_rusqlite::Connection,
-    meeting_id: &str,
-) -> Vec<serde_json::Value> {
-    let mut stmt = match conn.prepare(
-        "SELECT id, meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-         FROM meeting_transcripts
-         WHERE meeting_id = ?1
-         ORDER BY seq ASC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let rows = stmt
-        .query_map([meeting_id], |row| {
-            Ok(json!({
-                "id": row.get::<_, i64>(0)?,
-                "meeting_id": row.get::<_, String>(1)?,
-                "seq": row.get::<_, Option<i64>>(2)?,
-                "round": row.get::<_, Option<i64>>(3)?,
-                "speaker_agent_id": row.get::<_, Option<String>>(4)?,
-                "speaker_name": row.get::<_, Option<String>>(5)?,
-                "content": row.get::<_, Option<String>>(6)?,
-                "is_summary": row.get::<_, bool>(7).unwrap_or(false),
-            }))
-        })
-        .ok();
-
-    match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    }
+async fn upsert_kv_meta_pg(pool: &PgPool, key: &str, value: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -1772,10 +1672,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
+        crate::db::test_db()
     }
 
     fn test_engine(db: &Db) -> PolicyEngine {
@@ -1783,24 +1680,6 @@ mod tests {
         config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
-    }
-
-    fn transcript_counts(conn: &libsql_rusqlite::Connection, meeting_id: &str) -> (i64, i64) {
-        let total = conn
-            .query_row(
-                "SELECT COUNT(*) FROM meeting_transcripts WHERE meeting_id = ?1",
-                [meeting_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        let summary = conn
-            .query_row(
-                "SELECT COUNT(*) FROM meeting_transcripts WHERE meeting_id = ?1 AND is_summary = 1",
-                [meeting_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        (total, summary)
     }
 
     fn meeting_entry(seq: i64, round: i64, speaker_name: &str, content: &str) -> MeetingEntryBody {
@@ -1916,7 +1795,7 @@ mod tests {
     #[tokio::test]
     async fn start_meeting_rejects_unregistered_channel_without_primary_provider() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, body) = start_meeting(
             State(state),
@@ -1940,7 +1819,7 @@ mod tests {
     #[tokio::test]
     async fn start_meeting_rejects_unregistered_channel_even_when_primary_provider_is_supplied() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, body) = start_meeting(
             State(state),
@@ -1993,7 +1872,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_meeting_preserves_existing_metadata_when_optional_fields_omitted() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, _) = upsert_meeting(
             State(state.clone()),
@@ -2080,7 +1959,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_meeting_persists_query_hashes_and_returns_them() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, _) = upsert_meeting(
             State(state.clone()),
@@ -2141,73 +2020,5 @@ mod tests {
         assert_eq!(stored_meeting_hash, expected_meeting_hash);
         assert_eq!(meeting_lookup, "meeting-hash");
         assert_eq!(stored_thread_hash, expected_thread_hash);
-    }
-
-    #[tokio::test]
-    async fn upsert_meeting_preserves_existing_transcripts_and_updates_summary_without_duplication()
-    {
-        let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
-
-        let (status, _) = upsert_meeting(
-            State(state.clone()),
-            Json(UpsertMeetingBody {
-                id: "meeting-transcript".to_string(),
-                channel_id: None,
-                agenda: Some("안건".to_string()),
-                summary: Some("기존 요약".to_string()),
-                selection_reason: Some("초기 조합 선정".to_string()),
-                status: Some("completed".to_string()),
-                primary_provider: Some("qwen".to_string()),
-                reviewer_provider: Some("codex".to_string()),
-                participant_names: Some(vec!["Alice".to_string()]),
-                total_rounds: Some(2),
-                started_at: Some(100),
-                completed_at: Some(150),
-                thread_id: Some("thread-2".to_string()),
-                entries: Some(vec![
-                    meeting_entry(1, 1, "Alice", "첫 발언"),
-                    meeting_entry(2, 2, "Bob", "두 번째 발언"),
-                ]),
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, _) = upsert_meeting(
-            State(state),
-            Json(UpsertMeetingBody {
-                id: "meeting-transcript".to_string(),
-                channel_id: None,
-                agenda: None,
-                summary: Some("새 요약".to_string()),
-                selection_reason: Some("후속 업데이트에서도 선정 사유 유지".to_string()),
-                status: Some("completed".to_string()),
-                primary_provider: None,
-                reviewer_provider: None,
-                participant_names: None,
-                total_rounds: None,
-                started_at: None,
-                completed_at: Some(200),
-                thread_id: None,
-                entries: None,
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let conn = db.lock().unwrap();
-        let (total, summary_count) = transcript_counts(&conn, "meeting-transcript");
-        assert_eq!(total, 3);
-        assert_eq!(summary_count, 1);
-
-        let transcript_rows = load_transcripts(&conn, "meeting-transcript");
-        let contents: Vec<&str> = transcript_rows
-            .iter()
-            .filter_map(|row| row.get("content").and_then(|value| value.as_str()))
-            .collect();
-        assert!(contents.contains(&"첫 발언"));
-        assert!(contents.contains(&"두 번째 발언"));
-        assert!(contents.contains(&"새 요약"));
     }
 }
