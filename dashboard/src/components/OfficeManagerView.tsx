@@ -615,7 +615,7 @@ export default function OfficeManagerView({
                       >
                         <div className="flex items-center gap-3">
                           <div className="flex h-11 w-11 items-center justify-center rounded-2xl" style={{ background: "rgba(148,163,184,0.12)" }}>
-                            <AgentAvatar agent={agent} size={36} rounded="2xl" />
+                            <AgentAvatar agent={agent} agents={allAgents} size={36} rounded="2xl" />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>

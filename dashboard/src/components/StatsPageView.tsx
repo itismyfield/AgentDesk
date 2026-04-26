@@ -2455,7 +2455,7 @@ function AgentLeaderboardCard({
                     className="inline-grid h-9 w-9 place-items-center overflow-hidden rounded-full"
                     style={{ background: "var(--th-overlay-subtle)" }}
                   >
-                    <AgentAvatar agent={row.agent ?? undefined} size={32} rounded="full" />
+                    <AgentAvatar agent={row.agent ?? undefined} agents={agents} size={32} rounded="full" />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-3">

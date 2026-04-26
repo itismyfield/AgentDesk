@@ -48,13 +48,24 @@ function resolveSpriteNumber(
     const map = buildSpriteMap(agents);
     if (map.has(agent.id)) return map.get(agent.id) as number;
   }
-  // Codex review (PR #1258, 4th pass): the previous hash fallback could
-  // disagree with buildSpriteMap (sorted-id + DORO special case), so the
-  // same agent showed different sprites on different pages when the
-  // caller didn't pass agents/spriteMap. Use the canonical fallback
-  // sprite instead — agent identity stays stable, even if it shares the
-  // sprite with the default-portrait pool.
-  return SPRITE_FALLBACK_NUMBER;
+  // Codex 4th-pass concern: hash fallback could disagree with
+  // buildSpriteMap so the same agent showed different sprites on
+  // different pages. Resolution: every avatar call site this PR adds
+  // now passes agents/spriteMap (StatsPageView, OfficeManagerModal,
+  // OfficeManagerView, AppShell home leaderboard, OfficeView overlay),
+  // so buildSpriteMap is the canonical source whenever it can be.
+  // Codex 5th-pass concern: the all-1 fallback collapsed every
+  // sprite-context-less agent into the same portrait, so list call
+  // sites elsewhere in the app went visually indistinguishable.
+  // Resolution: keep a deterministic per-id hash fallback so distinct
+  // agents stay distinct even from a non-PR call site. DORO keeps the
+  // 13 special case so that one identity is still pinned.
+  if (agent.name === "DORO") return 13;
+  let hash = 0;
+  for (let i = 0; i < agent.id.length; i += 1) {
+    hash = (hash * 31 + agent.id.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 12) + 1;
 }
 
 type AgentLike = Pick<Agent, "id" | "name"> & {

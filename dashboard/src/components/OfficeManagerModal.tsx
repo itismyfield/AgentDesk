@@ -449,7 +449,7 @@ export default function OfficeManagerModal({
                     }}
                   >
                     <div className="flex items-center gap-3">
-                      <AgentAvatar agent={a} size={24} rounded="xl" />
+                      <AgentAvatar agent={a} agents={allAgents} size={24} rounded="xl" />
                       <div className="flex-1 min-w-0">
                         <div
                           className="text-sm truncate"
