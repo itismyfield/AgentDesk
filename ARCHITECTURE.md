@@ -322,8 +322,11 @@ src/
 │   │   └── tmux.rs
 │   ├── provider_cli/
 │   │   ├── context.rs
+│   │   ├── io.rs
 │   │   ├── mod.rs
-│   │   └── registry.rs
+│   │   ├── paths.rs
+│   │   ├── registry.rs
+│   │   └── snapshot.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── agent_protocol.rs
