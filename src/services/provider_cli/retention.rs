@@ -73,7 +73,12 @@ pub fn build_retention_set(
 /// Does not delete anything.
 pub fn cleanup_dry_run(scan_dir: &Path, set: &RetentionSet) -> std::io::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(scan_dir)? {
+    let entries = match std::fs::read_dir(scan_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if !set.is_protected(&path) {
@@ -119,6 +124,17 @@ mod tests {
         let candidates = cleanup_dry_run(dir.path(), &set).unwrap();
         assert!(candidates.contains(&removable));
         assert!(!candidates.contains(&protected));
+    }
+
+    #[test]
+    fn cleanup_dry_run_treats_missing_scan_dir_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let set = RetentionSet::new();
+
+        let candidates = cleanup_dry_run(&missing, &set).unwrap();
+
+        assert!(candidates.is_empty());
     }
 
     #[test]
