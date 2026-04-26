@@ -612,12 +612,12 @@ export default function AppShell({
           }}
         >
           <div
-            className="border-b px-4 py-5"
+            className="flex h-16 shrink-0 items-center border-b px-4"
             style={{ borderColor: "var(--th-border-subtle)" }}
           >
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <div
-                className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-semibold"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-[13px] font-semibold"
                 style={{
                   background: "var(--th-accent-primary-soft)",
                   color: "var(--th-accent-primary)",
@@ -625,7 +625,7 @@ export default function AppShell({
               >
                 AD
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 leading-tight">
                 <div
                   className="truncate text-sm font-semibold"
                   style={{ color: "var(--th-text-heading)" }}
@@ -633,7 +633,7 @@ export default function AppShell({
                   AgentDesk
                 </div>
                 <div
-                  className="truncate text-xs"
+                  className="truncate text-[11px]"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   v2.4.1
@@ -754,7 +754,7 @@ export default function AppShell({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <header
           data-testid="topbar"
-          className="relative shrink-0 border-b px-4 py-2.5 sm:px-5"
+          className="relative flex min-h-16 shrink-0 items-center border-b px-4 py-2 sm:px-5"
           style={{
             zIndex: SHELL_HEADER_Z_INDEX,
             borderColor: "var(--th-border-subtle)",
