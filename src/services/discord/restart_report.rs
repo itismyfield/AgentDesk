@@ -75,21 +75,7 @@ impl RestartCompletionReport {
 }
 
 fn latest_startup_doctor_summary() -> Option<serde_json::Value> {
-    let path = crate::cli::doctor::startup::latest_startup_artifact_path()?;
-    let mut summary = serde_json::json!({
-        "artifact_path": path.display().to_string(),
-        "followup_context": crate::cli::doctor::contract::RunContext::RestartFollowup.as_str()
-    });
-    if let Ok(content) = fs::read_to_string(&path)
-        && let Ok(report) = serde_json::from_str::<serde_json::Value>(&content)
-    {
-        for key in ["ok", "run_context", "boot_id", "summary", "error"] {
-            if let Some(value) = report.get(key) {
-                summary[key] = value.clone();
-            }
-        }
-    }
-    Some(summary)
+    Some(crate::cli::doctor::startup::latest_startup_doctor_health_json(true))
 }
 
 pub(crate) fn restart_report_context_from_env() -> Option<RestartReportContext> {

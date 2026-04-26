@@ -23,6 +23,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/health/detail", get(health_api::health_detail_handler))
             .route(
+                "/doctor/startup/latest",
+                get(health_api::startup_doctor_latest_handler),
+            )
+            .route(
                 "/doctor/stale-mailbox/repair",
                 post(health_api::stale_mailbox_repair_handler),
             )

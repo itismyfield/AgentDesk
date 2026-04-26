@@ -186,9 +186,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             StatusCode::SERVICE_UNAVAILABLE
         };
         let json = if detailed {
-            json
+            with_latest_startup_doctor(json, true)
         } else {
-            public_health_json(json)
+            with_latest_startup_doctor(public_health_json(json), false)
         };
         (http_status, Json(json)).into_response()
     } else {
@@ -229,12 +229,18 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["pipeline_overrides"] = report;
         }
         let json = if detailed {
-            json
+            with_latest_startup_doctor(json, true)
         } else {
-            public_health_json(json)
+            with_latest_startup_doctor(public_health_json(json), false)
         };
         (status, Json(json)).into_response()
     }
+}
+
+fn with_latest_startup_doctor(mut json: serde_json::Value, detailed: bool) -> serde_json::Value {
+    json["latest_startup_doctor"] =
+        crate::cli::doctor::startup::latest_startup_doctor_health_json(detailed);
+    json
 }
 
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
@@ -423,6 +429,22 @@ pub async fn health_detail_handler(
             .into_response();
     }
     health_response(&state, true).await
+}
+
+/// GET /api/doctor/startup/latest — protected/local latest startup doctor artifact.
+pub async fn startup_doctor_latest_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
+    Json(crate::cli::doctor::startup::latest_startup_doctor_response_json()).into_response()
 }
 
 /// POST /api/doctor/stale-mailbox/repair — protected/local stale mailbox cleanup.
