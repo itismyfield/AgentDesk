@@ -690,14 +690,15 @@ fn join_paths_lossy(paths: Vec<PathBuf>) -> Option<OsString> {
 pub fn resolve_provider_binary_for_context(
     ctx: &crate::services::provider_cli::ProviderExecutionContext,
 ) -> BinaryResolution {
+    let provider = normalize_name(&ctx.provider);
     if let Some(root) = crate::config::runtime_root() {
         if let Ok(Some(registry)) = crate::services::provider_cli::io::load_registry(&root) {
-            if let Some(channels) = registry.providers.get(&ctx.provider) {
+            if let Some(channels) = registry.providers.get(&provider) {
                 // 1. Per-agent override → named channel
                 let channel_name = ctx
                     .agent_id
                     .as_deref()
-                    .and_then(|id| registry.agent_channel(&ctx.provider, id))
+                    .and_then(|id| registry.agent_channel(&provider, id))
                     .unwrap_or("current");
 
                 let selected_channel = match channel_name {
@@ -709,7 +710,7 @@ pub fn resolve_provider_binary_for_context(
 
                 if let Some(channel) = selected_channel {
                     if let Some(resolution) =
-                        registry_channel_resolution(&ctx.provider, channel_name, channel)
+                        registry_channel_resolution(&provider, channel_name, channel)
                     {
                         return resolution;
                     }
@@ -718,7 +719,7 @@ pub fn resolve_provider_binary_for_context(
                 if channel_name != "current" {
                     if let Some(channel) = channels.current.as_ref() {
                         if let Some(resolution) =
-                            registry_channel_resolution(&ctx.provider, "current", channel)
+                            registry_channel_resolution(&provider, "current", channel)
                         {
                             return resolution;
                         }
@@ -728,7 +729,7 @@ pub fn resolve_provider_binary_for_context(
         }
     }
     // 3. Fall back to legacy resolver.
-    resolve_provider_binary_legacy(&ctx.provider)
+    resolve_provider_binary_legacy(&provider)
 }
 
 fn registry_channel_resolution(
@@ -951,6 +952,49 @@ mod tests {
         unsafe {
             std::env::remove_var("AGENTDESK_CODEX_PATH");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_resolver_normalizes_provider_for_registry_lookup() {
+        use crate::services::provider_cli::registry::{
+            ProviderChannels, ProviderCliChannel, ProviderCliRegistry,
+        };
+        use chrono::Utc;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime_root = RuntimeRootOverrideGuard::set(temp.path());
+        let registry_path = temp.path().join("registry-codex");
+        write_executable(&registry_path);
+
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                current: Some(ProviderCliChannel {
+                    path: registry_path.to_string_lossy().to_string(),
+                    canonical_path: registry_path.to_string_lossy().to_string(),
+                    version: "registry".to_string(),
+                    version_output: None,
+                    source: "test".to_string(),
+                    checked_at: Utc::now(),
+                    evidence: Default::default(),
+                }),
+                ..Default::default()
+            },
+        );
+        crate::services::provider_cli::io::save_registry(temp.path(), &registry).unwrap();
+
+        let resolution = resolve_provider_binary_for_context(
+            &crate::services::provider_cli::ProviderExecutionContext::for_provider("CoDeX"),
+        );
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(registry_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(resolution.source.as_deref(), Some("registry:current"));
     }
 
     #[cfg(unix)]
