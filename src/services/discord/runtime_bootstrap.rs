@@ -774,7 +774,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         commands::cmd_help(),
         commands::cmd_meeting(),
         commands::cmd_restart(),
-        commands::cmd_mcp_reload(),
     ]);
 
     let framework = poise::Framework::builder()

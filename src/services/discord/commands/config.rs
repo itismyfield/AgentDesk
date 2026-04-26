@@ -963,7 +963,6 @@ pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
         "**Note (issue #1005):** `allow_all_users` only governs ordinary chat \
          access. High-risk commands stay owner-only on BOTH the `!` text and \
          `/` slash surfaces, regardless:\n\
-         • runtime-control (`!stop`/`!clear`/`!restart`/`!mcp_reload`, `/stop`/`/clear`/`/restart`/`/debug`/`/deletesession`) — owner-only\n\
          • shell/tool-grant (`!shell`/`!allowed`, `/shell`/`/allowed`) — {shell_state}\n\
          • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
     )
@@ -1794,7 +1793,8 @@ agents:
     fn allowall_policy_note_lists_every_high_risk_family() {
         let note = build_allowall_policy_note();
         assert!(note.contains("issue #1005"), "{note}");
-        assert!(note.contains("runtime-control"), "{note}");
+        // After #1190 follow-up, only shell/tool-grant and credential/system
+        // remain owner-gated; channel-scoped runtime commands moved to Mutating.
         assert!(note.contains("shell/tool-grant"), "{note}");
         assert!(note.contains("credential/system"), "{note}");
         // Every high-risk family must reference owner-only or its enable flag

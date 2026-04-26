@@ -20,16 +20,15 @@
 /// Coarse risk tier for a Discord text command.
 ///
 /// Ordering (low → high) reflects the amount of trust required:
-/// `ReadOnly < Mutating < RuntimeControl < ShellOrToolGrant < CredentialSystem`.
+/// `ReadOnly < Mutating < ShellOrToolGrant < CredentialSystem`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum CommandRisk {
     /// Inspection-only commands. Safe for any authorized chat user.
     ReadOnly,
     /// Changes per-channel session state but cannot escape the sandbox.
+    /// Includes session resets (`clear`, `deletesession`), in-flight turn
+    /// cancellation (`stop`), and channel-scoped tmux respawn (`restart`).
     Mutating,
-    /// Can drop an in-flight turn, wipe channel state, or toggle bot runtime.
-    /// Still reversible but disruptive to active work.
-    RuntimeControl,
     /// Executes shell commands or grants new tool capabilities to the model.
     /// Equivalent to RCE on the host — owner only, explicit opt-in.
     ShellOrToolGrant,
@@ -39,25 +38,12 @@ pub(in crate::services::discord) enum CommandRisk {
 }
 
 impl CommandRisk {
-    /// Human-readable label for help/dashboard surfaces.
-    pub(in crate::services::discord) fn label(self) -> &'static str {
-        match self {
-            CommandRisk::ReadOnly => "read-only",
-            CommandRisk::Mutating => "mutating",
-            CommandRisk::RuntimeControl => "runtime-control",
-            CommandRisk::ShellOrToolGrant => "shell/tool-grant",
-            CommandRisk::CredentialSystem => "credential/system",
-        }
-    }
-
     /// True for tiers that must go through the owner guard regardless of
     /// `allow_all_users`.
     pub(in crate::services::discord) fn is_high_risk(self) -> bool {
         matches!(
             self,
-            CommandRisk::RuntimeControl
-                | CommandRisk::ShellOrToolGrant
-                | CommandRisk::CredentialSystem
+            CommandRisk::ShellOrToolGrant | CommandRisk::CredentialSystem
         )
     }
 
@@ -80,14 +66,13 @@ pub(in crate::services::discord) fn command_risk(cmd: &str, _arg1: &str) -> Comm
         "!help" | "!pwd" | "!health" | "!status" | "!inflight" | "!queue" | "!metrics"
         | "!allowedtools" | "!sessions" | "!receipt" => CommandRisk::ReadOnly,
 
-        // Session-shaping but not runtime-disruptive. `!clear` and
-        // `!deletesession` reset the per-channel conversation memory but do
-        // not touch the bot runtime; trusted non-owners need them too.
+        // Session-shaping. All scoped to the current channel: `!clear` /
+        // `!deletesession` reset that channel's conversation memory; `!stop`
+        // cancels its in-flight turn; `!restart` kills+respawns its tmux
+        // session; `!debug` toggles the global debug-logging atomic but the
+        // operator trusts every authorized user with that switch.
         "!start" | "!down" | "!cc" | "!meeting" | "!model" | "!fast" | "!clear"
-        | "!deletesession" => CommandRisk::Mutating,
-
-        // Can interrupt live turns or restart the bot itself.
-        "!stop" | "!debug" | "!restart" | "!mcp_reload" => CommandRisk::RuntimeControl,
+        | "!deletesession" | "!stop" | "!restart" | "!debug" => CommandRisk::Mutating,
 
         // Shell execution and tool allowlist mutation — equivalent to RCE.
         "!shell" | "!allowed" => CommandRisk::ShellOrToolGrant,
@@ -178,10 +163,7 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
 
         // Per-channel session shaping (mirrors text-command tiers).
         "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" | "/clear"
-        | "/deletesession" => CommandRisk::Mutating,
-
-        // Runtime kill switches.
-        "/stop" | "/debug" | "/restart" | "/mcp-reload" => CommandRisk::RuntimeControl,
+        | "/deletesession" | "/stop" | "/restart" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
         "/shell" | "/allowed" => CommandRisk::ShellOrToolGrant,
@@ -205,8 +187,7 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
     format!(
         "**Command Risk Tiers** (issue #1005)\n\
          `read-only` — help/status/metrics/allowedtools: any authorized user\n\
-         `mutating` — start/down/cc/meeting/model: any authorized user\n\
-         `runtime-control` — stop/clear/debug/restart/mcp_reload: owner-only\n\
+         `mutating` — start/down/cc/meeting/model/clear/deletesession/stop/restart/debug: any authorized user\n\
          `shell/tool-grant` — shell/allowed: {shell_state}\n\
          `credential/system` — allowall/adduser/removeuser/escalation: owner-only"
     )
@@ -229,24 +210,29 @@ mod tests {
         );
     }
 
+    /// Per-channel session-control commands sit in Mutating so trusted
+    /// non-owners (e.g. co-users authorized via `allow_all_users` or
+    /// `allowed_user_ids`) can manage their channel without owner escalation.
+    /// `clear`/`deletesession` reset conversation memory; `stop` cancels the
+    /// channel's in-flight turn; `restart` kills+respawns the channel's tmux
+    /// session; `debug` toggles a process-wide debug flag the operator
+    /// chooses to share with all authorized users.
     #[test]
-    fn stop_restart_and_mcp_reload_are_runtime_control() {
-        assert_eq!(command_risk("!stop", ""), CommandRisk::RuntimeControl);
-        assert_eq!(command_risk("!debug", ""), CommandRisk::RuntimeControl);
-        assert_eq!(command_risk("!restart", ""), CommandRisk::RuntimeControl);
-        assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::RuntimeControl);
-    }
-
-    /// `!clear` and `!deletesession` reset per-channel conversation memory.
-    /// They are intentionally Mutating so trusted non-owners (e.g. a co-user
-    /// added via `allow_all_users` or `allowed_user_ids`) can recover a stuck
-    /// session without owner escalation.
-    #[test]
-    fn clear_and_deletesession_are_mutating() {
-        assert_eq!(command_risk("!clear", ""), CommandRisk::Mutating);
-        assert_eq!(command_risk("!deletesession", ""), CommandRisk::Mutating);
-        assert_eq!(slash_command_risk("/clear"), CommandRisk::Mutating);
-        assert_eq!(slash_command_risk("/deletesession"), CommandRisk::Mutating);
+    fn channel_session_commands_are_mutating() {
+        for cmd in ["!clear", "!deletesession", "!stop", "!restart", "!debug"] {
+            assert_eq!(
+                command_risk(cmd, ""),
+                CommandRisk::Mutating,
+                "{cmd} must be Mutating",
+            );
+        }
+        for cmd in ["/clear", "/deletesession", "/stop", "/restart", "/debug"] {
+            assert_eq!(
+                slash_command_risk(cmd),
+                CommandRisk::Mutating,
+                "{cmd} must be Mutating",
+            );
+        }
     }
 
     #[test]
@@ -306,10 +292,6 @@ mod tests {
             PolicyDecision::DenyNotOwner
         );
         assert_eq!(
-            evaluate_policy(CommandRisk::RuntimeControl, false, true),
-            PolicyDecision::DenyNotOwner
-        );
-        assert_eq!(
             evaluate_policy(CommandRisk::CredentialSystem, false, true),
             PolicyDecision::DenyNotOwner
         );
@@ -328,13 +310,10 @@ mod tests {
     }
 
     #[test]
-    fn owner_runtime_control_allowed_without_explicit_enable() {
-        // Runtime control must stay available for emergency ops even when the
-        // shell opt-in is off.
-        assert_eq!(
-            evaluate_policy(CommandRisk::RuntimeControl, true, false),
-            PolicyDecision::Allow
-        );
+    fn owner_credential_allowed_without_explicit_enable() {
+        // CredentialSystem must stay available for owner ops even when the
+        // shell opt-in is off — rotating user access shouldn't require the
+        // RCE-grade flag.
         assert_eq!(
             evaluate_policy(CommandRisk::CredentialSystem, true, false),
             PolicyDecision::Allow
@@ -402,7 +381,6 @@ mod tests {
         let tiers = [
             CommandRisk::ReadOnly,
             CommandRisk::Mutating,
-            CommandRisk::RuntimeControl,
             CommandRisk::ShellOrToolGrant,
             CommandRisk::CredentialSystem,
         ];
@@ -440,11 +418,7 @@ mod tests {
         // Simulate the production flow: allow_all_users only gates `check_auth`,
         // not the policy. Once a non-owner reaches evaluate_policy, the high-risk
         // tiers must still deny.
-        for &tier in &[
-            CommandRisk::RuntimeControl,
-            CommandRisk::ShellOrToolGrant,
-            CommandRisk::CredentialSystem,
-        ] {
+        for &tier in &[CommandRisk::ShellOrToolGrant, CommandRisk::CredentialSystem] {
             assert_eq!(
                 evaluate_policy(
                     tier, /*is_owner=*/ false, /*high_risk_enabled=*/ true
@@ -460,18 +434,6 @@ mod tests {
                 "tier={tier:?} must deny non-owner when high-risk is disabled",
             );
         }
-    }
-
-    #[test]
-    fn label_strings_are_stable() {
-        // The labels feed help/dashboard surfaces and external docs reference
-        // them; pin the wording so renames break the test instead of silently
-        // changing user-visible output.
-        assert_eq!(CommandRisk::ReadOnly.label(), "read-only");
-        assert_eq!(CommandRisk::Mutating.label(), "mutating");
-        assert_eq!(CommandRisk::RuntimeControl.label(), "runtime-control");
-        assert_eq!(CommandRisk::ShellOrToolGrant.label(), "shell/tool-grant");
-        assert_eq!(CommandRisk::CredentialSystem.label(), "credential/system");
     }
 
     /// Codex review caught that the slash surface was not gated by the policy.
@@ -514,13 +476,17 @@ mod tests {
                 "tier mismatch between {text_cmd} and {slash_cmd}",
             );
         }
-        // /mcp-reload uses a hyphen; the text form is `!mcp_reload`. Both must
-        // map to RuntimeControl.
-        assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::RuntimeControl);
-        assert_eq!(
-            slash_command_risk("/mcp-reload"),
-            CommandRisk::RuntimeControl
-        );
+    }
+
+    /// `!mcp_reload` and `/mcp-reload` were deprecated aliases for `/restart`
+    /// and have been removed (#1190 follow-up). The fallback in
+    /// `command_risk`/`slash_command_risk` for unknown names is `Mutating`,
+    /// so the gate stays consistent — but the dispatcher must reject the
+    /// command name as unknown before the policy ever runs.
+    #[test]
+    fn deleted_mcp_reload_is_no_longer_known_to_policy() {
+        assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/mcp-reload"), CommandRisk::Mutating);
     }
 
     #[test]
@@ -532,25 +498,23 @@ mod tests {
         assert_eq!(slash_command_risk(""), CommandRisk::Mutating);
     }
 
-    /// Codex round 4 caught that `/cc stop` and `!cc stop` route through the
-    /// same cancel path as `/stop` / `!stop`, but the parent commands (`!cc`
-    /// and `/cc`) are classified as Mutating. The dispatch sites for the
-    /// `stop` subcommand explicitly evaluate `CommandRisk::RuntimeControl`
-    /// before reaching the cancel path. Pin the expected policy outcome of
-    /// that runtime-control evaluation so a future refactor that drops the
-    /// guard fails this test.
+    /// `/cc stop` and `!cc stop` route through the same cancel path as
+    /// `/stop` / `!stop`. After #1190 follow-up `/stop` is `Mutating`, so the
+    /// alias must evaluate as `Mutating` too — otherwise authorized non-owners
+    /// could use `!stop` but not `!cc stop`, which would surprise users.
     #[test]
-    fn cc_stop_alias_is_runtime_control_when_evaluated() {
-        // Non-owner with allow_all_users semantically passes upstream auth →
-        // policy must deny. This is what the dispatch sites assert.
+    fn cc_stop_alias_matches_stop_tier() {
+        // Same tier as the canonical `!stop` / `/stop` surface.
+        assert_eq!(command_risk("!stop", ""), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/stop"), CommandRisk::Mutating);
+        // Mutating evaluates to Allow for any caller that already passed
+        // upstream auth — owner or `allow_all_users`/`allowed_user_ids`.
         assert_eq!(
-            evaluate_policy(CommandRisk::RuntimeControl, false, true),
-            PolicyDecision::DenyNotOwner,
+            evaluate_policy(CommandRisk::Mutating, false, false),
+            PolicyDecision::Allow,
         );
-        // Owner is allowed regardless of the high-risk env flag — emergency
-        // ops path stays open.
         assert_eq!(
-            evaluate_policy(CommandRisk::RuntimeControl, true, false),
+            evaluate_policy(CommandRisk::Mutating, true, false),
             PolicyDecision::Allow,
         );
     }

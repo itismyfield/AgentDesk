@@ -1115,15 +1115,13 @@ Any other message is sent to {p}.
                     return Ok(true);
                 }
                 "stop" => {
-                    // Issue #1005: `!cc stop` is a runtime-control alias for
-                    // `!stop` — same cancel path. Apply the same owner-only
-                    // policy we run at the top of `handle_text_command` for
-                    // `!stop` so non-owners on `allow_all_users=true` cannot
-                    // bypass the gate via this alias.
+                    // Issue #1005: `!cc stop` is an alias for `!stop` — same
+                    // cancel path. Mirror `!stop`'s tier (Mutating, post-#1190)
+                    // so the alias policy matches the canonical surface.
                     let is_owner = check_owner(msg.author.id, &data.shared).await;
                     let high_risk_enabled = super::high_risk_enabled_via_env();
                     let alias_decision = super::evaluate_policy(
-                        super::CommandRisk::RuntimeControl,
+                        super::CommandRisk::Mutating,
                         is_owner,
                         high_risk_enabled,
                     );
