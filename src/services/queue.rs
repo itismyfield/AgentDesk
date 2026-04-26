@@ -8,7 +8,9 @@ use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
-use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
+use crate::services::turn_lifecycle::{
+    TurnLifecycleTarget, force_kill_turn, stop_turn_preserving_queue,
+};
 use poise::serenity_prelude::ChannelId;
 
 #[derive(Clone)]
@@ -291,10 +293,24 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
+    /// Cancel an in-flight turn for `channel_id`.
+    ///
+    /// When `force == false` (the default for the public REST surface) the
+    /// active provider session and watcher are *preserved*: the queue gets
+    /// drained but any tool/process subtree under the live turn keeps
+    /// running. This matches what an operator usually means by "remove queue
+    /// item" / "cancel queue" — they are reorganising the channel's mailbox,
+    /// not asking us to SIGKILL the cargo build that is currently running.
+    ///
+    /// When `force == true` we fall back to the historical hard-kill path
+    /// (`force_kill_turn` → `kill_pid_tree` → SIGTERM/SIGKILL on the process
+    /// group). Reserve this for explicit recovery scenarios where the live
+    /// turn has to be torn down (#1196).
     pub async fn cancel_turn(
         &self,
         health_registry: Option<&Arc<HealthRegistry>>,
         channel_id: &str,
+        force: bool,
     ) -> ServiceResult<Value> {
         let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
         let session_info = self.load_cancel_turn_session(channel_id).await?;
@@ -343,17 +359,27 @@ impl QueueService {
             .and_then(|session_key| session_key.split(':').next_back())
             .unwrap_or_default()
             .to_string();
-        let lifecycle = force_kill_turn(
-            health_registry.map(Arc::as_ref),
-            &TurnLifecycleTarget {
-                provider: provider_kind,
-                channel_id: parsed_channel_id,
-                tmux_name: tmux_name.clone(),
-            },
-            "queue-api cancel_turn",
-            "queue_api_cancel_turn",
-        )
-        .await;
+        let target = TurnLifecycleTarget {
+            provider: provider_kind,
+            channel_id: parsed_channel_id,
+            tmux_name: tmux_name.clone(),
+        };
+        let lifecycle = if force {
+            force_kill_turn(
+                health_registry.map(Arc::as_ref),
+                &target,
+                "queue-api cancel_turn (force)",
+                "queue_api_cancel_turn",
+            )
+            .await
+        } else {
+            stop_turn_preserving_queue(
+                health_registry.map(Arc::as_ref),
+                &target,
+                "queue-api cancel_turn (preserve)",
+            )
+            .await
+        };
 
         if let Some(dispatch_id) = dispatch_id.as_ref() {
             if let Some(pool) = self.pg_pool.as_ref() {

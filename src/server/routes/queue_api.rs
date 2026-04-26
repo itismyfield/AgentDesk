@@ -4,7 +4,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -207,15 +207,38 @@ pub async fn cancel_all_dispatches(
 
 // ── POST /api/turns/:channel_id/cancel ──────────────────────────
 
-/// Cancel the active turn in a channel by killing its tmux session.
-/// This is the hard-stop equivalent — the turn will not complete gracefully.
+/// Query parameters for `POST /api/turns/:channel_id/cancel`.
+///
+/// `force=true` requests the historical hard-kill path: the live turn's tmux
+/// session and the entire child PID tree (cargo, claude CLI, …) get SIGKILLed
+/// via `kill_pid_tree`. Reserve for explicit recovery — operators reaching
+/// for "remove queued message" almost never want this (#1196).
+///
+/// Default (`force=false`): preserve the live tmux session and watcher; only
+/// drain the channel mailbox. Tool subprocesses keep running.
+#[derive(Debug, Default, Deserialize)]
+pub struct CancelTurnQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Cancel the active turn in a channel.
+///
+/// Default (`force=false`): preserves the live provider session and watcher;
+/// drains the channel mailbox. The currently running tool subtree is NOT
+/// SIGKILLed — what an operator usually means by "queue 정리".
+///
+/// `force=true`: tear the tmux session down, SIGKILL the PID tree, clear
+/// inflight state. The turn will not complete gracefully; in-flight
+/// `cargo`/`claude` subprocesses get terminated.
 pub async fn cancel_turn(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
+    Query(query): Query<CancelTurnQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match state
         .queue_service()
-        .cancel_turn(state.health_registry.as_ref(), &channel_id)
+        .cancel_turn(state.health_registry.as_ref(), &channel_id, query.force)
         .await
     {
         Ok(response) => (StatusCode::OK, Json(response)),
