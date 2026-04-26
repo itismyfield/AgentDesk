@@ -11,6 +11,8 @@ export const STORAGE_KEYS = {
   homeEditing: "agentdesk.home.editing",
   fsmDraft: "agentdesk.fsm.v2",
   kanbanDrawerLastId: "agentdesk.kanban.drawer.lastId",
+  kanbanScopeOpen: "agentdesk.kanban.scope.open",
+  kanbanAutoQueueOpen: "agentdesk.kanban.autoqueue.open",
   dashboardBottleneckThresholds: "agentdesk:dashboard:bottleneck-thresholds",
   dashboardActiveTab: "agentdesk.dashboard.active-tab",
   settingsPanel: "agentdesk.settings.active-panel",

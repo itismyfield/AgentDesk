@@ -204,6 +204,10 @@ export default function KanbanTab({
   const [closingIssueNumber, setClosingIssueNumber] = useState<number | null>(null);
   const [selectedBacklogIssue, setSelectedBacklogIssue] = useState<GitHubIssue | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [scopeOpen, setScopeOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanScopeOpen, true);
+  const [autoQueueOpen, setAutoQueueOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanAutoQueueOpen, true);
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
+  const advancedFiltersRef = useRef<HTMLDivElement | null>(null);
   const [reviewData, setReviewData] = useState<KanbanReview | null>(null);
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, "accept" | "reject">>({});
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -390,6 +394,18 @@ export default function KanbanTab({
     const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!advancedFiltersOpen) return;
+    const handle = (event: MouseEvent) => {
+      if (!advancedFiltersRef.current) return;
+      if (!advancedFiltersRef.current.contains(event.target as Node)) {
+        setAdvancedFiltersOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handle);
+    return () => window.removeEventListener("mousedown", handle);
+  }, [advancedFiltersOpen]);
 
   useEffect(() => {
     Promise.all([
@@ -700,6 +716,11 @@ export default function KanbanTab({
     signalStatusFilter !== "all",
     showClosed,
   ].filter(Boolean).length;
+  const advancedFilterDirty =
+    deptFilter !== "all" ||
+    cardTypeFilter !== "all" ||
+    signalStatusFilter !== "all" ||
+    showClosed;
   const selectedCardAssigneeLabel = selectedCard?.assignee_agent_id
     ? getAgentLabel(selectedCard.assignee_agent_id)
     : tr("미할당", "Unassigned");
@@ -1235,269 +1256,286 @@ export default function KanbanTab({
           />
         </div>
 
-        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-          <SurfaceSubsection
-            title={tr("Scope", "Scope")}
-            description={tr(
-              "Repo 초점과 담당 범위를 한 화면에서 빠르게 전환합니다.",
-              "Switch repo focus and assignee scope from one place.",
-            )}
+        {/* #1253: Controls toolbar — search + agent filter chips inline,
+            active-filter badge + advanced overflow menu + settings toggle on
+            the right. Replaces the Controls SurfaceSubsection so the kanban
+            scan flow isn't pushed below a 2-column scope/controls grid. */}
+        <div
+          data-testid="kanban-toolbar"
+          className="mt-4 flex flex-col gap-2 lg:flex-row lg:items-center lg:flex-wrap"
+        >
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={tr("제목 / 설명 / 담당자 검색", "Search title / description / assignee")}
+            className="min-w-0 rounded-xl border px-3 py-2 text-sm lg:w-[260px] lg:flex-none"
+            style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+          />
+
+          <div
+            data-testid="kanban-toolbar-agent-chips"
+            className="-mx-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-1 pb-1 lg:pb-0"
           >
-            <div className="-mx-1 overflow-x-auto px-1 pb-1">
-              <div className="flex min-w-max gap-2 sm:min-w-0 sm:flex-wrap">
-                {repoSources.length === 0 ? (
-                  <span
-                    className="rounded-full border border-dashed px-3 py-1.5 text-xs"
-                    style={{ color: "var(--th-text-muted)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}
-                  >
-                    {tr("선택된 backlog repo 없음", "No backlog repo selected")}
-                  </span>
-                ) : (
-                  repoSources.map((source) => (
-                    <SurfaceSegmentButton
-                      key={source.id}
-                      onClick={() => setSelectedRepo(source.repo)}
-                      active={selectedRepo === source.repo}
-                      tone="info"
-                      className="max-w-[180px] truncate"
-                    >
-                      {source.repo.split("/")[1] ?? source.repo}
-                    </SurfaceSegmentButton>
-                  ))
+            <SurfaceSegmentButton
+              onClick={() => setAgentFilter("all")}
+              active={agentFilter === "all"}
+              tone="accent"
+              className="shrink-0"
+            >
+              {tr("전체 에이전트", "All agents")}
+            </SurfaceSegmentButton>
+            {agents.map((agent) => (
+              <SurfaceSegmentButton
+                key={agent.id}
+                onClick={() => setAgentFilter(agent.id)}
+                active={agentFilter === agent.id}
+                tone="accent"
+                className="max-w-[180px] shrink-0 truncate"
+              >
+                {getAgentLabel(agent.id)}
+              </SurfaceSegmentButton>
+            ))}
+          </div>
+
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {stalledCards.length > 0 && (
+              <SurfaceActionButton
+                tone="danger"
+                compact
+                onClick={() => { setStalledPopup(true); setStalledSelected(new Set()); }}
+                className="animate-pulse"
+              >
+                {tr(`정체 ${stalledCards.length}건`, `${stalledCards.length} stalled`)}
+              </SurfaceActionButton>
+            )}
+            {deferredDodCount > 0 && (
+              <SurfaceActionButton tone="warn" compact onClick={() => setDeferredDodPopup(true)}>
+                {tr(`미검증 DoD ${deferredDodCount}건`, `${deferredDodCount} deferred DoD`)}
+              </SurfaceActionButton>
+            )}
+
+            <span
+              data-testid="kanban-toolbar-active-filter-badge"
+              className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs"
+              style={{
+                ...SURFACE_CHIP_STYLE,
+                color: activeFilterCount > 0 ? "var(--th-accent-primary)" : "var(--th-text-secondary)",
+                borderColor: activeFilterCount > 0
+                  ? "color-mix(in srgb, var(--th-accent-primary) 36%, var(--th-border) 64%)"
+                  : SURFACE_CHIP_STYLE.borderColor,
+              }}
+            >
+              <span className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                {tr("활성 필터", "Active")}
+              </span>
+              <span className="font-semibold">{activeFilterCount}</span>
+            </span>
+
+            <div className="relative" ref={advancedFiltersRef}>
+              <SurfaceActionButton
+                data-testid="kanban-toolbar-advanced-toggle"
+                tone={advancedFilterDirty ? "info" : "neutral"}
+                compact
+                onClick={() => setAdvancedFiltersOpen((prev) => !prev)}
+              >
+                {tr("고급 필터", "Advanced")}
+                {advancedFilterDirty && (
+                  <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full" style={{ background: "var(--th-accent-info)" }} />
                 )}
-              </div>
+              </SurfaceActionButton>
+              {advancedFiltersOpen && (
+                <div
+                  data-testid="kanban-toolbar-advanced-menu"
+                  className="absolute right-0 top-full z-30 mt-2 w-72 space-y-2 rounded-2xl border p-3 shadow-xl"
+                  style={SURFACE_PANEL_STYLE}
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <label className="block space-y-1">
+                    <span className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                      {tr("부서", "Department")}
+                    </span>
+                    <select
+                      value={deptFilter}
+                      onChange={(event) => setDeptFilter(event.target.value)}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+                    >
+                      <option value="all">{tr("전체 부서", "All departments")}</option>
+                      {departments.map((department) => (
+                        <option key={department.id} value={department.id}>{localeName(locale, department)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                      {tr("카드 유형", "Card type")}
+                    </span>
+                    <select
+                      value={cardTypeFilter}
+                      onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+                    >
+                      <option value="all">{tr("전체 카드", "All cards")}</option>
+                      <option value="issue">{tr("이슈만", "Issues only")}</option>
+                      <option value="review">{tr("리뷰만", "Reviews only")}</option>
+                    </select>
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                      {tr("대시보드 신호", "Dashboard signal")}
+                    </span>
+                    <select
+                      value={signalStatusFilter}
+                      onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+                    >
+                      <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
+                      <option value="review">{tr("리뷰 대기", "Review queue")}</option>
+                      <option value="blocked">{tr("수동 개입", "Manual intervention")}</option>
+                      <option value="requested">{tr("준비됨", "Ready")}</option>
+                      <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
+                    </select>
+                  </label>
+                  <label
+                    className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
+                    style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showClosed}
+                      onChange={(event) => setShowClosed(event.target.checked)}
+                    />
+                    {tr("닫힌 컬럼 표시", "Show closed columns")}
+                  </label>
+                  {advancedFilterDirty && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeptFilter("all");
+                        setCardTypeFilter("all");
+                        setSignalStatusFilter("all");
+                        setShowClosed(false);
+                      }}
+                      className="w-full rounded-xl border px-3 py-2 text-xs"
+                      style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
+                    >
+                      {tr("고급 필터 모두 해제", "Reset advanced filters")}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
-            {selectedRepo && repoAgentEntries.length > 1 && (
-              <div className="mt-4">
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                  {tr("Agent scope", "Agent scope")}
-                </div>
-                {repoAgentEntries.length <= 4 ? (
-                  <div className="flex flex-wrap gap-2">
-                    <SurfaceSegmentButton
-                      onClick={() => setSelectedAgentId(null)}
-                      active={!selectedAgentId}
-                      tone="accent"
-                    >
-                      {tr(`전체 (${repoCards.length})`, `All (${repoCards.length})`)}
-                    </SurfaceSegmentButton>
-                    {repoAgentEntries.map(([aid, count]) => (
-                      <SurfaceSegmentButton
-                        key={aid}
-                        onClick={() => setSelectedAgentId(aid)}
-                        active={selectedAgentId === aid}
-                        tone="accent"
-                        className="max-w-[180px] truncate"
-                      >
-                        {getAgentLabel(aid)} ({count})
-                      </SurfaceSegmentButton>
-                    ))}
-                  </div>
-                ) : (
-                  <select
-                    value={selectedAgentId ?? ""}
-                    onChange={(event) => setSelectedAgentId(event.target.value || null)}
-                    className="w-full rounded-xl border px-3 py-2 text-sm sm:max-w-[260px]"
-                    style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-                  >
-                    <option value="">{tr(`전체 (${repoCards.length})`, `All (${repoCards.length})`)}</option>
-                    {repoAgentEntries.map(([aid, count]) => (
-                      <option key={aid} value={aid}>
-                        {getAgentLabel(aid)} ({count})
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            )}
+            <SurfaceActionButton
+              tone={settingsOpen ? "info" : "neutral"}
+              compact
+              onClick={() => setSettingsOpen((prev) => !prev)}
+            >
+              {settingsOpen ? tr("설정 접기", "Close settings") : tr("설정 열기", "Open settings")}
+            </SurfaceActionButton>
+          </div>
+        </div>
 
-            {selectedAgentId && agentPipelineStages.length > 0 && (
-              <SurfaceNotice tone="info" className="mt-4" compact>
-                <div className="text-xs leading-5">
-                  {tr("선택 에이전트 pipeline", "Selected agent pipeline")}: {agentPipelineStages.map((stage) => stage.stage_name).join(" / ")}
-                </div>
-              </SurfaceNotice>
-            )}
-          </SurfaceSubsection>
-
-          <SurfaceSubsection
-            title={tr("Controls", "Controls")}
-            description={tr(
-              "검색, 필터, 운영 신호를 이 패널에서 바로 조정합니다.",
-              "Adjust search, filters, and operational signals from this panel.",
-            )}
-            actions={(
+        {signalFilterLabel && (
+          <SurfaceNotice
+            tone="warn"
+            className="mt-3"
+            compact
+            action={(
               <SurfaceActionButton
-                tone={settingsOpen ? "info" : "neutral"}
-                onClick={() => setSettingsOpen((prev) => !prev)}
+                type="button"
+                tone="warn"
+                compact
+                onClick={() => setSignalStatusFilter("all")}
               >
-                {settingsOpen ? tr("설정 접기", "Close settings") : tr("설정 열기", "Open settings")}
+                {tr("해제", "Clear")}
               </SurfaceActionButton>
             )}
           >
-            <div className="flex flex-wrap gap-2">
-              {stalledCards.length > 0 && (
-                <SurfaceActionButton
-                  tone="danger"
-                  onClick={() => { setStalledPopup(true); setStalledSelected(new Set()); }}
-                  className="animate-pulse"
-                >
-                  {tr(`정체 ${stalledCards.length}건`, `${stalledCards.length} stalled`)}
-                </SurfaceActionButton>
-              )}
-              {deferredDodCount > 0 && (
-                <SurfaceActionButton tone="warn" onClick={() => setDeferredDodPopup(true)}>
-                  {tr(`미검증 DoD ${deferredDodCount}건`, `${deferredDodCount} deferred DoD`)}
-                </SurfaceActionButton>
-              )}
-              <SurfaceMetricPill
-                tone={activeFilterCount > 0 ? "accent" : "neutral"}
-                label={tr("활성 필터", "Active filters")}
-                value={activeFilterCount}
-                className="min-w-[140px]"
-              />
+            <div className="text-xs leading-5">
+              {tr("대시보드 포커스", "Dashboard focus")}: {signalFilterLabel}
             </div>
+          </SurfaceNotice>
+        )}
 
-            {signalFilterLabel && (
-              <SurfaceNotice
-                tone="warn"
-                className="mt-4"
-                compact
-                action={(
-                  <SurfaceActionButton
-                    type="button"
-                    tone="warn"
-                    compact
-                    onClick={() => setSignalStatusFilter("all")}
-                  >
-                    {tr("해제", "Clear")}
-                  </SurfaceActionButton>
-                )}
-              >
-                <div className="text-xs leading-5">
-                  {tr("대시보드 포커스", "Dashboard focus")}: {signalFilterLabel}
-                </div>
-              </SurfaceNotice>
-            )}
-
-            <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={tr("제목 / 설명 / 담당자 검색", "Search title / description / assignee")}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              />
-              <select
-                value={agentFilter}
-                onChange={(event) => setAgentFilter(event.target.value)}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("전체 에이전트", "All agents")}</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-                ))}
-              </select>
-              <select
-                value={deptFilter}
-                onChange={(event) => setDeptFilter(event.target.value)}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("전체 부서", "All departments")}</option>
-                {departments.map((department) => (
-                  <option key={department.id} value={department.id}>{localeName(locale, department)}</option>
-                ))}
-              </select>
-              <select
-                value={cardTypeFilter}
-                onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("전체 카드", "All cards")}</option>
-                <option value="issue">{tr("이슈만", "Issues only")}</option>
-                <option value="review">{tr("리뷰만", "Reviews only")}</option>
-              </select>
-              <select
-                value={signalStatusFilter}
-                onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
-                className="rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
-                <option value="review">{tr("리뷰 대기", "Review queue")}</option>
-                <option value="blocked">{tr("수동 개입", "Manual intervention")}</option>
-                <option value="requested">{tr("준비됨", "Ready")}</option>
-                <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
-              </select>
-              <label
-                className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
-              >
-                <input
-                  type="checkbox"
-                  checked={showClosed}
-                  onChange={(event) => setShowClosed(event.target.checked)}
-                />
-                {tr("닫힌 컬럼 표시", "Show closed columns")}
-              </label>
-            </div>
-          </SurfaceSubsection>
-
-          {settingsOpen && (
-            <SurfaceSubsection
-              className="xl:col-span-2"
-              title={tr("Repo Settings", "Repo Settings")}
-              description={tr(
-                "Repo 관리와 연결 설정을 같은 흐름에서 이어서 다룹니다.",
-                "Handle repo management and connection settings in the same flow.",
-              )}
+        {/* #1253: Scope is now a single full-width collapsible. Repo
+            add/remove lives inline so users don't have to open the settings
+            panel just to manage backlog repos. */}
+        <SurfaceSubsection
+          className="mt-3"
+          title={tr("Scope", "Scope")}
+          description={tr(
+            "Repo 초점과 담당 범위, repo 추가/삭제를 한 화면에서 다룹니다.",
+            "Switch repo focus, assignee scope, and add/remove repos from one place.",
+          )}
+          actions={(
+            <SurfaceActionButton
+              data-testid="kanban-scope-toggle"
+              tone="neutral"
+              compact
+              onClick={() => setScopeOpen((prev) => !prev)}
             >
-              {repoSources.length === 0 && (
-                <SurfaceNotice tone="neutral" compact className="mb-4">
-                  <div className="text-xs leading-5">
-                    {tr("먼저 backlog repo를 추가하세요.", "Add a backlog repo first.")}
-                  </div>
-                </SurfaceNotice>
-              )}
-
-              <div className="flex flex-wrap gap-2">
-                {repoSources.map((source) => (
-                  <div
-                    key={source.id}
-                    className="inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
-                    style={{
-                      borderColor: selectedRepo === source.repo
-                        ? "color-mix(in srgb, var(--th-accent-info) 32%, var(--th-border) 68%)"
-                        : SURFACE_CHIP_STYLE.borderColor,
-                      background: selectedRepo === source.repo
-                        ? "color-mix(in srgb, var(--th-badge-sky-bg) 72%, var(--th-card-bg) 28%)"
-                        : SURFACE_CHIP_STYLE.background,
-                    }}
-                  >
-                    <button
-                      onClick={() => setSelectedRepo(source.repo)}
-                      className="max-w-[240px] truncate text-left"
-                      style={{ color: selectedRepo === source.repo ? "var(--th-accent-info)" : "var(--th-text-primary)" }}
+              {scopeOpen ? tr("접기", "Collapse") : tr("펼치기", "Expand")}
+            </SurfaceActionButton>
+          )}
+        >
+          {scopeOpen && (
+            <div data-testid="kanban-scope-body" className="space-y-4">
+              <div className="-mx-1 overflow-x-auto px-1 pb-1">
+                <div className="flex min-w-max gap-2 sm:min-w-0 sm:flex-wrap">
+                  {repoSources.length === 0 ? (
+                    <span
+                      className="rounded-full border border-dashed px-3 py-1.5 text-xs"
+                      style={{ color: "var(--th-text-muted)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}
                     >
-                      {source.repo}
-                    </button>
-                    <button
-                      onClick={() => void handleRemoveRepo(source)}
-                      disabled={repoBusy}
-                      className="text-xs"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {tr("삭제", "Remove")}
-                    </button>
-                  </div>
-                ))}
+                      {tr("선택된 backlog repo 없음", "No backlog repo selected")}
+                    </span>
+                  ) : (
+                    repoSources.map((source) => {
+                      const active = selectedRepo === source.repo;
+                      return (
+                        <span
+                          key={source.id}
+                          className="inline-flex items-center rounded-full border"
+                          style={{
+                            borderColor: active
+                              ? "color-mix(in srgb, var(--th-accent-info) 32%, var(--th-border) 68%)"
+                              : "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                            background: active
+                              ? "color-mix(in srgb, var(--th-badge-sky-bg) 72%, var(--th-card-bg) 28%)"
+                              : SURFACE_CHIP_STYLE.background,
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setSelectedRepo(source.repo)}
+                            className="max-w-[180px] truncate px-3 py-1.5 text-xs"
+                            style={{ color: active ? "var(--th-accent-info)" : "var(--th-text-primary)" }}
+                            title={source.repo}
+                          >
+                            {source.repo.split("/")[1] ?? source.repo}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveRepo(source)}
+                            disabled={repoBusy}
+                            className="px-2 py-1.5 text-xs leading-none disabled:opacity-40"
+                            style={{ color: "var(--th-text-muted)" }}
+                            title={tr(`Repo 삭제: ${source.repo}`, `Remove repo: ${source.repo}`)}
+                            aria-label={tr(`Repo 삭제: ${source.repo}`, `Remove repo: ${source.repo}`)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })
+                  )}
+                </div>
               </div>
 
-              <div className="mt-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <input
                   list="kanban-repo-options"
                   value={repoInput}
@@ -1512,6 +1550,7 @@ export default function KanbanTab({
                   ))}
                 </datalist>
                 <SurfaceActionButton
+                  data-testid="kanban-scope-add-repo"
                   onClick={() => void handleAddRepo()}
                   disabled={repoBusy || !repoInput.trim()}
                   tone="info"
@@ -1521,39 +1560,111 @@ export default function KanbanTab({
                 </SurfaceActionButton>
               </div>
 
-              {selectedRepo && (() => {
-                if (!selectedRepoSource) return null;
-                return (
-                  <label
-                    className="mt-4 flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
-                    style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
-                  >
-                    <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
+              {selectedRepo && repoAgentEntries.length > 1 && (
+                <div>
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("Agent scope", "Agent scope")}
+                  </div>
+                  {repoAgentEntries.length <= 4 ? (
+                    <div className="flex flex-wrap gap-2">
+                      <SurfaceSegmentButton
+                        onClick={() => setSelectedAgentId(null)}
+                        active={!selectedAgentId}
+                        tone="accent"
+                      >
+                        {tr(`전체 (${repoCards.length})`, `All (${repoCards.length})`)}
+                      </SurfaceSegmentButton>
+                      {repoAgentEntries.map(([aid, count]) => (
+                        <SurfaceSegmentButton
+                          key={aid}
+                          onClick={() => setSelectedAgentId(aid)}
+                          active={selectedAgentId === aid}
+                          tone="accent"
+                          className="max-w-[180px] truncate"
+                        >
+                          {getAgentLabel(aid)} ({count})
+                        </SurfaceSegmentButton>
+                      ))}
+                    </div>
+                  ) : (
                     <select
-                      value={selectedRepoSource.default_agent_id ?? ""}
-                      onChange={(event) => {
-                        const value = event.target.value || null;
-                        void api.updateKanbanRepoSource(selectedRepoSource.id, { default_agent_id: value });
-                        setRepoSources((prev) => prev.map((source) => (
-                          source.id === selectedRepoSource.id
-                            ? { ...source, default_agent_id: value }
-                            : source
-                        )));
-                      }}
-                      className="min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs"
+                      value={selectedAgentId ?? ""}
+                      onChange={(event) => setSelectedAgentId(event.target.value || null)}
+                      className="w-full rounded-xl border px-3 py-2 text-sm sm:max-w-[260px]"
                       style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
                     >
-                      <option value="">{tr("없음", "None")}</option>
-                      {agents.map((agent) => (
-                        <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
+                      <option value="">{tr(`전체 (${repoCards.length})`, `All (${repoCards.length})`)}</option>
+                      {repoAgentEntries.map(([aid, count]) => (
+                        <option key={aid} value={aid}>
+                          {getAgentLabel(aid)} ({count})
+                        </option>
                       ))}
                     </select>
-                  </label>
-                );
-              })()}
-            </SurfaceSubsection>
+                  )}
+                </div>
+              )}
+
+              {selectedAgentId && agentPipelineStages.length > 0 && (
+                <SurfaceNotice tone="info" compact>
+                  <div className="text-xs leading-5">
+                    {tr("선택 에이전트 pipeline", "Selected agent pipeline")}: {agentPipelineStages.map((stage) => stage.stage_name).join(" / ")}
+                  </div>
+                </SurfaceNotice>
+              )}
+            </div>
           )}
-        </div>
+        </SurfaceSubsection>
+
+        {settingsOpen && (
+          <SurfaceSubsection
+            className="mt-3"
+            title={tr("Repo Settings", "Repo Settings")}
+            description={tr(
+              "선택된 repo의 기본 담당자처럼 칸반 외부에서 거의 바뀌지 않는 설정만 모았습니다. Repo 추가/삭제는 위 Scope 섹션에서 직접 다룹니다.",
+              "Settings that rarely change at the kanban surface — repo add/remove now lives in the Scope section above.",
+            )}
+          >
+            {repoSources.length === 0 ? (
+              <SurfaceNotice tone="neutral" compact>
+                <div className="text-xs leading-5">
+                  {tr("먼저 Scope에서 backlog repo를 추가하세요.", "Add a backlog repo from the Scope section first.")}
+                </div>
+              </SurfaceNotice>
+            ) : selectedRepoSource ? (
+              <label
+                className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
+                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-secondary)" }}
+              >
+                <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
+                <select
+                  value={selectedRepoSource.default_agent_id ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value || null;
+                    void api.updateKanbanRepoSource(selectedRepoSource.id, { default_agent_id: value });
+                    setRepoSources((prev) => prev.map((source) => (
+                      source.id === selectedRepoSource.id
+                        ? { ...source, default_agent_id: value }
+                        : source
+                    )));
+                  }}
+                  className="min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs"
+                  style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+                >
+                  <option value="">{tr("없음", "None")}</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <SurfaceNotice tone="neutral" compact>
+                <div className="text-xs leading-5">
+                  {tr("Scope에서 repo를 선택하면 기본 담당자를 바꿀 수 있습니다.", "Select a repo in the Scope section to change its default agent.")}
+                </div>
+              </SurfaceNotice>
+            )}
+          </SurfaceSubsection>
+        )}
 
         {actionError && (
           <SurfaceNotice tone="danger" className="mt-4">
@@ -1846,8 +1957,8 @@ export default function KanbanTab({
               </div>
               <div className="mt-1 text-sm" style={{ color: "var(--th-text-primary)" }}>
                 {tr(
-                  `${selectedRepoLabel} backlog와 진행 흐름을 먼저 보고, 세부 큐/파이프라인 도구는 아래 확장 영역에서 이어서 다룹니다.`,
-                  `Review ${selectedRepoLabel} backlog and live flow first, then continue with queue and pipeline tools in the extension area below.`,
+                  `${selectedRepoLabel} backlog와 진행 흐름을 한눈에 봅니다.`,
+                  `Review ${selectedRepoLabel} backlog and live flow at a glance.`,
                 )}
               </div>
             </div>
@@ -1862,6 +1973,53 @@ export default function KanbanTab({
         </SurfaceCard>
       )}
 
+      {/* #1253: AutoQueuePanel was buried in the post-board "Extensions"
+          section, which made next-up dispatch state invisible until users
+          scrolled past the whole board. Promote it as a collapsible card
+          right above the board so the auto-queue stays the first thing
+          ops sees, while keeping the collapsed-state preference in
+          localStorage so power users can still hide it. */}
+      {selectedRepo && (
+        <SurfaceCard
+          data-testid="kanban-autoqueue-card"
+          className="rounded-[24px] p-0"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+          }}
+        >
+          <button
+            type="button"
+            data-testid="kanban-autoqueue-toggle"
+            onClick={() => setAutoQueueOpen((prev) => !prev)}
+            className="flex w-full items-center gap-3 px-4 py-3 text-left"
+            aria-expanded={autoQueueOpen}
+          >
+            <span className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+              {tr("자동 큐", "Auto Queue")}
+            </span>
+            <span className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+              {tr("다음 디스패치 대기열을 보드 바로 위에서 확인합니다.", "Watch the upcoming dispatch queue right above the board.")}
+            </span>
+            <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {autoQueueOpen ? tr("접기 ▲", "Collapse ▲") : tr("펼치기 ▼", "Expand ▼")}
+            </span>
+          </button>
+          {autoQueueOpen && (
+            <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}>
+              <AutoQueuePanel
+                tr={tr}
+                locale={locale}
+                agents={agents}
+                selectedRepo={selectedRepo}
+                selectedAgentId={selectedAgentId}
+              />
+            </div>
+          )}
+        </SurfaceCard>
+      )}
+
       <div className="min-w-0">
         <div className="min-w-0 space-y-4">
           {!selectedRepo ? (
@@ -1873,63 +2031,79 @@ export default function KanbanTab({
             </SurfaceEmptyState>
           ) : (
             <div className="space-y-3">
+              {/* #1253: at the mobile breakpoint we go back to single-column
+                  minimap mode — the pills at the top are the only navigator,
+                  and the board renders just the focused column at full width.
+                  Previously every column rendered side-by-side via horizontal
+                  scroll even on mobile, which forced two-finger panning to
+                  get to anything past "backlog" and broke the at-a-glance
+                  scan the minimap is supposed to provide. */}
               {compactBoard && (
-                <>
-                  <div className="space-y-3">
-                    <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
-                      {mobileColumnSummaries.map(({ column, count }) => (
-                        <button
-                          key={column.status}
-                          type="button"
-                          data-testid={`kanban-mobile-summary-${column.status}`}
-                          onClick={() => focusMobileColumn(column.status, true)}
-                          className="min-w-[7rem] rounded-2xl border px-3 py-2 text-left"
-                          style={{
-                            borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
-                            backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
-                            color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
-                          }}
-                        >
-                          <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "white" : "var(--th-text-muted)" }}>
-                            {tr(column.labelKo, column.labelEn)}
-                          </div>
-                          <div className="mt-1 text-lg font-semibold">{count}</div>
-                        </button>
-                      ))}
-                    </div>
-                    <div className="rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}>
-                      {focusedMobileSummary
-                        ? tr(
-                            `${focusedMobileSummary.column.labelKo} lane으로 바로 이동할 수 있습니다. 보드는 가로 스크롤되고 카드 상세는 시트에서 엽니다.`,
-                            `Jump straight to the ${focusedMobileSummary.column.labelEn} lane. The board scrolls horizontally and card details open in a sheet.`,
-                          )
-                        : tr(
-                            "보드는 가로 스크롤되고 카드 상세는 시트에서 엽니다.",
-                            "The board scrolls horizontally and card details open in a sheet.",
-                          )}
-                    </div>
+                <div className="space-y-3">
+                  <div
+                    data-testid="kanban-mobile-minimap"
+                    className="flex min-w-0 gap-2 overflow-x-auto pb-1"
+                  >
+                    {mobileColumnSummaries.map(({ column, count }) => (
+                      <button
+                        key={column.status}
+                        type="button"
+                        data-testid={`kanban-mobile-summary-${column.status}`}
+                        onClick={() => focusMobileColumn(column.status, false)}
+                        className="min-w-[6.5rem] rounded-2xl border px-3 py-2 text-left"
+                        style={{
+                          borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
+                          backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
+                          color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
+                        }}
+                      >
+                        <div className="text-[11px] font-semibold uppercase" style={{ color: mobileColumnStatus === column.status ? "white" : "var(--th-text-muted)" }}>
+                          {tr(column.labelKo, column.labelEn)}
+                        </div>
+                        <div className="mt-1 text-lg font-semibold">{count}</div>
+                      </button>
+                    ))}
                   </div>
-                </>
+                  <div
+                    className="rounded-xl border px-3 py-2 text-xs"
+                    style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}
+                  >
+                    {focusedMobileSummary
+                      ? tr(
+                          `${focusedMobileSummary.column.labelKo} 컬럼만 표시 중입니다. 다른 lane은 위 미니맵에서 전환하세요.`,
+                          `Showing the ${focusedMobileSummary.column.labelEn} column only. Switch lanes from the minimap above.`,
+                        )
+                      : tr(
+                          "위 미니맵에서 lane을 선택하면 해당 컬럼만 단독으로 표시됩니다.",
+                          "Pick a lane in the minimap above to render that column on its own.",
+                        )}
+                  </div>
+                </div>
               )}
 
-              <div
-                className="pb-2"
-                data-testid="kanban-board-scroll"
-                style={{ overflowX: "auto", overflowY: "visible" }}
-              >
-                <div className="flex items-start gap-4 min-w-max">
-                  {visibleColumns.map((column) => {
-                    const columnCards = cardsByStatus.get(column.status) ?? [];
-                    const backlogCount = column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length;
+              {compactBoard ? (
+                <div
+                  className="pb-2"
+                  data-testid="kanban-board-scroll"
+                  style={{ overflowX: "hidden", overflowY: "visible" }}
+                >
+                  {(() => {
+                    const focusedColumn = visibleColumns.find((column) => column.status === mobileColumnStatus)
+                      ?? visibleColumns[0];
+                    if (!focusedColumn) return null;
+                    const columnCards = cardsByStatus.get(focusedColumn.status) ?? [];
+                    const backlogCount = focusedColumn.status === "backlog"
+                      ? columnCards.length + backlogIssues.length
+                      : columnCards.length;
                     return (
-                      <div key={column.status} id={`kanban-mobile-${column.status}`}>
+                      <div id={`kanban-mobile-${focusedColumn.status}`} className="w-full">
                         <KanbanColumn
-                          column={column as KanbanColumnProps["column"]}
+                          column={focusedColumn as KanbanColumnProps["column"]}
                           columnCards={columnCards}
                           backlogIssues={backlogIssues}
                           backlogCount={backlogCount}
                           tr={tr}
-                          compactBoard={false}
+                          compactBoard
                           initialLoading={initialLoading}
                           loadingIssues={loadingIssues}
                           closingIssueNumber={closingIssueNumber}
@@ -1947,9 +2121,48 @@ export default function KanbanTab({
                         />
                       </div>
                     );
-                  })}
+                  })()}
                 </div>
-              </div>
+              ) : (
+                <div
+                  className="pb-2"
+                  data-testid="kanban-board-scroll"
+                  style={{ overflowX: "auto", overflowY: "visible" }}
+                >
+                  <div className="flex items-start gap-4 min-w-max">
+                    {visibleColumns.map((column) => {
+                      const columnCards = cardsByStatus.get(column.status) ?? [];
+                      const backlogCount = column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length;
+                      return (
+                        <div key={column.status} id={`kanban-mobile-${column.status}`}>
+                          <KanbanColumn
+                            column={column as KanbanColumnProps["column"]}
+                            columnCards={columnCards}
+                            backlogIssues={backlogIssues}
+                            backlogCount={backlogCount}
+                            tr={tr}
+                            compactBoard={false}
+                            initialLoading={initialLoading}
+                            loadingIssues={loadingIssues}
+                            closingIssueNumber={closingIssueNumber}
+                            assigningIssue={assigningIssue}
+                            getAgentLabel={getAgentLabel}
+                            getAgentProvider={getAgentProvider}
+                            resolveAgentFromLabels={resolveAgentFromLabels}
+                            onCardClick={handleCardOpen}
+                            onBacklogIssueClick={handleBacklogIssueOpen}
+                            onCloseIssue={handleCloseIssue}
+                            onDirectAssignIssue={handleDirectAssignIssue}
+                            onOpenAssignModal={handleOpenAssignModal}
+                            onUpdateCardStatus={handleUpdateCardStatus}
+                            onSetActionError={setActionError}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -3056,13 +3269,18 @@ export default function KanbanTab({
         </SurfaceCard>
       )}
 
-      {selectedRepo && (
+      {/* #1253: AutoQueuePanel and PipelineVisualEditor are no longer rendered
+          here. AutoQueuePanel was promoted to a collapsible card right above
+          the board (see "kanban-autoqueue-card") so dispatch state is the
+          first signal users see, and PipelineVisualEditor was moved to the
+          Settings page in #1257. Only "최근 완료" stays below the board. */}
+      {selectedRepo && recentDoneCards.length > 0 && (
         <SurfaceSection
-          eyebrow={tr("Extensions", "Extensions")}
-          title={tr("자동 큐 · 파이프라인 · 최근 완료", "Auto Queue · Pipeline · Recent Completions")}
+          eyebrow={tr("Recent", "Recent")}
+          title={tr("최근 완료", "Recent Completions")}
           description={tr(
-            "시안 밖의 운영 도구는 같은 톤으로 확장하되, 보드 감상 흐름을 방해하지 않도록 뒤쪽으로 배치합니다.",
-            "Extend operating tools in the same tone, but place them after the board so they do not interrupt the primary board flow.",
+            "최근 마무리된 카드를 보드 아래에서 빠르게 훑어봅니다.",
+            "Skim recently finished cards just under the board.",
           )}
           className="rounded-[28px] p-4 sm:p-5"
           style={{
@@ -3072,19 +3290,6 @@ export default function KanbanTab({
           }}
         >
           <div className="space-y-4">
-            <AutoQueuePanel
-              tr={tr}
-              locale={locale}
-              agents={agents}
-              selectedRepo={selectedRepo}
-              selectedAgentId={selectedAgentId}
-            />
-
-            {/* PipelineVisualEditor (FSM editor) was lifted out of the kanban
-                page in #1253; it now lives only in the Settings page (#1257)
-                under the 파이프라인 group, so the kanban surface stays
-                focused on flow state instead of pipeline editing. */}
-
             {recentDoneCards.length > 0 && (() => {
               const PAGE_SIZE = 10;
               const totalPages = Math.ceil(recentDoneCards.length / PAGE_SIZE);

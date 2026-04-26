@@ -1730,10 +1730,15 @@ test.describe("Dashboard smoke tests", () => {
     }
   });
 
-  test("kanban: failed lane exposes trace, audit history, and pipeline hooks", async ({ page }) => {
+  test("kanban: failed lane exposes trace, audit history, and pipeline hooks", async ({ page }, testInfo) => {
     await page.goto("/kanban");
 
     await expect(page.getByTestId("kanban-page")).toBeVisible({ timeout: 15000 });
+    // #1253: on mobile only the focused column renders, so switch to the
+    // failed lane via the minimap before asserting on the column.
+    if (testInfo.project.name === "mobile") {
+      await page.getByTestId("kanban-mobile-summary-failed").click();
+    }
     await expect(page.getByTestId("kanban-column-failed")).toBeVisible();
     await expect(page.getByTestId("kanban-pipeline-hooks")).toBeVisible();
 
@@ -1743,22 +1748,29 @@ test.describe("Dashboard smoke tests", () => {
     await expect(page.getByTestId("kanban-state-history")).toBeVisible();
   });
 
-  test("kanban: mobile keeps horizontal board scroll and opens card details as a sheet", async ({ page }, testInfo) => {
+  test("kanban: mobile shows minimap with single focused column and opens card details as a sheet", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name === "desktop", "Mobile-only test");
 
     await page.goto("/kanban");
 
     await expect(page.getByTestId("kanban-page")).toBeVisible({ timeout: 15000 });
+    // #1253: at the mobile breakpoint we render a minimap of column counts
+    // plus the single focused column at full width — the previous build
+    // kept the desktop horizontal-scroll layout on mobile, which forced
+    // two-finger panning and broke at-a-glance scanning.
+    await expect(page.getByTestId("kanban-mobile-minimap")).toBeVisible();
     await expect(page.getByTestId("kanban-mobile-summary-failed")).toBeVisible();
     await expect
       .poll(() =>
         page
           .getByTestId("kanban-board-scroll")
-          .evaluate((element) => element.scrollWidth > element.clientWidth),
+          .evaluate((element) => element.scrollWidth <= element.clientWidth + 1),
       )
       .toBe(true);
 
     await page.getByTestId("kanban-mobile-summary-failed").click();
+    await expect(page.getByTestId("kanban-column-failed")).toBeVisible();
+
     await page.getByTestId("kanban-card-card-779-1").click();
 
     const sheet = page.getByRole("dialog", { name: /카드 상세|Card details/ });
