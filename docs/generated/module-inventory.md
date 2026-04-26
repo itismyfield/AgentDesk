@@ -344,7 +344,7 @@
 | `services::slo` | `src/services/slo/mod.rs` | 1033 | giant-file |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 450 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 652 |  |
-| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 386 |  |
+| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 320 |  |
