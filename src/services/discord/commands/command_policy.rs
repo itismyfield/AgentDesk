@@ -80,13 +80,14 @@ pub(in crate::services::discord) fn command_risk(cmd: &str, _arg1: &str) -> Comm
         "!help" | "!pwd" | "!health" | "!status" | "!inflight" | "!queue" | "!metrics"
         | "!allowedtools" | "!sessions" | "!receipt" => CommandRisk::ReadOnly,
 
-        // Session-shaping but not runtime-disruptive.
-        "!start" | "!down" | "!cc" | "!meeting" | "!model" | "!fast" => CommandRisk::Mutating,
+        // Session-shaping but not runtime-disruptive. `!clear` and
+        // `!deletesession` reset the per-channel conversation memory but do
+        // not touch the bot runtime; trusted non-owners need them too.
+        "!start" | "!down" | "!cc" | "!meeting" | "!model" | "!fast" | "!clear"
+        | "!deletesession" => CommandRisk::Mutating,
 
-        // Can interrupt live turns or wipe conversation state.
-        "!stop" | "!clear" | "!debug" | "!deletesession" | "!restart" | "!mcp_reload" => {
-            CommandRisk::RuntimeControl
-        }
+        // Can interrupt live turns or restart the bot itself.
+        "!stop" | "!debug" | "!restart" | "!mcp_reload" => CommandRisk::RuntimeControl,
 
         // Shell execution and tool allowlist mutation — equivalent to RCE.
         "!shell" | "!allowed" => CommandRisk::ShellOrToolGrant,
@@ -175,13 +176,12 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
         | "/allowedtools" | "/sessions" | "/receipt" => CommandRisk::ReadOnly,
 
-        // Per-channel session shaping.
-        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" => CommandRisk::Mutating,
+        // Per-channel session shaping (mirrors text-command tiers).
+        "/start" | "/down" | "/cc" | "/meeting" | "/model" | "/fast" | "/clear"
+        | "/deletesession" => CommandRisk::Mutating,
 
-        // Runtime kill switches and conversation wipes.
-        "/stop" | "/clear" | "/debug" | "/deletesession" | "/restart" | "/mcp-reload" => {
-            CommandRisk::RuntimeControl
-        }
+        // Runtime kill switches.
+        "/stop" | "/debug" | "/restart" | "/mcp-reload" => CommandRisk::RuntimeControl,
 
         // RCE-equivalent surface.
         "/shell" | "/allowed" => CommandRisk::ShellOrToolGrant,
@@ -230,11 +230,23 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_clear_are_runtime_control() {
+    fn stop_restart_and_mcp_reload_are_runtime_control() {
         assert_eq!(command_risk("!stop", ""), CommandRisk::RuntimeControl);
-        assert_eq!(command_risk("!clear", ""), CommandRisk::RuntimeControl);
+        assert_eq!(command_risk("!debug", ""), CommandRisk::RuntimeControl);
         assert_eq!(command_risk("!restart", ""), CommandRisk::RuntimeControl);
         assert_eq!(command_risk("!mcp_reload", ""), CommandRisk::RuntimeControl);
+    }
+
+    /// `!clear` and `!deletesession` reset per-channel conversation memory.
+    /// They are intentionally Mutating so trusted non-owners (e.g. a co-user
+    /// added via `allow_all_users` or `allowed_user_ids`) can recover a stuck
+    /// session without owner escalation.
+    #[test]
+    fn clear_and_deletesession_are_mutating() {
+        assert_eq!(command_risk("!clear", ""), CommandRisk::Mutating);
+        assert_eq!(command_risk("!deletesession", ""), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/clear"), CommandRisk::Mutating);
+        assert_eq!(slash_command_risk("/deletesession"), CommandRisk::Mutating);
     }
 
     #[test]
