@@ -1008,9 +1008,9 @@ pub fn create_dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn create_dispatch_with_options(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
+fn create_dispatch_with_options_pg_backed(
+    db: Option<&Db>,
+    pool: &PgPool,
     engine: &PolicyEngine,
     kanban_card_id: &str,
     to_agent_id: &str,
@@ -1023,28 +1023,6 @@ pub fn create_dispatch_with_options(
         sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
         ..options
     };
-    let Some(pool) = pg_pool else {
-        #[cfg(test)]
-        {
-            return create_dispatch_with_options_sqlite_test(
-                db,
-                engine,
-                kanban_card_id,
-                to_agent_id,
-                dispatch_type,
-                title,
-                context,
-                options,
-            );
-        }
-        #[cfg(not(test))]
-        {
-            return Err(anyhow::anyhow!(
-                "Postgres pool required for create_dispatch_with_options"
-            ));
-        }
-    };
-
     let card_id_owned = kanban_card_id.to_string();
     let agent_id_owned = to_agent_id.to_string();
     let dispatch_type_owned = dispatch_type.to_string();
@@ -1112,9 +1090,116 @@ pub fn create_dispatch_with_options(
             })
             .to_string())
     })?;
-    crate::kanban::fire_state_hooks(db, engine, kanban_card_id, &old_status, &kickoff_owned);
+    crate::kanban::fire_state_hooks_with_backends(
+        db,
+        engine,
+        kanban_card_id,
+        &old_status,
+        &kickoff_owned,
+    );
 
     Ok(dispatch)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_dispatch_with_options(
+    db: &Db,
+    pg_pool: Option<&PgPool>,
+    engine: &PolicyEngine,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<serde_json::Value> {
+    let options = DispatchCreateOptions {
+        sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
+        ..options
+    };
+    if let Some(pool) = pg_pool {
+        return create_dispatch_with_options_pg_backed(
+            Some(db),
+            pool,
+            engine,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context,
+            options,
+        );
+    }
+
+    #[cfg(test)]
+    {
+        return create_dispatch_with_options_sqlite_test(
+            db,
+            engine,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context,
+            options,
+        );
+    }
+    #[cfg(not(test))]
+    {
+        Err(anyhow::anyhow!(
+            "Postgres pool required for create_dispatch_with_options"
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_dispatch_pg_only(
+    pg_pool: &PgPool,
+    engine: &PolicyEngine,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    create_dispatch_with_options_pg_only(
+        pg_pool,
+        engine,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        DispatchCreateOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_dispatch_with_options_pg_only(
+    pg_pool: &PgPool,
+    engine: &PolicyEngine,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+    options: DispatchCreateOptions,
+) -> Result<serde_json::Value> {
+    let options = DispatchCreateOptions {
+        sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
+        ..options
+    };
+    create_dispatch_with_options_pg_backed(
+        None,
+        pg_pool,
+        engine,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+        options,
+    )
 }
 
 #[cfg(test)]

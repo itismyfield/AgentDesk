@@ -1150,6 +1150,23 @@ pub fn mark_dispatch_completed_pg_first(
     )
 }
 
+pub fn mark_dispatch_completed_pg_only(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Result<usize> {
+    set_dispatch_status_with_backends(
+        None,
+        Some(pg_pool),
+        dispatch_id,
+        "completed",
+        Some(result),
+        "mark_dispatch_completed",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+}
+
 pub fn set_dispatch_status_pg_first(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -1304,6 +1321,21 @@ pub fn load_dispatch_row_pg_first(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
+    load_dispatch_row_with_backends(Some(db), pg_pool, dispatch_id)
+}
+
+pub fn load_dispatch_row_pg_only(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    load_dispatch_row_with_backends(None, Some(pg_pool), dispatch_id)
+}
+
+pub fn load_dispatch_row_with_backends(
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    dispatch_id: &str,
+) -> Result<Option<serde_json::Value>> {
     if let Some(pool) = pg_pool {
         let dispatch_id = dispatch_id.to_string();
         return block_on_dispatch_pg(pool, move |pool| async move {
@@ -1314,6 +1346,11 @@ pub fn load_dispatch_row_pg_first(
         });
     }
 
+    let Some(db) = db else {
+        return Err(anyhow::anyhow!(
+            "dispatch row backend unavailable for {dispatch_id}"
+        ));
+    };
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;

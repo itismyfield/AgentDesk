@@ -8,6 +8,46 @@ use std::sync::Arc;
 const RUN_STATUS_RESTORING: &str = "restoring";
 
 impl AutoQueueService {
+    pub async fn cancel_run_with_backends(
+        &self,
+        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+        pg_pool: Option<&PgPool>,
+        conn: Option<&libsql_rusqlite::Connection>,
+        run_id: &str,
+    ) -> ServiceResult<Value> {
+        if let Some(pool) = pg_pool {
+            return self.cancel_run_with_pg(health_registry, pool, run_id).await;
+        }
+        let Some(conn) = conn else {
+            return Err(
+                ServiceError::internal("auto-queue cancel backend unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_context("run_id", run_id)
+                    .with_operation("auto_queue.cancel_run_with_backends"),
+            );
+        };
+        self.cancel_run(health_registry, conn, run_id)
+    }
+
+    pub async fn cancel_runs_with_backends(
+        &self,
+        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+        pg_pool: Option<&PgPool>,
+        conn: Option<&libsql_rusqlite::Connection>,
+    ) -> ServiceResult<Value> {
+        if let Some(pool) = pg_pool {
+            return self.cancel_runs_with_pg(health_registry, pool).await;
+        }
+        let Some(conn) = conn else {
+            return Err(
+                ServiceError::internal("auto-queue cancel backend unavailable")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("auto_queue.cancel_runs_with_backends"),
+            );
+        };
+        self.cancel_runs(health_registry, conn)
+    }
+
     pub async fn cancel_run_with_pg(
         &self,
         health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,

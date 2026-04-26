@@ -1600,7 +1600,7 @@ pub fn fire_event_hooks_with_backends(
 /// Use this when callers already handle those concerns separately
 /// (e.g. dispatch creation, route handlers).
 fn resolve_effective_pipeline_for_hooks(
-    db: &Db,
+    db: Option<&Db>,
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
 ) -> Option<crate::pipeline::PipelineConfig> {
@@ -1659,6 +1659,10 @@ fn resolve_effective_pipeline_for_hooks(
         };
     }
 
+    let Some(db) = db else {
+        return None;
+    };
+
     db.lock().ok().map(|conn| {
         let repo_id: Option<String> = conn
             .query_row(
@@ -1681,6 +1685,16 @@ fn resolve_effective_pipeline_for_hooks(
 }
 
 pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
+    fire_state_hooks_with_backends(Some(db), engine, card_id, from, to);
+}
+
+pub fn fire_state_hooks_with_backends(
+    db: Option<&Db>,
+    engine: &PolicyEngine,
+    card_id: &str,
+    from: &str,
+    to: &str,
+) {
     if from == to {
         return;
     }
@@ -1688,7 +1702,7 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
     if let Some(ref pipeline) = effective {
         fire_dynamic_hooks(engine, pipeline, card_id, from, to, None);
     }
-    drain_hook_side_effects(db, engine);
+    drain_hook_side_effects_with_backends(db, engine);
 }
 
 /// Fire only the on_enter hooks for a specific state, without requiring a transition.
@@ -1696,6 +1710,15 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
 /// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
 /// where `fire_state_hooks` would no-op because from == to.
 pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
+    fire_enter_hooks_with_backends(Some(db), engine, card_id, state);
+}
+
+pub fn fire_enter_hooks_with_backends(
+    db: Option<&Db>,
+    engine: &PolicyEngine,
+    card_id: &str,
+    state: &str,
+) {
     let effective = resolve_effective_pipeline_for_hooks(db, engine.pg_pool(), card_id);
     if let Some(ref pipeline) = effective {
         if let Some(bindings) = pipeline.hooks_for_state(state) {
@@ -1710,7 +1733,7 @@ pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &s
             }
         }
     }
-    drain_hook_side_effects(db, engine);
+    drain_hook_side_effects_with_backends(db, engine);
 }
 
 /// Fire hooks for a status transition that already happened in the DB.

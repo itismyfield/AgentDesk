@@ -37,7 +37,7 @@ pub(crate) use dispatch_create::query_dispatch_row_pg;
 pub use dispatch_create::{
     create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
     create_dispatch_core_with_id_and_options, create_dispatch_core_with_options,
-    create_dispatch_with_options,
+    create_dispatch_pg_only, create_dispatch_with_options, create_dispatch_with_options_pg_only,
 };
 #[cfg(test)]
 pub(crate) use dispatch_create::{
@@ -46,7 +46,8 @@ pub(crate) use dispatch_create::{
 #[allow(unused_imports)]
 pub use dispatch_status::{
     complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
-    load_dispatch_row_pg_first, mark_dispatch_completed, mark_dispatch_completed_pg_first,
+    load_dispatch_row_pg_first, load_dispatch_row_pg_only, load_dispatch_row_with_backends,
+    mark_dispatch_completed, mark_dispatch_completed_pg_first, mark_dispatch_completed_pg_only,
     set_dispatch_status_pg_first, set_dispatch_status_with_backends,
 };
 #[allow(unused_imports)]
