@@ -24,6 +24,20 @@ pub fn apply_canary_override(
     save_registry(root, &registry).map_err(|e| e.to_string())
 }
 
+pub fn clear_canary_override(
+    root: &std::path::Path,
+    provider: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let mut registry = load_registry(root)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    if let Some(channels) = registry.providers.get_mut(provider) {
+        channels.agent_overrides.remove(agent_id);
+    }
+    save_registry(root, &registry).map_err(|e| e.to_string())
+}
+
 pub fn promote_registry_candidate(root: &std::path::Path, provider: &str) -> Result<(), String> {
     let mut registry = load_registry(root)
         .map_err(|e| e.to_string())?

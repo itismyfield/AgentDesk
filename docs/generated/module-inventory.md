@@ -4,7 +4,7 @@
 
 - Production Rust modules: `332`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `91`
+- Giant files: `92`
 
 ## Namespace Summary
 
@@ -61,7 +61,7 @@
 | `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7669 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::monitoring` | `src/cli/monitoring.rs` | 141 |  |
-| `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 976 |  |
+| `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1009 | giant-file |
 | `cli::run` | `src/cli/run.rs` | 434 |  |
 | `cli::utils` | `src/cli/utils.rs` | 274 |  |
 | `compat` | `src/compat/mod.rs` | 206 |  |
@@ -339,7 +339,7 @@
 | `services::provider_cli::context` | `src/services/provider_cli/context.rs` | 74 |  |
 | `services::provider_cli::diagnostics` | `src/services/provider_cli/diagnostics.rs` | 180 |  |
 | `services::provider_cli::io` | `src/services/provider_cli/io.rs` | 151 |  |
-| `services::provider_cli::orchestration` | `src/services/provider_cli/orchestration.rs` | 155 |  |
+| `services::provider_cli::orchestration` | `src/services/provider_cli/orchestration.rs` | 169 |  |
 | `services::provider_cli::paths` | `src/services/provider_cli/paths.rs` | 152 |  |
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 303 |  |
 | `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 200 |  |

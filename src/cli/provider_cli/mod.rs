@@ -5,10 +5,13 @@ use crate::services::provider_cli::io::{
     load_migration_state, load_registry, save_migration_state, save_registry, save_smoke_result,
 };
 use crate::services::provider_cli::orchestration::{
-    apply_canary_override, configured_provider_agents, evaluate_provider_session_guard,
-    promote_registry_candidate, rollback_registry_previous, session_guard_evidence,
+    apply_canary_override, clear_canary_override, configured_provider_agents,
+    evaluate_provider_session_guard, promote_registry_candidate, rollback_registry_previous,
+    session_guard_evidence,
 };
-use crate::services::provider_cli::registry::{MigrationState, PROVIDER_UPDATE_STRATEGIES};
+use crate::services::provider_cli::registry::{
+    MigrationState, PROVIDER_UPDATE_STRATEGIES, ProviderCliChannel,
+};
 use crate::services::provider_cli::smoke::run_smoke;
 use crate::services::provider_cli::snapshot::snapshot_current_channel;
 use crate::services::provider_cli::upgrade::{
@@ -543,6 +546,24 @@ fn resolve_canary_agent_id(
     })
 }
 
+fn preserved_previous_channel(
+    current: &ProviderCliChannel,
+    prev_path: &std::path::Path,
+) -> ProviderCliChannel {
+    let path = prev_path.to_string_lossy().to_string();
+    let mut evidence = current.evidence.clone();
+    evidence.insert("preserved_from".to_string(), current.canonical_path.clone());
+    ProviderCliChannel {
+        path: path.clone(),
+        canonical_path: path,
+        version: current.version.clone(),
+        version_output: current.version_output.clone(),
+        source: "previous_preserved".to_string(),
+        checked_at: chrono::Utc::now(),
+        evidence,
+    }
+}
+
 /// Full migration orchestration: runs through the state machine up to
 /// `AwaitingOperatorPromote` (or `ProviderAgentsMigrated` when `auto_promote=true`).
 fn cmd_run(
@@ -580,6 +601,8 @@ fn cmd_run(
     eprintln!("[2/7] Smoke check on current binary passed");
 
     // Step 3: preserve previous + upgrade (unless skip_upgrade or candidate_path provided).
+    let mut registry_current = current.clone();
+    let mut registry_previous = current.clone();
     let candidate = if let Some(path) = candidate_path {
         advance_to(
             &mut state,
@@ -619,6 +642,9 @@ fn cmd_run(
             result.pre_version, result.post_version
         );
         advance_to(&mut state, MigrationState::UpgradeSucceeded, None)?;
+        let preserved = preserved_previous_channel(&current, &prev_path);
+        registry_current = preserved.clone();
+        registry_previous = preserved;
         result.candidate_channel
     };
 
@@ -631,8 +657,8 @@ fn cmd_run(
         .unwrap_or_default();
     {
         let channels = registry.providers.entry(provider.to_string()).or_default();
-        channels.previous = Some(current.clone());
-        channels.current = Some(current.clone());
+        channels.previous = Some(registry_previous);
+        channels.current = Some(registry_current);
         channels.candidate = Some(candidate.clone());
     }
     save_registry(&root, &registry).map_err(|e| e.to_string())?;
@@ -683,7 +709,14 @@ fn cmd_run(
             MigrationState::Failed,
             Some(canary_guard.evidence_json()),
         )?;
+        let clear_result = clear_canary_override(&root, provider, &selected_agent_id);
         save_migration_state(&root, &state).map_err(|e| e.to_string())?;
+        if let Err(error) = clear_result {
+            return Err(format!(
+                "safe session guard blocked canary recreate: {}; additionally failed to clear canary override: {error}",
+                canary_guard.blockers.join("; ")
+            ));
+        }
         return Err(format!(
             "safe session guard blocked canary recreate: {}",
             canary_guard.blockers.join("; ")
