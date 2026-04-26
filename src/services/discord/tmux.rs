@@ -434,6 +434,29 @@ fn lifecycle_reason_code_for_tmux_exit(reason: &str) -> &'static str {
     }
 }
 
+fn tmux_death_lifecycle_notification_reason(reason: Option<&str>) -> Option<&str> {
+    let reason = reason?.trim();
+    if reason.is_empty() {
+        return None;
+    }
+
+    let reason = reason
+        .strip_prefix('[')
+        .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
+        .unwrap_or(reason)
+        .trim();
+    if reason.is_empty() || reason.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+
+    let lower = reason.to_ascii_lowercase();
+    if tmux_exit_reason_is_normal_completion(reason) || lower.contains("force-kill") {
+        return None;
+    }
+
+    Some(reason)
+}
+
 fn tmux_death_is_normal_completion(reason: Option<&str>, _diagnostic: Option<&str>) -> bool {
     reason.is_some_and(tmux_exit_reason_is_normal_completion)
 }
@@ -2159,14 +2182,8 @@ async fn handle_tmux_watcher_observed_death(
         tmux_death_is_normal_completion(reason_short.as_deref(), diagnostic.as_deref());
     // Notify: tmux session termination with reason
     if !is_normal_completion {
-        let reason_short_text = reason_short.as_deref().unwrap_or("unknown");
-        let is_force_kill = reason_short_text.contains("force-kill");
-        if !is_force_kill {
-            // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
-            let reason_text = reason_short_text
-                .strip_prefix('[')
-                .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
-                .unwrap_or(reason_short_text);
+        if let Some(reason_text) = tmux_death_lifecycle_notification_reason(reason_short.as_deref())
+        {
             let reason_truncated: String = reason_text.chars().take(100).collect();
             let session_key =
                 super::adk_session::build_adk_session_key(shared, channel_id, watcher_provider)
@@ -2185,6 +2202,10 @@ async fn handle_tmux_watcher_observed_death(
                 Some(session_key.as_str()),
                 lifecycle_reason_code_for_tmux_exit(reason_text),
                 &format!("🔴 세션 종료: {reason_truncated}"),
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] 👁 tmux session {tmux_session_name} ended without an actionable lifecycle reason, skipping lifecycle notification"
             );
         }
     } else {
@@ -7530,9 +7551,10 @@ mod tests {
         should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
-        tmux_death_is_normal_completion, trigger_missing_inflight_reattach,
-        wait_for_reacquired_turn_bridge_inflight_state, watcher_ready_for_input_turn_completed,
-        watcher_should_yield_to_inflight_state, watcher_stream_seed,
+        tmux_death_is_normal_completion, tmux_death_lifecycle_notification_reason,
+        trigger_missing_inflight_reattach, wait_for_reacquired_turn_bridge_inflight_state,
+        watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
+        watcher_stream_seed,
     };
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
@@ -7582,6 +7604,34 @@ mod tests {
             None,
             Some("recent_output=completed_result_present")
         ));
+    }
+
+    #[test]
+    fn tmux_death_lifecycle_notification_skips_missing_or_unknown_reason() {
+        assert_eq!(tmux_death_lifecycle_notification_reason(None), None);
+        assert_eq!(tmux_death_lifecycle_notification_reason(Some("")), None);
+        assert_eq!(
+            tmux_death_lifecycle_notification_reason(Some("unknown")),
+            None
+        );
+        assert_eq!(
+            tmux_death_lifecycle_notification_reason(Some("[2026-04-26 22:26:38] unknown")),
+            None
+        );
+    }
+
+    #[test]
+    fn tmux_death_lifecycle_notification_keeps_actionable_cleanup_reason() {
+        assert_eq!(
+            tmux_death_lifecycle_notification_reason(Some(
+                "[2026-04-26 22:26:38] idle 60분 초과 — 자동 정리"
+            )),
+            Some("idle 60분 초과 — 자동 정리")
+        );
+        assert_eq!(
+            tmux_death_lifecycle_notification_reason(Some("explicit cleanup via force-kill API")),
+            None
+        );
     }
 
     #[test]
