@@ -387,7 +387,7 @@ async fn dashmap_zombie_cleanup_preserves_live_watcher() {
 /// - turn attach receives a requested thread/rebind channel but pauses the
 ///   existing owner slot returned by production `claim_or_reuse_watcher`,
 /// - tmux death is the normal stop authority,
-/// - killed=false stop/cancel preserves watcher ownership,
+/// - killed=false stop/cancel preserves watcher ownership and inflight state,
 /// - force-kill removes the watcher and raises the cancel flag.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
@@ -513,6 +513,10 @@ async fn watcher_lifetime_follows_tmux_across_rotation_exit_cancel_and_rebind() 
     assert!(
         !stop_result.tmux_killed,
         "killed=false stop/cancel must preserve the tmux session"
+    );
+    assert!(
+        !stop_result.inflight_cleared,
+        "killed=false stop/cancel must preserve persistent inflight for handoff"
     );
     assert!(
         stop_harness.has_watcher(stop_channel_id),
