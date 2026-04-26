@@ -137,7 +137,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3172 | giant-file |
+| `server` | `src/server/mod.rs` | 3248 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 182 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
@@ -225,7 +225,7 @@
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1047 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 147 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 126 |  |
-| `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
+| `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 102 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 165 |  |
@@ -237,23 +237,23 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2643 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 619 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 3929 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 4090 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 586 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1016 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 645 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 356 |  |
-| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3517 | giant-file |
+| `services::discord::meeting_orchestrator` | `src/services/discord/meeting_orchestrator.rs` | 3777 | giant-file |
 | `services::discord::meeting_state_machine` | `src/services/discord/meeting_state_machine.rs` | 302 |  |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1224 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 424 |  |
-| `services::discord::monitoring_status` | `src/services/discord/monitoring_status.rs` | 304 |  |
+| `services::discord::monitoring_status` | `src/services/discord/monitoring_status.rs` | 550 |  |
 | `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 938 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
-| `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 39 |  |
+| `services::discord::outbound` | `src/services/discord/outbound/mod.rs` | 40 |  |
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 474 |  |
-| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 949 |  |
+| `services::discord::outbound::legacy` | `src/services/discord/outbound/legacy.rs` | 963 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 629 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 155 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 266 |  |
