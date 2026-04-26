@@ -149,84 +149,23 @@ pub async fn update_decisions(
         }
     }
 
-    if let Some(pg_pool) = state.pg_pool_ref() {
-        return match update_decisions_pg(pg_pool, &id, &body.decisions).await {
-            Ok(decisions) => (
-                StatusCode::OK,
-                Json(json!({"review": {"dispatch_id": id, "decisions": decisions}})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
-        };
+    let Some(pg_pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+
+    match update_decisions_pg(pg_pool, &id, &body.decisions).await {
+        Ok(decisions) => (
+            StatusCode::OK,
+            Json(json!({"review": {"dispatch_id": id, "decisions": decisions}})),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ),
     }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    // The id here refers to a dispatch_id that groups review decisions
-    // Update each decision by item_id within this dispatch
-    for item in &body.decisions {
-        let affected = conn.execute(
-            "UPDATE review_decisions SET decision = ?1, decided_at = datetime('now') WHERE dispatch_id = ?2 AND id = ?3",
-            libsql_rusqlite::params![item.decision, id, item.item_id],
-        ).unwrap_or(0);
-
-        // If no row was updated, try inserting (upsert pattern)
-        if affected == 0 {
-            conn.execute(
-                "INSERT OR REPLACE INTO review_decisions (id, dispatch_id, decision, decided_at) VALUES (?1, ?2, ?3, datetime('now'))",
-                libsql_rusqlite::params![item.item_id, id, item.decision],
-            ).ok();
-        }
-    }
-
-    // Return all decisions for this dispatch
-    let mut stmt = match conn.prepare(
-        "SELECT id, kanban_card_id, dispatch_id, item_index, decision, decided_at
-         FROM review_decisions
-         WHERE dispatch_id = ?1
-         ORDER BY id",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("prepare: {e}")})),
-            );
-        }
-    };
-
-    let rows = stmt
-        .query_map([&id], |row| {
-            Ok(json!({
-                "id": row.get::<_, i64>(0)?,
-                "kanban_card_id": row.get::<_, Option<String>>(1)?,
-                "dispatch_id": row.get::<_, Option<String>>(2)?,
-                "item_index": row.get::<_, Option<i64>>(3)?,
-                "decision": row.get::<_, Option<String>>(4)?,
-                "decided_at": row.get::<_, Option<String>>(5)?,
-            }))
-        })
-        .ok();
-
-    let decisions: Vec<serde_json::Value> = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    };
-
-    (
-        StatusCode::OK,
-        Json(json!({"review": {"dispatch_id": id, "decisions": decisions}})),
-    )
 }
 
 /// POST /api/kanban-reviews/:id/trigger-rework
@@ -234,96 +173,39 @@ pub async fn trigger_rework(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pg_pool) = state.pg_pool_ref() {
-        let card_id = match resolve_review_card_id_pg(pg_pool, &id).await {
-            Ok(card_id) => card_id,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
-
-        let card_id = match card_id {
-            Some(card_id) => card_id,
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "review or dispatch not found"})),
-                );
-            }
-        };
-
-        return match crate::kanban::transition_status_with_opts_pg(
-            Some(state.sqlite_db()),
-            pg_pool,
-            &state.engine,
-            &card_id,
-            "in_progress",
-            "trigger-rework",
-            crate::engine::transition::ForceIntent::OperatorOverride,
-        )
-        .await
-        {
-            Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            ),
-        };
-    }
-
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
+    let Some(pg_pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
     };
 
-    // Find the kanban_card_id from review_decisions for this dispatch
-    let card_id: Option<String> = conn
-        .query_row(
-            "SELECT kanban_card_id FROM review_decisions WHERE dispatch_id = ?1 LIMIT 1",
-            [&id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    // Also try looking up from task_dispatches if no review_decision found
-    let card_id = card_id.or_else(|| {
-        conn.query_row(
-            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [&id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
-
-    let card_id = match card_id {
-        Some(cid) => cid,
-        None => {
+    let card_id = match resolve_review_card_id_pg(pg_pool, &id).await {
+        Ok(Some(card_id)) => card_id,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "review or dispatch not found"})),
             );
         }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
     };
 
-    drop(conn);
-    match crate::kanban::transition_status_with_opts(
-        state.sqlite_db(),
+    match crate::kanban::transition_status_with_opts_pg_only(
+        pg_pool,
         &state.engine,
         &card_id,
         "in_progress",
         "trigger-rework",
         crate::engine::transition::ForceIntent::OperatorOverride,
-    ) {
+    )
+    .await
+    {
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -351,11 +233,10 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
-    fn test_state_with_pg(db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> AppState {
+    fn test_state_with_pg(_db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> AppState {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         AppState {
-            db,
             pg_pool: Some(pg_pool),
             engine,
             config: Arc::new(crate::config::Config::default()),

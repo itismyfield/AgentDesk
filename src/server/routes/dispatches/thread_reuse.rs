@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::db::agents::{
-    resolve_agent_counter_model_channel_on_conn, resolve_agent_primary_channel_on_conn,
-};
+use crate::db::agents::{resolve_agent_counter_model_channel_pg, resolve_agent_primary_channel_pg};
 use crate::server::routes::AppState;
 
 use super::parse_channel_id;
@@ -1252,52 +1250,87 @@ pub async fn link_dispatch_thread(
     State(state): State<AppState>,
     Json(body): Json<LinkDispatchThreadBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+
+    let card_id = match sqlx::query_scalar::<_, String>(
+        "SELECT kanban_card_id FROM task_dispatches WHERE id = $1",
+    )
+    .bind(&body.dispatch_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(card_id) => card_id,
+        Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                Json(json!({"error": format!("{error}")})),
             );
         }
     };
 
-    // Look up card_id from the dispatch, then set channel-thread mapping
-    let card_id: Option<String> = conn
-        .query_row(
-            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [&body.dispatch_id],
-            |row| row.get(0),
-        )
-        .ok();
-
     match card_id {
         Some(cid) => {
-            conn.execute(
-                "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![body.thread_id, body.dispatch_id],
+            if let Err(error) = sqlx::query(
+                "UPDATE task_dispatches
+                 SET thread_id = $1,
+                     updated_at = NOW()
+                 WHERE id = $2",
             )
-            .ok();
-            if let Some(ref ch_id) = body.channel_id {
+            .bind(&body.thread_id)
+            .bind(&body.dispatch_id)
+            .execute(pool)
+            .await
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+
+            let save_result = if let Some(ref ch_id) = body.channel_id {
                 if let Ok(ch_num) = ch_id.parse::<u64>() {
-                    set_thread_for_channel(&conn, &cid, ch_num, &body.thread_id);
+                    set_thread_for_channel_pg(pool, &cid, ch_num, &body.thread_id).await
                 } else {
-                    // Fallback: legacy active_thread_id
-                    conn.execute(
-                        "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                        libsql_rusqlite::params![body.thread_id, cid],
+                    sqlx::query(
+                        "UPDATE kanban_cards
+                         SET active_thread_id = $1,
+                             updated_at = NOW()
+                         WHERE id = $2",
                     )
-                    .ok();
+                    .bind(&body.thread_id)
+                    .bind(&cid)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("{error}"))
                 }
             } else {
-                // No channel_id provided — legacy path
-                conn.execute(
-                    "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                    libsql_rusqlite::params![body.thread_id, cid],
+                sqlx::query(
+                    "UPDATE kanban_cards
+                     SET active_thread_id = $1,
+                         updated_at = NOW()
+                     WHERE id = $2",
                 )
-                .ok();
+                .bind(&body.thread_id)
+                .bind(&cid)
+                .execute(pool)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error}"))
+            };
+
+            match save_result {
+                Ok(()) => (StatusCode::OK, Json(json!({"ok": true, "card_id": cid}))),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                ),
             }
-            (StatusCode::OK, Json(json!({"ok": true, "card_id": cid})))
         }
         None => (
             StatusCode::NOT_FOUND,
@@ -1322,84 +1355,64 @@ pub async fn get_card_thread(
         }
     };
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+
+    let result = match sqlx::query(
+        "SELECT kc.id AS card_id,
+                kc.title AS card_title,
+                kc.github_issue_url AS github_issue_url,
+                kc.github_issue_number::BIGINT AS github_issue_number,
+                kc.description AS issue_body,
+                kc.deferred_dod_json::text AS deferred_dod_json,
+                kc.active_thread_id AS legacy_thread_id,
+                td.dispatch_type AS dispatch_type,
+                td.title AS dispatch_title,
+                td.to_agent_id AS dispatch_agent_id,
+                td.context AS dispatch_context
+         FROM task_dispatches td
+         JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+         WHERE td.id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                Json(json!({"error": format!("{error}")})),
             );
         }
     };
 
-    let result: Option<(
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-        Option<String>,
-    )> = conn
-        .query_row(
-            "SELECT kc.id AS card_id, \
-                    kc.title AS card_title, \
-                    kc.github_issue_url AS github_issue_url, \
-                    kc.github_issue_number AS github_issue_number, \
-                    kc.description AS issue_body, \
-                    kc.deferred_dod_json AS deferred_dod_json, \
-                    kc.active_thread_id AS legacy_thread_id, \
-                    td.dispatch_type AS dispatch_type, \
-                    td.title AS dispatch_title, \
-                    td.to_agent_id AS dispatch_agent_id, \
-                    td.context AS dispatch_context \
-             FROM task_dispatches td \
-             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
-             WHERE td.id = ?1",
-            [dispatch_id],
-            |row| {
-                Ok((
-                    row.get("card_id")?,
-                    row.get("card_title")?,
-                    row.get("github_issue_url")?,
-                    row.get("github_issue_number")?,
-                    row.get("issue_body")?,
-                    row.get("deferred_dod_json")?,
-                    row.get("legacy_thread_id")?,
-                    row.get("dispatch_type")?,
-                    row.get("dispatch_title")?,
-                    row.get("dispatch_agent_id")?,
-                    row.get("dispatch_context")?,
-                ))
-            },
-        )
-        .ok();
-
     match result {
-        Some((
-            card_id,
-            card_title,
-            github_issue_url,
-            github_issue_number,
-            issue_body,
-            deferred_dod_json,
-            _legacy_thread_id,
-            dispatch_type,
-            dispatch_title,
-            to_agent_id,
-            dispatch_context,
-        )) => {
-            let primary_channel = resolve_agent_primary_channel_on_conn(&conn, &to_agent_id)
+        Some(row) => {
+            let card_id: String = row.try_get("card_id").unwrap_or_default();
+            let card_title: String = row.try_get("card_title").unwrap_or_default();
+            let github_issue_url: Option<String> = row.try_get("github_issue_url").ok().flatten();
+            let github_issue_number: Option<i64> =
+                row.try_get("github_issue_number").ok().flatten();
+            let issue_body: Option<String> = row.try_get("issue_body").ok().flatten();
+            let deferred_dod_json: Option<String> = row.try_get("deferred_dod_json").ok().flatten();
+            let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
+            let dispatch_title: Option<String> = row.try_get("dispatch_title").ok().flatten();
+            let to_agent_id: String = row.try_get("dispatch_agent_id").unwrap_or_default();
+            let dispatch_context: Option<String> = row.try_get("dispatch_context").ok().flatten();
+
+            let primary_channel = resolve_agent_primary_channel_pg(pool, &to_agent_id)
+                .await
                 .ok()
                 .flatten();
-            let counter_model_channel =
-                resolve_agent_counter_model_channel_on_conn(&conn, &to_agent_id)
-                    .ok()
-                    .flatten();
+            let counter_model_channel = resolve_agent_counter_model_channel_pg(pool, &to_agent_id)
+                .await
+                .ok()
+                .flatten();
             // Determine target channel for this dispatch type
             let use_alt = super::use_counter_model_channel(dispatch_type.as_deref());
             let target_channel = if use_alt {
@@ -1408,9 +1421,19 @@ pub async fn get_card_thread(
                 primary_channel.as_deref()
             };
             // Look up channel-specific thread
-            let thread_id = target_channel
-                .and_then(|ch| parse_channel_id(ch))
-                .and_then(|ch_num| get_thread_for_channel(&conn, &card_id, ch_num));
+            let thread_id = if let Some(ch_num) = target_channel.and_then(parse_channel_id) {
+                match get_thread_for_channel_pg(pool, &card_id, ch_num).await {
+                    Ok(thread_id) => thread_id,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             let deferred_dod = deferred_dod_json
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
@@ -1461,40 +1484,42 @@ pub async fn get_pending_dispatch_for_thread(
         }
     };
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+
+    let dispatch_id = match sqlx::query_scalar::<_, String>(
+        "SELECT td.id
+         FROM task_dispatches td
+         JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+         WHERE td.status IN ('pending', 'dispatched')
+           AND (
+             td.thread_id = $1
+             OR kc.active_thread_id = $1
+             OR EXISTS(
+               SELECT 1
+               FROM jsonb_each_text(COALESCE(kc.channel_thread_map, '{}'::jsonb)) AS entry(key, value)
+               WHERE entry.value = $1
+             )
+           )
+         ORDER BY td.created_at DESC
+         LIMIT 1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(dispatch_id) => dispatch_id,
+        Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
+                Json(json!({"error": format!("{error}")})),
             );
         }
     };
-
-    // Find the latest pending/dispatched dispatch whose card is linked to this
-    // thread via thread_id (direct match), active_thread_id, or
-    // channel_thread_map JSON values. This must cover review/review-decision
-    // as well as work dispatches because reused threads often omit a fresh
-    // DISPATCH: prefix.
-    //
-    // #355: Use td.thread_id as primary match, and json_each for
-    // channel_thread_map to avoid matching JSON keys (parent channel IDs).
-    // INSTR was matching parent channel IDs, causing thread dispatch
-    // reminders to leak into parent channel turns.
-    let dispatch_id: Option<String> = conn
-        .query_row(
-            "SELECT td.id FROM task_dispatches td \
-             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
-             WHERE td.status IN ('pending', 'dispatched') \
-             AND (td.thread_id = ?1 \
-                  OR kc.active_thread_id = ?1 \
-                  OR EXISTS(SELECT 1 FROM json_each(kc.channel_thread_map) \
-                            WHERE json_each.value = ?1)) \
-             ORDER BY td.created_at DESC LIMIT 1",
-            [thread_id],
-            |row| row.get(0),
-        )
-        .ok();
 
     match dispatch_id {
         Some(id) => (StatusCode::OK, Json(json!({"dispatch_id": id}))),
