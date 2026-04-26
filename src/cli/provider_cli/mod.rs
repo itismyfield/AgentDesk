@@ -19,6 +19,8 @@ use crate::services::provider_cli::upgrade::{
 };
 use crate::services::provider_cli::{build_retention_set, cleanup_dry_run};
 
+const SUPPORTED_PROVIDERS: &[&str] = &["codex", "claude", "gemini", "qwen"];
+
 #[derive(Args)]
 pub struct ProviderCliArgs {
     #[command(subcommand)]
@@ -135,33 +137,67 @@ fn print_json(value: &serde_json::Value) {
     );
 }
 
+fn normalize_provider_arg(provider: &str) -> Result<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if SUPPORTED_PROVIDERS.contains(&provider.as_str()) {
+        Ok(provider)
+    } else {
+        Err(format!("unsupported provider: {provider}"))
+    }
+}
+
 pub fn cmd_provider_cli(args: ProviderCliArgs) -> Result<(), String> {
     match args.action {
-        ProviderCliAction::Status { provider } => cmd_status(provider.as_deref()),
-        ProviderCliAction::Plan { provider } => cmd_plan(&provider),
+        ProviderCliAction::Status { provider } => {
+            let provider = provider
+                .as_deref()
+                .map(normalize_provider_arg)
+                .transpose()?;
+            cmd_status(provider.as_deref())
+        }
+        ProviderCliAction::Plan { provider } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_plan(&provider)
+        }
         ProviderCliAction::Upgrade {
             provider,
             skip_previous_preservation,
             candidate_path,
-        } => cmd_upgrade(
-            &provider,
-            skip_previous_preservation,
-            candidate_path.as_deref(),
-        ),
-        ProviderCliAction::Smoke { provider, channel } => cmd_smoke(&provider, &channel),
+        } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_upgrade(
+                &provider,
+                skip_previous_preservation,
+                candidate_path.as_deref(),
+            )
+        }
+        ProviderCliAction::Smoke { provider, channel } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_smoke(&provider, &channel)
+        }
         ProviderCliAction::Canary {
             provider,
             canary_agent,
-        } => cmd_canary(&provider, canary_agent.as_deref()),
+        } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_canary(&provider, canary_agent.as_deref())
+        }
         ProviderCliAction::Promote {
             provider,
             evidence,
             force_recreate_active,
-        } => cmd_promote(&provider, evidence.as_deref(), force_recreate_active),
+        } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_promote(&provider, evidence.as_deref(), force_recreate_active)
+        }
         ProviderCliAction::Rollback { provider, evidence } => {
+            let provider = normalize_provider_arg(&provider)?;
             cmd_rollback(&provider, evidence.as_deref())
         }
-        ProviderCliAction::Cleanup { provider, dry_run } => cmd_cleanup(&provider, dry_run),
+        ProviderCliAction::Cleanup { provider, dry_run } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_cleanup(&provider, dry_run)
+        }
         ProviderCliAction::Run {
             provider,
             candidate_path,
@@ -169,19 +205,25 @@ pub fn cmd_provider_cli(args: ProviderCliArgs) -> Result<(), String> {
             skip_upgrade,
             auto_promote,
             force_recreate_active,
-        } => cmd_run(
-            &provider,
-            candidate_path.as_deref(),
-            canary_agent.as_deref(),
-            skip_upgrade,
-            auto_promote,
-            force_recreate_active,
-        ),
+        } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_run(
+                &provider,
+                candidate_path.as_deref(),
+                canary_agent.as_deref(),
+                skip_upgrade,
+                auto_promote,
+                force_recreate_active,
+            )
+        }
         ProviderCliAction::Resume {
             provider,
             auto_promote,
             force_recreate_active,
-        } => cmd_resume(&provider, auto_promote, force_recreate_active),
+        } => {
+            let provider = normalize_provider_arg(&provider)?;
+            cmd_resume(&provider, auto_promote, force_recreate_active)
+        }
     }
 }
 
@@ -191,11 +233,10 @@ fn cmd_status(provider: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("load registry: {e}"))?
         .unwrap_or_default();
 
-    let providers: &[&str] = &["codex", "claude", "gemini", "qwen"];
     let filter: Vec<&str> = if let Some(p) = provider {
         vec![p]
     } else {
-        providers.to_vec()
+        SUPPORTED_PROVIDERS.to_vec()
     };
 
     let mut output = Vec::new();
@@ -905,6 +946,17 @@ mod tests {
     fn plan_errors_for_unknown_provider() {
         let result = cmd_plan("__unknown_provider__");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_entrypoint_rejects_unsupported_provider_before_io() {
+        let result = cmd_provider_cli(ProviderCliArgs {
+            action: ProviderCliAction::Plan {
+                provider: "../codex".to_string(),
+            },
+        });
+
+        assert_eq!(result, Err("unsupported provider: ../codex".to_string()));
     }
 
     #[test]

@@ -155,15 +155,43 @@ pub async fn patch_provider_cli(
                 MigrationState::ProviderSessionsSafeEnding,
                 Some(session_guard_evidence(body.evidence.as_deref(), &guard)),
             )
+            .map_err(|e| {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("invalid transition: {e}"),
+                )
+            })
             .and_then(|_| {
                 advance_to(
                     &mut migration,
                     MigrationState::ProviderSessionsRecreated,
                     Some(guard.evidence_json()),
                 )
+                .map_err(|e| {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("invalid transition: {e}"),
+                    )
+                })
             })
-            .and_then(|_| advance_to(&mut migration, MigrationState::ProviderAgentsMigrated, None))
-            .and_then(|_| promote_registry_candidate(&root, &provider))
+            .and_then(|_| {
+                advance_to(&mut migration, MigrationState::ProviderAgentsMigrated, None).map_err(
+                    |e| {
+                        (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("invalid transition: {e}"),
+                        )
+                    },
+                )
+            })
+            .and_then(|_| {
+                promote_registry_candidate(&root, &provider).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("update provider registry: {e}"),
+                    )
+                })
+            })
         } else {
             let _ = transition(
                 &mut migration,
@@ -171,9 +199,12 @@ pub async fn patch_provider_cli(
                 Some(guard.evidence_json()),
             );
             let _ = save_migration_state(&root, &migration);
-            Err(format!(
-                "safe session guard blocked promotion: {}",
-                guard.blockers.join("; ")
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "safe session guard blocked promotion: {}",
+                    guard.blockers.join("; ")
+                ),
             ))
         }
     } else {
@@ -182,21 +213,29 @@ pub async fn patch_provider_cli(
             MigrationState::RolledBack,
             body.evidence.clone(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("invalid transition: {e}"),
+            )
+        })
         .and_then(|_| {
             if matches!(action, ProviderCliApiAction::RollbackToPrevious) {
                 rollback_registry_previous(&root, &provider)
             } else {
                 clear_provider_channel_overrides(&root, &provider)
             }
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("update provider registry: {e}"),
+                )
+            })
         })
     };
 
-    if let Err(e) = transition_result {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": format!("invalid transition: {e}")})),
-        );
+    if let Err((status, message)) = transition_result {
+        return (status, Json(json!({"error": message})));
     }
 
     if let Err(e) = save_migration_state(&root, &migration) {
@@ -476,5 +515,55 @@ mod tests {
             .unwrap();
         let channels = registry.providers.get("codex").unwrap();
         assert!(channels.agent_overrides.is_empty());
+    }
+
+    #[tokio::test]
+    async fn patch_rollback_registry_io_failure_returns_5xx() {
+        let dir = tempfile::tempdir().unwrap();
+        let _runtime_root = RuntimeRootOverrideGuard::set(dir.path());
+
+        use crate::services::provider_cli::registry::{
+            MigrationState, ProviderCliChannel, ProviderCliMigrationState,
+        };
+        use chrono::Utc;
+        let current = ProviderCliChannel {
+            path: "/tmp/current-codex".to_string(),
+            canonical_path: "/tmp/current-codex".to_string(),
+            version: "current".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: Utc::now(),
+            evidence: Default::default(),
+        };
+        let ms = ProviderCliMigrationState {
+            schema_version: 1,
+            provider: "codex".to_string(),
+            state: MigrationState::CanaryActive,
+            selected_agent_id: Some("codex-agent".to_string()),
+            current_channel: Some(current),
+            candidate_channel: None,
+            rollback_target: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            history: vec![],
+        };
+        crate::services::provider_cli::io::save_migration_state(dir.path(), &ms).unwrap();
+        std::fs::write(dir.path().join("config"), b"not a directory").unwrap();
+
+        let state = make_state();
+        let body = ProviderCliActionRequest {
+            action: "rollback".to_string(),
+            evidence: Some("operator rollback".to_string()),
+            force_recreate_active: false,
+        };
+        let (status, Json(value)) =
+            patch_provider_cli(State(state), Path("codex".to_string()), Json(body)).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("update provider registry"))
+        );
     }
 }
