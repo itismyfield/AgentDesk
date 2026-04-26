@@ -1453,6 +1453,36 @@ async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> 
     shared.mailbox(channel_id).has_active_turn().await
 }
 
+fn cleanup_retry_inflight_blocks_idle_kickoff(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> bool {
+    let Some(state) = inflight::load_inflight_state(provider, channel_id.get()) else {
+        return false;
+    };
+    if state.current_msg_id == 0 {
+        return false;
+    }
+
+    shared.placeholder_cleanup.terminal_cleanup_retry_pending(
+        provider,
+        channel_id,
+        MessageId::new(state.current_msg_id),
+    )
+}
+
+fn idle_queue_snapshot_has_kickable_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> bool {
+    snapshot.cancel_token.is_none()
+        && !snapshot.intervention_queue.is_empty()
+        && !cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+}
+
 async fn mailbox_try_start_turn(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -1641,6 +1671,20 @@ async fn mailbox_take_next_soft_intervention(
     result
         .intervention
         .map(|intervention| (intervention, result.has_more))
+}
+
+async fn idle_queue_take_next_soft_if_ready(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<(Intervention, bool)> {
+    if mailbox_has_active_turn(shared, channel_id).await
+        || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
+    {
+        return None;
+    }
+
+    mailbox_take_next_soft_intervention(shared, provider, channel_id).await
 }
 
 async fn mailbox_requeue_intervention_front(
@@ -2169,10 +2213,10 @@ pub(super) async fn kickoff_idle_queues(
     let channels_to_kick: Vec<ChannelId> = mailbox_snapshots
         .into_iter()
         .filter_map(|(channel_id, snapshot)| {
-            if snapshot.cancel_token.is_some() || snapshot.intervention_queue.is_empty() {
-                None
-            } else {
+            if idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, &snapshot) {
                 Some(channel_id)
+            } else {
+                None
             }
         })
         .collect();
@@ -2201,12 +2245,8 @@ pub(super) async fn kickoff_idle_queues(
             continue;
         }
 
-        if mailbox_has_active_turn(shared, channel_id).await {
-            continue;
-        }
-
         let Some((intervention, has_more)) =
-            mailbox_take_next_soft_intervention(shared, provider, channel_id).await
+            idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await
         else {
             continue;
         };
@@ -2848,6 +2888,9 @@ mod tests {
         mark_session_disconnected_for_idle_cleanup, queued_message_ids, recovery_known_message_ids,
         should_phase2_recover_message,
     };
+    use crate::services::discord::placeholder_cleanup::{
+        PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
+    };
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
     };
@@ -2976,6 +3019,120 @@ mod tests {
         assert!(existing.contains(&90));
         assert!(existing.contains(&100));
         assert!(!existing.contains(&200));
+    }
+
+    #[tokio::test]
+    async fn idle_queue_kickoff_blocks_until_cleanup_retry_resolved() {
+        let _lock = super::runtime_store::lock_test_env();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp_root = tempfile::tempdir().expect("temp root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp_root.path()) };
+
+        let shared = super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1486333430516947101);
+        let owner_id = UserId::new(1487795113240559801);
+        let queued_msg_id = MessageId::new(1487795113240559802);
+        let placeholder_msg_id = MessageId::new(1487799916758827803);
+        let channel_name = format!("adk-cdx-t{}", channel_id.get());
+        let tmux_name = provider.build_tmux_session_name(&channel_name);
+
+        let enqueue = super::mailbox_enqueue_intervention(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            Intervention {
+                author_id: owner_id,
+                message_id: queued_msg_id,
+                source_message_ids: vec![queued_msg_id],
+                text: "queued turn".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+        )
+        .await;
+        assert!(enqueue.enqueued);
+
+        let inflight_state = super::InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some(channel_name),
+            owner_id.get(),
+            MessageId::new(1487795113240559800).get(),
+            placeholder_msg_id.get(),
+            "cleanup retry turn".to_string(),
+            None,
+            Some(tmux_name.clone()),
+            Some("/tmp/agentdesk-idle-cleanup-retry-output.jsonl".to_string()),
+            Some("/tmp/agentdesk-idle-cleanup-retry-input.fifo".to_string()),
+            0,
+        );
+        super::save_inflight_state(&inflight_state).expect("save cleanup retry inflight");
+        shared.placeholder_cleanup.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id: placeholder_msg_id,
+            tmux_session_name: Some(tmux_name),
+            operation: PlaceholderCleanupOperation::EditTerminal,
+            outcome: PlaceholderCleanupOutcome::failed("HTTP 500 edit failed"),
+            source: "idle_queue_kickoff_test",
+        });
+
+        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        assert!(!super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &snapshot
+        ));
+        assert!(super::cleanup_retry_inflight_blocks_idle_kickoff(
+            shared.as_ref(),
+            &provider,
+            channel_id
+        ));
+        assert!(
+            super::idle_queue_take_next_soft_if_ready(shared.as_ref(), &provider, channel_id)
+                .await
+                .is_none()
+        );
+
+        shared.placeholder_cleanup.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id: placeholder_msg_id,
+            tmux_session_name: None,
+            operation: PlaceholderCleanupOperation::EditTerminal,
+            outcome: PlaceholderCleanupOutcome::Succeeded,
+            source: "idle_queue_kickoff_test",
+        });
+
+        assert!(!super::cleanup_retry_inflight_blocks_idle_kickoff(
+            shared.as_ref(),
+            &provider,
+            channel_id
+        ));
+        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        assert!(super::idle_queue_snapshot_has_kickable_backlog(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            &snapshot
+        ));
+        let (started, has_more) =
+            super::idle_queue_take_next_soft_if_ready(shared.as_ref(), &provider, channel_id)
+                .await
+                .expect("resolved cleanup should allow queued turn kickoff");
+        assert_eq!(started.message_id, queued_msg_id);
+        assert!(!has_more);
+
+        super::clear_inflight_state(&provider, channel_id.get());
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
     }
 
     #[test]

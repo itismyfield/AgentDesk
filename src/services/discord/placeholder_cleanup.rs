@@ -134,6 +134,30 @@ impl PlaceholderCleanupRegistry {
         })
     }
 
+    pub(super) fn terminal_cleanup_retry_pending(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> bool {
+        self.prune_expired();
+        let key = PlaceholderCleanupKey {
+            provider: provider.as_str().to_string(),
+            channel_id,
+            message_id,
+        };
+        self.records.get(&key).is_some_and(|stored| {
+            matches!(
+                stored.record.operation,
+                PlaceholderCleanupOperation::DeleteTerminal
+                    | PlaceholderCleanupOperation::EditTerminal
+            ) && matches!(
+                stored.record.outcome,
+                PlaceholderCleanupOutcome::Failed { .. }
+            )
+        })
+    }
+
     fn prune_expired(&self) {
         let now = Instant::now();
         self.records
@@ -277,6 +301,58 @@ mod tests {
                 .operation,
             PlaceholderCleanupOperation::DeleteTerminal
         );
+    }
+
+    #[test]
+    fn failed_terminal_cleanup_marks_retry_pending_until_committed_or_expired() {
+        let registry = PlaceholderCleanupRegistry::default();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(10);
+        let message_id = MessageId::new(20);
+
+        registry.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id,
+            tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+            operation: PlaceholderCleanupOperation::EditTerminal,
+            outcome: PlaceholderCleanupOutcome::failed("HTTP 500 edit failed"),
+            source: "test",
+        });
+        assert!(registry.terminal_cleanup_retry_pending(&provider, channel_id, message_id));
+
+        registry.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id,
+            tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+            operation: PlaceholderCleanupOperation::EditTerminal,
+            outcome: PlaceholderCleanupOutcome::Succeeded,
+            source: "test",
+        });
+        assert!(!registry.terminal_cleanup_retry_pending(&provider, channel_id, message_id));
+
+        let expired_message_id = MessageId::new(21);
+        registry.record(PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id: expired_message_id,
+            tmux_session_name: Some("AgentDesk-codex-test".to_string()),
+            operation: PlaceholderCleanupOperation::DeleteTerminal,
+            outcome: PlaceholderCleanupOutcome::failed("HTTP 500 delete failed"),
+            source: "test",
+        });
+        registry.force_age_for_test(
+            &provider,
+            channel_id,
+            expired_message_id,
+            PLACEHOLDER_CLEANUP_TTL + Duration::from_secs(1),
+        );
+        assert!(!registry.terminal_cleanup_retry_pending(
+            &provider,
+            channel_id,
+            expired_message_id
+        ));
     }
 
     #[test]
