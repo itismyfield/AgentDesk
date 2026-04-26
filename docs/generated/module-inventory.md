@@ -4,7 +4,7 @@
 
 - Production Rust modules: `317`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `86`
+- Giant files: `87`
 
 ## Namespace Summary
 
@@ -46,7 +46,7 @@
 | `cli::args` | `src/cli/args.rs` | 871 |  |
 | `cli::client` | `src/cli/client.rs` | 1496 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1518 | giant-file |
-| `cli::direct` | `src/cli/direct.rs` | 1497 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1504 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
@@ -75,7 +75,7 @@
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 378 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1421 | giant-file |
-| `db::schema` | `src/db/schema.rs` | 27 |  |
+| `db::schema` | `src/db/schema.rs` | 3195 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 1245 | giant-file |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
@@ -125,7 +125,7 @@
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1581 | giant-file |
 | `kanban` | `src/kanban.rs` | 3817 | giant-file |
-| `launch` | `src/launch.rs` | 39 |  |
+| `launch` | `src/launch.rs` | 59 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 65 |  |
 | `pipeline` | `src/pipeline.rs` | 2144 | giant-file |
@@ -137,7 +137,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3269 | giant-file |
+| `server` | `src/server/mod.rs` | 3270 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 182 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
@@ -321,7 +321,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 3405 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 3647 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
