@@ -7,7 +7,6 @@ use serde::Serialize;
 use serenity::{ChannelId, CreateMessage};
 use sqlx::PgPool;
 
-use super::DISCORD_MSG_LIMIT;
 use super::formatting::{build_long_message_attachment, split_message};
 use super::{
     SharedData, clear_inflight_state, mailbox_cancel_active_turn, mailbox_clear_channel,
@@ -2822,6 +2821,7 @@ fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::DISCORD_MSG_LIMIT;
     use poise::serenity_prelude::{MessageId, UserId};
 
     fn test_db() -> Db {
