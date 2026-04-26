@@ -129,17 +129,40 @@ pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// `errno` value for ENOSPC on both Linux and macOS.
+const ENOSPC: i32 = 28;
+
+/// Wrap an `io::Error` into a `String` while flagging ENOSPC out-of-band.
+///
+/// `runtime_store::atomic_write` is called from many sites that just want a
+/// `Result<(), String>` so we keep the existing error shape, but we also
+/// stamp `disk_monitor::record_enospc_now` whenever the underlying error is
+/// "no space left on device". The monitoring tick then shows a banner even
+/// though the per-call site stays oblivious (#1203 follow-up).
+fn classify_io_error(prefix: &str, error: std::io::Error) -> String {
+    if error.raw_os_error() == Some(ENOSPC) {
+        crate::services::disk_monitor::record_enospc_now();
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!("  [{ts}] 💾 ENOSPC at runtime_store::atomic_write ({prefix}): {error}");
+        format!("ENOSPC: {prefix}: {error}")
+    } else {
+        format!("{prefix}: {error}")
+    }
+}
+
 pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent).map_err(|e| classify_io_error("create_dir_all", e))?;
     }
     let unique = uuid::Uuid::new_v4().simple();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(".{}.{}.tmp", file_name, unique));
-    let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    file.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    let mut file = fs::File::create(&tmp).map_err(|e| classify_io_error("create_tmp", e))?;
+    file.write_all(data.as_bytes())
+        .map_err(|e| classify_io_error("write_all", e))?;
+    file.sync_all()
+        .map_err(|e| classify_io_error("sync_all", e))?;
+    fs::rename(&tmp, path).map_err(|e| classify_io_error("rename", e))
 }
 
 #[cfg(test)]

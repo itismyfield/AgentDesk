@@ -57,6 +57,14 @@ impl MonitoringStore {
         }
     }
 
+    /// Snapshot of every channel that currently has at least one monitoring
+    /// entry. Used by `disk_monitor::run_disk_monitor_tick_once` to fan a
+    /// disk-space banner out to all already-active channels (idle channels
+    /// stay quiet and rely on `/api/health` for the same signal).
+    pub fn tracked_channel_ids(&self) -> Vec<u64> {
+        self.entries.keys().copied().collect()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn sweep_expired(&mut self, ttl: Duration) -> Vec<u64> {
         self.sweep_expired_inner(ttl).emptied_channels
