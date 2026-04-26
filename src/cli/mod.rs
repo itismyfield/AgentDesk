@@ -7,6 +7,7 @@ pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod migrate;
 pub(crate) mod monitoring;
+pub(crate) mod provider_cli;
 pub(crate) mod run;
 pub(crate) mod utils;
 

@@ -16,6 +16,9 @@ pub struct ProviderExecutionContext {
     /// Session key linking provider session to this execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_key: Option<String>,
+    /// Actual tmux session name used for the provider process, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_session: Option<String>,
     /// Human-readable Discord channel name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
@@ -44,6 +47,7 @@ mod tests {
             agent_id: Some("codex-agent".to_string()),
             channel_id: Some("123456789".to_string()),
             session_key: Some("sess-abc".to_string()),
+            tmux_session: Some("agentdesk-codex-agent-control".to_string()),
             channel_name: Some("agent-control".to_string()),
             execution_mode: Some("discord_turn".to_string()),
         };

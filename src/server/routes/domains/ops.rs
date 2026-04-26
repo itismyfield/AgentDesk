@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, health_api,
-    hooks, log_deprecated_alias, maintenance, messages, pipeline, protected_api_domain, queue_api,
-    skills_api, termination_events,
+    hooks, log_deprecated_alias, maintenance, messages, pipeline, protected_api_domain,
+    provider_cli_api, queue_api, skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
@@ -233,6 +233,14 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/docs/{group}/{category}",
                 get(docs::api_docs_group_category),
+            )
+            .route(
+                "/provider-cli",
+                get(provider_cli_api::get_provider_cli_status),
+            )
+            .route(
+                "/provider-cli/{provider}",
+                patch(provider_cli_api::patch_provider_cli),
             ),
         state,
     )

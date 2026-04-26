@@ -96,6 +96,8 @@ pub struct ProviderCliActionRequest {
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
+    #[serde(default)]
+    pub force_recreate_active: bool,
 }
 
 /// Build a `DiagnosticsSnapshot` from available in-memory data.
@@ -145,6 +147,7 @@ mod tests {
         let req = ProviderCliActionRequest {
             action: "confirm_promote".to_string(),
             evidence: Some("operator approved".to_string()),
+            force_recreate_active: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let decoded: ProviderCliActionRequest = serde_json::from_str(&json).unwrap();

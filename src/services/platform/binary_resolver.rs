@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -17,6 +18,11 @@ const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
 const SHELL_ENV_DELIMITER: &str = "__AGENTDESK_SHELL_ENV__";
+
+thread_local! {
+    static ACTIVE_PROVIDER_CONTEXTS: RefCell<Vec<crate::services::provider_cli::ProviderExecutionContext>> =
+        const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinaryResolution {
@@ -47,6 +53,9 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
 }
 
 pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
+    if let Some(ctx) = active_provider_context(provider) {
+        return resolve_provider_binary_for_context(&ctx);
+    }
     resolve_provider_binary_legacy(provider)
 }
 
@@ -159,6 +168,44 @@ fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
             }
         }
     }
+}
+
+struct ProviderContextScope;
+
+impl ProviderContextScope {
+    fn push(ctx: crate::services::provider_cli::ProviderExecutionContext) -> Self {
+        ACTIVE_PROVIDER_CONTEXTS.with(|contexts| contexts.borrow_mut().push(ctx));
+        Self
+    }
+}
+
+impl Drop for ProviderContextScope {
+    fn drop(&mut self) {
+        ACTIVE_PROVIDER_CONTEXTS.with(|contexts| {
+            contexts.borrow_mut().pop();
+        });
+    }
+}
+
+pub fn with_provider_execution_context<T>(
+    ctx: crate::services::provider_cli::ProviderExecutionContext,
+    run: impl FnOnce() -> T,
+) -> T {
+    let _scope = ProviderContextScope::push(ctx);
+    run()
+}
+
+fn active_provider_context(
+    provider: &str,
+) -> Option<crate::services::provider_cli::ProviderExecutionContext> {
+    ACTIVE_PROVIDER_CONTEXTS.with(|contexts| {
+        contexts
+            .borrow()
+            .iter()
+            .rev()
+            .find(|ctx| ctx.provider.eq_ignore_ascii_case(provider))
+            .cloned()
+    })
 }
 
 pub fn resolve_login_shell_path() -> Option<String> {
@@ -710,7 +757,7 @@ pub fn resolve_provider_binary_for_context(
 
                 if let Some(channel) = selected_channel {
                     if let Some(resolution) =
-                        registry_channel_resolution(&provider, channel_name, channel)
+                        registry_channel_resolution(ctx, &provider, channel_name, channel)
                     {
                         return resolution;
                     }
@@ -719,7 +766,7 @@ pub fn resolve_provider_binary_for_context(
                 if channel_name != "current" {
                     if let Some(channel) = channels.current.as_ref() {
                         if let Some(resolution) =
-                            registry_channel_resolution(&provider, "current", channel)
+                            registry_channel_resolution(ctx, &provider, "current", channel)
                         {
                             return resolution;
                         }
@@ -733,24 +780,64 @@ pub fn resolve_provider_binary_for_context(
 }
 
 fn registry_channel_resolution(
-    provider: &str,
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+    requested_binary: &str,
     channel_name: &str,
     channel: &crate::services::provider_cli::ProviderCliChannel,
 ) -> Option<BinaryResolution> {
     let cwd = current_dir_fallback();
-    let resolved_path = resolve_candidate_path(Path::new(&channel.path), &cwd).ok()?;
-    let canonical_path = std::fs::canonicalize(&resolved_path).ok();
-    let exec_path = build_exec_path(&resolved_path, canonical_path.as_deref());
+    let expanded = expand_user_path(OsStr::new(&channel.path));
+    let resolved_path = resolve_candidate_path(&expanded, &cwd).ok()?;
+    let resolution = finalize_resolution(
+        requested_binary.to_string(),
+        resolved_path,
+        format!("registry:{channel_name}"),
+        vec![format!("registry:{channel_name}=found:{}", channel.path)],
+    );
+    record_context_launch_artifact(ctx, &resolution, channel_name, &channel.version);
+    Some(resolution)
+}
 
-    Some(BinaryResolution {
-        requested_binary: provider.to_string(),
-        resolved_path: Some(resolved_path.to_string_lossy().to_string()),
-        canonical_path: canonical_path.map(|path| path.to_string_lossy().to_string()),
-        source: Some(format!("registry:{channel_name}")),
-        attempts: vec![],
-        failure_kind: None,
-        exec_path,
-    })
+fn record_context_launch_artifact(
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+    resolution: &BinaryResolution,
+    channel_name: &str,
+    cli_version: &str,
+) {
+    let Some(session_key) = ctx
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(root) = crate::config::runtime_root() else {
+        return;
+    };
+    let Some(cli_path) = resolution.resolved_path.clone() else {
+        return;
+    };
+    let canonical_path = resolution
+        .canonical_path
+        .clone()
+        .unwrap_or_else(|| cli_path.clone());
+
+    let artifact = crate::services::provider_cli::LaunchArtifact {
+        provider: resolution.requested_binary.clone(),
+        agent_id: ctx.agent_id.clone(),
+        channel_id: ctx.channel_id.clone(),
+        session_key: Some(session_key.to_string()),
+        channel: channel_name.to_string(),
+        cli_path,
+        canonical_path,
+        cli_version: cli_version.to_string(),
+        process_id: None,
+        tmux_session: ctx.tmux_session.clone(),
+        launched_at: chrono::Utc::now(),
+    };
+
+    let _ = crate::services::provider_cli::io::save_launch_artifact(&root, &artifact);
 }
 
 #[cfg(test)]
@@ -795,6 +882,21 @@ mod tests {
         std::fs::set_permissions(path, perms).unwrap();
     }
 
+    fn registry_channel(path: &Path) -> crate::services::provider_cli::ProviderCliChannel {
+        crate::services::provider_cli::ProviderCliChannel {
+            path: path.to_string_lossy().to_string(),
+            canonical_path: std::fs::canonicalize(path)
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            version: "test-version".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: chrono::Utc::now(),
+            evidence: Default::default(),
+        }
+    }
+
     #[test]
     fn resolve_binary_finds_known_tool() {
         let _guard = env_guard();
@@ -802,6 +904,68 @@ mod tests {
         assert!(resolve_binary("ls").is_some());
         #[cfg(windows)]
         assert!(resolve_binary("cmd.exe").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_context_prefers_agent_override_over_discord_channel_name() {
+        let _guard = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let _root_guard = RuntimeRootOverrideGuard::set(root.path());
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let current = bin_dir.join("codex-current");
+        let candidate = bin_dir.join("codex-candidate");
+        write_executable(&current);
+        write_executable(&candidate);
+
+        let mut registry = crate::services::provider_cli::ProviderCliRegistry::default();
+        let mut channels = crate::services::provider_cli::ProviderChannels {
+            current: Some(registry_channel(&current)),
+            candidate: Some(registry_channel(&candidate)),
+            ..Default::default()
+        };
+        channels
+            .agent_overrides
+            .insert("codex-agent".to_string(), "candidate".to_string());
+        registry.providers.insert("codex".to_string(), channels);
+        crate::services::provider_cli::io::save_registry(root.path(), &registry).unwrap();
+
+        let ctx = crate::services::provider_cli::ProviderExecutionContext {
+            provider: "codex".to_string(),
+            agent_id: Some("codex-agent".to_string()),
+            channel_id: Some("123".to_string()),
+            session_key: Some("session-1".to_string()),
+            tmux_session: Some("agentdesk-codex-agent-sandbox".to_string()),
+            channel_name: Some("agent-sandbox".to_string()),
+            execution_mode: Some("discord_turn".to_string()),
+        };
+
+        let resolution = with_provider_execution_context(ctx, || resolve_provider_binary("codex"));
+
+        assert_eq!(resolution.source.as_deref(), Some("registry:candidate"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(candidate.to_string_lossy().as_ref())
+        );
+        let artifact =
+            crate::services::provider_cli::io::load_launch_artifact(root.path(), "session-1")
+                .unwrap()
+                .unwrap();
+        assert_eq!(artifact.provider, "codex");
+        assert_eq!(artifact.agent_id.as_deref(), Some("codex-agent"));
+        assert_eq!(artifact.channel, "candidate");
+        assert_eq!(
+            artifact.tmux_session.as_deref(),
+            Some("agentdesk-codex-agent-sandbox")
+        );
+        assert_eq!(
+            artifact.canonical_path,
+            std::fs::canonicalize(&candidate)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
     }
 
     #[test]

@@ -362,6 +362,8 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: MigrateAction,
     },
+    /// Provider CLI safe migration management
+    ProviderCli(super::provider_cli::ProviderCliArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

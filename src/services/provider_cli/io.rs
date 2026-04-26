@@ -88,6 +88,20 @@ pub fn load_launch_artifact(
     read_json(&paths::launch_artifact_path(root, session_key))
 }
 
+pub fn load_launch_artifacts(root: &Path, provider: &str) -> Vec<LaunchArtifact> {
+    let dir = paths::launch_artifacts_dir(root);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .filter_map(|content| serde_json::from_str::<LaunchArtifact>(&content).ok())
+        .filter(|artifact| artifact.provider == provider)
+        .collect()
+}
+
 // ── Smoke result ──────────────────────────────────────────────────────────────
 
 pub fn save_smoke_result(root: &Path, result: &SmokeResult) -> Result<(), IoError> {
