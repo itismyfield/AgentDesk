@@ -378,6 +378,165 @@ async fn dashmap_zombie_cleanup_preserves_live_watcher() {
 }
 
 // ============================================================================
+// #1173: watcher-to-tmux lifecycle integration scenario
+// ============================================================================
+
+/// Issue #1173 pins the watcher lifetime contract at the flow boundary:
+///
+/// - start/attach creates one watcher for a tmux session,
+/// - same-session attach/rebind reuses the owner instead of spawning a second
+///   relayer,
+/// - turn rotation mutates the owner slot (pause/epoch/delivered/resume),
+/// - tmux death is the normal stop authority,
+/// - operator cancel/force-kill removes the slot and raises the cancel flag,
+/// - outbound dedupe remains the last guard against duplicate relay attempts.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn watcher_lifetime_follows_tmux_across_rotation_exit_cancel_and_rebind() {
+    let harness = TestHarness::new();
+    let watchers = flow::new_watcher_registry();
+    let provider = ProviderKind::Codex;
+    let channel = ChannelId::new(SCENARIO_CHANNEL_ID + 1173);
+    let rebind_channel = ChannelId::new(SCENARIO_CHANNEL_ID + 1174);
+    let tmux_name = "AgentDesk-codex-adk-cdx-1173-life";
+
+    let (handle, inspector) = flow::new_test_watcher_handle(tmux_name);
+    assert!(
+        flow::try_claim_watcher(&watchers, channel, handle),
+        "start/attach should claim an empty watcher registry"
+    );
+    assert_eq!(flow::watcher_slot_count(&watchers), 1);
+    assert!(flow::watcher_slot_exists(&watchers, channel));
+    assert_eq!(
+        flow::owner_channel_for_tmux_session(&watchers, tmux_name),
+        Some(channel)
+    );
+    assert!(
+        !inspector.cancel.load(Ordering::Relaxed),
+        "fresh watcher starts live"
+    );
+
+    let (duplicate_handle, duplicate_inspector) = flow::new_test_watcher_handle(tmux_name);
+    let duplicate_attach = flow::claim_or_reuse_watcher(
+        &watchers,
+        rebind_channel,
+        duplicate_handle,
+        &provider,
+        "discord_flow::1173_duplicate_attach",
+    );
+    assert!(
+        !duplicate_attach.should_spawn(),
+        "same tmux attach must reuse the owner watcher"
+    );
+    assert_eq!(duplicate_attach.owner_channel_id(), channel);
+    assert_eq!(flow::watcher_slot_count(&watchers), 1);
+    assert!(!flow::watcher_slot_exists(&watchers, rebind_channel));
+    assert!(
+        !duplicate_inspector.cancel.load(Ordering::Relaxed),
+        "unspawned duplicate handle should not be treated as a killed watcher"
+    );
+
+    assert!(flow::pause_watcher_for_turn(&watchers, channel));
+    assert_eq!(flow::watcher_slot_paused(&watchers, channel), Some(true));
+    assert_eq!(flow::watcher_slot_pause_epoch(&watchers, channel), Some(1));
+    assert!(flow::mark_turn_delivered(&watchers, channel));
+    assert!(flow::resume_watcher_after_turn(&watchers, channel, 512));
+    assert_eq!(flow::watcher_slot_paused(&watchers, channel), Some(false));
+    assert_eq!(
+        flow::watcher_slot_resume_offset(&watchers, channel),
+        Some(Some(512))
+    );
+    assert_eq!(
+        flow::watcher_slot_turn_delivered(&watchers, channel),
+        Some(true)
+    );
+
+    use crate::services::discord::test_harness_exports::watcher_stop::{
+        Decision, WATCHER_POST_TERMINAL_IDLE_WINDOW, decide,
+    };
+    let tmux_dead = decide(
+        true,
+        false,
+        512,
+        512,
+        None,
+        WATCHER_POST_TERMINAL_IDLE_WINDOW,
+    );
+    assert_eq!(tmux_dead, Decision::Stop);
+    assert!(
+        flow::remove_watcher_after_tmux_exit(&watchers, channel),
+        "natural tmux exit should detach the watcher slot"
+    );
+    assert_eq!(flow::watcher_slot_count(&watchers), 0);
+    assert!(
+        !inspector.cancel.load(Ordering::Relaxed),
+        "natural tmux exit removes the slot without marking it as operator-cancelled"
+    );
+
+    let force_tmux_name = "AgentDesk-codex-adk-cdx-1173-force";
+    let (force_handle, force_inspector) = flow::new_test_watcher_handle(force_tmux_name);
+    assert!(flow::try_claim_watcher(&watchers, channel, force_handle));
+    assert!(
+        flow::operator_cancel_watcher(&watchers, channel),
+        "operator force-kill/cancel should detach the watcher slot"
+    );
+    assert_eq!(flow::watcher_slot_count(&watchers), 0);
+    assert!(
+        force_inspector.cancel.load(Ordering::Relaxed),
+        "operator cancel/force-kill must raise the watcher cancel flag"
+    );
+
+    let rebind_tmux_name = "AgentDesk-codex-adk-cdx-1173-rebind";
+    let (owner_handle, owner_inspector) = flow::new_test_watcher_handle(rebind_tmux_name);
+    assert!(flow::try_claim_watcher(&watchers, channel, owner_handle));
+    let (rebind_handle, rebind_inspector) = flow::new_test_watcher_handle(rebind_tmux_name);
+    let rebind_claim = flow::claim_or_reuse_watcher(
+        &watchers,
+        rebind_channel,
+        rebind_handle,
+        &provider,
+        "discord_flow::1173_rebind",
+    );
+    assert!(
+        !rebind_claim.should_spawn(),
+        "manual rebind to an already watched tmux session must not spawn a duplicate relayer"
+    );
+    assert_eq!(rebind_claim.owner_channel_id(), channel);
+    assert_eq!(flow::watcher_slot_count(&watchers), 1);
+    assert!(!owner_inspector.cancel.load(Ordering::Relaxed));
+    assert!(!rebind_inspector.cancel.load(Ordering::Relaxed));
+
+    let dedup = OutboundDeduper::new();
+    let policy = DiscordOutboundPolicy::default();
+    let target = channel.get().to_string();
+    let correlation = format!("tmux:{rebind_tmux_name}:512");
+    let semantic = "watcher:terminal-relay";
+    let first = deliver_outbound(
+        &harness.mock_discord,
+        &dedup,
+        DiscordOutboundMessage::new(target.clone(), "rebind relay")
+            .with_correlation(correlation.clone(), semantic),
+        policy.clone(),
+    )
+    .await;
+    let duplicate = deliver_outbound(
+        &harness.mock_discord,
+        &dedup,
+        DiscordOutboundMessage::new(target.clone(), "rebind relay duplicate")
+            .with_correlation(correlation, semantic),
+        policy,
+    )
+    .await;
+    assert!(matches!(first, DeliveryResult::Success { .. }));
+    assert!(matches!(duplicate, DeliveryResult::Duplicate { .. }));
+    assert_eq!(
+        harness.mock_discord.calls_to(&target),
+        1,
+        "duplicate rebind relay attempts must collapse to one Discord POST"
+    );
+}
+
+// ============================================================================
 // #1137: watcher-stop strictness integration scenario
 // ============================================================================
 

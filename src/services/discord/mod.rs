@@ -1107,6 +1107,19 @@ pub(crate) mod test_harness_exports {
         watchers.inner.len()
     }
 
+    pub(crate) fn watcher_slot_exists(watchers: &WatcherRegistry, channel_id: ChannelId) -> bool {
+        watchers.inner.contains_key(&channel_id)
+    }
+
+    pub(crate) fn owner_channel_for_tmux_session(
+        watchers: &WatcherRegistry,
+        tmux_session_name: &str,
+    ) -> Option<ChannelId> {
+        watchers
+            .inner
+            .owner_channel_for_tmux_session(tmux_session_name)
+    }
+
     pub(crate) fn watcher_slot_paused(
         watchers: &WatcherRegistry,
         channel_id: ChannelId,
@@ -1115,6 +1128,104 @@ pub(crate) mod test_harness_exports {
             .inner
             .get(&channel_id)
             .map(|entry| entry.paused.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub(crate) fn watcher_slot_pause_epoch(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> Option<u64> {
+        watchers
+            .inner
+            .get(&channel_id)
+            .map(|entry| entry.pause_epoch.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub(crate) fn watcher_slot_resume_offset(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> Option<Option<u64>> {
+        watchers.inner.get(&channel_id).map(|entry| {
+            *entry
+                .resume_offset
+                .lock()
+                .expect("resume offset lock for test")
+        })
+    }
+
+    pub(crate) fn watcher_slot_turn_delivered(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> Option<bool> {
+        watchers.inner.get(&channel_id).map(|entry| {
+            entry
+                .turn_delivered
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    pub(crate) fn pause_watcher_for_turn(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> bool {
+        let Some(watcher) = watchers.inner.get(&channel_id) else {
+            return false;
+        };
+        watcher
+            .pause_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        watcher
+            .paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    pub(crate) fn mark_turn_delivered(watchers: &WatcherRegistry, channel_id: ChannelId) -> bool {
+        let Some(watcher) = watchers.inner.get(&channel_id) else {
+            return false;
+        };
+        watcher
+            .turn_delivered
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    pub(crate) fn resume_watcher_after_turn(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+        offset: u64,
+    ) -> bool {
+        let Some(watcher) = watchers.inner.get(&channel_id) else {
+            return false;
+        };
+        *watcher
+            .resume_offset
+            .lock()
+            .expect("resume offset lock for test") = Some(offset);
+        watcher
+            .paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    pub(crate) fn remove_watcher_after_tmux_exit(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> bool {
+        watchers.inner.remove(&channel_id).is_some()
+    }
+
+    pub(crate) fn operator_cancel_watcher(
+        watchers: &WatcherRegistry,
+        channel_id: ChannelId,
+    ) -> bool {
+        if let Some((_, watcher)) = watchers.inner.remove(&channel_id) {
+            watcher
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) mod inflight {
