@@ -2,7 +2,6 @@ use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Default)]
 struct AuditRuntime {
-    db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
 }
 
@@ -47,11 +46,10 @@ fn build_record(
 }
 
 /// Initialize the audit DB handle. Call during startup and after PG is available.
-pub fn init_audit_db(db: crate::db::Db, pg_pool: Option<sqlx::PgPool>) {
+pub fn init_audit_db(_db: crate::db::Db, pg_pool: Option<sqlx::PgPool>) {
     let Ok(mut runtime) = audit_runtime_slot().lock() else {
         return;
     };
-    runtime.db = Some(db);
     if let Some(pool) = pg_pool {
         runtime.pg_pool = Some(pool);
     }
@@ -71,7 +69,6 @@ pub fn record_termination(
     let Ok(runtime) = audit_runtime_slot().lock() else {
         return;
     };
-    let Some(db) = runtime.db.clone() else { return };
     let record = build_record(
         session_key,
         dispatch_id,
@@ -82,12 +79,12 @@ pub fn record_termination(
         last_offset,
         tmux_alive,
     );
-    persist_record(Some(db), runtime.pg_pool.clone(), record);
+    persist_record(runtime.pg_pool.clone(), record);
 }
 
 /// Record a session termination event against an explicit DB handle.
 pub fn record_termination_with_db(
-    db: &crate::db::Db,
+    _db: &crate::db::Db,
     session_key: &str,
     dispatch_id: Option<&str>,
     killer_component: &str,
@@ -107,12 +104,17 @@ pub fn record_termination_with_db(
         last_offset,
         tmux_alive,
     );
-    insert_record_sqlite(db, &record);
+    let pg_pool = audit_runtime_slot()
+        .lock()
+        .ok()
+        .and_then(|runtime| runtime.pg_pool.clone());
+    persist_record(pg_pool, record);
 }
 
-/// Record against explicit handles; prefers PostgreSQL when available and falls back to SQLite.
+/// Record against explicit handles. PostgreSQL is authoritative for #868; the
+/// legacy db handle is accepted only for API compatibility.
 pub fn record_termination_with_handles(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
     dispatch_id: Option<&str>,
@@ -133,29 +135,19 @@ pub fn record_termination_with_handles(
         last_offset,
         tmux_alive,
     );
-    persist_record(db.cloned(), pg_pool.cloned(), record);
+    persist_record(pg_pool.cloned(), record);
 }
 
-fn persist_record(
-    db: Option<crate::db::Db>,
-    pg_pool: Option<sqlx::PgPool>,
-    record: TerminationAuditRecord,
-) {
+fn persist_record(pg_pool: Option<sqlx::PgPool>, record: TerminationAuditRecord) {
     let Some(pool) = pg_pool else {
-        if let Some(db) = db.as_ref() {
-            insert_record_sqlite(db, &record);
-        }
+        tracing::debug!("  [termination_audit] skipped insert: postgres backend is unavailable");
         return;
     };
 
-    let db_for_task = db.clone();
     let record_for_task = record.clone();
     let write_task = async move {
         if let Err(error) = insert_record_pg(&pool, &record_for_task).await {
             tracing::warn!("  [termination_audit] postgres insert failed: {error}");
-            if let Some(db) = db_for_task.as_ref() {
-                insert_record_sqlite(db, &record_for_task);
-            }
         }
     };
 
@@ -172,39 +164,9 @@ fn persist_record(
             Ok(runtime) => runtime.block_on(write_task),
             Err(error) => {
                 tracing::warn!("  [termination_audit] runtime bootstrap failed: {error}");
-                if let Some(db) = db.as_ref() {
-                    insert_record_sqlite(db, &record);
-                }
             }
         }
     });
-}
-
-fn insert_record_sqlite(db: &crate::db::Db, record: &TerminationAuditRecord) {
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("  [termination_audit] failed to open separate conn: {e}");
-            return;
-        }
-    };
-    if let Err(e) = conn.execute(
-        "INSERT INTO session_termination_events \
-         (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, last_offset, tmux_alive) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        libsql_rusqlite::params![
-            record.session_key,
-            record.dispatch_id,
-            record.killer_component,
-            record.reason_code,
-            record.reason_text,
-            record.probe_snapshot,
-            record.last_offset,
-            record.tmux_alive.map(|value| i32::from(value)),
-        ],
-    ) {
-        tracing::warn!("  [termination_audit] insert failed: {e}");
-    }
 }
 
 async fn insert_record_pg(
@@ -363,12 +325,11 @@ mod tests {
 
     #[tokio::test]
     async fn record_termination_with_handles_persists_to_postgres_when_available() {
-        let sqlite = crate::db::test_db();
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
         record_termination_with_handles(
-            Some(&sqlite),
+            None,
             Some(&pool),
             "host:pg-audit",
             Some("dispatch-1"),
@@ -441,7 +402,7 @@ mod tests {
 
         assert!(
             persisted,
-            "postgres termination audit row was not persisted without sqlite"
+            "postgres termination audit row was not persisted without sqlite handle"
         );
 
         pool.close().await;

@@ -10,13 +10,11 @@
 //!   * `DuplicateRelayCount`  — duplicate-relay guard fires inside the window
 //!   * `AvgTurnLatencyMs`     — average `turn_finished.payload.duration_ms`
 //!
-//! Storage layout — see migration `0015_slo_aggregates.sql` (postgres) and
-//! `ensure_slo_schema` in `db/schema.rs` (sqlite parity).
+//! Storage layout — see migration `0015_slo_aggregates.sql` (postgres).
 
 use std::fmt;
 
 use anyhow::Result;
-use libsql_rusqlite::OptionalExtension;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
@@ -219,26 +217,6 @@ pub async fn compute_turn_success_rate_pg(
     Ok(success_rate_aggregate(window, ok, total))
 }
 
-pub fn compute_turn_success_rate_sqlite(db: &Db, window: SloWindow) -> Result<SloWindowAggregate> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    let start_seconds = window.window_start_ms as f64 / 1000.0;
-    let end_seconds = window.window_end_ms as f64 / 1000.0;
-    let (ok, total): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(CASE WHEN status IN ('completed','tmux_handoff') THEN 1 ELSE 0 END), 0) AS ok,
-                    COUNT(*) AS total
-             FROM observability_events
-             WHERE event_type = 'turn_finished'
-               AND strftime('%s', created_at) >= CAST(?1 AS INTEGER)
-               AND strftime('%s', created_at) <  CAST(?2 AS INTEGER)",
-            libsql_rusqlite::params![start_seconds as i64, end_seconds as i64],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-        .unwrap_or((0, 0));
-    Ok(success_rate_aggregate(window, ok, total))
-}
-
 fn success_rate_aggregate(window: SloWindow, ok: i64, total: i64) -> SloWindowAggregate {
     let value = if total <= 0 {
         1.0
@@ -285,31 +263,6 @@ pub async fn compute_duplicate_relay_pg(
     })
 }
 
-pub fn compute_duplicate_relay_sqlite(db: &Db, window: SloWindow) -> Result<SloWindowAggregate> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    let start_seconds = window.window_start_ms / 1000;
-    let end_seconds = window.window_end_ms / 1000;
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM observability_events
-             WHERE (event_type = 'duplicate_relay'
-                    OR (event_type = 'guard_fired' AND status LIKE 'duplicate_relay%'))
-               AND strftime('%s', created_at) >= CAST(?1 AS INTEGER)
-               AND strftime('%s', created_at) <  CAST(?2 AS INTEGER)",
-            libsql_rusqlite::params![start_seconds, end_seconds],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .unwrap_or(0);
-    Ok(SloWindowAggregate {
-        window_start_ms: window.window_start_ms,
-        window_end_ms: window.window_end_ms,
-        metric: SloMetric::DuplicateRelayCount,
-        value: count as f64,
-        sample_size: count,
-    })
-}
-
 /// Average duration across `turn_finished` events in the window, reading
 /// `payload_json.duration_ms` emitted by `observability::emit_turn_finished`.
 pub async fn compute_avg_latency_pg(
@@ -340,42 +293,6 @@ pub async fn compute_avg_latency_pg(
     })
 }
 
-pub fn compute_avg_latency_sqlite(db: &Db, window: SloWindow) -> Result<SloWindowAggregate> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    let start_seconds = window.window_start_ms / 1000;
-    let end_seconds = window.window_end_ms / 1000;
-    // sqlite has no JSON1 by default on every build; read as TEXT and let rust
-    // parse.
-    let mut stmt = conn.prepare(
-        "SELECT payload_json FROM observability_events
-         WHERE event_type = 'turn_finished'
-           AND strftime('%s', created_at) >= CAST(?1 AS INTEGER)
-           AND strftime('%s', created_at) <  CAST(?2 AS INTEGER)",
-    )?;
-    let rows = stmt.query_map(
-        libsql_rusqlite::params![start_seconds, end_seconds],
-        |row| row.get::<_, String>(0),
-    )?;
-    let mut total_ms: f64 = 0.0;
-    let mut n: i64 = 0;
-    for payload in rows.flatten() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload)
-            && let Some(duration) = value.get("duration_ms").and_then(|v| v.as_i64())
-        {
-            total_ms += duration.max(0) as f64;
-            n += 1;
-        }
-    }
-    let avg = if n == 0 { 0.0 } else { total_ms / n as f64 };
-    Ok(SloWindowAggregate {
-        window_start_ms: window.window_start_ms,
-        window_end_ms: window.window_end_ms,
-        metric: SloMetric::AvgTurnLatencyMs,
-        value: avg,
-        sample_size: n,
-    })
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Persistence + cooldown
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,72 +319,9 @@ pub async fn persist_aggregate_pg(
     Ok(())
 }
 
-pub fn persist_aggregate_sqlite(
-    db: &Db,
-    aggregate: &SloWindowAggregate,
-    verdict: ThresholdVerdict,
-) -> Result<()> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    conn.execute(
-        "INSERT INTO slo_aggregates
-             (window_start_ms, window_end_ms, metric, value, sample_size, threshold, breached)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        libsql_rusqlite::params![
-            aggregate.window_start_ms,
-            aggregate.window_end_ms,
-            aggregate.metric.as_str(),
-            aggregate.value,
-            aggregate.sample_size,
-            verdict.threshold(),
-            if verdict.is_breach() { 1_i64 } else { 0_i64 },
-        ],
-    )?;
-    Ok(())
-}
-
 /// Returns `true` if cooldown has expired (i.e. the alert should fire) for the
 /// given `(metric, channel)` and `now_ms`. When the alert is fired the caller
-/// must call [`record_alert_sent_sqlite`] / `_pg` to advance the cooldown.
-pub fn cooldown_allows_alert_sqlite(
-    db: &Db,
-    metric: SloMetric,
-    channel_id: &str,
-    now_ms: i64,
-    cooldown_ms: i64,
-) -> Result<bool> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    let last: Option<i64> = conn
-        .query_row(
-            "SELECT alerted_at_ms FROM slo_alert_cooldowns
-             WHERE metric = ?1 AND channel_id = ?2",
-            libsql_rusqlite::params![metric.as_str(), channel_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(match last {
-        None => true,
-        Some(previous) => now_ms.saturating_sub(previous) >= cooldown_ms,
-    })
-}
-
-pub fn record_alert_sent_sqlite(
-    db: &Db,
-    metric: SloMetric,
-    channel_id: &str,
-    now_ms: i64,
-    value: f64,
-) -> Result<()> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    conn.execute(
-        "INSERT INTO slo_alert_cooldowns (metric, channel_id, alerted_at_ms, last_value)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(metric, channel_id) DO UPDATE SET
-             alerted_at_ms = excluded.alerted_at_ms,
-             last_value    = excluded.last_value",
-        libsql_rusqlite::params![metric.as_str(), channel_id, now_ms, value],
-    )?;
-    Ok(())
-}
+/// must call [`record_alert_sent_pg`] to advance the cooldown.
 
 pub async fn cooldown_allows_alert_pg(
     pool: &PgPool,
@@ -513,18 +367,6 @@ pub async fn record_alert_sent_pg(
     Ok(())
 }
 
-/// Enqueue a Discord alert message via the `message_outbox` queue (sqlite
-/// backend). The outbox worker picks it up and POSTs `/api/send`.
-pub fn enqueue_alert_sqlite(db: &Db, target: &str, content: &str) -> Result<()> {
-    let conn = db.lock().map_err(|_| anyhow::anyhow!("sqlite poisoned"))?;
-    conn.execute(
-        "INSERT INTO message_outbox (target, content, bot, source, reason_code)
-         VALUES (?1, ?2, 'notify', 'slo_alerter', 'slo_threshold_breach')",
-        libsql_rusqlite::params![target, content],
-    )?;
-    Ok(())
-}
-
 pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO message_outbox (target, content, bot, source, reason_code, status)
@@ -545,7 +387,7 @@ pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Res
 /// cooldown elapsed) enqueues a Discord alert. Returns the list of aggregates
 /// computed so callers / tests can inspect them.
 pub async fn run_aggregation_tick(
-    db: Option<&Db>,
+    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     now_ms: i64,
 ) -> Vec<SloWindowAggregate> {
@@ -553,22 +395,15 @@ pub async fn run_aggregation_tick(
     let channel = resolve_alert_channel();
     let mut aggregates = Vec::with_capacity(3);
 
-    let computes: Vec<Result<SloWindowAggregate>> = if let Some(pool) = pg_pool {
-        vec![
-            compute_turn_success_rate_pg(pool, window).await,
-            compute_duplicate_relay_pg(pool, window).await,
-            compute_avg_latency_pg(pool, window).await,
-        ]
-    } else if let Some(db) = db {
-        vec![
-            compute_turn_success_rate_sqlite(db, window),
-            compute_duplicate_relay_sqlite(db, window),
-            compute_avg_latency_sqlite(db, window),
-        ]
-    } else {
-        tracing::debug!("[slo] aggregation tick skipped: no db backend available");
+    let Some(pool) = pg_pool else {
+        tracing::debug!("[slo] aggregation tick skipped: postgres backend unavailable");
         return aggregates;
     };
+    let computes: Vec<Result<SloWindowAggregate>> = vec![
+        compute_turn_success_rate_pg(pool, window).await,
+        compute_duplicate_relay_pg(pool, window).await,
+        compute_avg_latency_pg(pool, window).await,
+    ];
 
     for compute_result in computes {
         let aggregate = match compute_result {
@@ -582,74 +417,33 @@ pub async fn run_aggregation_tick(
 
         // Persistence is best-effort: aggregation should keep going even if
         // one metric's insert fails.
-        if let Some(pool) = pg_pool {
-            if let Err(error) = persist_aggregate_pg(pool, &aggregate, verdict).await {
-                tracing::warn!(
-                    "[slo] persist_aggregate_pg({}) failed: {error}",
-                    aggregate.metric
-                );
-            }
-        } else if let Some(db) = db
-            && let Err(error) = persist_aggregate_sqlite(db, &aggregate, verdict)
-        {
+        if let Err(error) = persist_aggregate_pg(pool, &aggregate, verdict).await {
             tracing::warn!(
-                "[slo] persist_aggregate_sqlite({}) failed: {error}",
+                "[slo] persist_aggregate_pg({}) failed: {error}",
                 aggregate.metric
             );
         }
 
         if let ThresholdVerdict::Breach { threshold } = verdict {
-            let cooldown_ok = if let Some(pool) = pg_pool {
-                cooldown_allows_alert_pg(
-                    pool,
-                    aggregate.metric,
-                    &channel,
-                    now_ms,
-                    ALERT_COOLDOWN_MS,
-                )
-                .await
-                .unwrap_or(true)
-            } else if let Some(db) = db {
-                cooldown_allows_alert_sqlite(
-                    db,
-                    aggregate.metric,
-                    &channel,
-                    now_ms,
-                    ALERT_COOLDOWN_MS,
-                )
-                .unwrap_or(true)
-            } else {
-                true
-            };
+            let cooldown_ok = cooldown_allows_alert_pg(
+                pool,
+                aggregate.metric,
+                &channel,
+                now_ms,
+                ALERT_COOLDOWN_MS,
+            )
+            .await
+            .unwrap_or(true);
 
             if cooldown_ok {
                 let message = format_alert_message(&aggregate, threshold);
-                if let Some(pool) = pg_pool {
-                    if let Err(error) = enqueue_alert_pg(pool, &channel, &message).await {
-                        tracing::warn!("[slo] enqueue_alert_pg failed: {error}");
-                    } else if let Err(error) = record_alert_sent_pg(
-                        pool,
-                        aggregate.metric,
-                        &channel,
-                        now_ms,
-                        aggregate.value,
-                    )
-                    .await
-                    {
-                        tracing::warn!("[slo] record_alert_sent_pg failed: {error}");
-                    }
-                } else if let Some(db) = db {
-                    if let Err(error) = enqueue_alert_sqlite(db, &channel, &message) {
-                        tracing::warn!("[slo] enqueue_alert_sqlite failed: {error}");
-                    } else if let Err(error) = record_alert_sent_sqlite(
-                        db,
-                        aggregate.metric,
-                        &channel,
-                        now_ms,
-                        aggregate.value,
-                    ) {
-                        tracing::warn!("[slo] record_alert_sent_sqlite failed: {error}");
-                    }
+                if let Err(error) = enqueue_alert_pg(pool, &channel, &message).await {
+                    tracing::warn!("[slo] enqueue_alert_pg failed: {error}");
+                } else if let Err(error) =
+                    record_alert_sent_pg(pool, aggregate.metric, &channel, now_ms, aggregate.value)
+                        .await
+                {
+                    tracing::warn!("[slo] record_alert_sent_pg failed: {error}");
                 }
                 tracing::warn!(
                     metric = %aggregate.metric,
@@ -673,168 +467,17 @@ pub async fn run_aggregation_tick(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests — use in-memory sqlite so PG is not required.
+// Tests — keep pure threshold/formatting coverage here. Storage and tick
+// coverage depends on Postgres fixtures after #868.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, wrap_conn};
-    use libsql_rusqlite::Connection;
-
-    fn new_test_db() -> Db {
-        let conn = Connection::open_in_memory().expect("open memory db");
-        conn.execute_batch(
-            "CREATE TABLE observability_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                provider TEXT,
-                channel_id TEXT,
-                dispatch_id TEXT,
-                session_key TEXT,
-                turn_id TEXT,
-                status TEXT,
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE slo_aggregates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                window_start_ms INTEGER NOT NULL,
-                window_end_ms INTEGER NOT NULL,
-                metric TEXT NOT NULL,
-                value REAL NOT NULL,
-                sample_size INTEGER NOT NULL DEFAULT 0,
-                threshold REAL,
-                breached INTEGER NOT NULL DEFAULT 0,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE slo_alert_cooldowns (
-                metric TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
-                alerted_at_ms INTEGER NOT NULL,
-                last_value REAL NOT NULL,
-                PRIMARY KEY (metric, channel_id)
-            );
-            CREATE TABLE message_outbox (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target TEXT NOT NULL,
-                content TEXT NOT NULL,
-                bot TEXT NOT NULL DEFAULT 'announce',
-                source TEXT NOT NULL DEFAULT 'system',
-                reason_code TEXT,
-                session_key TEXT,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at DATETIME DEFAULT (datetime('now')),
-                sent_at DATETIME,
-                error TEXT,
-                claimed_at DATETIME,
-                claim_owner TEXT
-            );",
-        )
-        .expect("create test tables");
-        wrap_conn(conn)
-    }
-
-    fn insert_turn_finished(db: &Db, status: &str, duration_ms: i64, created_at: &str) {
-        let conn = db.lock().expect("lock db");
-        conn.execute(
-            "INSERT INTO observability_events
-                 (event_type, status, payload_json, created_at)
-             VALUES ('turn_finished', ?1, ?2, ?3)",
-            libsql_rusqlite::params![
-                status,
-                format!(r#"{{"duration_ms":{duration_ms}}}"#),
-                created_at
-            ],
-        )
-        .expect("insert turn_finished");
-    }
-
-    fn insert_event(db: &Db, event_type: &str, status: Option<&str>, created_at: &str) {
-        let conn = db.lock().expect("lock db");
-        conn.execute(
-            "INSERT INTO observability_events
-                 (event_type, status, payload_json, created_at)
-             VALUES (?1, ?2, '{}', ?3)",
-            libsql_rusqlite::params![event_type, status, created_at],
-        )
-        .expect("insert event");
-    }
-
-    fn recent_window(now_ms: i64) -> SloWindow {
-        SloWindow::ending_at(now_ms, DEFAULT_WINDOW_MS)
-    }
 
     #[test]
-    fn success_rate_computes_ratio_over_window() {
-        let db = new_test_db();
-        // 3 completed, 1 failed → 0.75 success rate
-        insert_turn_finished(&db, "completed", 1000, "2026-04-24 00:00:05");
-        insert_turn_finished(&db, "completed", 2000, "2026-04-24 00:00:10");
-        insert_turn_finished(&db, "tmux_handoff", 1500, "2026-04-24 00:00:20");
-        insert_turn_finished(&db, "error", 500, "2026-04-24 00:00:30");
-
-        // Window: 2026-04-24 00:00:00 → 00:05:00
-        let window = SloWindow {
-            window_start_ms: 1_776_988_800_000, // 2026-04-24 00:00:00 UTC
-            window_end_ms: 1_776_989_100_000,   // 2026-04-24 00:05:00 UTC
-        };
-        let agg = compute_turn_success_rate_sqlite(&db, window).expect("compute");
-        assert_eq!(agg.sample_size, 4);
-        assert!((agg.value - 0.75).abs() < 1e-9);
-        assert_eq!(agg.metric, SloMetric::TurnSuccessRate);
-    }
-
-    #[test]
-    fn duplicate_relay_counts_within_window() {
-        let db = new_test_db();
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:01:00",
-        );
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:02:00",
-        );
-        insert_event(&db, "duplicate_relay", Some("fired"), "2026-04-24 00:03:00");
-        // Event outside window (too old) — must NOT be counted.
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2020-01-01 00:00:00",
-        );
-
-        let window = SloWindow {
-            window_start_ms: 1_776_988_800_000, // 2026-04-24 00:00:00 UTC
-            window_end_ms: 1_776_989_100_000,   // 2026-04-24 00:05:00 UTC
-        };
-        let agg = compute_duplicate_relay_sqlite(&db, window).expect("compute");
-        assert_eq!(agg.value as i64, 3);
-        assert_eq!(agg.sample_size, 3);
-        assert_eq!(agg.metric, SloMetric::DuplicateRelayCount);
-    }
-
-    #[test]
-    fn avg_latency_averages_durations_in_window() {
-        let db = new_test_db();
-        insert_turn_finished(&db, "completed", 1000, "2026-04-24 00:00:10");
-        insert_turn_finished(&db, "completed", 3000, "2026-04-24 00:00:20");
-        insert_turn_finished(&db, "completed", 5000, "2026-04-24 00:00:30");
-
-        let window = SloWindow {
-            window_start_ms: 1_776_988_800_000, // 2026-04-24 00:00:00 UTC
-            window_end_ms: 1_776_989_100_000,   // 2026-04-24 00:05:00 UTC
-        };
-        let agg = compute_avg_latency_sqlite(&db, window).expect("compute");
-        assert_eq!(agg.sample_size, 3);
-        assert!((agg.value - 3000.0).abs() < 1e-9);
-        assert_eq!(agg.metric, SloMetric::AvgTurnLatencyMs);
-    }
+    #[ignore = "SQLite SLO storage/tick service path removed for #868; metric SQL, cooldown, persistence, and outbox coverage must move to Postgres integration fixtures."]
+    fn sqlite_slo_storage_unit_coverage_obsolete_after_pg_migration() {}
 
     #[test]
     fn threshold_evaluator_flags_breach_and_ok() {
@@ -882,43 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_suppresses_repeat_alerts_within_window() {
-        let db = new_test_db();
-        let metric = SloMetric::TurnSuccessRate;
-        let now_ms = recent_window(0).window_end_ms + 10_000_000;
-        assert!(
-            cooldown_allows_alert_sqlite(&db, metric, "12345", now_ms, ALERT_COOLDOWN_MS)
-                .expect("cooldown check")
-        );
-        record_alert_sent_sqlite(&db, metric, "12345", now_ms, 0.1).expect("record");
-
-        // 10 minutes later — still in cooldown.
-        assert!(
-            !cooldown_allows_alert_sqlite(
-                &db,
-                metric,
-                "12345",
-                now_ms + 10 * 60_000,
-                ALERT_COOLDOWN_MS
-            )
-            .expect("cooldown check"),
-            "cooldown must suppress alert inside 30 min window",
-        );
-
-        // 31 minutes later — cooldown released.
-        assert!(
-            cooldown_allows_alert_sqlite(
-                &db,
-                metric,
-                "12345",
-                now_ms + 31 * 60_000,
-                ALERT_COOLDOWN_MS
-            )
-            .expect("cooldown check"),
-        );
-    }
-
-    #[test]
     fn alert_formatter_renders_expected_payload() {
         let success = SloWindowAggregate {
             window_start_ms: 0,
@@ -954,80 +560,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregation_tick_persists_and_enqueues_alert_on_breach() {
-        let db = new_test_db();
-        // 4 duplicate-relay events within window (threshold = 3 → breach)
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:00:10",
-        );
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:00:20",
-        );
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:00:30",
-        );
-        insert_event(
-            &db,
-            "guard_fired",
-            Some("duplicate_relay"),
-            "2026-04-24 00:00:40",
-        );
-
-        // Force the window to 2026-04-24 00:00:00 .. 00:05:00 by choosing now_ms
-        // = window_end_ms.  SloWindow::ending_at subtracts DEFAULT_WINDOW_MS
-        // internally so this pins both bounds.
-        let now_ms = 1_776_989_100_000; // 2026-04-24 00:05:00 UTC
-        let aggregates = run_aggregation_tick(Some(&db), None, now_ms).await;
-        assert_eq!(aggregates.len(), 3);
-
-        // One row per metric persisted.
-        let conn = db.lock().unwrap();
-        let persisted: i64 = conn
-            .query_row("SELECT COUNT(*) FROM slo_aggregates", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(persisted, 3);
-
-        let breached: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM slo_aggregates WHERE breached = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(breached, 1);
-
-        let outbox_rows: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM message_outbox WHERE source = 'slo_alerter'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(outbox_rows, 1);
-        drop(conn);
-
-        // Re-run immediately — cooldown must suppress a second enqueue.
-        let _ = run_aggregation_tick(Some(&db), None, now_ms + 60_000).await;
-        let conn = db.lock().unwrap();
-        let outbox_rows_after: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM message_outbox WHERE source = 'slo_alerter'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            outbox_rows_after, 1,
-            "cooldown must prevent a second alert within 30min"
-        );
+    async fn aggregation_tick_without_postgres_skips() {
+        let aggregates = run_aggregation_tick(None, None, 1_776_989_100_000).await;
+        assert!(aggregates.is_empty());
     }
 }

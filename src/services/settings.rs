@@ -28,7 +28,7 @@ const RUNTIME_CONFIG_KEYS: &[&str] = &[
 
 #[derive(Clone)]
 pub struct SettingsService {
-    db: Db,
+    _db: Db,
     pg_pool: Option<sqlx::PgPool>,
     config: Arc<crate::config::Config>,
 }
@@ -36,7 +36,7 @@ pub struct SettingsService {
 impl SettingsService {
     pub fn new(db: Db, pg_pool: Option<sqlx::PgPool>, config: Arc<crate::config::Config>) -> Self {
         Self {
-            db,
+            _db: db,
             pg_pool,
             config,
         }
@@ -46,25 +46,16 @@ impl SettingsService {
         let saved = match crate::services::discord::internal_api::get_kv_value("runtime-config") {
             Ok(Some(value)) => serde_json::from_str(&value).unwrap_or_else(|_| json!({})),
             Ok(None) => json!({}),
-            Err(error) if direct_api_context_unavailable(&error) => {
-                if let Some(pg_pool) = self.pg_pool.as_ref() {
-                    load_runtime_config_pg(pg_pool)?
-                } else {
-                    let conn = self.db.lock().map_err(|e| {
-                        ServiceError::internal(format!("{e}"))
-                            .with_code(ErrorCode::Database)
-                            .with_operation("get_runtime_config.lock")
-                    })?;
-                    let value: String = conn
-                        .query_row(
-                            "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .unwrap_or_else(|_| "{}".to_string());
-                    serde_json::from_str(&value).unwrap_or_else(|_| json!({}))
-                }
-            }
+            Err(error) if direct_api_context_unavailable(&error) => self
+                .pg_pool
+                .as_ref()
+                .map(load_runtime_config_pg)
+                .transpose()?
+                .ok_or_else(|| {
+                    ServiceError::internal("postgres backend is unavailable")
+                        .with_code(ErrorCode::Database)
+                        .with_operation("get_runtime_config.load_runtime_config_pg")
+                })?,
             Err(error) => {
                 return Err(ServiceError::internal(error)
                     .with_code(ErrorCode::Database)
@@ -99,12 +90,9 @@ impl SettingsService {
                     if let Some(pg_pool) = self.pg_pool.as_ref() {
                         write_runtime_config_pg(pg_pool, obj)?;
                     } else {
-                        let conn = self.db.lock().map_err(|e| {
-                            ServiceError::internal(format!("{e}"))
-                                .with_code(ErrorCode::Database)
-                                .with_operation("put_runtime_config.lock")
-                        })?;
-                        write_runtime_config(&conn, obj)?;
+                        return Err(ServiceError::internal("postgres backend is unavailable")
+                            .with_code(ErrorCode::Database)
+                            .with_operation("put_runtime_config.write_runtime_config_pg"));
                     }
                     return Ok(());
                 }
@@ -127,22 +115,9 @@ impl SettingsService {
             return Ok(());
         }
 
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("put_runtime_config.lock")
-        })?;
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
-            [&value_str],
-        )
-        .map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("put_runtime_config.upsert_runtime_config")
-        })?;
-
-        Ok(())
+        Err(ServiceError::internal("postgres backend is unavailable")
+            .with_code(ErrorCode::Database)
+            .with_operation("put_runtime_config.upsert_runtime_config_pg"))
     }
 }
 
