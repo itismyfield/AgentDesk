@@ -1,8 +1,5 @@
-use poise::serenity_prelude as serenity;
-use serenity::CreateMessage;
-
 use super::super::meeting;
-use super::super::{Context, Error, check_auth, rate_limit_wait};
+use super::super::{Context, Error, check_auth};
 use crate::services::provider::ProviderKind;
 
 #[poise::command(slash_command, rename = "meeting")]
@@ -73,13 +70,13 @@ pub(in crate::services::discord) async fn cmd_meeting(
                     Err(e) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] ❌ Meeting error: {e}");
-                        rate_limit_wait(&shared, channel_id).await;
-                        let _ = channel_id
-                            .send_message(
-                                &*http,
-                                CreateMessage::new().content(format!("❌ 회의 오류: {}", e)),
-                            )
-                            .await;
+                        let _ = meeting::send_meeting_message(
+                            &http,
+                            channel_id,
+                            &shared,
+                            format!("❌ 회의 오류: {}", e),
+                        )
+                        .await;
                     }
                 }
             });

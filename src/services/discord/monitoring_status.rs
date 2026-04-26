@@ -3,10 +3,17 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage, EditMessage, MessageId};
+use serenity::{ChannelId, MessageId};
 use tokio::sync::Mutex;
 
+use super::outbound::{
+    DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
+    OutboundDeduper, deliver_outbound,
+};
 use super::{SharedData, health, rate_limit_wait};
+use crate::server::routes::dispatches::discord_delivery::{
+    DispatchMessagePostError, DispatchMessagePostErrorKind,
+};
 use crate::server::routes::state::{MonitoringEntry, MonitoringStore, global_monitoring_store};
 
 const RENDER_DEBOUNCE: StdDuration = StdDuration::from_millis(300);
@@ -19,6 +26,135 @@ const SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
 #[cfg_attr(test, allow(dead_code))]
 static SWEEPER_STARTED: OnceLock<()> = OnceLock::new();
+
+#[derive(Clone)]
+struct MonitoringOutboundClient {
+    http: Arc<serenity::Http>,
+    shared: Option<Arc<SharedData>>,
+}
+
+fn monitoring_deduper() -> &'static OutboundDeduper {
+    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
+    DEDUPER.get_or_init(OutboundDeduper::new)
+}
+
+impl DiscordOutboundClient for MonitoringOutboundClient {
+    async fn post_message(
+        &self,
+        target_channel: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = parse_monitoring_channel_id(target_channel)?;
+        wait_if_shared(self.shared.as_ref(), channel_id).await;
+        channel_id
+            .send_message(&self.http, serenity::CreateMessage::new().content(content))
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(monitoring_post_error)
+    }
+
+    async fn edit_message(
+        &self,
+        target_channel: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = parse_monitoring_channel_id(target_channel)?;
+        let message_id = message_id
+            .parse::<u64>()
+            .map(MessageId::new)
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid monitoring message id {message_id}: {error}"),
+                )
+            })?;
+        wait_if_shared(self.shared.as_ref(), channel_id).await;
+        channel_id
+            .edit_message(
+                &self.http,
+                message_id,
+                serenity::EditMessage::new().content(content),
+            )
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(monitoring_post_error)
+    }
+}
+
+fn parse_monitoring_channel_id(raw: &str) -> Result<ChannelId, DispatchMessagePostError> {
+    raw.parse::<u64>().map(ChannelId::new).map_err(|error| {
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!("invalid monitoring channel id {raw}: {error}"),
+        )
+    })
+}
+
+fn monitoring_post_error(error: serenity::Error) -> DispatchMessagePostError {
+    let detail = error.to_string();
+    let lowered = detail.to_ascii_lowercase();
+    let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
+        || lowered.contains("2000 or fewer in length")
+        || lowered.contains("length")
+    {
+        DispatchMessagePostErrorKind::MessageTooLong
+    } else {
+        DispatchMessagePostErrorKind::Other
+    };
+    DispatchMessagePostError::new(kind, detail)
+}
+
+async fn deliver_monitoring_status<C: DiscordOutboundClient>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    channel_id: ChannelId,
+    rendered_msg_id: Option<u64>,
+    content: &str,
+) -> Result<Option<u64>, String> {
+    let semantic_event_id = rendered_msg_id
+        .map(|message_id| format!("monitoring:{}:edit:{message_id}", channel_id.get()))
+        .unwrap_or_else(|| {
+            format!(
+                "monitoring:{}:send:{}",
+                channel_id.get(),
+                uuid::Uuid::new_v4()
+            )
+        });
+    let mut message = DiscordOutboundMessage::new(channel_id.get().to_string(), content)
+        .with_correlation(
+            format!("monitoring:{}", channel_id.get()),
+            semantic_event_id,
+        );
+    if let Some(message_id) = rendered_msg_id {
+        message = message.with_edit_message_id(message_id.to_string());
+    }
+
+    match deliver_outbound(
+        client,
+        dedup,
+        message,
+        DiscordOutboundPolicy::preserve_inline_content(),
+    )
+    .await
+    {
+        DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
+            parse_delivered_monitoring_message_id(&message_id).map(Some)
+        }
+        DeliveryResult::Duplicate { message_id } => message_id
+            .as_deref()
+            .map(parse_delivered_monitoring_message_id)
+            .transpose(),
+        DeliveryResult::Skipped { .. } => Ok(rendered_msg_id),
+        DeliveryResult::PermanentFailure { detail } => Err(detail),
+    }
+}
+
+fn parse_delivered_monitoring_message_id(message_id: &str) -> Result<u64, String> {
+    message_id
+        .parse::<u64>()
+        .map_err(|error| format!("invalid monitoring delivery message id {message_id}: {error}"))
+}
 
 pub(crate) fn schedule_render_channel(
     monitoring: Arc<Mutex<MonitoringStore>>,
@@ -164,15 +300,20 @@ async fn render_channel_monitoring_from_store(
         return Ok(());
     };
 
+    let outbound_client = MonitoringOutboundClient {
+        http: http.clone(),
+        shared: shared.cloned(),
+    };
+
     if let Some(msg_id) = rendered_msg_id {
-        wait_if_shared(shared, channel_id).await;
-        match channel_id
-            .edit_message(
-                http,
-                MessageId::new(msg_id),
-                EditMessage::new().content(&content),
-            )
-            .await
+        match deliver_monitoring_status(
+            &outbound_client,
+            monitoring_deduper(),
+            channel_id,
+            Some(msg_id),
+            &content,
+        )
+        .await
         {
             Ok(_) => return Ok(()),
             Err(error) => {
@@ -189,19 +330,22 @@ async fn render_channel_monitoring_from_store(
         }
     }
 
-    wait_if_shared(shared, channel_id).await;
-    let message = channel_id
-        .send_message(http, CreateMessage::new().content(content))
-        .await
-        .map_err(|error| {
-            format!(
-                "failed to send monitoring status message in channel {}: {}",
-                channel_id.get(),
-                error
-            )
-        })?;
+    let message_id = deliver_monitoring_status(
+        &outbound_client,
+        monitoring_deduper(),
+        channel_id,
+        None,
+        &content,
+    )
+    .await?
+    .ok_or_else(|| {
+        format!(
+            "monitoring status delivery skipped for channel {}",
+            channel_id.get()
+        )
+    })?;
     let mut store = monitoring.lock().await;
-    store.set_rendered_msg(channel_id.get(), Some(message.id.get()));
+    store.set_rendered_msg(channel_id.get(), Some(message_id));
     Ok(())
 }
 
@@ -251,6 +395,41 @@ fn format_kst_hhmm(value: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct MockMonitoringOutboundClient {
+        posts: StdMutex<Vec<(String, String)>>,
+        edits: StdMutex<Vec<(String, String, String)>>,
+    }
+
+    impl DiscordOutboundClient for MockMonitoringOutboundClient {
+        async fn post_message(
+            &self,
+            target_channel: &str,
+            content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.posts
+                .lock()
+                .unwrap()
+                .push((target_channel.to_string(), content.to_string()));
+            Ok("9001".to_string())
+        }
+
+        async fn edit_message(
+            &self,
+            target_channel: &str,
+            message_id: &str,
+            content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.edits.lock().unwrap().push((
+                target_channel.to_string(),
+                message_id.to_string(),
+                content.to_string(),
+            ));
+            Ok(message_id.to_string())
+        }
+    }
 
     fn entry(
         key: &str,
@@ -300,5 +479,30 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn deliver_monitoring_status_uses_shared_send_and_edit_contract() {
+        let client = MockMonitoringOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let channel_id = ChannelId::new(42);
+
+        let sent = deliver_monitoring_status(&client, &dedup, channel_id, None, "status")
+            .await
+            .expect("send succeeds");
+        let edited = deliver_monitoring_status(&client, &dedup, channel_id, Some(1234), "updated")
+            .await
+            .expect("edit succeeds");
+
+        assert_eq!(sent, Some(9001));
+        assert_eq!(edited, Some(1234));
+        assert_eq!(
+            client.posts.lock().unwrap().as_slice(),
+            &[("42".to_string(), "status".to_string())]
+        );
+        assert_eq!(
+            client.edits.lock().unwrap().as_slice(),
+            &[("42".to_string(), "1234".to_string(), "updated".to_string())]
+        );
     }
 }

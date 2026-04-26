@@ -1854,14 +1854,17 @@ mod tests {
 
         let processed = drain_message_outbox_batch_once_sqlite(&db, {
             let delivered = delivered.clone();
-            move |target, content, source, bot| {
+            move |row| {
                 let delivered = delivered.clone();
                 async move {
+                    let (correlation_id, semantic_event_id) = row.delivery_ids();
                     delivered.lock().unwrap().push(json!({
-                        "target": target,
-                        "content": content,
-                        "source": source,
-                        "bot": bot,
+                        "target": row.target,
+                        "content": row.content,
+                        "source": row.source,
+                        "bot": row.bot,
+                        "correlation_id": correlation_id,
+                        "semantic_event_id": semantic_event_id,
                     }));
                     ("200 OK".to_string(), json!({"ok": true}).to_string())
                 }
@@ -1881,6 +1884,14 @@ mod tests {
         assert_eq!(captured[0]["content"], "hello");
         assert_eq!(captured[0]["source"], "system");
         assert_eq!(captured[0]["bot"], "notify");
+        assert_eq!(
+            captured[0]["correlation_id"],
+            "message_outbox:system:message:channel:1492506767085801535"
+        );
+        assert_eq!(
+            captured[0]["semantic_event_id"],
+            format!("message_outbox:{message_id}:deliver")
+        );
     }
 
     #[tokio::test]
@@ -1892,14 +1903,14 @@ mod tests {
 
         let processed = drain_message_outbox_batch_once_sqlite(&db, {
             let delivered = delivered.clone();
-            move |target, content, source, bot| {
+            move |row| {
                 let delivered = delivered.clone();
                 async move {
                     delivered.lock().unwrap().push(json!({
-                        "target": target,
-                        "content": content,
-                        "source": source,
-                        "bot": bot,
+                        "target": row.target,
+                        "content": row.content,
+                        "source": row.source,
+                        "bot": row.bot,
                     }));
                     ("200 OK".to_string(), json!({"ok": true}).to_string())
                 }
@@ -1924,14 +1935,13 @@ mod tests {
         let db = test_db();
         let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
 
-        let processed =
-            drain_message_outbox_batch_once_sqlite(&db, |_target, _content, _source, _bot| async {
-                (
-                    "500 Internal Server Error".to_string(),
-                    json!({"error": "mock failure"}).to_string(),
-                )
-            })
-            .await;
+        let processed = drain_message_outbox_batch_once_sqlite(&db, |_row| async {
+            (
+                "500 Internal Server Error".to_string(),
+                json!({"error": "mock failure"}).to_string(),
+            )
+        })
+        .await;
 
         let (status, error, sent_at) = message_row_status(&db, message_id);
 
@@ -1965,14 +1975,14 @@ mod tests {
 
         let claimed = claim_pending_message_outbox_batch_pg(&pg_pool, "test-owner").await;
         assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].2, "stale");
+        assert_eq!(claimed[0].content, "stale");
 
         let row = sqlx::query(
             "SELECT status, claim_owner
              FROM message_outbox
              WHERE id = $1",
         )
-        .bind(claimed[0].0)
+        .bind(claimed[0].id)
         .fetch_one(&pg_pool)
         .await
         .unwrap();
@@ -2006,14 +2016,17 @@ mod tests {
 
         let processed = drain_message_outbox_batch_once(&pg_pool, Some("test-owner"), {
             let delivered = delivered.clone();
-            move |target, content, source, bot| {
+            move |row| {
                 let delivered = delivered.clone();
                 async move {
+                    let (correlation_id, semantic_event_id) = row.delivery_ids();
                     delivered.lock().unwrap().push(json!({
-                        "target": target,
-                        "content": content,
-                        "source": source,
-                        "bot": bot,
+                        "target": row.target,
+                        "content": row.content,
+                        "source": row.source,
+                        "bot": row.bot,
+                        "correlation_id": correlation_id,
+                        "semantic_event_id": semantic_event_id,
                     }));
                     ("200 OK".to_string(), json!({"ok": true}).to_string())
                 }
@@ -2025,6 +2038,14 @@ mod tests {
         let captured = delivered.lock().unwrap().clone();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0]["content"], "hello-pg");
+        assert_eq!(
+            captured[0]["correlation_id"],
+            "message_outbox:system:message:channel:1492506767085801535"
+        );
+        assert_eq!(
+            captured[0]["semantic_event_id"],
+            format!("message_outbox:{message_id}:deliver")
+        );
 
         let row = sqlx::query(
             "SELECT status,
@@ -2908,29 +2929,63 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 
 /// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
 /// Runs every 2 seconds, processes up to 10 messages per tick.
+#[derive(Clone, Debug)]
+struct PendingMessageOutboxRow {
+    id: i64,
+    target: String,
+    content: String,
+    bot: String,
+    source: String,
+    reason_code: Option<String>,
+    session_key: Option<String>,
+}
+
+impl PendingMessageOutboxRow {
+    fn delivery_ids(&self) -> (String, String) {
+        let reason = self
+            .reason_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("message");
+        let session = self
+            .session_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.target.as_str());
+        (
+            format!("message_outbox:{}:{reason}:{session}", self.source),
+            format!("message_outbox:{}:deliver", self.id),
+        )
+    }
+}
+
 #[cfg(test)]
 fn load_pending_message_outbox_batch_sqlite(
     legacy_db: &crate::db::Db,
-) -> Vec<(i64, String, String, String, String)> {
+) -> Vec<PendingMessageOutboxRow> {
     let conn = match legacy_db.lock() {
         Ok(conn) => conn,
         Err(_) => return Vec::new(),
     };
     let mut stmt = match conn.prepare(
-        "SELECT id, target, content, bot, source FROM message_outbox \
+        "SELECT id, target, content, bot, source, reason_code, session_key FROM message_outbox \
          WHERE status = 'pending' ORDER BY id ASC LIMIT 10",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
     };
     stmt.query_map([], |row| {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        ))
+        Ok(PendingMessageOutboxRow {
+            id: row.get(0)?,
+            target: row.get(1)?,
+            content: row.get(2)?,
+            bot: row.get(3)?,
+            source: row.get(4)?,
+            reason_code: row.get(5)?,
+            session_key: row.get(6)?,
+        })
     })
     .ok()
     .map(|rows| rows.filter_map(|row| row.ok()).collect())
@@ -2940,7 +2995,7 @@ fn load_pending_message_outbox_batch_sqlite(
 async fn claim_pending_message_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
-) -> Vec<(i64, String, String, String, String)> {
+) -> Vec<PendingMessageOutboxRow> {
     let rows = match sqlx::query(
         "WITH claimed AS (
             SELECT id
@@ -2964,7 +3019,7 @@ async fn claim_pending_message_outbox_batch_pg(
                error = NULL
           FROM claimed
          WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source",
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key",
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
@@ -2981,16 +3036,18 @@ async fn claim_pending_message_outbox_batch_pg(
     let mut claimed = rows
         .into_iter()
         .filter_map(|row| {
-            Some((
-                row.try_get::<i64, _>("id").ok()?,
-                row.try_get::<String, _>("target").ok()?,
-                row.try_get::<String, _>("content").ok()?,
-                row.try_get::<String, _>("bot").ok()?,
-                row.try_get::<String, _>("source").ok()?,
-            ))
+            Some(PendingMessageOutboxRow {
+                id: row.try_get::<i64, _>("id").ok()?,
+                target: row.try_get::<String, _>("target").ok()?,
+                content: row.try_get::<String, _>("content").ok()?,
+                bot: row.try_get::<String, _>("bot").ok()?,
+                source: row.try_get::<String, _>("source").ok()?,
+                reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
+                session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
+            })
         })
         .collect::<Vec<_>>();
-    claimed.sort_by_key(|row| row.0);
+    claimed.sort_by_key(|row| row.id);
     claimed
 }
 
@@ -3000,7 +3057,7 @@ async fn drain_message_outbox_batch_once<F, Fut>(
     mut deliver: F,
 ) -> usize
 where
-    F: FnMut(String, String, String, String) -> Fut,
+    F: FnMut(PendingMessageOutboxRow) -> Fut,
     Fut: std::future::Future<Output = (String, String)>,
 {
     let pending =
@@ -3010,9 +3067,8 @@ where
         return 0;
     }
 
-    for (id, target, content, bot, source) in &pending {
-        let (status, err_text) =
-            deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
+    for row in &pending {
+        let (status, err_text) = deliver(row.clone()).await;
         if status == "200 OK" {
             sqlx::query(
                 "UPDATE message_outbox
@@ -3023,12 +3079,16 @@ where
                         claim_owner = NULL
                   WHERE id = $1",
             )
-            .bind(*id)
+            .bind(row.id)
             .execute(pg_pool)
             .await
             .ok();
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+            tracing::debug!(
+                "[{ts}] [outbox] ✅ delivered msg {} → {}",
+                row.id,
+                row.target
+            );
         } else {
             let error_text = format!("{status}: {err_text}");
             sqlx::query(
@@ -3040,11 +3100,15 @@ where
                   WHERE id = $2",
             )
             .bind(error_text)
-            .bind(*id)
+            .bind(row.id)
             .execute(pg_pool)
             .await
             .ok();
-            tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+            tracing::warn!(
+                "[outbox] ❌ msg {} → {} failed: {status}",
+                row.id,
+                row.target
+            );
         }
     }
 
@@ -3057,7 +3121,7 @@ async fn drain_message_outbox_batch_once_sqlite<F, Fut>(
     mut deliver: F,
 ) -> usize
 where
-    F: FnMut(String, String, String, String) -> Fut,
+    F: FnMut(PendingMessageOutboxRow) -> Fut,
     Fut: std::future::Future<Output = (String, String)>,
 {
     let pending = load_pending_message_outbox_batch_sqlite(sqlite_db);
@@ -3065,9 +3129,8 @@ where
         return 0;
     }
 
-    for (id, target, content, bot, source) in &pending {
-        let (status, err_text) =
-            deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
+    for row in &pending {
+        let (status, err_text) = deliver(row.clone()).await;
         if status == "200 OK" {
             if let Ok(conn) = sqlite_db.lock() {
                 conn.execute(
@@ -3078,12 +3141,16 @@ where
                             claimed_at = NULL,
                             claim_owner = NULL
                       WHERE id = ?1",
-                    [id],
+                    [row.id],
                 )
                 .ok();
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+            tracing::debug!(
+                "[{ts}] [outbox] ✅ delivered msg {} → {}",
+                row.id,
+                row.target
+            );
         } else {
             let error_text = format!("{status}: {err_text}");
             if let Ok(conn) = sqlite_db.lock() {
@@ -3094,11 +3161,15 @@ where
                             claimed_at = NULL,
                             claim_owner = NULL
                       WHERE id = ?2",
-                    libsql_rusqlite::params![error_text, id],
+                    libsql_rusqlite::params![error_text, row.id],
                 )
                 .ok();
             }
-            tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+            tracing::warn!(
+                "[outbox] ❌ msg {} → {} failed: {status}",
+                row.id,
+                row.target
+            );
         }
     }
 
@@ -3130,20 +3201,25 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
         if drain_message_outbox_batch_once(pg_pool.as_ref(), Some(&claim_owner), {
             let health_registry = health_registry.clone();
             let pg_pool = pg_pool.clone();
-            move |target, content, source, bot| {
+            move |row| {
                 let health_registry = health_registry.clone();
                 let pg_pool = pg_pool.clone();
                 async move {
+                    let (correlation_id, semantic_event_id) = row.delivery_ids();
                     let (status, err_text) =
-                        crate::services::discord::health::send_message_with_backends(
+                        crate::services::discord::health::send_message_with_backends_and_delivery_id(
                             &health_registry,
                             None,
                             Some(pg_pool.as_ref()),
-                            &target,
-                            &content,
-                            &source,
-                            &bot,
+                            &row.target,
+                            &row.content,
+                            &row.source,
+                            &row.bot,
                             None,
+                            Some(crate::services::discord::health::ManualOutboundDeliveryId {
+                                correlation_id: &correlation_id,
+                                semantic_event_id: &semantic_event_id,
+                            }),
                         )
                         .await;
                     (status.to_string(), err_text)

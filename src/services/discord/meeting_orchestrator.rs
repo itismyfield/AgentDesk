@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use serenity::{
-    AutoArchiveDuration, ChannelId, ChannelType, CreateMessage,
-    builder::{CreateThread, EditMessage, EditThread},
+    AutoArchiveDuration, ChannelId, ChannelType,
+    builder::{CreateThread, EditThread},
 };
 
 use crate::services::memory::{RecallRequest, RecallResponse, build_resolved_memory_backend};
@@ -17,9 +17,16 @@ use super::formatting::send_long_message_raw;
 use super::meeting_artifact_store::{MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome};
 use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
 use super::org_schema;
+use super::outbound::{
+    DeliveryResult, DiscordOutboundClient, DiscordOutboundMessage, DiscordOutboundPolicy,
+    OutboundDeduper, deliver_outbound,
+};
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
 use super::{DispatchProfile, SharedData, rate_limit_wait};
+use crate::server::routes::dispatches::discord_delivery::{
+    DispatchMessagePostError, DispatchMessagePostErrorKind,
+};
 
 // ─── Data Structures ─────────────────────────────────────────────────────────
 
@@ -623,6 +630,148 @@ async fn archive_meeting_thread(http: &serenity::Http, thread_channel_id: Channe
             tracing::warn!("[meeting] Failed to archive thread {thread_channel_id}: {error}")
         }
     }
+}
+
+struct MeetingOutboundClient<'a> {
+    http: &'a serenity::Http,
+    shared: &'a Arc<SharedData>,
+}
+
+fn meeting_deduper() -> &'static OutboundDeduper {
+    static DEDUPER: std::sync::OnceLock<OutboundDeduper> = std::sync::OnceLock::new();
+    DEDUPER.get_or_init(OutboundDeduper::new)
+}
+
+impl DiscordOutboundClient for MeetingOutboundClient<'_> {
+    async fn post_message(
+        &self,
+        target_channel: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = parse_meeting_channel_id(target_channel)?;
+        rate_limit_wait(self.shared, channel_id).await;
+        channel_id
+            .send_message(self.http, serenity::CreateMessage::new().content(content))
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(meeting_post_error)
+    }
+
+    async fn edit_message(
+        &self,
+        target_channel: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = parse_meeting_channel_id(target_channel)?;
+        let message_id = message_id
+            .parse::<u64>()
+            .map(serenity::MessageId::new)
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid meeting message id {message_id}: {error}"),
+                )
+            })?;
+        rate_limit_wait(self.shared, channel_id).await;
+        channel_id
+            .edit_message(
+                self.http,
+                message_id,
+                serenity::EditMessage::new().content(content),
+            )
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(meeting_post_error)
+    }
+}
+
+fn parse_meeting_channel_id(raw: &str) -> Result<ChannelId, DispatchMessagePostError> {
+    raw.parse::<u64>().map(ChannelId::new).map_err(|error| {
+        DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!("invalid meeting channel id {raw}: {error}"),
+        )
+    })
+}
+
+fn meeting_post_error(error: serenity::Error) -> DispatchMessagePostError {
+    let detail = error.to_string();
+    let lowered = detail.to_ascii_lowercase();
+    let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
+        || lowered.contains("2000 or fewer in length")
+        || lowered.contains("length")
+    {
+        DispatchMessagePostErrorKind::MessageTooLong
+    } else {
+        DispatchMessagePostErrorKind::Other
+    };
+    DispatchMessagePostError::new(kind, detail)
+}
+
+pub(in crate::services::discord) async fn send_meeting_message(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    content: impl Into<String>,
+) -> Result<Option<serenity::MessageId>, String> {
+    let content = content.into();
+    let message = DiscordOutboundMessage::new(channel_id.get().to_string(), content);
+    meeting_delivery_result(
+        deliver_outbound(
+            &MeetingOutboundClient { http, shared },
+            meeting_deduper(),
+            message,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await,
+    )
+}
+
+async fn edit_meeting_message(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    shared: &Arc<SharedData>,
+    content: impl Into<String>,
+) -> Result<(), String> {
+    let content = content.into();
+    let message = DiscordOutboundMessage::new(channel_id.get().to_string(), content)
+        .with_edit_message_id(message_id.get().to_string());
+    meeting_delivery_result(
+        deliver_outbound(
+            &MeetingOutboundClient { http, shared },
+            meeting_deduper(),
+            message,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await,
+    )
+    .map(|_| ())
+}
+
+fn meeting_delivery_result(result: DeliveryResult) -> Result<Option<serenity::MessageId>, String> {
+    match result {
+        DeliveryResult::Success { message_id } | DeliveryResult::Fallback { message_id, .. } => {
+            parse_meeting_message_id(&message_id).map(Some)
+        }
+        DeliveryResult::Duplicate { message_id } => message_id
+            .as_deref()
+            .map(parse_meeting_message_id)
+            .transpose(),
+        DeliveryResult::Skipped { reason } => {
+            tracing::info!(?reason, "[meeting] outbound delivery skipped");
+            Ok(None)
+        }
+        DeliveryResult::PermanentFailure { detail } => Err(detail),
+    }
+}
+
+fn parse_meeting_message_id(message_id: &str) -> Result<serenity::MessageId, String> {
+    message_id
+        .parse::<u64>()
+        .map(serenity::MessageId::new)
+        .map_err(|error| format!("invalid meeting delivery message id {message_id}: {error}"))
 }
 
 fn parse_json_array_fragment(text: &str) -> Result<Vec<String>, String> {
@@ -1410,21 +1559,22 @@ async fn start_meeting_with_reviewer(
         "[meeting] query hashes assigned"
     );
 
-    rate_limit_wait(shared, msg_channel).await;
-    let selection_status_message = msg_channel
-        .send_message(
-            http,
-            CreateMessage::new().content(build_meeting_start_status_message(
-                agenda,
-                &meeting_hash_display,
-                thread_hash_display.as_deref(),
-                &primary_provider,
-                &reviewer_provider,
-                None,
-            )),
-        )
-        .await
-        .ok();
+    let selection_status_message = send_meeting_message(
+        http,
+        msg_channel,
+        shared,
+        build_meeting_start_status_message(
+            agenda,
+            &meeting_hash_display,
+            thread_hash_display.as_deref(),
+            &primary_provider,
+            &reviewer_provider,
+            None,
+        ),
+    )
+    .await
+    .ok()
+    .flatten();
 
     // Select participants via primary provider + reviewer cross-check
     let (participants, selection_reason) = match select_participants(
@@ -1456,21 +1606,21 @@ async fn start_meeting_with_reviewer(
     }
 
     if let Some(status_message) = selection_status_message {
-        rate_limit_wait(shared, msg_channel).await;
-        let _ = msg_channel
-            .edit_message(
-                http,
-                status_message.id,
-                EditMessage::new().content(build_meeting_start_status_message(
-                    agenda,
-                    &meeting_hash_display,
-                    thread_hash_display.as_deref(),
-                    &primary_provider,
-                    &reviewer_provider,
-                    Some(&selection_reason),
-                )),
-            )
-            .await;
+        let _ = edit_meeting_message(
+            http,
+            msg_channel,
+            status_message,
+            shared,
+            build_meeting_start_status_message(
+                agenda,
+                &meeting_hash_display,
+                thread_hash_display.as_deref(),
+                &primary_provider,
+                &reviewer_provider,
+                Some(&selection_reason),
+            ),
+        )
+        .await;
     }
 
     // Announce participants
@@ -1478,17 +1628,17 @@ async fn start_meeting_with_reviewer(
         .iter()
         .map(|p| format!("• {}", p.display_name))
         .collect();
-    rate_limit_wait(shared, msg_channel).await;
-    let _ = msg_channel
-        .send_message(
-            http,
-            CreateMessage::new().content(format!(
-                "👥 **참여자 확정** ({}명)\n{}",
-                participants.len(),
-                participant_list.join("\n")
-            )),
-        )
-        .await;
+    let _ = send_meeting_message(
+        http,
+        msg_channel,
+        shared,
+        format!(
+            "👥 **참여자 확정** ({}명)\n{}",
+            participants.len(),
+            participant_list.join("\n")
+        ),
+    )
+    .await;
 
     // Update meeting state and notify ADK
     let adk_payload = {
@@ -1522,14 +1672,13 @@ async fn start_meeting_with_reviewer(
             return Ok(None);
         }
 
-        rate_limit_wait(shared, msg_channel).await;
-        let _ = msg_channel
-            .send_message(
-                http,
-                CreateMessage::new()
-                    .content(format!("─── **라운드 {}/{}** ───", round, max_rounds)),
-            )
-            .await;
+        let _ = send_meeting_message(
+            http,
+            msg_channel,
+            shared,
+            format!("─── **라운드 {}/{}** ───", round, max_rounds),
+        )
+        .await;
 
         let consensus =
             match run_meeting_round(http, channel_id, msg_channel, &meeting_id, round, shared)
@@ -1554,13 +1703,13 @@ async fn start_meeting_with_reviewer(
         }
 
         if consensus {
-            rate_limit_wait(shared, msg_channel).await;
-            let _ = msg_channel
-                .send_message(
-                    http,
-                    CreateMessage::new().content("✅ **합의 도달! 회의를 마무리할게.**"),
-                )
-                .await;
+            let _ = send_meeting_message(
+                http,
+                msg_channel,
+                shared,
+                "✅ **합의 도달! 회의를 마무리할게.**",
+            )
+            .await;
             break;
         }
     }
@@ -1576,14 +1725,13 @@ async fn start_meeting_with_reviewer(
         cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
         return Ok(None);
     }
-    rate_limit_wait(shared, msg_channel).await;
-    let _ = msg_channel
-        .send_message(
-            http,
-            CreateMessage::new()
-                .content("💾 **회의록 저장 완료.** memory write/capture는 자동 실행하지 않으며, 후처리는 승인 기반으로만 진행합니다."),
-        )
-        .await;
+    let _ = send_meeting_message(
+        http,
+        msg_channel,
+        shared,
+        "💾 **회의록 저장 완료.** memory write/capture는 자동 실행하지 않으며, 후처리는 승인 기반으로만 진행합니다.",
+    )
+    .await;
 
     // Archive the meeting thread if one was created
     if msg_channel != channel_id {
@@ -1641,13 +1789,13 @@ pub(super) async fn spawn_direct_start(
             Err(error) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!("  [{ts}] ❌ Meeting error: {error}");
-                rate_limit_wait(&shared, channel_id).await;
-                let _ = channel_id
-                    .send_message(
-                        &*http,
-                        CreateMessage::new().content(format!("❌ 회의 오류: {}", error)),
-                    )
-                    .await;
+                let _ = send_meeting_message(
+                    &http,
+                    channel_id,
+                    &shared,
+                    format!("❌ 회의 오류: {error}"),
+                )
+                .await;
             }
         }
     });
@@ -1682,20 +1830,16 @@ pub(super) async fn cancel_meeting(
         // Save whatever transcript we have
         let _ = save_meeting_record(shared, channel_id, None).await;
         cleanup_meeting(shared, channel_id).await;
-        rate_limit_wait(shared, mc).await;
-        let _ = mc
-            .send_message(
-                http,
-                CreateMessage::new()
-                    .content("🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어."),
-            )
-            .await;
+        let _ = send_meeting_message(
+            http,
+            mc,
+            shared,
+            "🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어.",
+        )
+        .await;
         Ok(())
     } else {
-        rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
-            .send_message(http, CreateMessage::new().content("진행 중인 회의가 없어."))
-            .await;
+        let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
         Ok(())
     }
 }
@@ -1722,7 +1866,6 @@ pub(super) async fn meeting_status(
         })
     };
 
-    rate_limit_wait(shared, channel_id).await;
     match info {
         Some((agenda, round, max_rounds, participants, utterances, status, primary, reviewer)) => {
             let status_str = match status {
@@ -1732,27 +1875,26 @@ pub(super) async fn meeting_status(
                 MeetingStatus::Completed => "완료",
                 MeetingStatus::Cancelled => "취소됨",
             };
-            let _ = channel_id
-                .send_message(
-                    http,
-                    CreateMessage::new().content(format!(
-                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행 프로바이더: {} / 리뷰 프로바이더: {}\n라운드: {}/{}\n참여자: {}명\n발언: {}개",
-                        agenda,
-                        status_str,
-                        primary.display_name(),
-                        reviewer.display_name(),
-                        round,
-                        max_rounds,
-                        participants,
-                        utterances
-                    )),
-                )
-                .await;
+            let _ = send_meeting_message(
+                http,
+                channel_id,
+                shared,
+                format!(
+                    "📊 **회의 현황**\n안건: {}\n상태: {}\n진행 프로바이더: {} / 리뷰 프로바이더: {}\n라운드: {}/{}\n참여자: {}명\n발언: {}개",
+                    agenda,
+                    status_str,
+                    primary.display_name(),
+                    reviewer.display_name(),
+                    round,
+                    max_rounds,
+                    participants,
+                    utterances
+                ),
+            )
+            .await;
         }
         None => {
-            let _ = channel_id
-                .send_message(http, CreateMessage::new().content("진행 중인 회의가 없어."))
-                .await;
+            let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
         }
     }
     Ok(())
@@ -2047,14 +2189,13 @@ async fn run_meeting_round(
             }
             Err(e) => {
                 // Skip this agent, post error to thread
-                rate_limit_wait(shared, msg_channel).await;
-                let _ = msg_channel
-                    .send_message(
-                        http,
-                        CreateMessage::new()
-                            .content(format!("⚠️ {} 발언 실패: {}", participant.display_name, e)),
-                    )
-                    .await;
+                let _ = send_meeting_message(
+                    http,
+                    msg_channel,
+                    shared,
+                    format!("⚠️ {} 발언 실패: {}", participant.display_name, e),
+                )
+                .await;
             }
         }
     }
@@ -2492,16 +2633,10 @@ async fn conclude_meeting(
         transcript = transcript_text,
     );
 
-    rate_limit_wait(shared, msg_channel).await;
     if active_meeting_state(shared, channel_id, meeting_id).await != ActiveMeetingSlot::Active {
         return Ok(false);
     }
-    let _ = msg_channel
-        .send_message(
-            http,
-            CreateMessage::new().content("📝 **회의록 작성 중...**"),
-        )
-        .await;
+    let _ = send_meeting_message(http, msg_channel, shared, "📝 **회의록 작성 중...**").await;
 
     let draft = execute_provider_stage(
         primary_provider.clone(),
@@ -2601,16 +2736,13 @@ async fn conclude_meeting(
                     Some(trimmed)
                 }
                 Err(e) => {
-                    rate_limit_wait(shared, msg_channel).await;
-                    let _ = msg_channel
-                        .send_message(
-                            http,
-                            CreateMessage::new().content(format!(
-                                "⚠️ 회의록 최종화 실패: {} — 초안으로 저장합니다.",
-                                e
-                            )),
-                        )
-                        .await;
+                    let _ = send_meeting_message(
+                        http,
+                        msg_channel,
+                        shared,
+                        format!("⚠️ 회의록 최종화 실패: {} — 초안으로 저장합니다.", e),
+                    )
+                    .await;
                     let fallback_summary = if fallback_draft.is_empty() {
                         build_fallback_meeting_summary(
                             &agenda,
@@ -2629,16 +2761,13 @@ async fn conclude_meeting(
         Err(e) => {
             let fallback_summary =
                 build_fallback_meeting_summary(&agenda, &participants_list, &transcript_snapshot);
-            rate_limit_wait(shared, msg_channel).await;
-            let _ = msg_channel
-                .send_message(
-                    http,
-                    CreateMessage::new().content(format!(
-                        "⚠️ 회의록 작성 실패: {} — fallback 회의록을 저장합니다.",
-                        e
-                    )),
-                )
-                .await;
+            let _ = send_meeting_message(
+                http,
+                msg_channel,
+                shared,
+                format!("⚠️ 회의록 작성 실패: {} — fallback 회의록을 저장합니다.", e),
+            )
+            .await;
             let _ = send_long_message_raw(http, msg_channel, &fallback_summary, shared).await;
             Some(fallback_summary)
         }
@@ -2904,24 +3033,19 @@ pub(super) async fn handle_meeting_command(
             Ok(Some(request)) => request,
             Ok(None) => return Ok(false),
             Err(message) => {
-                rate_limit_wait(shared, channel_id).await;
-                let _ = channel_id
-                    .send_message(&*http, CreateMessage::new().content(message))
-                    .await;
+                let _ = send_meeting_message(&http, channel_id, shared, message).await;
                 return Ok(true);
             }
         };
 
         if request.agenda.is_empty() {
-            rate_limit_wait(shared, channel_id).await;
-            let _ = channel_id
-                .send_message(
-                    &*http,
-                    CreateMessage::new().content(
-                        "사용법: `/meeting start [--primary claude|codex|gemini|qwen] <안건>`",
-                    ),
-                )
-                .await;
+            let _ = send_meeting_message(
+                &http,
+                channel_id,
+                shared,
+                "사용법: `/meeting start [--primary claude|codex|gemini|qwen] <안건>`",
+            )
+            .await;
             return Ok(true);
         }
 
@@ -2951,13 +3075,13 @@ pub(super) async fn handle_meeting_command(
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ❌ Meeting error: {e}");
-                    rate_limit_wait(&shared_clone, channel_id).await;
-                    let _ = channel_id
-                        .send_message(
-                            &*http_clone,
-                            CreateMessage::new().content(format!("❌ 회의 오류: {}", e)),
-                        )
-                        .await;
+                    let _ = send_meeting_message(
+                        &http_clone,
+                        channel_id,
+                        &shared_clone,
+                        format!("❌ 회의 오류: {}", e),
+                    )
+                    .await;
                 }
             }
         });

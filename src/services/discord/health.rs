@@ -2678,34 +2678,50 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
         Err(resp) => return resp,
     };
     let user_id_text = request.user_id.to_string();
+    let dm_correlation_id = format!("senddm:{}", request.user_id);
+    let dm_semantic_event_id = format!("senddm:{}", uuid::Uuid::new_v4());
 
-    use poise::serenity_prelude::{CreateMessage, UserId};
+    use poise::serenity_prelude::UserId;
     let user_id = UserId::new(request.user_id);
     match user_id.create_dm_channel(&*http).await {
-        Ok(dm_channel) => {
-            match dm_channel
-                .id
-                .send_message(&*http, CreateMessage::new().content(&request.content))
-                .await
-            {
-                Ok(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!("  [{ts}] 📨 DM: → user {}", request.user_id);
-                    (
-                        "200 OK",
-                        serde_json::json!({
-                            "ok": true,
-                            "user_id": user_id_text,
-                        })
-                        .to_string(),
-                    )
+        Ok(dm_channel) => match deliver_manual_notification(
+            &SerenityManualOutboundClient { http },
+            manual_notification_deduper(),
+            &dm_channel.id.get().to_string(),
+            &request.content,
+            &request.bot,
+            None,
+            Some(ManualOutboundDeliveryId {
+                correlation_id: &dm_correlation_id,
+                semantic_event_id: &dm_semantic_event_id,
+            }),
+        )
+        .await
+        {
+            ManualDeliveryOutcome::Sent {
+                message_id,
+                delivery,
+            } => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 📨 DM: → user {} via shared outbound",
+                    request.user_id
+                );
+                let mut response = serde_json::json!({
+                    "ok": true,
+                    "user_id": user_id_text,
+                    "message_id": message_id,
+                });
+                if let Some(delivery) = delivery {
+                    response["delivery"] = serde_json::Value::String(delivery.to_string());
                 }
-                Err(e) => (
-                    "500 Internal Server Error",
-                    format!(r#"{{"ok":false,"error":"DM send failed: {}"}}"#, e),
-                ),
+                ("200 OK", response.to_string())
             }
-        }
+            ManualDeliveryOutcome::Failed { detail } => (
+                "500 Internal Server Error",
+                format!(r#"{{"ok":false,"error":"DM send failed: {}"}}"#, detail),
+            ),
+        },
         Err(e) => (
             "500 Internal Server Error",
             format!(
