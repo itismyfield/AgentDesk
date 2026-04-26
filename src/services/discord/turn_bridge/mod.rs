@@ -2757,7 +2757,13 @@ pub(super) fn spawn_turn_bridge(
         if has_queued_turns {
             // Drain mode: if restart is pending, don't start new turns from queue.
             // The queued messages will be saved to disk and processed after restart.
-            if shared_owned
+            if preserve_inflight_for_cleanup_retry {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ QUEUE-GUARD: preserving queued command(s) for channel {} until placeholder cleanup retry commits",
+                    channel_id
+                );
+            } else if shared_owned
                 .restart_pending
                 .load(std::sync::atomic::Ordering::Relaxed)
             {

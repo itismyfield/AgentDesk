@@ -32,7 +32,7 @@ use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::MessageId;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
-use crate::services::discord::gateway::HeadlessGateway;
+use crate::services::discord::gateway::{HeadlessGateway, TurnGateway};
 use crate::services::discord::make_shared_data_for_tests;
 use crate::services::discord::make_shared_data_for_tests_with_storage;
 use crate::services::discord::placeholder_cleanup::{
@@ -42,9 +42,110 @@ use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettin
 use crate::services::memory::{SessionEndReason, TokenUsage};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
+use poise::serenity_prelude::UserId;
+use std::future::Future;
 use std::io::Write;
-use std::sync::{Arc, atomic::Ordering};
+use std::pin::Pin;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
+
+type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+struct CleanupFallbackQueueGateway {
+    dispatch_count: Arc<AtomicUsize>,
+}
+
+impl TurnGateway for CleanupFallbackQueueGateway {
+    fn send_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async { Ok(MessageId::new(1487799916758827333)) })
+    }
+
+    fn edit_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _content: &'a str,
+    ) -> TestGatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+        Box::pin(async {
+            Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error: "HTTP 403 Forbidden: Missing Permissions".to_string(),
+            })
+        })
+    }
+
+    fn add_reaction<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _emoji: char,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn remove_reaction<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        _emoji: char,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _user_message_id: MessageId,
+        _user_text: &'a str,
+    ) -> TestGatewayFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _intervention: &'a super::super::Intervention,
+        _request_owner_name: &'a str,
+        _has_more_queued_turns: bool,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        self.dispatch_count.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn validate_live_routing<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn requester_mention(&self) -> Option<String> {
+        None
+    }
+
+    fn can_chain_locally(&self) -> bool {
+        true
+    }
+
+    fn bot_owner_provider(&self) -> Option<ProviderKind> {
+        Some(ProviderKind::Codex)
+    }
+}
 
 #[test]
 fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -166,6 +267,149 @@ fn replace_fallback_records_failed_cleanup_and_does_not_commit_delivery() {
         }
         other => panic!("expected failed cleanup outcome, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn replace_fallback_preserves_cleanup_inflight_and_defers_queued_dispatch() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1486333430516947001);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let owner_id = UserId::new(1487795113240559701);
+    let user_msg_id = MessageId::new(1487795113240559702);
+    let current_msg_id = MessageId::new(1487799916758827703);
+
+    crate::services::discord::clear_inflight_state(&provider, channel_id.get());
+
+    let cancel_token = Arc::new(CancelToken::new());
+    assert!(
+        super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            cancel_token.clone(),
+            owner_id,
+            user_msg_id,
+        )
+        .await
+    );
+    shared.global_active.fetch_add(1, Ordering::Relaxed);
+
+    let queued_msg_id = MessageId::new(1487795113240559704);
+    let enqueue = super::super::mailbox_enqueue_intervention(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        super::super::Intervention {
+            author_id: owner_id,
+            message_id: queued_msg_id,
+            source_message_ids: vec![queued_msg_id],
+            text: "queued follow-up".to_string(),
+            mode: super::super::InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+        },
+    )
+    .await;
+    assert!(enqueue.enqueued);
+
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let inflight_state = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some(channel_name.clone()),
+        owner_id.get(),
+        user_msg_id.get(),
+        current_msg_id.get(),
+        "original turn".to_string(),
+        None,
+        Some(tmux_name.clone()),
+        Some("/tmp/agentdesk-cleanup-retry-test-output.jsonl".to_string()),
+        Some("/tmp/agentdesk-cleanup-retry-test-input.fifo".to_string()),
+        0,
+    );
+
+    super::spawn_turn_bridge(
+        shared.clone(),
+        cancel_token,
+        stream_rx,
+        super::TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: Arc::new(CleanupFallbackQueueGateway {
+                dispatch_count: dispatch_count.clone(),
+            }),
+            channel_id,
+            user_msg_id,
+            user_text_owned: "original turn".to_string(),
+            request_owner_name: "tester".to_string(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: Some(channel_name),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            memory_recall_usage: TokenUsage::default(),
+            current_msg_id,
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            completion_tx: Some(completion_tx),
+            inflight_state,
+        },
+    );
+
+    stream_tx
+        .send(StreamMessage::Text {
+            content: "final answer".to_string(),
+        })
+        .expect("send text");
+    stream_tx
+        .send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        })
+        .expect("send done");
+    drop(stream_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), completion_rx)
+        .await
+        .expect("turn bridge should finish")
+        .expect("completion sender should complete");
+
+    assert_eq!(dispatch_count.load(Ordering::Relaxed), 0);
+
+    let saved = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+        .expect("cleanup retry should preserve original inflight state");
+    assert_eq!(saved.current_msg_id, current_msg_id.get());
+    assert_eq!(saved.user_msg_id, user_msg_id.get());
+    assert_eq!(saved.user_text, "original turn");
+
+    let snapshot = super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    assert!(snapshot.active_user_message_id.is_none());
+    assert_eq!(snapshot.intervention_queue.len(), 1);
+    assert_eq!(snapshot.intervention_queue[0].message_id, queued_msg_id);
+
+    let record = shared
+        .placeholder_cleanup
+        .latest(&provider, channel_id, current_msg_id)
+        .expect("failed cleanup record");
+    assert_eq!(record.operation, PlaceholderCleanupOperation::EditTerminal);
+    assert_eq!(
+        record.tmux_session_name.as_deref(),
+        Some(tmux_name.as_str())
+    );
+    assert!(matches!(
+        record.outcome,
+        PlaceholderCleanupOutcome::Failed { .. }
+    ));
+
+    crate::services::discord::clear_inflight_state(&provider, channel_id.get());
 }
 
 #[tokio::test]
