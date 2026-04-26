@@ -150,15 +150,26 @@ pub async fn get_token_analytics(
 
     let mut response = (StatusCode::OK, Json(json!(data))).into_response();
     let headers = response.headers_mut();
-    // Codex review (PR #1258, 3rd pass): stale-while-revalidate=120 still let
-    // browsers that honor SWR serve a stale body for up to 2 min on explicit
-    // refreshes. Switch to no-cache + must-revalidate so the Stats refresh
-    // button always re-validates with the origin. Dashboard-side SWR via
-    // sessionStorage (StatsPageView.tsx) covers the perceived-speed need.
+    // The endpoint scans `~/.claude/projects` + `~/.codex/sessions` on every
+    // request through `spawn_blocking`, which costs ~1-2 s. Without an HTTP
+    // cache, every same-tab navigation back to /stats re-pays that cost.
+    //
+    // Codex review on PR #1258 (3rd pass) removed the previous SWR header
+    // because the Stats Refresh button was being silently served from the
+    // 30 s window. The frontend now passes `cache: "reload"` whenever the
+    // Refresh button or `reloadKey` increments, so we can re-enable a small
+    // fresh window + a longer SWR window without regressing the explicit
+    // refresh path. Background re-entry hits the cache instantly while the
+    // user opts in to a hard refresh.
     headers.insert(
         "Cache-Control",
-        HeaderValue::from_static("private, no-cache, must-revalidate"),
+        HeaderValue::from_static("private, max-age=15, stale-while-revalidate=300"),
     );
+    if let Ok(value) = HeaderValue::from_str(period_id) {
+        // Vary on the period query parameter so the 7d / 30d / 90d entries
+        // never collide in the cache.
+        headers.insert("X-Token-Analytics-Period", value);
+    }
     if let Ok(value) = HeaderValue::from_str(&elapsed_ms.to_string()) {
         headers.insert("X-Response-Time-Ms", value);
     }

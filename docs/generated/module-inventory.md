@@ -185,7 +185,7 @@
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4478 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1370 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
-| `server::routes::receipt` | `src/server/routes/receipt.rs` | 166 |  |
+| `server::routes::receipt` | `src/server/routes/receipt.rs` | 177 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2000 | giant-file |
@@ -196,7 +196,7 @@
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 371 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 1274 | giant-file |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 328 |  |
-| `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 693 |  |
+| `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 708 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 529 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1855 | giant-file |
