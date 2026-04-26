@@ -631,7 +631,7 @@ fn cmd_run(
         .unwrap_or_default();
     {
         let channels = registry.providers.entry(provider.to_string()).or_default();
-        channels.previous = channels.current.clone();
+        channels.previous = Some(current.clone());
         channels.current = Some(current.clone());
         channels.candidate = Some(candidate.clone());
     }
@@ -799,16 +799,21 @@ fn cmd_resume(
             state.state
         )),
         other => {
-            // Re-run from current state by delegating to cmd_run with skip_upgrade.
+            let skip_upgrade = migration_state_rank(&other)
+                .zip(migration_state_rank(&MigrationState::UpgradeSucceeded))
+                .map(|(current_rank, upgrade_succeeded_rank)| {
+                    current_rank >= upgrade_succeeded_rank
+                })
+                .unwrap_or(false);
             eprintln!(
-                "State {:?} is mid-migration; re-running orchestration from scratch (use run --skip-upgrade to skip the upgrade step).",
-                other
+                "State {:?} is mid-migration; re-running orchestration from scratch (skip_upgrade={}).",
+                other, skip_upgrade
             );
             cmd_run(
                 provider,
                 None,
                 state.selected_agent_id.as_deref(),
-                true,
+                skip_upgrade,
                 auto_promote,
                 force_recreate_active,
             )
@@ -910,7 +915,8 @@ mod tests {
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
 
         use crate::services::provider_cli::registry::{
-            MigrationState, ProviderChannels, ProviderCliMigrationState, ProviderCliRegistry,
+            LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
+            ProviderCliRegistry,
         };
         use chrono::Utc;
         let current = test_channel("/tmp/current-codex");
@@ -939,6 +945,23 @@ mod tests {
             .insert("codex-agent".to_string(), "candidate".to_string());
         registry.providers.insert("codex".to_string(), channels);
         save_registry(dir.path(), &registry).unwrap();
+        crate::services::provider_cli::io::save_launch_artifact(
+            dir.path(),
+            &LaunchArtifact {
+                provider: "codex".to_string(),
+                agent_id: Some("codex-agent".to_string()),
+                channel_id: Some("123".to_string()),
+                session_key: Some("codex-agent-session".to_string()),
+                channel: "candidate".to_string(),
+                cli_path: candidate.path.clone(),
+                canonical_path: candidate.canonical_path.clone(),
+                cli_version: candidate.version.clone(),
+                process_id: None,
+                tmux_session: Some("agentdesk-codex-agent".to_string()),
+                launched_at: Utc::now(),
+            },
+        )
+        .unwrap();
 
         let result = cmd_promote("codex", Some("operator approval"), false);
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();

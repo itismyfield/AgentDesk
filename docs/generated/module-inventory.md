@@ -61,7 +61,7 @@
 | `cli::migrate::postgres_cutover` | `src/cli/migrate/postgres_cutover.rs` | 7669 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | giant-file |
 | `cli::monitoring` | `src/cli/monitoring.rs` | 141 |  |
-| `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 953 |  |
+| `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 976 |  |
 | `cli::run` | `src/cli/run.rs` | 434 |  |
 | `cli::utils` | `src/cli/utils.rs` | 274 |  |
 | `compat` | `src/compat/mod.rs` | 206 |  |
@@ -343,7 +343,7 @@
 | `services::provider_cli::paths` | `src/services/provider_cli/paths.rs` | 152 |  |
 | `services::provider_cli::registry` | `src/services/provider_cli/registry.rs` | 303 |  |
 | `services::provider_cli::retention` | `src/services/provider_cli/retention.rs` | 200 |  |
-| `services::provider_cli::session_guard` | `src/services/provider_cli/session_guard.rs` | 302 |  |
+| `services::provider_cli::session_guard` | `src/services/provider_cli/session_guard.rs` | 313 |  |
 | `services::provider_cli::smoke` | `src/services/provider_cli/smoke.rs` | 234 |  |
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 123 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 730 |  |

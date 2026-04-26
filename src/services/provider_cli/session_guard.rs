@@ -120,12 +120,19 @@ pub fn evaluate_session_migration_guards(
                 );
             }
         } else {
-            guard.safe_to_recreate = true;
-            guard.recreate_required = false;
-            guard.safe_end_completed_at = Some(Utc::now());
+            guard.safe_to_recreate = false;
+            guard.recreate_required = true;
+            guard.active_turn_state = "missing_launch_artifact".to_string();
+            let blocker = format!(
+                "{provider}/{agent_id} has no launch artifact; cannot verify current channel before migrating to {target_channel}"
+            );
             guard
                 .evidence
-                .insert("status".to_string(), "no_launch_artifact".to_string());
+                .insert("status".to_string(), "missing_launch_artifact".to_string());
+            guard
+                .evidence
+                .insert("blocker".to_string(), blocker.clone());
+            blockers.push(blocker);
         }
 
         guards.push(guard);
@@ -229,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_allows_agent_without_launch_artifact() {
+    fn guard_blocks_agent_without_launch_artifact() {
         let root = tempfile::tempdir().unwrap();
         let evaluation = evaluate_session_migration_guards(
             root.path(),
@@ -239,14 +246,18 @@ mod tests {
             false,
         );
 
-        assert!(evaluation.is_clear());
+        assert!(!evaluation.is_clear());
         assert_eq!(evaluation.guards.len(), 1);
+        assert_eq!(
+            evaluation.guards[0].active_turn_state,
+            "missing_launch_artifact"
+        );
         assert_eq!(
             evaluation.guards[0]
                 .evidence
                 .get("status")
                 .map(String::as_str),
-            Some("no_launch_artifact")
+            Some("missing_launch_artifact")
         );
     }
 
