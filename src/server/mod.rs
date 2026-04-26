@@ -216,6 +216,22 @@ where
     } else {
         anyhow::bail!("PostgreSQL is required for AgentDesk server runtime");
     }
+    crate::services::observability::init_observability(legacy_db.clone(), pg_pool.clone());
+    let boot_reconcile_engine = match startup_pg_pool.as_ref() {
+        Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+        )?),
+        None => None,
+    };
+    let startup_pool = startup_pg_pool.as_ref().or(pg_pool.as_ref());
+    crate::reconcile::reconcile_boot_runtime(
+        &legacy_db,
+        boot_reconcile_engine.as_ref().unwrap_or(&engine),
+        startup_pool,
+    )
+    .await?;
+    drop(boot_reconcile_engine);
     drop(startup_pg_pool);
 
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(

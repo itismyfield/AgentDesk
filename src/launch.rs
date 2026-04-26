@@ -14,6 +14,8 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
+    let db = crate::db::init(&config).context("Failed to init legacy compatibility DB")?;
+
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)
@@ -29,7 +31,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         config.server.port
     );
 
-    crate::server::run(config.clone(), engine, None, pg_pool)
+    crate::server::run(config.clone(), db, engine, None)
         .await
         .context("Server error")?;
 
