@@ -21,6 +21,13 @@ const ESCALATION_SECTION_CHAR_LIMIT: usize = 320;
 const ESCALATION_REASON_CHAR_LIMIT: usize = 240;
 const ESCALATION_RECENT_RESULT_LIMIT: usize = 2;
 
+fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool not configured"})),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EscalationScheduleSettings {
@@ -1391,37 +1398,7 @@ async fn emit_escalation_with_base_url(
                 }
             }
         } else {
-            let conn = match state.sqlite_db().separate_conn() {
-                Ok(conn) => conn,
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("db open failed: {err}")})),
-                    );
-                }
-            };
-            let settings = merged_settings(&conn, &state.config);
-            let summary = match load_card_summary(&conn, &card_id) {
-                Ok(summary) => summary,
-                Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
-            };
-            let context = match load_card_context(&conn, &card_id, &summary) {
-                Ok(context) => context,
-                Err(err) => {
-                    tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
-                    None
-                }
-            };
-            let parent_channels =
-                candidate_parent_channels(&conn, &card_id, summary.assigned_agent_id.as_deref());
-            let cached_thread_id = load_cached_thread_id(&conn, &card_id);
-            (
-                settings,
-                summary,
-                context,
-                parent_channels,
-                cached_thread_id,
-            )
+            return pg_unavailable();
         };
 
     let client = reqwest::Client::new();
@@ -1487,8 +1464,6 @@ async fn emit_escalation_with_base_url(
                                     "[escalation] failed to clear postgres cached thread for {card_id}"
                                 );
                             }
-                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
-                            let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
                     Err(err) => {
@@ -1500,8 +1475,6 @@ async fn emit_escalation_with_base_url(
                                     "[escalation] failed to clear postgres cached thread for {card_id}"
                                 );
                             }
-                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
-                            let _ = clear_cached_thread_id(&conn, &card_id);
                         }
                     }
                 }
@@ -1568,22 +1541,6 @@ async fn emit_escalation_with_base_url(
                                     );
                                     thread_id
                                 }
-                            }
-                        } else if let Ok(conn) = state.sqlite_db().separate_conn() {
-                            if let Some(existing) = load_cached_thread_id(&conn, &card_id) {
-                                tracing::info!(
-                                    "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
-                                    existing
-                                );
-                                existing
-                            } else {
-                                if let Err(err) = save_cached_thread_id(&conn, &card_id, &thread_id)
-                                {
-                                    tracing::warn!(
-                                        "[escalation] failed to cache thread for {card_id}: {err}"
-                                    );
-                                }
-                                thread_id
                             }
                         } else {
                             thread_id
@@ -1727,16 +1684,7 @@ pub async fn get_escalation_settings(
             }
         }
     } else {
-        let conn = match state.sqlite_db().read_conn() {
-            Ok(conn) => conn,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("db open failed: {err}")})),
-                );
-            }
-        };
-        merged_settings(&conn, &state.config)
+        return pg_unavailable();
     };
     (
         StatusCode::OK,
@@ -1791,27 +1739,7 @@ pub async fn put_escalation_settings(
             }
         }
     } else {
-        let conn = match state.sqlite_db().separate_conn() {
-            Ok(conn) => conn,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("db open failed: {err}")})),
-                );
-            }
-        };
-        let store_result = if body == defaults {
-            clear_override(&conn)
-        } else {
-            store_override(&conn, &body)
-        };
-        if let Err(err) = store_result {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": err})),
-            );
-        }
-        merged_settings(&conn, &state.config)
+        return pg_unavailable();
     };
 
     (
@@ -1997,11 +1925,8 @@ mod tests {
     #[tokio::test]
     async fn put_and_get_escalation_settings_round_trip() {
         let db = test_db();
-        let state = AppState::test_state_with_config(
-            db.clone(),
-            test_engine(&db),
-            crate::config::Config::default(),
-        );
+        let state =
+            AppState::test_state_with_config(test_engine(&db), crate::config::Config::default());
 
         let (status, Json(body)) = put_escalation_settings(
             State(state.clone()),
@@ -2136,7 +2061,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.owner_user_id = Some(343742347365974026);
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = AppState::test_state_with_config(test_engine(&db), config);
 
         let body = EmitEscalationBody {
             card_id: "card-1".to_string(),
@@ -2248,7 +2173,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.pm_channel_id = Some("222".to_string());
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = AppState::test_state_with_config(test_engine(&db), config);
 
         let (status, Json(body)) = emit_escalation_with_base_url(
             &state,

@@ -10,6 +10,13 @@ use sqlx::{PgPool, Row};
 use super::AppState;
 use crate::db::table_metadata;
 
+fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool not configured"})),
+    )
+}
+
 /// #1097 (910-3) — readonly guard.
 ///
 /// Returns an HTTP 405 response when `db_source_of_truth(table) == 'file'`
@@ -19,13 +26,9 @@ async fn reject_if_readonly(
     state: &AppState,
     table: &str,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
-    let source = if let Some(pool) = state.pg_pool_ref() {
-        table_metadata::source_of_truth_pg(pool, table).await
-    } else {
-        match state.sqlite_db().read_conn() {
-            Ok(conn) => table_metadata::source_of_truth_sqlite(&conn, table),
-            Err(_) => None,
-        }
+    let source = match state.pg_pool_ref() {
+        Some(pool) => table_metadata::source_of_truth_pg(pool, table).await,
+        None => None,
     };
 
     match source {
@@ -136,7 +139,10 @@ pub async fn get_stages(
     State(state): State<AppState>,
     Query(params): Query<GetStagesQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let stages = if let Some(pool) = state.pg_pool_ref() {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let stages =
         match list_pipeline_stages_pg(pool, params.repo.as_deref(), params.agent_id.as_deref())
             .await
         {
@@ -147,28 +153,7 @@ pub async fn get_stages(
                     Json(json!({"error": error})),
                 );
             }
-        }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
         };
-        match list_pipeline_stages_sqlite(&conn, params.repo.as_deref(), params.agent_id.as_deref())
-        {
-            Ok(stages) => stages,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        }
-    };
 
     (StatusCode::OK, Json(json!({ "stages": stages })))
 }
@@ -219,7 +204,10 @@ pub async fn put_stages(
         }
     }
 
-    let stages = if let Some(pool) = state.pg_pool_ref() {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let stages = {
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -295,86 +283,6 @@ pub async fn put_stages(
                 );
             }
         }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        if let Err(error) = conn.execute_batch("BEGIN TRANSACTION") {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("begin tx: {error}")})),
-            );
-        }
-
-        if let Err(error) = conn.execute(
-            "DELETE FROM pipeline_stages WHERE repo_id = ?1",
-            [&body.repo],
-        ) {
-            let _ = conn.execute_batch("ROLLBACK");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("delete: {error}")})),
-            );
-        }
-
-        for (idx, stage) in body.stages.iter().enumerate() {
-            let order = stage.stage_order.unwrap_or(idx as i64 + 1);
-            let timeout = stage.timeout_minutes.unwrap_or(60);
-            let on_failure = stage.on_failure.as_deref().unwrap_or("fail");
-            let max_retries = stage.max_retries.unwrap_or(0);
-
-            if let Err(error) = conn.execute(
-                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, entry_skill,
-                    timeout_minutes, on_failure, skip_condition, provider, agent_override_id,
-                    on_failure_target, max_retries, parallel_with)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                libsql_rusqlite::params![
-                    body.repo,
-                    stage.stage_name,
-                    order,
-                    stage.trigger_after,
-                    stage.entry_skill,
-                    timeout,
-                    on_failure,
-                    stage.skip_condition,
-                    stage.provider,
-                    stage.agent_override_id,
-                    stage.on_failure_target,
-                    max_retries,
-                    stage.parallel_with,
-                ],
-            ) {
-                let _ = conn.execute_batch("ROLLBACK");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("insert stage '{}': {error}", stage.stage_name)})),
-                );
-            }
-        }
-
-        if let Err(error) = conn.execute_batch("COMMIT") {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("commit: {error}")})),
-            );
-        }
-
-        match list_pipeline_stages_sqlite(&conn, Some(&body.repo), None) {
-            Ok(stages) => stages,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        }
     };
 
     (StatusCode::OK, Json(json!({ "stages": stages })))
@@ -390,45 +298,22 @@ pub async fn delete_stages(
         return resp;
     }
 
-    if let Some(pool) = state.pg_pool_ref() {
-        match sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
-            .bind(&params.repo)
-            .execute(pool)
-            .await
-        {
-            Ok(result) => (
-                StatusCode::OK,
-                Json(json!({"deleted": true, "count": result.rows_affected()})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        match conn.execute(
-            "DELETE FROM pipeline_stages WHERE repo_id = ?1",
-            [&params.repo],
-        ) {
-            Ok(count) => (
-                StatusCode::OK,
-                Json(json!({"deleted": true, "count": count})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    match sqlx::query("DELETE FROM pipeline_stages WHERE repo_id = $1")
+        .bind(&params.repo)
+        .execute(pool)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({"deleted": true, "count": result.rows_affected()})),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        ),
     }
 }
 
@@ -437,110 +322,54 @@ pub async fn get_card_pipeline(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (repo_id, stages, history) = if let Some(pool) = state.pg_pool_ref() {
-        let repo_id = match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT repo_id FROM kanban_cards WHERE id = $1",
-        )
-        .bind(&card_id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(repo_id)) => repo_id,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
 
-        let stages = if let Some(repo_id) = repo_id.as_deref() {
-            match list_pipeline_stages_pg(pool, Some(repo_id), None).await {
-                Ok(stages) => stages,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            }
-        } else {
-            Vec::new()
-        };
+    let repo_id = match sqlx::query_scalar::<_, Option<String>>(
+        "SELECT repo_id FROM kanban_cards WHERE id = $1",
+    )
+    .bind(&card_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(repo_id)) => repo_id,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "card not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    };
 
-        let history = match list_card_pipeline_history_pg(pool, &card_id).await {
-            Ok(history) => history,
+    let stages = if let Some(repo_id) = repo_id.as_deref() {
+        match list_pipeline_stages_pg(pool, Some(repo_id), None).await {
+            Ok(stages) => stages,
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": error})),
                 );
             }
-        };
-
-        (repo_id, stages, history)
+        }
     } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
+        Vec::new()
+    };
 
-        let repo_id: Option<String> = match conn.query_row(
-            "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-            [&card_id],
-            |row| row.get(0),
-        ) {
-            Ok(repo_id) => repo_id,
-            Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        let stages = if let Some(repo_id) = repo_id.as_deref() {
-            match list_pipeline_stages_sqlite(&conn, Some(repo_id), None) {
-                Ok(stages) => stages,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let history = match list_card_pipeline_history_sqlite(&conn, &card_id) {
-            Ok(history) => history,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        };
-
-        (repo_id, stages, history)
+    let history = match list_card_pipeline_history_pg(pool, &card_id).await {
+        Ok(history) => history,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
     };
 
     let current_stage = find_current_stage(&stages, &history);
@@ -561,34 +390,16 @@ pub async fn get_card_history(
     State(state): State<AppState>,
     Path(card_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let history = if let Some(pool) = state.pg_pool_ref() {
-        match list_card_history_pg(pool, &card_id).await {
-            Ok(history) => history,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-        match list_card_history_sqlite(&conn, &card_id) {
-            Ok(history) => history,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let history = match list_card_history_pg(pool, &card_id).await {
+        Ok(history) => history,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
         }
     };
 
@@ -601,7 +412,11 @@ pub async fn get_card_transcripts(
     Path(card_id): Path<String>,
     Query(params): Query<TranscriptQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let card_exists = if let Some(pool) = state.pg_pool_ref() {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+
+    let card_exists =
         match sqlx::query("SELECT COUNT(*)::BIGINT AS count FROM kanban_cards WHERE id = $1")
             .bind(&card_id)
             .fetch_one(pool)
@@ -614,25 +429,7 @@ pub async fn get_card_transcripts(
                     Json(json!({"error": format!("query: {e}")})),
                 );
             }
-        }
-    } else {
-        let conn = match state.sqlite_db().read_conn() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
         };
-        conn.query_row(
-            "SELECT COUNT(*) FROM kanban_cards WHERE id = ?1",
-            [&card_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false)
-    };
     if !card_exists {
         return (
             StatusCode::NOT_FOUND,
@@ -640,14 +437,7 @@ pub async fn get_card_transcripts(
         );
     }
 
-    match crate::db::session_transcripts::list_transcripts_for_card_db(
-        state.sqlite_db(),
-        state.pg_pool_ref(),
-        &card_id,
-        params.limit.unwrap_or(10),
-    )
-    .await
-    {
+    match list_card_transcripts_pg(pool, &card_id, params.limit.unwrap_or(10)).await {
         Ok(transcripts) => (
             StatusCode::OK,
             Json(json!({
@@ -695,97 +485,60 @@ pub async fn get_effective_pipeline(
         );
     }
 
-    let (effective, repo_has_override, agent_has_override) = if let Some(pool) = state.pg_pool_ref()
-    {
-        let effective = crate::pipeline::resolve_for_card_pg(
-            pool,
-            params.repo.as_deref(),
-            params.agent_id.as_deref(),
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let effective = crate::pipeline::resolve_for_card_pg(
+        pool,
+        params.repo.as_deref(),
+        params.agent_id.as_deref(),
+    )
+    .await;
+
+    let repo_has_override = if let Some(repo_id) = params.repo.as_deref() {
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''
+             FROM github_repos
+             WHERE id = $1",
         )
-        .await;
-
-        let repo_has_override = if let Some(repo_id) = params.repo.as_deref() {
-            match sqlx::query_scalar::<_, bool>(
-                "SELECT pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''
-                 FROM github_repos
-                 WHERE id = $1",
-            )
-            .bind(repo_id)
-            .fetch_optional(pool)
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => false,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-            }
-        } else {
-            false
-        };
-
-        let agent_has_override = if let Some(agent_id) = params.agent_id.as_deref() {
-            match sqlx::query_scalar::<_, bool>(
-                "SELECT pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''
-                 FROM agents
-                 WHERE id = $1",
-            )
-            .bind(agent_id)
-            .fetch_optional(pool)
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => false,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-            }
-        } else {
-            false
-        };
-
-        (effective, repo_has_override, agent_has_override)
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
+        .bind(repo_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => false,
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{error}")})),
                 );
             }
-        };
+        }
+    } else {
+        false
+    };
 
-        let effective = crate::pipeline::resolve_for_card(
-            &conn,
-            params.repo.as_deref(),
-            params.agent_id.as_deref(),
-        );
-
-        let repo_has_override = params.repo.as_ref().map_or(false, |repo_id| {
-            conn.query_row(
-                "SELECT pipeline_config IS NOT NULL AND pipeline_config != '' FROM github_repos WHERE id = ?1",
-                [repo_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
-        });
-        let agent_has_override = params.agent_id.as_ref().map_or(false, |agent_id| {
-            conn.query_row(
-                "SELECT pipeline_config IS NOT NULL AND pipeline_config != '' FROM agents WHERE id = ?1",
-                [agent_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
-        });
-
-        (effective, repo_has_override, agent_has_override)
+    let agent_has_override = if let Some(agent_id) = params.agent_id.as_deref() {
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT pipeline_config IS NOT NULL AND TRIM(pipeline_config::text) != ''
+             FROM agents
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => false,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+    } else {
+        false
     };
 
     (
@@ -813,39 +566,23 @@ pub async fn get_repo_pipeline(
     Path((owner, repo)): Path<(String, String)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
-    let config = if let Some(pool) = state.pg_pool_ref() {
-        match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(config) => config.flatten(),
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let config = match sqlx::query_scalar::<_, Option<String>>(
+        "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(config) => config.flatten(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
         }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        conn.query_row(
-            "SELECT pipeline_config FROM github_repos WHERE id = ?1",
-            [&id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None)
     };
 
     let parsed: serde_json::Value = config
@@ -880,90 +617,38 @@ pub async fn set_repo_pipeline(
         _ => None,
     };
 
-    let response = {
-        if let Some(pool) = state.pg_pool_ref() {
-            match sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = $2")
-                .bind(config_str.as_deref())
-                .bind(&id)
-                .execute(pool)
-                .await
-            {
-                Ok(result) if result.rows_affected() == 0 => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "repo not found"})),
-                ),
-                Ok(_) => {
-                    let effective =
-                        crate::pipeline::resolve_for_card_pg(pool, Some(&id), None).await;
-                    if let Err(error) = effective.validate() {
-                        let _ = sqlx::query(
-                            "UPDATE github_repos SET pipeline_config = NULL WHERE id = $1",
-                        )
-                        .bind(&id)
-                        .execute(pool)
-                        .await;
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(
-                                json!({"error": format!("merged pipeline validation failed: {error}")}),
-                            ),
-                        );
-                    }
-                    (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
-                }
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                ),
-            }
-        } else {
-            let conn = match state.sqlite_db().lock() {
-                Ok(c) => c,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-            };
-
-            match conn.execute(
-                "UPDATE github_repos SET pipeline_config = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![config_str, id],
-            ) {
-                Ok(0) => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "repo not found"})),
-                ),
-                Ok(_) => {
-                    let effective = crate::pipeline::resolve_for_card(&conn, Some(&id), None);
-                    if let Err(error) = effective.validate() {
-                        let _ = conn.execute(
-                            "UPDATE github_repos SET pipeline_config = NULL WHERE id = ?1",
-                            libsql_rusqlite::params![id],
-                        );
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(
-                                json!({"error": format!("merged pipeline validation failed: {error}")}),
-                            ),
-                        );
-                    }
-                    (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
-                }
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                ),
-            }
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-
-    if response.0 == StatusCode::OK {
-        crate::pipeline::refresh_override_health_report(state.sqlite_db(), state.pg_pool_ref())
-            .await;
+    match sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = $2")
+        .bind(config_str.as_deref())
+        .bind(&id)
+        .execute(pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 0 => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "repo not found"})),
+        ),
+        Ok(_) => {
+            let effective = crate::pipeline::resolve_for_card_pg(pool, Some(&id), None).await;
+            if let Err(error) = effective.validate() {
+                let _ = sqlx::query("UPDATE github_repos SET pipeline_config = NULL WHERE id = $1")
+                    .bind(&id)
+                    .execute(pool)
+                    .await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
+                );
+            }
+            (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        ),
     }
-    response
 }
 
 /// GET /api/pipeline/config/agent/:agent_id
@@ -971,39 +656,23 @@ pub async fn get_agent_pipeline(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let config = if let Some(pool) = state.pg_pool_ref() {
-        match sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
-        )
-        .bind(&agent_id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(config) => config.flatten(),
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+    let config = match sqlx::query_scalar::<_, Option<String>>(
+        "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
+    )
+    .bind(&agent_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(config) => config.flatten(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
         }
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        conn.query_row(
-            "SELECT pipeline_config FROM agents WHERE id = ?1",
-            [&agent_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(None)
     };
 
     let parsed: serde_json::Value = config
@@ -1037,95 +706,41 @@ pub async fn set_agent_pipeline(
         _ => None,
     };
 
-    let response = {
-        if let Some(pool) = state.pg_pool_ref() {
-            match sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = $2")
-                .bind(config_str.as_deref())
-                .bind(&agent_id)
-                .execute(pool)
-                .await
-            {
-                Ok(result) if result.rows_affected() == 0 => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                ),
-                Ok(_) => {
-                    let effective =
-                        crate::pipeline::resolve_for_card_pg(pool, None, Some(&agent_id)).await;
-                    if let Err(error) = effective.validate() {
-                        let _ =
-                            sqlx::query("UPDATE agents SET pipeline_config = NULL WHERE id = $1")
-                                .bind(&agent_id)
-                                .execute(pool)
-                                .await;
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(
-                                json!({"error": format!("merged pipeline validation failed: {error}")}),
-                            ),
-                        );
-                    }
-                    (
-                        StatusCode::OK,
-                        Json(json!({"ok": true, "agent_id": agent_id})),
-                    )
-                }
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                ),
-            }
-        } else {
-            let conn = match state.sqlite_db().lock() {
-                Ok(c) => c,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-            };
-
-            match conn.execute(
-                "UPDATE agents SET pipeline_config = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![config_str, agent_id],
-            ) {
-                Ok(0) => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                ),
-                Ok(_) => {
-                    let effective = crate::pipeline::resolve_for_card(&conn, None, Some(&agent_id));
-                    if let Err(error) = effective.validate() {
-                        let _ = conn.execute(
-                            "UPDATE agents SET pipeline_config = NULL WHERE id = ?1",
-                            libsql_rusqlite::params![agent_id],
-                        );
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(
-                                json!({"error": format!("merged pipeline validation failed: {error}")}),
-                            ),
-                        );
-                    }
-                    (
-                        StatusCode::OK,
-                        Json(json!({"ok": true, "agent_id": agent_id})),
-                    )
-                }
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                ),
-            }
-        }
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-
-    if response.0 == StatusCode::OK {
-        crate::pipeline::refresh_override_health_report(state.sqlite_db(), state.pg_pool_ref())
-            .await;
+    match sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = $2")
+        .bind(config_str.as_deref())
+        .bind(&agent_id)
+        .execute(pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 0 => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        ),
+        Ok(_) => {
+            let effective = crate::pipeline::resolve_for_card_pg(pool, None, Some(&agent_id)).await;
+            if let Err(error) = effective.validate() {
+                let _ = sqlx::query("UPDATE agents SET pipeline_config = NULL WHERE id = $1")
+                    .bind(&agent_id)
+                    .execute(pool)
+                    .await;
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "agent_id": agent_id})),
+            )
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        ),
     }
-    response
 }
 
 /// GET /api/pipeline/config/graph?repo=...&agent_id=...
@@ -1141,26 +756,15 @@ pub async fn get_pipeline_graph(
         );
     }
 
-    let effective = if let Some(pool) = state.pg_pool_ref() {
-        crate::pipeline::resolve_for_card_pg(
-            pool,
-            params.repo.as_deref(),
-            params.agent_id.as_deref(),
-        )
-        .await
-    } else {
-        let conn = match state.sqlite_db().lock() {
-            Ok(c) => c,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-
-        crate::pipeline::resolve_for_card(&conn, params.repo.as_deref(), params.agent_id.as_deref())
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
+    let effective = crate::pipeline::resolve_for_card_pg(
+        pool,
+        params.repo.as_deref(),
+        params.agent_id.as_deref(),
+    )
+    .await;
 
     (StatusCode::OK, Json(effective.to_graph()))
 }
@@ -1488,6 +1092,75 @@ async fn list_card_history_pg(
         .map_err(|error| format!("decode history row: {error}"))
 }
 
+async fn list_card_transcripts_pg(
+    pool: &PgPool,
+    card_id: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let limit = limit.clamp(1, 100) as i64;
+    let rows = sqlx::query(
+        "SELECT st.id::BIGINT AS id,
+                st.turn_id,
+                st.session_key,
+                st.channel_id,
+                st.agent_id,
+                st.provider,
+                st.dispatch_id,
+                td.kanban_card_id,
+                td.title,
+                kc.title AS card_title,
+                kc.github_issue_number::BIGINT AS github_issue_number,
+                st.user_message,
+                st.assistant_message,
+                st.events_json::TEXT AS events_json,
+                st.duration_ms::BIGINT AS duration_ms,
+                to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+         FROM session_transcripts st
+         JOIN task_dispatches td
+           ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
+         WHERE td.kanban_card_id = $1
+         ORDER BY st.created_at DESC, st.id DESC
+         LIMIT $2",
+    )
+    .bind(card_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("query card transcripts failed: {error}"))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let events_json = row.try_get::<Option<String>, _>("events_json")?;
+            let events = events_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default();
+            Ok(json!({
+                "id": row.try_get::<i64, _>("id")?,
+                "turn_id": row.try_get::<String, _>("turn_id")?,
+                "session_key": row.try_get::<Option<String>, _>("session_key")?,
+                "channel_id": row.try_get::<Option<String>, _>("channel_id")?,
+                "agent_id": row.try_get::<Option<String>, _>("agent_id")?,
+                "provider": row.try_get::<Option<String>, _>("provider")?,
+                "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id")?,
+                "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id")?,
+                "dispatch_title": row.try_get::<Option<String>, _>("title")?,
+                "card_title": row.try_get::<Option<String>, _>("card_title")?,
+                "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number")?,
+                "user_message": row.try_get::<String, _>("user_message")?,
+                "assistant_message": row.try_get::<String, _>("assistant_message")?,
+                "events": events,
+                "duration_ms": row.try_get::<Option<i64>, _>("duration_ms")?,
+                "created_at": row.try_get::<String, _>("created_at")?,
+            }))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map_err(|error| format!("decode transcript row: {error}"))
+}
+
 fn find_current_stage(
     stages: &[serde_json::Value],
     history: &[serde_json::Value],
@@ -1545,7 +1218,7 @@ mod tests {
     async fn get_card_transcripts_returns_linked_turns() {
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state(engine);
 
         {
             let mut conn = db.lock().unwrap();
@@ -1629,7 +1302,7 @@ mod tests {
     async fn put_stages_rejected_when_db_source_of_truth_is_file() {
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state(engine);
 
         // pipeline_stages is seeded as file-canonical by the schema migrator.
         let body = PutStagesBody {

@@ -23,6 +23,34 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "narrate_progress",
 ];
 
+const RUNTIME_CONFIG_KEYS: &[&str] = &[
+    "dispatchPollSec",
+    "agentSyncSec",
+    "githubIssueSyncSec",
+    "claudeRateLimitPollSec",
+    "codexRateLimitPollSec",
+    "issueTriagePollSec",
+    "ceoWarnDepth",
+    "maxRetries",
+    "maxEntryRetries",
+    "staleDispatchedGraceMin",
+    "staleDispatchedTerminalStatuses",
+    "staleDispatchedRecoverNullDispatch",
+    "staleDispatchedRecoverMissingDispatch",
+    "reviewReminderMin",
+    "rateLimitWarningPct",
+    "rateLimitDangerPct",
+    "githubRepoCacheSec",
+    "rateLimitStaleSec",
+];
+
+fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "postgres pool not configured"})),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KvSeedAction {
     Put { key: String, value: String },
@@ -53,27 +81,7 @@ pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<se
         return (StatusCode::OK, Json(parsed));
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    let value: String = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'settings'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "{}".to_string());
-
-    let parsed: serde_json::Value = serde_json::from_str(&value).unwrap_or(json!({}));
-
-    (StatusCode::OK, Json(parsed))
+    pg_unavailable()
 }
 
 fn prune_retired_settings_keys(mut body: serde_json::Value) -> serde_json::Value {
@@ -114,27 +122,7 @@ pub async fn put_settings(
         return (StatusCode::OK, Json(json!({"ok": true})));
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    if let Err(e) = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('settings', ?1)",
-        [&value_str],
-    ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
-    }
-
-    (StatusCode::OK, Json(json!({"ok": true})))
+    pg_unavailable()
 }
 
 /// Known individual `kv_meta` config keys surfaced to the dashboard and policy helpers.
@@ -376,46 +364,25 @@ fn config_entry_restart_behavior(
 pub async fn get_config_entries(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let pg_values = if let Some(pool) = state.pg_pool_ref() {
-        match load_pg_kv_values(pool).await {
-            Ok(values) => Some(values),
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
-        }
-    } else {
-        None
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
     };
-    let sqlite_conn = if pg_values.is_none() {
-        match state.sqlite_db().lock() {
-            Ok(conn) => Some(conn),
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
+    let pg_values = match load_pg_kv_values(pool).await {
+        Ok(values) => values,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
         }
-    } else {
-        None
     };
 
     let mut entries = Vec::new();
     for (key, category, label_ko, label_en, default_val) in CONFIG_KEYS {
         let stored_value: Option<String> = if is_read_only_config_key(key) {
             None
-        } else if let Some(values) = pg_values.as_ref() {
-            values.get(*key).cloned()
         } else {
-            sqlite_conn.as_ref().and_then(|conn| {
-                conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-                    row.get(0)
-                })
-                .ok()
-            })
+            pg_values.get(*key).cloned()
         };
         let baseline = config_entry_default(state.config.as_ref(), key, *default_val);
         let effective = config_entry_effective_value(key, stored_value, baseline.clone());
@@ -503,46 +470,7 @@ pub async fn patch_config_entries(
         );
     }
 
-    let conn = match state.sqlite_db().lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    for (key, value) in entries {
-        if !allowed.contains(key.as_str()) {
-            rejected.push(key.clone());
-            continue;
-        }
-        if is_read_only_config_key(key) {
-            rejected.push(key.clone());
-            continue;
-        }
-        let v = match value {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![key, v],
-        )
-        .ok();
-        updated += 1;
-    }
-    if !rejected.is_empty() {
-        tracing::warn!(
-            "patch_config_entries: rejected unknown keys: {:?}",
-            rejected
-        );
-    }
-    (
-        StatusCode::OK,
-        Json(json!({"ok": true, "updated": updated, "rejected": rejected})),
-    )
+    pg_unavailable()
 }
 
 /// Seed default values for CONFIG_KEYS into kv_meta on startup.
@@ -653,10 +581,41 @@ async fn load_pg_kv_values(
 pub async fn get_runtime_config(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.settings_service().get_runtime_config() {
-        Ok(body) => (StatusCode::OK, Json(body)),
-        Err(error) => error.into_json_response(),
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+
+    let saved =
+        match sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+            .bind("runtime-config")
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(value)) => serde_json::from_str(&value).unwrap_or_else(|_| json!({})),
+            Ok(None) => json!({}),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        };
+
+    let defaults = crate::services::settings::runtime_config_defaults(state.config.as_ref());
+    let mut current = defaults.as_object().cloned().unwrap_or_default();
+    if let Some(saved_obj) = saved.as_object() {
+        for (key, value) in saved_obj {
+            current.insert(key.clone(), value.clone());
+        }
     }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "current": current,
+            "defaults": defaults,
+        })),
+    )
 }
 
 /// PUT /api/settings/runtime-config
@@ -664,10 +623,110 @@ pub async fn put_runtime_config(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.settings_service().put_runtime_config(body) {
-        Ok(()) => (StatusCode::OK, Json(json!({"ok": true}))),
-        Err(error) => error.into_json_response(),
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_unavailable();
+    };
+
+    let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+    if let Some(values) = body.as_object() {
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("begin runtime-config tx: {error}")})),
+                );
+            }
+        };
+
+        if let Err(error) = sqlx::query(
+            "INSERT INTO kv_meta (key, value, expires_at)
+             VALUES ($1, $2, NULL)
+             ON CONFLICT (key) DO UPDATE
+                 SET value = EXCLUDED.value,
+                     expires_at = EXCLUDED.expires_at",
+        )
+        .bind("runtime-config")
+        .bind(&value_str)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+
+        for key in RUNTIME_CONFIG_KEYS {
+            if let Err(error) = sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                .bind(*key)
+                .execute(&mut *tx)
+                .await
+            {
+                let _ = tx.rollback().await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+
+        for (key, value) in values {
+            let text = match value {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                serde_json::Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            };
+            let Some(text) = text else {
+                continue;
+            };
+            if let Err(error) = sqlx::query(
+                "INSERT INTO kv_meta (key, value, expires_at)
+                 VALUES ($1, $2, NULL)
+                 ON CONFLICT (key) DO UPDATE
+                     SET value = EXCLUDED.value,
+                         expires_at = EXCLUDED.expires_at",
+            )
+            .bind(key)
+            .bind(&text)
+            .execute(&mut *tx)
+            .await
+            {
+                let _ = tx.rollback().await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+
+        if let Err(error) = tx.commit().await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    } else if let Err(error) = sqlx::query(
+        "INSERT INTO kv_meta (key, value, expires_at)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value,
+                 expires_at = EXCLUDED.expires_at",
+    )
+    .bind("runtime-config")
+    .bind(&value_str)
+    .execute(pool)
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        );
     }
+
+    (StatusCode::OK, Json(json!({"ok": true})))
 }
 
 #[cfg(test)]
@@ -696,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn get_config_entries_includes_merge_automation_and_omits_retired_keys() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -745,7 +804,7 @@ mod tests {
             .unwrap();
         }
 
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = AppState::test_state_with_config(test_engine(&db), config);
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
 
@@ -801,7 +860,7 @@ mod tests {
     #[tokio::test]
     async fn patch_config_entries_accepts_merge_automation_and_provider_specific_keys() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state.clone()),
@@ -848,7 +907,7 @@ mod tests {
     #[tokio::test]
     async fn patch_config_entries_rejects_read_only_server_port() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state),
@@ -1086,7 +1145,7 @@ mod tests {
             Some("cancelled,failed,expired".to_string());
         config.runtime.stale_dispatched_recover_null_dispatch = Some(false);
         config.runtime.stale_dispatched_recover_missing_dispatch = Some(false);
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = AppState::test_state_with_config(test_engine(&db), config);
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -1119,7 +1178,7 @@ mod tests {
     #[tokio::test]
     async fn put_runtime_config_mirrors_scalar_keys_for_runtime_consumers() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (status, _) = put_runtime_config(
             State(state),
@@ -1182,7 +1241,7 @@ mod tests {
     #[tokio::test]
     async fn put_settings_is_full_replace_and_strips_retired_company_keys() {
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
 
         let (first_status, _) = put_settings(
             State(state.clone()),

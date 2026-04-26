@@ -6,9 +6,10 @@ use super::super::AppState;
 use crate::services::provider::ProviderKind;
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    match state {
-        AppState { db, .. } => db,
-    }
+    state
+        .engine
+        .legacy_db()
+        .expect("legacy sqlite db unavailable for review verdict fallback")
 }
 
 /// Write a review-passed marker file for the reviewed commit.

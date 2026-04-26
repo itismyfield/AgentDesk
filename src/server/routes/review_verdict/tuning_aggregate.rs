@@ -622,12 +622,14 @@ fn write_review_tuning_guidance_file(guidance: &str) {
 pub async fn aggregate_review_tuning(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pg_pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres pool not configured"})),
+        );
+    };
     let (total_tp, total_fp, total_tn, total_fn, total_disputed, guidance_lines) =
-        if let Some(pg_pool) = state.pg_pool_ref() {
-            aggregate_review_tuning_core_pg(pg_pool).await
-        } else {
-            aggregate_review_tuning_core(state.sqlite_db())
-        };
+        aggregate_review_tuning_core_pg(pg_pool).await;
     let total = total_tp + total_fp + total_tn + total_fn + total_disputed;
     (
         StatusCode::OK,

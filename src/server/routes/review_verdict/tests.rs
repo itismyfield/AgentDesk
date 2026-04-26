@@ -85,7 +85,7 @@ fn count_active_dispatches(db: &Db, card_id: &str, dispatch_type: &str) -> i64 {
 async fn submit_verdict_pass_marks_done_and_clears_review_status() {
     let db = test_db();
     seed_review_card(&db, "dispatch-pass");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, _) = submit_verdict(
         State(state),
@@ -130,7 +130,7 @@ async fn submit_verdict_pass_marks_done_and_clears_review_status() {
 async fn submit_verdict_improve_creates_review_decision_dispatch() {
     let db = test_db();
     seed_review_card(&db, "dispatch-improve");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, _) = submit_verdict(
         State(state),
@@ -180,7 +180,7 @@ async fn submit_verdict_improve_creates_review_decision_dispatch() {
 async fn review_verdict_allows_same_agent_submission() {
     let db = test_db();
     seed_review_card(&db, "dispatch-counter");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -229,7 +229,7 @@ async fn repeated_findings_after_approach_change_creates_session_reset_rework_di
         .unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
     let (status, _) = submit_verdict(
         State(state),
         Json(SubmitVerdictBody {
@@ -325,7 +325,7 @@ async fn repeated_findings_after_session_reset_escalates_to_dilemma_pending() {
         .unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
     let (status, _) = submit_verdict(
         State(state),
         Json(SubmitVerdictBody {
@@ -401,7 +401,7 @@ async fn implementation_dispatch_verdict_rejected() {
     ).unwrap();
     drop(conn);
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -441,7 +441,7 @@ async fn review_decision_dispatch_verdict_rejected() {
     ).unwrap();
     drop(conn);
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -487,7 +487,7 @@ async fn dismiss_clears_review_status_and_cancels_pending_dispatches() {
     ).unwrap();
     drop(conn);
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_review_decision(
         State(state),
@@ -551,7 +551,7 @@ async fn verdict_on_cancelled_dispatch_rejected() {
     ).unwrap();
     drop(conn);
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -621,7 +621,7 @@ fn seed_counter_model_review(
 async fn cross_provider_verdict_allowed() {
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-cross", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     // CDX (codex) submitting verdict for a review where from=claude, target=codex → allowed
     let (status, body) = submit_verdict(
@@ -646,7 +646,7 @@ async fn cross_provider_verdict_allowed() {
 async fn same_provider_verdict_rejected() {
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-self-prov", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     // CC (claude) submitting verdict for own work → self-review rejection
     let (status, body) = submit_verdict(
@@ -671,7 +671,7 @@ async fn same_provider_verdict_rejected() {
 async fn verdict_without_provider_rejected_for_counter_model_dispatch() {
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-no-prov", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     // No provider specified on counter-model dispatch → rejected to prevent bypass
     let (status, body) = submit_verdict(
@@ -701,7 +701,7 @@ async fn verdict_without_provider_rejected_for_counter_model_dispatch() {
 async fn reverse_cross_provider_verdict_allowed() {
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-rev-cross", "codex", "claude");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     // CC (claude) submitting verdict where from=codex, target=claude → allowed
     let (status, body) = submit_verdict(
@@ -727,7 +727,7 @@ async fn casing_variant_self_review_rejected() {
     // "Claude" (capitalized) submitting for from=claude → should normalize and reject
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-case-self", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -752,7 +752,7 @@ async fn casing_variant_cross_provider_allowed() {
     // "Codex" (capitalized) submitting for from=claude, target=codex → normalize and allow
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-case-cross", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -776,7 +776,7 @@ async fn casing_variant_cross_provider_allowed() {
 async fn gemini_cross_provider_allowed() {
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-gemini-cross", "claude", "gemini");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -801,7 +801,7 @@ async fn unknown_provider_string_rejected() {
     // Unknown provider string → reject
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-unknown-prov", "claude", "codex");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -831,7 +831,7 @@ async fn reverse_self_review_rejected() {
     // from=codex, target=claude, submitter=codex → self-review blocked (submitter == from)
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-mismatch", "codex", "claude");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -857,7 +857,7 @@ async fn provider_mismatch_branch_rejected() {
     // This exercises line 341-351 (mismatch branch), not 329-339 (self-review branch)
     let db = test_db();
     seed_counter_model_review(&db, "dispatch-mismatch2", "claude", "claude");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -888,7 +888,7 @@ async fn legacy_dispatch_without_provider_tracking_allows_no_provider() {
     // should still allow verdicts without provider field
     let db = test_db();
     seed_review_card(&db, "dispatch-legacy");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -930,7 +930,7 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     let (status, _body) = submit_review_decision(
         State(state),
@@ -1015,7 +1015,7 @@ async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_re
         .unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     let (status, body) = submit_review_decision(
         State(state),
@@ -1122,7 +1122,7 @@ async fn accept_rework_failure_keeps_review_decision_pending() {
         .unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     let (status, body) = submit_review_decision(
         State(state),
@@ -1196,7 +1196,7 @@ async fn dismiss_then_late_accept_does_not_reopen() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     let (status, _) = submit_review_decision(
         State(state),
@@ -1248,7 +1248,7 @@ async fn duplicate_accept_returns_conflict() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     // First accept should succeed
     let (status1, body1) = submit_review_decision(
@@ -1328,7 +1328,7 @@ async fn accept_then_dispute_returns_conflict() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), engine);
+    let state = AppState::test_state(engine);
 
     // Accept consumes the dispatch
     let (status1, _) = submit_review_decision(
@@ -1396,7 +1396,7 @@ async fn submit_verdict_pass_fires_terminal_hook_via_drain() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, _) = submit_verdict(
         State(state),
@@ -1458,7 +1458,7 @@ async fn submit_verdict_pass_fires_terminal_hook_via_drain() {
 async fn accept_verdict_is_rejected_by_submit_verdict() {
     let db = test_db();
     seed_review_card(&db, "dispatch-accept-v");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_verdict(
         State(state),
@@ -1581,7 +1581,7 @@ async fn accept_updates_canonical_review_state() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, _) = submit_review_decision(
         State(state),
@@ -1654,7 +1654,7 @@ async fn accept_clears_suggestion_pending_review_status() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, _) = submit_review_decision(
         State(state),
@@ -1781,7 +1781,7 @@ async fn accept_direct_review_preserves_reviewing_status() {
         ).unwrap();
     }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state = AppState::test_state(test_engine(&db));
 
     let (status, body) = submit_review_decision(
         State(state),

@@ -8,9 +8,10 @@ use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    match state {
-        AppState { db, .. } => db,
-    }
+    state
+        .engine
+        .legacy_db()
+        .expect("legacy sqlite db unavailable for review fallback")
 }
 
 /// PG-first wrapper around `crate::kanban::transition_status_with_opts`.
@@ -275,8 +276,7 @@ async fn load_review_decision_card_context_pg_first(
         };
     }
 
-    state
-        .db
+    legacy_db(state)
         .lock()
         .ok()
         .and_then(|conn| {
@@ -342,8 +342,7 @@ async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
         };
     }
 
-    state
-        .db
+    legacy_db(state)
         .lock()
         .ok()
         .and_then(|conn| {
@@ -550,8 +549,7 @@ async fn mark_next_review_round_advance_pg_first(
         return Ok(true);
     }
 
-    let conn = state
-        .db
+    let conn = legacy_db(state)
         .lock()
         .map_err(|error| format!("database lock poisoned: {error}"))?;
     mark_next_review_round_advance_on_conn(&conn, card_id).map_err(|error| error.to_string())
@@ -758,8 +756,7 @@ async fn latest_completed_review_context_pg_first(
         };
     }
 
-    state
-        .db
+    legacy_db(state)
         .lock()
         .ok()
         .and_then(|c| {
@@ -833,8 +830,7 @@ async fn stale_review_dispatch_ids_pg_first(state: &AppState, card_id: &str) -> 
         };
     }
 
-    state
-        .db
+    legacy_db(state)
         .lock()
         .ok()
         .and_then(|conn| {
@@ -890,8 +886,7 @@ async fn prepare_dispute_review_entry_pg_first(
         return Ok(());
     }
 
-    let conn = state
-        .db
+    let conn = legacy_db(state)
         .lock()
         .map_err(|error| format!("database lock poisoned: {error}"))?;
     use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
@@ -1006,8 +1001,7 @@ async fn cancel_dispatch_pg_first(
         .await;
     }
 
-    let conn = state
-        .db
+    let conn = legacy_db(state)
         .lock()
         .map_err(|error| format!("database lock poisoned: {error}"))?;
     crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, reason)
@@ -1068,8 +1062,7 @@ async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Res
         return Ok(());
     }
 
-    let conn = state
-        .db
+    let conn = legacy_db(state)
         .lock()
         .map_err(|error| format!("database lock poisoned: {error}"))?;
     let dispatch_ids: Vec<String> = conn
@@ -1771,8 +1764,7 @@ pub async fn submit_review_decision(
                     .await
                     .unwrap_or(false)
                 } else {
-                    state
-                        .db
+                    legacy_db(&state)
                         .lock()
                         .ok()
                         .and_then(|conn| {

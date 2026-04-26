@@ -14,6 +14,13 @@ use super::AppState;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
+fn legacy_db(state: &AppState) -> &crate::db::Db {
+    state
+        .engine
+        .legacy_db()
+        .expect("legacy sqlite db unavailable for onboarding fallback")
+}
+
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const ONBOARDING_DRAFT_VERSION: u8 = 1;
 const MAX_ONBOARDING_DRAFT_BYTES: usize = 128 * 1024;
@@ -245,7 +252,7 @@ fn onboarding_draft_secret_policy_value() -> serde_json::Value {
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
 pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
+    let conn = match legacy_db(&state).lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -400,7 +407,7 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
 /// GET /api/onboarding/draft
 /// Returns the in-progress onboarding draft, distinct from completed setup summary.
 pub async fn draft_get(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let completed = match state.sqlite_db().lock() {
+    let completed = match legacy_db(&state).lock() {
         Ok(conn) => conn
             .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
             .unwrap_or(false),
@@ -590,7 +597,7 @@ async fn load_channels(
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Use provided token or saved token
     let token = token.or_else(|| {
-        state.sqlite_db().lock().ok().and_then(|conn| {
+        legacy_db(&state).lock().ok().and_then(|conn| {
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
                 [],
@@ -2437,7 +2444,7 @@ async fn complete_with_options(
         );
     }
 
-    let mut conn = match state.sqlite_db().lock() {
+    let mut conn = match legacy_db(state).lock() {
         Ok(conn) => conn,
         Err(error) => {
             completion_state.last_error = Some(format!("{error}"));
@@ -3333,7 +3340,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let app = Router::new()
             .route(
                 "/draft",
@@ -3704,7 +3711,7 @@ mod tests {
         let _runtime = RuntimeRootGuard::new(temp.path());
         let (discord_api_base, post_count) = spawn_mock_discord_server().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
 
         let failure_options = CompleteExecutionOptions {
@@ -3721,7 +3728,7 @@ mod tests {
         );
         assert_eq!(post_count.load(Ordering::SeqCst), 1);
 
-        let status_state = AppState::test_state(db.clone(), test_engine(&db));
+        let status_state = AppState::test_state(test_engine(&db));
         let (status_code, Json(status_body)) = status(axum::extract::State(status_state)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert_eq!(status_body["partial_apply"], json!(true));
@@ -3770,7 +3777,7 @@ mod tests {
             .unwrap();
         }
 
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let (status_code, Json(status_body)) = status(axum::extract::State(state)).await;
 
         assert_eq!(status_code, StatusCode::OK);
@@ -3782,7 +3789,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let app = Router::new()
             .route("/draft", axum::routing::get(draft_get))
             .with_state(state);
@@ -3814,7 +3821,7 @@ mod tests {
         let _runtime = RuntimeRootGuard::new(temp.path());
         let (discord_api_base, post_count) = spawn_mock_discord_server().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let body = sample_complete_body("agentdesk-cdx", "agentdesk-cdx", Some("reuse_existing"));
 
         let failure_options = CompleteExecutionOptions {
@@ -3855,7 +3862,7 @@ mod tests {
         let _runtime = RuntimeRootGuard::new(temp.path());
         let (discord_api_base, _post_count) = spawn_mock_discord_server().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let app = Router::new()
             .route("/draft", axum::routing::get(draft_get))
             .with_state(state.clone());
@@ -3900,7 +3907,7 @@ mod tests {
         let draft_get_json: serde_json::Value = serde_json::from_slice(&draft_get_body).unwrap();
         assert_eq!(draft_get_json["available"], json!(false));
 
-        let status_state = AppState::test_state(db.clone(), test_engine(&db));
+        let status_state = AppState::test_state(test_engine(&db));
         let (status_code, Json(status_body)) = status(axum::extract::State(status_state)).await;
         assert_eq!(status_code, StatusCode::OK);
         assert_eq!(status_body["setup_mode"], json!("rerun"));
@@ -3913,7 +3920,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let app = Router::new()
             .route("/draft", axum::routing::put(draft_put))
             .with_state(state);
@@ -3960,7 +3967,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let app = Router::new()
             .route("/draft", axum::routing::put(draft_put))
             .with_state(state);
@@ -4033,7 +4040,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _runtime = RuntimeRootGuard::new(temp.path());
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let mut body = sample_complete_body("9001", "agentdesk-cdx", Some("reuse_existing"));
         body.guild_id = "   ".to_string();
 
@@ -4134,7 +4141,7 @@ mod tests {
             .unwrap();
         }
 
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state(test_engine(&db));
         let reuse_body = sample_complete_body("9001", "agentdesk-cdx", Some("reuse_existing"));
         let (conflict_status, conflict_body) =
             complete_with_options(&state, &reuse_body, &CompleteExecutionOptions::default()).await;
