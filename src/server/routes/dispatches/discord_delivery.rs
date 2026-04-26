@@ -668,43 +668,34 @@ pub(crate) async fn post_raw_message_once(
         })
 }
 
-async fn post_dispatch_message_once_to_channel(
+/// Pure PATCH helper used by the unified outbound API for edit operations.
+pub(crate) async fn edit_raw_message_once(
     client: &reqwest::Client,
     token: &str,
     base_url: &str,
     channel_id: &str,
-    message: &str,
+    message_id: &str,
+    content: &str,
 ) -> Result<String, DispatchMessagePostError> {
-    // Hard-truncate to stay within Discord's 2000 Unicode character limit.
-    // Discord counts chars (not bytes), so use .chars().count().
-    let message = if message.chars().count() > 1900 {
-        let char_boundary: usize = message
-            .char_indices()
-            .nth(1900)
-            .map(|(i, _)| i)
-            .unwrap_or(message.len());
-        let cut = message[..char_boundary]
-            .rfind('\n')
-            .unwrap_or(char_boundary);
-        format!("{}\n\n[… truncated]", &message[..cut])
-    } else {
-        message.to_string()
-    };
-    let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
+    let url = discord_api_url(
+        base_url,
+        &format!("/channels/{channel_id}/messages/{message_id}"),
+    );
     let response = client
-        .post(&message_url)
+        .patch(url)
         .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": message}))
+        .json(&serde_json::json!({ "content": content }))
         .send()
         .await
         .map_err(|error| {
             DispatchMessagePostError::new(
                 DispatchMessagePostErrorKind::Other,
-                format!("failed to post dispatch message to {channel_id}: {error}"),
+                format!("failed to edit dispatch message {message_id}: {error}"),
             )
         })?;
-    if !response.status().is_success() {
-        let status = response.status();
+
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let kind = if is_discord_length_error(status, &body) {
             DispatchMessagePostErrorKind::MessageTooLong
@@ -713,16 +704,17 @@ async fn post_dispatch_message_once_to_channel(
         };
         return Err(DispatchMessagePostError::new(
             kind,
-            format!("failed to post dispatch message to {channel_id}: {status} {body}"),
+            format!("Discord edit failed for message {message_id}: {status} {body}"),
         ));
     }
+
     let body = response
         .json::<serde_json::Value>()
         .await
         .map_err(|error| {
             DispatchMessagePostError::new(
                 DispatchMessagePostErrorKind::Other,
-                format!("failed to parse dispatch message response for {channel_id}: {error}"),
+                format!("failed to parse dispatch edit response for {message_id}: {error}"),
             )
         })?;
     body.get("id")
@@ -733,7 +725,7 @@ async fn post_dispatch_message_once_to_channel(
         .ok_or_else(|| {
             DispatchMessagePostError::new(
                 DispatchMessagePostErrorKind::Other,
-                format!("dispatch message response for {channel_id} omitted message id"),
+                format!("dispatch edit response for {message_id} omitted message id"),
             )
         })
 }
@@ -829,6 +821,20 @@ pub(super) async fn post_dispatch_message_to_channel_with_delivery(
                 },
             })
         }
+        DeliveryResult::Duplicate { .. } => Ok(DispatchMessagePostOutcome {
+            message_id: String::new(),
+            delivery: DispatchNotifyDeliveryResult {
+                status: "duplicate".to_string(),
+                dispatch_id: dispatch_id.unwrap_or("").to_string(),
+                action: "notify".to_string(),
+                correlation_id,
+                semantic_event_id,
+                target_channel_id: Some(channel_id.to_string()),
+                message_id: None,
+                fallback_kind: None,
+                detail: Some("shared outbound API deduplicated delivery".to_string()),
+            },
+        }),
         DeliveryResult::Skipped { .. } => Err(DispatchMessagePostError::new(
             DispatchMessagePostErrorKind::Other,
             format!("unexpected skip for channel {channel_id}"),
@@ -3893,10 +3899,11 @@ async fn send_review_result_message_via_http(
 
     match deliver_outbound(&outbound_client, dedup, outbound_msg, policy).await {
         DeliveryResult::Success { .. } | DeliveryResult::Fallback { .. } => Ok(()),
-        DeliveryResult::Skipped { .. } => {
+        DeliveryResult::Duplicate { .. } => {
             // Duplicate suppression is a success for the caller.
             Ok(())
         }
+        DeliveryResult::Skipped { .. } => Ok(()),
         DeliveryResult::PermanentFailure { detail } => match kind {
             ReviewFollowupKind::Pass => Err(format!(
                 "discord request failed for pass notification: {detail}"

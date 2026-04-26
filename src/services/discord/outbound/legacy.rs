@@ -114,6 +114,20 @@ impl DiscordOutboundPolicy {
             minimal_fallback: minimal,
         }
     }
+
+    /// Preset for streaming gateway messages: caller-side planning already
+    /// chunks content to Discord's hard per-message limit, so this policy must
+    /// preserve the planned text verbatim or fail before sending. Silent
+    /// truncation would corrupt the stream offset bookkeeping.
+    pub(crate) fn preserve_inline_content() -> Self {
+        Self {
+            max_len: DISCORD_HARD_LIMIT_CHARS,
+            split_strategy: SplitStrategy::RejectOverLimit,
+            thread_fallback: ThreadFallback::None,
+            file_fallback: FileFallback::None,
+            minimal_fallback: None,
+        }
+    }
 }
 
 /// Semantic identifiers used to deduplicate outbound deliveries. The
@@ -126,8 +140,16 @@ pub(crate) struct DiscordOutboundMessage {
     pub(crate) content: String,
     pub(crate) channel_id: String,
     pub(crate) thread_id: Option<String>,
+    pub(crate) edit_message_id: Option<String>,
+    pub(crate) reference: Option<DiscordOutboundReference>,
     pub(crate) correlation_id: Option<String>,
     pub(crate) semantic_event_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiscordOutboundReference {
+    pub(crate) channel_id: String,
+    pub(crate) message_id: String,
 }
 
 impl DiscordOutboundMessage {
@@ -136,6 +158,8 @@ impl DiscordOutboundMessage {
             content: content.into(),
             channel_id: channel_id.into(),
             thread_id: None,
+            edit_message_id: None,
+            reference: None,
             correlation_id: None,
             semantic_event_id: None,
         }
@@ -143,6 +167,23 @@ impl DiscordOutboundMessage {
 
     pub(crate) fn with_thread_id(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub(crate) fn with_edit_message_id(mut self, message_id: impl Into<String>) -> Self {
+        self.edit_message_id = Some(message_id.into());
+        self
+    }
+
+    pub(crate) fn with_reference(
+        mut self,
+        channel_id: impl Into<String>,
+        message_id: impl Into<String>,
+    ) -> Self {
+        self.reference = Some(DiscordOutboundReference {
+            channel_id: channel_id.into(),
+            message_id: message_id.into(),
+        });
         self
     }
 
@@ -194,9 +235,10 @@ pub(crate) enum DeliveryResult {
         message_id: String,
         kind: FallbackKind,
     },
-    /// Skipped because the (correlation_id, semantic_event_id) pair was
-    /// already delivered.
+    /// Skipped for a non-duplicate caller-side precondition.
     Skipped { reason: SkipReason },
+    /// The (correlation_id, semantic_event_id) pair was already delivered.
+    Duplicate { message_id: Option<String> },
     /// Permanent send failure — the caller must surface this to the retry
     /// bookkeeping layer.
     PermanentFailure { detail: String },
@@ -218,11 +260,38 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
         target_channel: &str,
         content: &str,
     ) -> Result<String, DispatchMessagePostError>;
+
+    /// Post `content` as a reply/reference to another message. Clients that
+    /// cannot express references may fall back to a plain post.
+    async fn post_message_with_reference(
+        &self,
+        target_channel: &str,
+        content: &str,
+        _reference_channel: &str,
+        _reference_message: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        self.post_message(target_channel, content).await
+    }
+
+    /// Edit an existing message. Returns the edited message id on success.
+    async fn edit_message(
+        &self,
+        target_channel: &str,
+        message_id: &str,
+        _content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        Err(DispatchMessagePostError::new(
+            DispatchMessagePostErrorKind::Other,
+            format!(
+                "outbound client does not support edit for channel {target_channel} message {message_id}"
+            ),
+        ))
+    }
 }
 
 /// In-memory dedup table keyed on `correlation_id::semantic_event_id`. The
 /// store remembers successful deliveries so that a replayed outbox row with
-/// the same semantic key is short-circuited with [`DeliveryResult::Skipped`].
+/// the same semantic key is short-circuited with [`DeliveryResult::Duplicate`].
 ///
 /// Follow-up slices can swap this for a Postgres table
 /// (`discord_outbound_dedup`) without touching callers.
@@ -278,9 +347,9 @@ where
     // 1. Idempotency check.
     let dedup_key = message.dedup_key();
     if let Some(key) = dedup_key.as_deref() {
-        if dedup.lookup(key).is_some() {
-            return DeliveryResult::Skipped {
-                reason: SkipReason::Duplicate,
+        if let Some(message_id) = dedup.lookup(key) {
+            return DeliveryResult::Duplicate {
+                message_id: Some(message_id),
             };
         }
     }
@@ -307,7 +376,20 @@ where
     };
 
     // 3. Primary send attempt.
-    let primary_result = client.post_message(&target, &primary).await;
+    let primary_result = if let Some(message_id) = message.edit_message_id.as_deref() {
+        client.edit_message(&target, message_id, &primary).await
+    } else if let Some(reference) = message.reference.as_ref() {
+        client
+            .post_message_with_reference(
+                &target,
+                &primary,
+                &reference.channel_id,
+                &reference.message_id,
+            )
+            .await
+    } else {
+        client.post_message(&target, &primary).await
+    };
 
     match primary_result {
         Ok(message_id) => {
@@ -353,7 +435,21 @@ where
                         ),
                     };
                 }
-                match client.post_message(&target, &minimal).await {
+                let fallback_result = if let Some(message_id) = message.edit_message_id.as_deref() {
+                    client.edit_message(&target, message_id, &minimal).await
+                } else if let Some(reference) = message.reference.as_ref() {
+                    client
+                        .post_message_with_reference(
+                            &target,
+                            &minimal,
+                            &reference.channel_id,
+                            &reference.message_id,
+                        )
+                        .await
+                } else {
+                    client.post_message(&target, &minimal).await
+                };
+                match fallback_result {
                     Ok(message_id) => {
                         if let Some(key) = dedup_key.as_deref() {
                             dedup.record(key, &message_id);
@@ -383,7 +479,22 @@ where
                     .as_deref()
                     .filter(|v| !v.trim().is_empty() && *v != primary.as_str())
                 {
-                    match client.post_message(&target, minimal).await {
+                    let fallback_result =
+                        if let Some(message_id) = message.edit_message_id.as_deref() {
+                            client.edit_message(&target, message_id, minimal).await
+                        } else if let Some(reference) = message.reference.as_ref() {
+                            client
+                                .post_message_with_reference(
+                                    &target,
+                                    minimal,
+                                    &reference.channel_id,
+                                    &reference.message_id,
+                                )
+                                .await
+                        } else {
+                            client.post_message(&target, minimal).await
+                        };
+                    match fallback_result {
                         Ok(message_id) => {
                             if let Some(key) = dedup_key.as_deref() {
                                 dedup.record(key, &message_id);
@@ -446,6 +557,23 @@ impl DiscordOutboundClient for HttpOutboundClient {
         )
         .await
     }
+
+    async fn edit_message(
+        &self,
+        target_channel: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<String, DispatchMessagePostError> {
+        crate::server::routes::dispatches::discord_delivery::edit_raw_message_once(
+            &self.client,
+            &self.token,
+            &self.discord_api_base,
+            target_channel,
+            message_id,
+            content,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +589,8 @@ mod tests {
         /// Absolute send failure — always returns an Other error.
         always_send_fail: Arc<Mutex<bool>>,
         posts: Arc<Mutex<Vec<(String, String)>>>,
+        referenced_posts: Arc<Mutex<Vec<(String, String, String, String)>>>,
+        edits: Arc<Mutex<Vec<(String, String, String)>>>,
         call_count: Arc<AtomicUsize>,
     }
 
@@ -483,6 +613,14 @@ mod tests {
 
         fn posts(&self) -> Vec<(String, String)> {
             self.posts.lock().unwrap().clone()
+        }
+
+        fn referenced_posts(&self) -> Vec<(String, String, String, String)> {
+            self.referenced_posts.lock().unwrap().clone()
+        }
+
+        fn edits(&self) -> Vec<(String, String, String)> {
+            self.edits.lock().unwrap().clone()
         }
     }
 
@@ -523,6 +661,37 @@ mod tests {
                 target_channel,
                 content.chars().count()
             ))
+        }
+
+        async fn post_message_with_reference(
+            &self,
+            target_channel: &str,
+            content: &str,
+            reference_channel: &str,
+            reference_message: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.referenced_posts.lock().unwrap().push((
+                target_channel.to_string(),
+                content.to_string(),
+                reference_channel.to_string(),
+                reference_message.to_string(),
+            ));
+            self.post_message(target_channel, content).await
+        }
+
+        async fn edit_message(
+            &self,
+            target_channel: &str,
+            message_id: &str,
+            content: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.edits.lock().unwrap().push((
+                target_channel.to_string(),
+                message_id.to_string(),
+                content.to_string(),
+            ));
+            Ok(message_id.to_string())
         }
     }
 
@@ -579,7 +748,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_semantic_event_id_is_skipped() {
+    async fn duplicate_semantic_event_id_is_duplicate() {
         let client = MockScript::new();
         let dedup = OutboundDeduper::new();
         let make = || {
@@ -594,12 +763,105 @@ mod tests {
         let second = deliver_outbound(&client, &dedup, make(), policy).await;
         assert!(matches!(
             second,
-            DeliveryResult::Skipped {
-                reason: SkipReason::Duplicate
+            DeliveryResult::Duplicate {
+                message_id: Some(_)
             }
         ));
         // Only one POST landed on the wire.
         assert_eq!(client.posts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn referenced_send_is_routed_through_outbound_client() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let msg = DiscordOutboundMessage::new("chan-1", "...").with_reference("chan-1", "msg-user");
+
+        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+
+        assert!(matches!(result, DeliveryResult::Success { .. }));
+        assert_eq!(
+            client.referenced_posts(),
+            vec![(
+                "chan-1".to_string(),
+                "...".to_string(),
+                "chan-1".to_string(),
+                "msg-user".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_operation_uses_outbound_client_edit() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let msg = DiscordOutboundMessage::new("chan-1", "updated")
+            .with_edit_message_id("msg-placeholder");
+
+        let result = deliver_outbound(&client, &dedup, msg, DiscordOutboundPolicy::default()).await;
+
+        assert_eq!(
+            result,
+            DeliveryResult::Success {
+                message_id: "msg-placeholder".to_string()
+            }
+        );
+        assert_eq!(
+            client.edits(),
+            vec![(
+                "chan-1".to_string(),
+                "msg-placeholder".to_string(),
+                "updated".to_string()
+            )]
+        );
+        assert!(client.posts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserve_inline_policy_keeps_1900_to_2000_char_edit_intact() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let content = "x".repeat(DISCORD_SAFE_LIMIT_CHARS + 75);
+        assert!(content.chars().count() > DISCORD_SAFE_LIMIT_CHARS);
+        assert!(content.chars().count() <= DISCORD_HARD_LIMIT_CHARS);
+        let msg =
+            DiscordOutboundMessage::new("chan-1", &content).with_edit_message_id("msg-placeholder");
+
+        let result = deliver_outbound(
+            &client,
+            &dedup,
+            msg,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            DeliveryResult::Success {
+                message_id: "msg-placeholder".to_string()
+            }
+        );
+        assert_eq!(client.edits()[0].2, content);
+    }
+
+    #[tokio::test]
+    async fn preserve_inline_policy_rejects_above_hard_limit_without_editing() {
+        let client = MockScript::new();
+        let dedup = OutboundDeduper::new();
+        let content = "x".repeat(DISCORD_HARD_LIMIT_CHARS + 1);
+        let msg =
+            DiscordOutboundMessage::new("chan-1", &content).with_edit_message_id("msg-placeholder");
+
+        let result = deliver_outbound(
+            &client,
+            &dedup,
+            msg,
+            DiscordOutboundPolicy::preserve_inline_content(),
+        )
+        .await;
+
+        assert!(matches!(result, DeliveryResult::PermanentFailure { .. }));
+        assert!(client.edits().is_empty());
     }
 
     #[tokio::test]

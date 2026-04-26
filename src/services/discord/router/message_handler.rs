@@ -1,11 +1,12 @@
-use super::super::gateway::{DiscordGateway, HeadlessGateway, LiveDiscordTurnContext};
+use super::super::gateway::{
+    DiscordGateway, HeadlessGateway, LiveDiscordTurnContext, send_intake_placeholder,
+};
 use super::super::*;
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
-use poise::serenity_prelude::CreateMessage;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2561,19 +2562,19 @@ pub(in crate::services::discord) async fn handle_text_message(
         take_session_retry_context(shared, channel_id),
     );
 
-    // Send placeholder message (after restore notification so restore appears first)
-    rate_limit_wait(shared, channel_id).await;
-    let placeholder = channel_id
-        .send_message(&ctx.http, {
-            let builder = CreateMessage::new().content("...");
-            if reply_to_user_message && dispatch_id_for_thread.is_none() {
-                builder.reference_message((channel_id, user_msg_id))
-            } else {
-                builder
-            }
-        })
-        .await?;
-    let placeholder_msg_id = placeholder.id;
+    // Send placeholder message (after restore notification so restore appears first).
+    let placeholder_msg_id = send_intake_placeholder(
+        ctx.http.clone(),
+        shared.clone(),
+        channel_id,
+        if reply_to_user_message && dispatch_id_for_thread.is_none() {
+            Some((channel_id, user_msg_id))
+        } else {
+            None
+        },
+    )
+    .await
+    .map_err(|error| -> Error { error.into() })?;
 
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently

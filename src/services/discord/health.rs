@@ -2299,9 +2299,13 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
                 FallbackKind::MinimalFallback => "minimal_fallback",
             }),
         },
-        DeliveryResult::Skipped { .. } => ManualDeliveryOutcome::Sent {
+        DeliveryResult::Duplicate { .. } => ManualDeliveryOutcome::Sent {
             message_id: String::new(),
             delivery: Some("duplicate"),
+        },
+        DeliveryResult::Skipped { .. } => ManualDeliveryOutcome::Sent {
+            message_id: String::new(),
+            delivery: Some("skipped"),
         },
         DeliveryResult::PermanentFailure { detail } => ManualDeliveryOutcome::Failed { detail },
     }

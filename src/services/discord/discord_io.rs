@@ -1,5 +1,10 @@
 use super::*;
+use crate::services::discord::outbound::{
+    DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, FallbackKind,
+    HttpOutboundClient, OutboundDeduper, deliver_outbound,
+};
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
+use std::sync::OnceLock;
 
 /// Check if a user is authorized (owner or allowed user)
 /// Returns true if authorized, false if rejected.
@@ -149,9 +154,28 @@ async fn notify_source_agent(
     };
 
     let message = format_dm_reply_notification(reply_id, username, answer, context)?;
-    send_message_to_channel(&token, channel_id, &message)
-        .await
-        .map_err(|e| format!("{e}"))?;
+    let minimal_fallback = format!(
+        "DM_REPLY:{reply_id} from {username}: [reply notification omitted because Discord rejected the full payload]"
+    );
+    let delivery = deliver_channel_message(
+        &token,
+        channel_id,
+        &message,
+        Some(DiscordIoDeliveryId {
+            correlation_id: format!("dm_reply:{reply_id}"),
+            semantic_event_id: format!("dm_reply:{reply_id}:source_notification"),
+        }),
+        Some(&minimal_fallback),
+    )
+    .await?;
+    tracing::info!(
+        delivery_status = delivery.status,
+        fallback_kind = ?delivery.fallback_kind,
+        message_id = ?delivery.message_id,
+        reply_id,
+        source_agent,
+        "[dm-reply] source notification delivery recorded"
+    );
     Ok(())
 }
 
@@ -383,14 +407,10 @@ pub async fn send_message_to_channel(
     channel_id: u64,
     message: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let http = serenity::Http::new(token);
-    let channel = ChannelId::new(channel_id);
-
-    channel
-        .send_message(&http, CreateMessage::new().content(message))
-        .await?;
-
-    Ok(())
+    deliver_channel_message(token, channel_id, message, None, None)
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Send a text message to a Discord user DM (called from CLI --discord-senddm)
@@ -402,12 +422,80 @@ pub async fn send_message_to_user(
     let http = serenity::Http::new(token);
     let dm_channel = UserId::new(user_id).create_dm_channel(&http).await?;
 
-    dm_channel
-        .id
-        .send_message(&http, CreateMessage::new().content(message))
-        .await?;
+    deliver_channel_message(token, dm_channel.id.get(), message, None, None)
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
+}
 
-    Ok(())
+#[derive(Clone, Debug)]
+struct DiscordIoDeliveryId {
+    correlation_id: String,
+    semantic_event_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct DiscordIoDeliveryReport {
+    status: &'static str,
+    message_id: Option<String>,
+    fallback_kind: Option<&'static str>,
+}
+
+fn discord_io_deduper() -> &'static OutboundDeduper {
+    static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
+    DEDUPER.get_or_init(OutboundDeduper::new)
+}
+
+async fn deliver_channel_message(
+    token: &str,
+    channel_id: u64,
+    message: &str,
+    delivery_id: Option<DiscordIoDeliveryId>,
+    minimal_fallback: Option<&str>,
+) -> Result<DiscordIoDeliveryReport, String> {
+    let client = HttpOutboundClient::new(
+        reqwest::Client::new(),
+        token.to_string(),
+        crate::server::routes::dispatches::discord_delivery::discord_api_base_url(),
+    );
+    let mut outbound_msg = DiscordOutboundMessage::new(channel_id.to_string(), message);
+    if let Some(delivery_id) = delivery_id.as_ref() {
+        outbound_msg = outbound_msg
+            .with_correlation(&delivery_id.correlation_id, &delivery_id.semantic_event_id);
+    }
+    let policy = DiscordOutboundPolicy::review_notification(
+        minimal_fallback
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    );
+
+    match deliver_outbound(&client, discord_io_deduper(), outbound_msg, policy).await {
+        DeliveryResult::Success { message_id } => Ok(DiscordIoDeliveryReport {
+            status: "success",
+            message_id: Some(message_id),
+            fallback_kind: None,
+        }),
+        DeliveryResult::Fallback { message_id, kind } => Ok(DiscordIoDeliveryReport {
+            status: "fallback",
+            message_id: Some(message_id),
+            fallback_kind: Some(match kind {
+                FallbackKind::Truncated => "truncated",
+                FallbackKind::MinimalFallback => "minimal_fallback",
+            }),
+        }),
+        DeliveryResult::Duplicate { message_id } => Ok(DiscordIoDeliveryReport {
+            status: "duplicate",
+            message_id,
+            fallback_kind: None,
+        }),
+        DeliveryResult::Skipped { .. } => Ok(DiscordIoDeliveryReport {
+            status: "skip",
+            message_id: None,
+            fallback_kind: None,
+        }),
+        DeliveryResult::PermanentFailure { detail } => Err(detail),
+    }
 }
 
 #[cfg(test)]

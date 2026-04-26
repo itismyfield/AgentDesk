@@ -928,6 +928,18 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_streaming_rollover_can_freeze_chunk_above_safe_outbound_limit() {
+        use super::{DISCORD_MSG_LIMIT, plan_streaming_rollover};
+
+        let current_portion = "x".repeat(DISCORD_MSG_LIMIT + 250);
+        let plan = plan_streaming_rollover(&current_portion, "⏳ status").unwrap();
+
+        assert!(plan.frozen_chunk.len() > 1900);
+        assert!(plan.frozen_chunk.len() <= DISCORD_MSG_LIMIT);
+        assert_eq!(plan.frozen_chunk, current_portion[..plan.split_at]);
+    }
+
+    #[test]
     fn test_build_streaming_placeholder_text_keeps_ascii_snapshot_behavior() {
         use super::{DISCORD_MSG_LIMIT, build_streaming_placeholder_text, normalize_empty_lines};
 
