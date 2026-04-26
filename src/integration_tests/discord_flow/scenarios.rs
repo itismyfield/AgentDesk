@@ -400,7 +400,8 @@ async fn dashmap_zombie_cleanup_preserves_live_watcher() {
 ///    has not yet elapsed. Decision: still
 ///    `PostTerminalSuccessContinuation` — strictness invariant (2) protects
 ///    against premature teardown when tmux is briefly quiet.
-/// 3. idle window elapsed with confirmed_end == tail. Decision: `Stop`.
+/// 3. idle window elapsed with confirmed_end == tail while tmux is alive.
+///    Decision: `Continue` (#1171 liveness authority).
 ///
 /// A final probe asserts that a dead tmux pane short-circuits the wait
 /// regardless of confirmed-end progress (the (terminal=Y, tmux=N) row of
@@ -444,13 +445,13 @@ async fn watcher_stop_strictness_post_terminal_continuation() {
         "confirmed_end caught up but idle window not elapsed -> watcher persists"
     );
 
-    // (3) Idle window has elapsed with confirmed_end still at tail
-    //     -> watcher may stop quietly.
+    // (3) Idle window has elapsed with confirmed_end still at tail, but tmux
+    //     is alive. #1171 keeps the watcher attached until tmux death.
     let settled = decide(true, true, 4096, 4096, Some(idle_window), idle_window);
     assert_eq!(
         settled,
-        Decision::Stop,
-        "idle window elapsed + confirmed_end == tail -> watcher stops"
+        Decision::Continue,
+        "idle window elapsed + confirmed_end == tail + live tmux -> watcher stays attached"
     );
 
     // (4) Dead tmux short-circuits: even if the strict invariants are not

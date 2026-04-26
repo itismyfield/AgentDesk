@@ -2394,6 +2394,20 @@ use discord_io::{
 
 // ─── Event handler ───────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleSessionWatcherCleanup {
+    ExpireSession,
+    DeferToTmuxLiveness,
+}
+
+fn idle_session_watcher_cleanup(has_watcher: bool) -> IdleSessionWatcherCleanup {
+    if has_watcher {
+        IdleSessionWatcherCleanup::DeferToTmuxLiveness
+    } else {
+        IdleSessionWatcherCleanup::ExpireSession
+    }
+}
+
 /// Periodically clean up idle sessions and their associated data.
 /// Called from handle_event; uses a static Mutex to track the last cleanup time.
 async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
@@ -2420,7 +2434,13 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
         let now = tokio::time::Instant::now();
         data.sessions
             .iter()
-            .filter(|(_, s)| now.duration_since(s.last_active) > SESSION_MAX_IDLE)
+            .filter(|(channel_id, s)| {
+                now.duration_since(s.last_active) > SESSION_MAX_IDLE
+                    && matches!(
+                        idle_session_watcher_cleanup(shared.tmux_watchers.contains_key(channel_id)),
+                        IdleSessionWatcherCleanup::ExpireSession
+                    )
+            })
             .map(|(ch, s)| ExpiredSessionCleanup {
                 channel_id: *ch,
                 session_id: s.session_id.clone(),
@@ -2474,7 +2494,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         shared.api_timestamps.remove(&expired_session.channel_id);
-        shared.tmux_watchers.remove(&expired_session.channel_id);
     }
     // Record termination audit for cleaned-up sessions
     for expired_session in &expired {
@@ -2785,6 +2804,18 @@ mod tests {
         assert!(existing.contains(&100));
         assert!(existing.contains(&200));
         assert!(!should_phase2_recover_message(200, None, &existing));
+    }
+
+    #[test]
+    fn idle_session_cleanup_defers_watched_sessions_to_tmux_liveness() {
+        assert_eq!(
+            super::idle_session_watcher_cleanup(true),
+            super::IdleSessionWatcherCleanup::DeferToTmuxLiveness
+        );
+        assert_eq!(
+            super::idle_session_watcher_cleanup(false),
+            super::IdleSessionWatcherCleanup::ExpireSession
+        );
     }
 
     #[test]

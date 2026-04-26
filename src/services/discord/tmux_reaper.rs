@@ -183,7 +183,9 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             continue; // orphan — handled by cleanup_orphan_tmux_sessions
         };
 
-        // If a watcher is attached, let it handle the cleanup
+        // If a watcher is attached, tmux liveness is the termination authority:
+        // the watcher observes pane death, clears the registry, and applies the
+        // same lifecycle/audit semantics as the live tail path.
         if shared.tmux_watchers.contains_key(&channel_id) {
             continue;
         }
