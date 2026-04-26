@@ -22,6 +22,7 @@ pub mod observability;
 pub mod platform;
 pub mod process;
 pub mod provider;
+pub mod provider_cli;
 pub mod provider_exec;
 pub mod provider_runtime;
 pub mod queue;
