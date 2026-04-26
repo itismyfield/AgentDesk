@@ -3259,8 +3259,8 @@ fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet
     Ok(repos)
 }
 
-const DISK_WARN_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-const DISK_FAIL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const DISK_WARN_BYTES: u64 = 30 * 1024 * 1024 * 1024;
+const DISK_FAIL_BYTES: u64 = 80 * 1024 * 1024 * 1024;
 
 fn recursive_dir_size(path: &Path) -> std::io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
