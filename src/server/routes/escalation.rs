@@ -1376,85 +1376,53 @@ async fn emit_escalation_with_base_url(
         );
     }
 
-    let (settings, summary, context, parent_channels, cached_thread_id) = if let Some(pool) =
-        state.pg_pool_ref()
-    {
-        match load_escalation_emit_inputs_pg(pool, &state.config, &card_id) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "[escalation] postgres load failed for {card_id}; falling back to sqlite"
-                );
-                let conn = match state.sqlite_db().separate_conn() {
-                    Ok(conn) => conn,
-                    Err(err) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("db open failed: {err}")})),
-                        );
-                    }
-                };
-                let settings = merged_settings(&conn, &state.config);
-                let summary = match load_card_summary(&conn, &card_id) {
-                    Ok(summary) => summary,
-                    Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
-                };
-                let context = match load_card_context(&conn, &card_id, &summary) {
-                    Ok(context) => context,
-                    Err(err) => {
-                        tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
-                        None
-                    }
-                };
-                let parent_channels = candidate_parent_channels(
-                    &conn,
-                    &card_id,
-                    summary.assigned_agent_id.as_deref(),
-                );
-                let cached_thread_id = load_cached_thread_id(&conn, &card_id);
-                (
-                    settings,
-                    summary,
-                    context,
-                    parent_channels,
-                    cached_thread_id,
-                )
+    let (settings, summary, context, parent_channels, cached_thread_id) =
+        if let Some(pool) = state.pg_pool_ref() {
+            match load_escalation_emit_inputs_pg(pool, &state.config, &card_id) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    tracing::warn!(%error, "[escalation] postgres load failed for {card_id}");
+                    let status = if error.starts_with("card not found:") {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    };
+                    return (status, Json(json!({"error": error})));
+                }
             }
-        }
-    } else {
-        let conn = match state.sqlite_db().separate_conn() {
-            Ok(conn) => conn,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("db open failed: {err}")})),
-                );
-            }
+        } else {
+            let conn = match state.sqlite_db().separate_conn() {
+                Ok(conn) => conn,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("db open failed: {err}")})),
+                    );
+                }
+            };
+            let settings = merged_settings(&conn, &state.config);
+            let summary = match load_card_summary(&conn, &card_id) {
+                Ok(summary) => summary,
+                Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
+            };
+            let context = match load_card_context(&conn, &card_id, &summary) {
+                Ok(context) => context,
+                Err(err) => {
+                    tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
+                    None
+                }
+            };
+            let parent_channels =
+                candidate_parent_channels(&conn, &card_id, summary.assigned_agent_id.as_deref());
+            let cached_thread_id = load_cached_thread_id(&conn, &card_id);
+            (
+                settings,
+                summary,
+                context,
+                parent_channels,
+                cached_thread_id,
+            )
         };
-        let settings = merged_settings(&conn, &state.config);
-        let summary = match load_card_summary(&conn, &card_id) {
-            Ok(summary) => summary,
-            Err(err) => return (StatusCode::NOT_FOUND, Json(json!({"error": err}))),
-        };
-        let context = match load_card_context(&conn, &card_id, &summary) {
-            Ok(context) => context,
-            Err(err) => {
-                tracing::warn!("[escalation] failed to load context for {card_id}: {err}");
-                None
-            }
-        };
-        let parent_channels =
-            candidate_parent_channels(&conn, &card_id, summary.assigned_agent_id.as_deref());
-        let cached_thread_id = load_cached_thread_id(&conn, &card_id);
-        (
-            settings,
-            summary,
-            context,
-            parent_channels,
-            cached_thread_id,
-        )
-    };
 
     let client = reqwest::Client::new();
     let requested_mode = settings.mode.clone();
@@ -1751,20 +1719,11 @@ pub async fn get_escalation_settings(
         match merged_settings_pg(pool, &state.config) {
             Ok(current) => current,
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "[escalation] postgres settings load failed; falling back to sqlite"
+                tracing::warn!(%error, "[escalation] postgres settings load failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
                 );
-                let conn = match state.sqlite_db().read_conn() {
-                    Ok(conn) => conn,
-                    Err(err) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("db open failed: {err}")})),
-                        );
-                    }
-                };
-                merged_settings(&conn, &state.config)
             }
         }
     } else {
@@ -1808,55 +1767,28 @@ pub async fn put_escalation_settings(
     }
 
     let defaults = escalation_defaults(&state.config);
-    let store_result = if let Some(pool) = state.pg_pool_ref() {
-        let pg_result = if body == defaults {
+    let current = if let Some(pool) = state.pg_pool_ref() {
+        let store_result = if body == defaults {
             clear_override_pg(pool)
         } else {
             store_override_pg(pool, &body)
         };
-        if let Err(error) = &pg_result {
-            tracing::warn!(
-                %error,
-                "[escalation] postgres settings write failed; falling back to sqlite"
+        if let Err(error) = store_result {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
             );
         }
-        pg_result
-    } else {
-        Err("sqlite-fallback-required".to_string())
-    };
 
-    let current = if store_result.is_ok() {
-        if let Some(pool) = state.pg_pool_ref() {
-            match merged_settings_pg(pool, &state.config) {
-                Ok(current) => current,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "[escalation] postgres settings reload failed; falling back to sqlite"
-                    );
-                    let conn = match state.sqlite_db().separate_conn() {
-                        Ok(conn) => conn,
-                        Err(err) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({"error": format!("db open failed: {err}")})),
-                            );
-                        }
-                    };
-                    merged_settings(&conn, &state.config)
-                }
+        match merged_settings_pg(pool, &state.config) {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(%error, "[escalation] postgres settings reload failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
             }
-        } else {
-            let conn = match state.sqlite_db().separate_conn() {
-                Ok(conn) => conn,
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("db open failed: {err}")})),
-                    );
-                }
-            };
-            merged_settings(&conn, &state.config)
         }
     } else {
         let conn = match state.sqlite_db().separate_conn() {
@@ -1868,12 +1800,12 @@ pub async fn put_escalation_settings(
                 );
             }
         };
-        let fallback_result = if body == defaults {
+        let store_result = if body == defaults {
             clear_override(&conn)
         } else {
             store_override(&conn, &body)
         };
-        if let Err(err) = fallback_result {
+        if let Err(err) = store_result {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": err})),

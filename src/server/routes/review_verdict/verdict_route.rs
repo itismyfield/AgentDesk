@@ -206,8 +206,9 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
                 tracing::warn!(
                     card_id,
                     %error,
-                    "[review-verdict] falling back to sqlite kanban_card_updated emit"
+                    "[review-verdict] failed to load postgres card for kanban_card_updated emit"
                 );
+                return;
             }
         }
     }

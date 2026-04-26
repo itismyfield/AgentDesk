@@ -2958,12 +2958,9 @@ pub async fn rereview_card(
             .await
             {
                 Ok(Some((status, agent, title, url))) => {
-                    let caller = if let Ok(conn) = legacy_db(&state).lock() {
-                        resolve_requesting_agent_id_on_conn(&conn, &headers)
-                            .unwrap_or_else(|| "api".to_string())
-                    } else {
-                        "api".to_string()
-                    };
+                    let caller = resolve_requesting_agent_id_with_pg(pool, &headers)
+                        .await
+                        .unwrap_or_else(|| "api".to_string());
                     break 'lookup (status, agent, title, url, caller);
                 }
                 Ok(None) => {
@@ -2976,7 +2973,11 @@ pub async fn rereview_card(
                     tracing::warn!(
                         card_id = %id,
                         %error,
-                        "[rereview] postgres lookup failed, falling back to sqlite"
+                        "[rereview] postgres lookup failed"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("postgres lookup failed: {error}")})),
                     );
                 }
             }
@@ -3324,12 +3325,18 @@ pub async fn batch_rereview(
                     tracing::warn!(
                         %issue_number,
                         %error,
-                        "[batch_rereview] postgres lookup failed, falling back to sqlite"
+                        "[batch_rereview] postgres lookup failed"
                     );
+                    results.push(json!({
+                        "issue": issue_number,
+                        "ok": false,
+                        "error": format!("postgres lookup failed: {error}"),
+                    }));
+                    continue;
                 }
             }
         }
-        if card_id.is_none() {
+        if card_id.is_none() && state.pg_pool_ref().is_none() {
             card_id = legacy_db(&state).lock().ok().and_then(|conn| {
                 conn.query_row(
                     "SELECT id FROM kanban_cards WHERE github_issue_number = ?1",

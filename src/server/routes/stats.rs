@@ -505,7 +505,10 @@ pub async fn get_stats(
         match get_stats_pg(pool, params.office_id.as_deref()).await {
             Ok(body) => return (StatusCode::OK, Json(body)),
             Err(error) => {
-                tracing::warn!(%error, "[stats] postgres load failed; falling back to sqlite");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
             }
         }
     }
