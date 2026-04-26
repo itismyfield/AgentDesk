@@ -159,7 +159,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2610 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1499 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 61 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 3535 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 3536 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 62 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 88 |  |
@@ -184,7 +184,7 @@
 | `server::routes::offices` | `src/server/routes/offices.rs` | 877 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4471 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1697 | giant-file |
-| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 363 |  |
+| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 364 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 139 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1499 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
@@ -215,7 +215,7 @@
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1679 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 629 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 2735 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 2972 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1164 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
@@ -237,7 +237,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2631 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 398 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 3817 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 3888 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 586 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1016 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
@@ -283,7 +283,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 9381 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 9530 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
