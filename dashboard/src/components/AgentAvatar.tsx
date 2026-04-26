@@ -117,6 +117,19 @@ export default function AgentAvatar({
         height={size}
         loading="lazy"
         draggable={false}
+        // Codex review (PR #1258, 7th pass): an out-of-range sprite_number
+        // in stored agent data would 404 and render a broken-image icon.
+        // Fall back to the bundled SPRITE_FALLBACK_NUMBER once on error,
+        // and stop after the first swap so a missing fallback doesn't
+        // loop forever.
+        onError={(event) => {
+          const img = event.currentTarget;
+          const fallbackSrc = spriteSrc(SPRITE_FALLBACK_NUMBER);
+          if (img.dataset.spriteFallbackApplied === "true") return;
+          img.dataset.spriteFallbackApplied = "true";
+          if (img.src.endsWith(fallbackSrc)) return;
+          img.src = fallbackSrc;
+        }}
         style={{
           width: "100%",
           height: "100%",
