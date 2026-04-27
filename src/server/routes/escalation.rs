@@ -1830,6 +1830,101 @@ mod tests {
         crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    /// Per-test Postgres database lifecycle for the #1238 migration of
+    /// escalation handler tests, which now require a PG pool.
+    struct EscalationPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl EscalationPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_escalation_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "escalation handler pg",
+            )
+            .await
+            .expect("create escalation postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "escalation handler pg",
+            )
+            .await
+            .expect("connect + migrate escalation postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "escalation handler pg",
+            )
+            .await
+            .expect("drop escalation postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
     #[test]
     fn scheduled_mode_switches_between_pm_and_user() {
         let settings = EscalationSettings {
@@ -1923,12 +2018,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_and_get_escalation_settings_round_trip() {
+    async fn put_and_get_pg_escalation_settings_round_trip() {
+        let pg_db = EscalationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state_with_config(
+        let state = AppState::test_state_with_pg(
             db.clone(),
-            test_engine(&db),
-            crate::config::Config::default(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
         );
 
         let (status, Json(body)) = put_escalation_settings(
@@ -1951,10 +2048,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["current"]["mode"], json!("user"));
         assert_eq!(body["current"]["pm_channel_id"], json!("123456789"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn user_mode_reuses_existing_thread_for_same_card() {
+    async fn user_mode_pg_reuses_existing_thread_for_same_card() {
         let _env_lock = env_lock();
         let runtime_root = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -2020,51 +2120,85 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
+        let pg_db = EscalationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-                 VALUES ('agent-1', 'Agent One', 'claude', '111', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, review_status, github_issue_number, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-1', 'Escalation card', 'review', 'high', 'dilemma_pending', 422, 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET description = ?1,
-                     blocked_reason = ?2
-                 WHERE id = 'card-1'",
-                libsql_rusqlite::params![
-                    "리뷰 루프가 반복되고 있습니다.\n브랜치 상태를 직접 확인해야 합니다.\n이전 결과를 요약합니다.",
-                    "rework 디스패치가 terminal card 에서 취소됨",
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at, completed_at
-                 ) VALUES (
-                    'dispatch-escalation-1', 'card-1', 'project-agentdesk', 'review', 'completed', 'Review finished', ?1,
-                    datetime('now', '-10 minutes'), datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
-                 )",
-                libsql_rusqlite::params![serde_json::json!({
-                    "summary": "Codex review에서 P1 1건과 P2 2건이 남았습니다."
-                })
-                .to_string()],
-            )
-            .unwrap();
-        }
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("agent-1")
+        .bind("Agent One")
+        .bind("claude")
+        .bind("111")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, review_status, github_issue_number,
+                assigned_agent_id, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind("card-1")
+        .bind("Escalation card")
+        .bind("review")
+        .bind("high")
+        .bind("dilemma_pending")
+        .bind(422_i32)
+        .bind("agent-1")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET description = $1,
+                 blocked_reason = $2
+             WHERE id = 'card-1'",
+        )
+        .bind("리뷰 루프가 반복되고 있습니다.\n브랜치 상태를 직접 확인해야 합니다.\n이전 결과를 요약합니다.")
+        .bind("rework 디스패치가 terminal card 에서 취소됨")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '10 minutes'
+             )",
+        )
+        .bind("dispatch-escalation-1")
+        .bind("card-1")
+        .bind("project-agentdesk")
+        .bind("review")
+        .bind("completed")
+        .bind("Review finished")
+        .bind(
+            serde_json::json!({
+                "summary": "Codex review에서 P1 1건과 P2 2건이 남았습니다."
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.owner_user_id = Some(343742347365974026);
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let mut state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
+        state.config = std::sync::Arc::new(config);
 
         let body = EmitEscalationBody {
             card_id: "card-1".to_string(),
@@ -2093,10 +2227,12 @@ mod tests {
         assert!(first_message.contains("⛔ 기존 차단 사유:"));
 
         server.abort();
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn user_mode_falls_back_to_pm_when_owner_routing_unavailable() {
+    async fn user_mode_pg_falls_back_to_pm_when_owner_routing_unavailable() {
         let _env_lock = env_lock();
         let runtime_root = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -2132,51 +2268,84 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
 
+        let pg_db = EscalationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-                 VALUES ('agent-2', 'Agent Two', 'claude', NULL, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, review_status, github_issue_number, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-2', 'Fallback card', 'review', 'high', 'dilemma_pending', 434, 'agent-2', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET description = ?1,
-                     blocked_reason = ?2
-                 WHERE id = 'card-2'",
-                libsql_rusqlite::params![
-                    "오너 라우팅이 불가한 카드입니다.\nPM 채널 폴백이 필요합니다.",
-                    "owner routing unavailable",
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at, completed_at
-                 ) VALUES (
-                    'dispatch-escalation-2', 'card-2', 'agent-2', 'implementation', 'failed', 'Implement failed', ?1,
-                    datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
-                 )",
-                libsql_rusqlite::params![serde_json::json!({
-                    "notes": "CI failure after implementation dispatch"
-                })
-                .to_string()],
-            )
-            .unwrap();
-        }
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ($1, $2, $3, NULL, NOW(), NOW())",
+        )
+        .bind("agent-2")
+        .bind("Agent Two")
+        .bind("claude")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, review_status, github_issue_number,
+                assigned_agent_id, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind("card-2")
+        .bind("Fallback card")
+        .bind("review")
+        .bind("high")
+        .bind("dilemma_pending")
+        .bind(434_i32)
+        .bind("agent-2")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET description = $1,
+                 blocked_reason = $2
+             WHERE id = 'card-2'",
+        )
+        .bind("오너 라우팅이 불가한 카드입니다.\nPM 채널 폴백이 필요합니다.")
+        .bind("owner routing unavailable")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                NOW() - INTERVAL '20 minutes',
+                NOW() - INTERVAL '20 minutes',
+                NOW() - INTERVAL '20 minutes'
+             )",
+        )
+        .bind("dispatch-escalation-2")
+        .bind("card-2")
+        .bind("agent-2")
+        .bind("implementation")
+        .bind("failed")
+        .bind("Implement failed")
+        .bind(
+            serde_json::json!({
+                "notes": "CI failure after implementation dispatch"
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let mut config = crate::config::Config::default();
         config.escalation.mode = EscalationMode::User;
         config.escalation.pm_channel_id = Some("222".to_string());
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let mut state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
+        state.config = std::sync::Arc::new(config);
 
         let (status, Json(body)) = emit_escalation_with_base_url(
             &state,
@@ -2201,5 +2370,7 @@ mod tests {
         assert!(sent.contains("결정 API: `POST /api/pm-decision`"));
 
         server.abort();
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
