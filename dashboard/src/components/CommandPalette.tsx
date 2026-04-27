@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { SurfaceEmptyState } from "./common/SurfacePrimitives";
+import AgentAvatar from "./AgentAvatar";
 
 interface PaletteRoute {
   id: string;
@@ -168,10 +169,14 @@ export default function CommandPalette({
                 background: i === selectedIndex ? "var(--th-accent-primary-soft)" : "transparent",
               }}
             >
-              <span className="text-base w-6 text-center">
-                {item.type === "agent" ? item.agent.avatar_emoji
-                  : item.type === "nav" ? item.icon
-                  : item.dept.icon}
+              <span className="flex items-center justify-center w-6 text-base text-center">
+                {item.type === "agent" ? (
+                  <AgentAvatar agent={item.agent} agents={agents} size={22} />
+                ) : item.type === "nav" ? (
+                  item.icon
+                ) : (
+                  item.dept.icon
+                )}
               </span>
               <div className="flex-1 min-w-0">
                 <div className="truncate">
