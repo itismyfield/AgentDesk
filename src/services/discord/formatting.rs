@@ -1389,6 +1389,26 @@ mod tests {
             classify_long_running_tool("Task", "{\"description\":\"x\"}"),
             None
         );
+        // PR #1308 codex round-1 P2 regression: `Agent` is not in
+        // `ALL_TOOLS` (the canonical entry is `Task`), so an unguarded
+        // `canonical_tool_name(name)?` would short-circuit before reaching the
+        // background-flag check. The classifier must keep treating `Agent`
+        // with `run_in_background=true` as a live-turn placeholder trigger.
+        assert_eq!(
+            classify_long_running_tool(
+                "Agent",
+                "{\"description\":\"x\",\"run_in_background\":true}"
+            ),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+        assert_eq!(
+            classify_long_running_tool("agent", "{\"run_in_background\":true}"),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+        assert_eq!(
+            classify_long_running_tool("Agent", "{\"description\":\"x\"}"),
+            None
+        );
     }
 
     #[test]
@@ -2829,8 +2849,16 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
 /// case-insensitive via `canonical_tool_name` so that downstream Claude code
 /// providers that lower-case their tool names still trigger the placeholder.
 pub(super) fn classify_long_running_tool(name: &str, input: &str) -> Option<MonitorHandoffReason> {
-    let canonical = canonical_tool_name(name)?;
-    match canonical {
+    // `Agent` is not a canonical Claude Code tool name (the canonical entry is
+    // `Task`), so it would not survive `canonical_tool_name`. Match it
+    // explicitly first so the Task/Agent + run_in_background path stays alive.
+    let trimmed = name.trim();
+    let resolved: &str = if trimmed.eq_ignore_ascii_case("Agent") {
+        "Agent"
+    } else {
+        canonical_tool_name(trimmed)?
+    };
+    match resolved {
         "Monitor" => Some(MonitorHandoffReason::ExplicitCall),
         "Bash" | "Task" | "Agent" => {
             // Only escalate to the live-turn card when the call is explicitly

@@ -870,9 +870,14 @@ pub(super) fn spawn_turn_bridge(
         // `controller.transition(Completed)`. The cancel / abort paths use
         // the same handle.
         let mut last_assistant_text_line: Option<String> = None;
-        let mut long_running_placeholder_active: Option<
+        // Pair the active key with the input snapshot so rollover can retarget
+        // the controller onto the new `current_msg_id` (otherwise the terminal
+        // transition would land on the frozen prior message and overwrite the
+        // delivered chunk). See codex round-1 P2 on PR #1308.
+        let mut long_running_placeholder_active: Option<(
             super::placeholder_controller::PlaceholderKey,
-        > = None;
+            super::placeholder_controller::PlaceholderActiveInput,
+        )> = None;
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
@@ -1197,10 +1202,10 @@ pub(super) fn spawn_turn_bridge(
                                         .ensure_active(
                                             gateway.as_ref(),
                                             key.clone(),
-                                            input_payload,
+                                            input_payload.clone(),
                                         )
                                         .await;
-                                    long_running_placeholder_active = Some(key);
+                                    long_running_placeholder_active = Some((key, input_payload));
                                 }
                             }
                             push_transcript_event(
@@ -1265,7 +1270,7 @@ pub(super) fn spawn_turn_bridge(
                             // the rest of the turn so the user can see the
                             // status line; the controller's idempotent terminal
                             // transition keeps duplicate edits free.
-                            if let Some(key) = long_running_placeholder_active.take() {
+                            if let Some((key, _)) = long_running_placeholder_active.take() {
                                 let target = if is_error {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
@@ -1342,7 +1347,7 @@ pub(super) fn spawn_turn_bridge(
                             // it now so the user does not stare at a stale
                             // 🔄 card forever. Idempotent if a prior
                             // ToolResult already fired Completed.
-                            if let Some(key) = long_running_placeholder_active.take() {
+                            if let Some((key, _)) = long_running_placeholder_active.take() {
                                 let target = if result == "__session_died_retry__" {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
@@ -1653,6 +1658,33 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.response_sent_offset = response_sent_offset;
                             inflight_state.full_response = full_response.clone();
                             state_dirty = true;
+                            // #1255 codex round-1 P2: rollover advanced
+                            // `current_msg_id` past the message that owned the
+                            // active long-running placeholder. The old message
+                            // now holds delivered response content; retarget
+                            // the controller onto the new message_id so the
+                            // eventual terminal transition lands on the live
+                            // card instead of overwriting that frozen chunk.
+                            if let Some((_, snapshot)) =
+                                long_running_placeholder_active.take()
+                            {
+                                let new_key =
+                                    super::placeholder_controller::PlaceholderKey {
+                                        provider: provider.clone(),
+                                        channel_id,
+                                        message_id: current_msg_id,
+                                    };
+                                let _ = shared_owned
+                                    .placeholder_controller
+                                    .ensure_active(
+                                        gateway.as_ref(),
+                                        new_key.clone(),
+                                        snapshot.clone(),
+                                    )
+                                    .await;
+                                long_running_placeholder_active =
+                                    Some((new_key, snapshot));
+                            }
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -1690,9 +1722,14 @@ pub(super) fn spawn_turn_bridge(
             let stable_display_text =
                 super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
 
+            // #1255 codex round-1 P2: while a long-running placeholder owns
+            // `current_msg_id`, the controller is the sole writer. Skipping the
+            // regular streaming edit prevents `stable_display_text` from
+            // overwriting the `🔄 백그라운드 처리 중` card mid-flight.
             if stable_display_text != last_edit_text
                 && !done
                 && last_status_edit.elapsed() >= status_interval
+                && long_running_placeholder_active.is_none()
             {
                 let _ = gateway
                     .edit_message(channel_id, current_msg_id, &stable_display_text)
@@ -1946,7 +1983,7 @@ pub(super) fn spawn_turn_bridge(
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is
             // safe even if the ToolResult event already fired Completed.
-            if let Some(key) = long_running_placeholder_active.take() {
+            if let Some((key, _)) = long_running_placeholder_active.take() {
                 let _ = shared_owned
                     .placeholder_controller
                     .transition(
