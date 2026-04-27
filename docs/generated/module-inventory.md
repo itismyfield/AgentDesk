@@ -72,7 +72,7 @@
 | `db` | `src/db/mod.rs` | 248 |  |
 | `db::agents` | `src/db/agents.rs` | 1039 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 5940 | giant-file |
-| `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 319 |  |
+| `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 330 |  |
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 378 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1421 | giant-file |
@@ -311,7 +311,7 @@
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 177 |  |
 | `services::maintenance` | `src/services/maintenance/mod.rs` | 465 |  |
-| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 235 |  |
+| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 233 |  |
 | `services::maintenance::jobs::db_retention` | `src/services/maintenance/jobs/db_retention.rs` | 555 |  |
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 194 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 406 |  |
