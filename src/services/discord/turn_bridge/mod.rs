@@ -892,6 +892,13 @@ pub(super) fn spawn_turn_bridge(
         let mut terminal_session_reset_required = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
+        // codex round-8 P1 on PR #1308: while a long-running placeholder is
+        // active, bump the inflight file's mtime so the sweeper sees the turn
+        // as alive. Without this, a healthy 5+ minute background tool would
+        // exceed `ABANDON_THRESHOLD_SECS` and the sweeper would cancel it.
+        let mut last_inflight_long_run_heartbeat = std::time::Instant::now();
+        const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(30);
         let mut last_activity_heartbeat_at: Option<std::time::Instant> = None;
         let mut current_msg_id = bridge.current_msg_id;
         let mut response_sent_offset = bridge.response_sent_offset;
@@ -1889,6 +1896,20 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await;
                 last_adk_heartbeat = std::time::Instant::now();
+            }
+
+            // codex round-8 P1: keep `placeholder_sweeper` from abandoning a
+            // healthy long-running tool wait by bumping inflight mtime every
+            // 30s while a placeholder is owned. If the turn dies, this loop
+            // stops firing → mtime stops advancing → sweeper can abandon
+            // normally past `ABANDON_THRESHOLD_SECS`.
+            if long_running_placeholder_active.is_some()
+                && last_inflight_long_run_heartbeat.elapsed()
+                    >= LIVE_LONG_RUN_HEARTBEAT_INTERVAL
+            {
+                inflight_state.updated_at = chrono::Utc::now().to_rfc3339();
+                let _ = save_inflight_state(&inflight_state);
+                last_inflight_long_run_heartbeat = std::time::Instant::now();
             }
         }
 
