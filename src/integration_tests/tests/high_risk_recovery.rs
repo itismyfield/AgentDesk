@@ -11,6 +11,7 @@ mod failure_recovery {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
+        database_url: String,
     }
 
     impl PgRecoveryTestDatabase {
@@ -18,6 +19,7 @@ mod failure_recovery {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
             let admin_url = pg_test_admin_database_url();
             let database_name = format!("agentdesk_pg_recovery_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
             crate::db::postgres::create_test_database(
                 &admin_url,
                 &database_name,
@@ -30,6 +32,7 @@ mod failure_recovery {
                 _lifecycle: lifecycle,
                 admin_url,
                 database_name,
+                database_url,
             }
         }
 
@@ -85,34 +88,6 @@ mod failure_recovery {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", pg_test_base_database_url(), admin_db)
-    }
-
-    fn pg_recovery_test_config(test_db: &PgRecoveryTestDatabase) -> crate::config::Config {
-        let mut config = crate::config::Config::default();
-        config.database.enabled = true;
-        config.database.pool_max = 1;
-        config.database.host = std::env::var("PGHOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
-        config.database.port = std::env::var("PGPORT")
-            .ok()
-            .and_then(|raw| raw.parse::<u16>().ok())
-            .unwrap_or(5432);
-        config.database.dbname = test_db.database_name.clone();
-        config.database.user = std::env::var("PGUSER")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                std::env::var("USER")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or_else(|| "postgres".to_string());
-        config.database.password = std::env::var("PGPASSWORD")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        config
     }
 
     #[test]
@@ -453,15 +428,26 @@ mod failure_recovery {
                 .expect("integration test runtime")
                 .block_on(async {
                     let test_pg = PgRecoveryTestDatabase::create().await;
-                    let config = pg_recovery_test_config(&test_pg);
-                    let runtime_pool = crate::db::postgres::connect_and_migrate(&config)
-                        .await
-                        .expect("connect runtime postgres pool")
-                        .expect("runtime postgres pool");
-                    let startup_pool = crate::db::postgres::connect_for_startup(&config)
-                        .await
-                        .expect("connect startup postgres pool")
-                        .expect("startup postgres pool");
+                    // #1296: bypass connect_and_migrate(&config) here — that helper
+                    // honors DATABASE_URL env, which the CI sets to the shared
+                    // `postgres` database. If the test went through it, every
+                    // PG-backed test would hit the shared DB, polluting kv_meta /
+                    // kanban_cards.metadata between runs and causing the JS review
+                    // loop guard to escalate after the first invocation. Build the
+                    // pools directly against the per-test database URL so the
+                    // boot reconcile path runs on isolated state.
+                    let runtime_pool = crate::db::postgres::connect_test_pool_and_migrate(
+                        &test_pg.database_url,
+                        "integration high_risk_recovery runtime pool",
+                    )
+                    .await
+                    .expect("connect runtime postgres pool");
+                    let startup_pool = crate::db::postgres::connect_test_pool_and_migrate(
+                        &test_pg.database_url,
+                        "integration high_risk_recovery startup pool",
+                    )
+                    .await
+                    .expect("connect startup postgres pool");
 
                     let sqlite = test_db();
                     seed_agent(&sqlite);
