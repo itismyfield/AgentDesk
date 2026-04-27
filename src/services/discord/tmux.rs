@@ -222,34 +222,34 @@ fn recent_turn_stop_for_channel(channel_id: ChannelId) -> Option<RecentTurnStop>
 /// or as the "대화를 이어붙이지 못했습니다" handoff is misleading because the
 /// death IS the cancel, not a crash.
 ///
-/// IMPORTANT: this consumes the matching tombstone on a true return so the
-/// suppression is one-shot per cancel (codex P1 on #1277). A follow-up turn
-/// reuses the same `(channel_id, tmux_session_name)` pair, so without
-/// consumption a real failure within the 60s metadata-fallback TTL would be
-/// silently swallowed. The cancel path's own post-stop watcher death is the
-/// only legitimate consumer; any subsequent death must surface its own
-/// lifecycle/handoff signal.
+/// IMPORTANT: this consumes ALL matching in-window tombstones on a true
+/// return so the suppression is one-shot per cancel (codex P1/P2 on #1277).
+/// A single user cancel commonly records two tombstones —
+/// `mailbox_cancel_active_turn` records one, and
+/// `turn_lifecycle::stop_provider_turn_with_outcome` records another via
+/// `record_turn_stop_tombstone` — so draining only the newest leaves the
+/// duplicate alive to suppress a follow-up turn's real failure that
+/// reuses the same `(channel_id, tmux_session_name)` pair within the 60s
+/// metadata-fallback TTL.
 fn cancel_induced_watcher_death(channel_id: ChannelId, tmux_session_name: &str) -> bool {
     let now = std::time::Instant::now();
     let mut stops = recent_turn_stops();
     prune_recent_turn_stops(&mut stops, now);
-    let Some(idx) = stops.iter().rposition(|entry| {
+    let initial_len = stops.len();
+    stops.retain(|entry| {
         if entry.channel_id != channel_id {
-            return false;
+            return true;
         }
         if now.saturating_duration_since(entry.recorded_at) > RECENT_TURN_STOP_METADATA_FALLBACK_TTL
         {
-            return false;
+            return true;
         }
         match entry.tmux_session_name.as_deref() {
-            Some(entry_tmux) => entry_tmux == tmux_session_name,
-            None => true,
+            Some(entry_tmux) => entry_tmux != tmux_session_name,
+            None => false,
         }
-    }) else {
-        return false;
-    };
-    stops.remove(idx);
-    true
+    });
+    stops.len() != initial_len
 }
 
 fn recent_turn_stop_for_watcher_range(
@@ -9014,6 +9014,47 @@ mod tests {
         assert!(
             !cancel_induced_watcher_death(channel, tmux_name),
             "tombstone must be consumed so a later real failure on the reused session is NOT suppressed"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn cancel_induced_watcher_death_drains_duplicate_tombstones_per_cancel() {
+        // Codex P2 on PR #1277: a single cancel commonly records two
+        // tombstones — `mailbox_cancel_active_turn` writes one, and
+        // `turn_lifecycle::stop_provider_turn_with_outcome` writes another
+        // via `record_turn_stop_tombstone`. If we removed only one entry,
+        // the duplicate would remain and silently swallow a follow-up
+        // turn's real failure on the reused (channel, tmux) pair.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1276_020);
+        let tmux_name = "AgentDesk-claude-duplicate-cancel-tombstones";
+
+        record_recent_turn_stop_with_offset_for_tests(
+            channel,
+            tmux_name,
+            128,
+            "mailbox_cancel_active_turn",
+        );
+        record_recent_turn_stop_with_offset_for_tests(
+            channel,
+            tmux_name,
+            128,
+            "turn_lifecycle::stop",
+        );
+
+        assert!(
+            cancel_induced_watcher_death(channel, tmux_name),
+            "first cancel-induced death must consume both duplicate tombstones"
+        );
+        assert!(
+            !cancel_induced_watcher_death(channel, tmux_name),
+            "no in-window tombstone must remain after the first consumer drains the duplicates"
         );
 
         clear_recent_turn_stops_for_tests();
