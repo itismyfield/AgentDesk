@@ -143,7 +143,7 @@
 | `server::boot` | `src/server/boot.rs` | 190 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 966 |  |
-| `server::routes` | `src/server/routes/mod.rs` | 302 |  |
+| `server::routes` | `src/server/routes/mod.rs` | 319 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2039 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
@@ -179,7 +179,7 @@
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4796 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 |  |
-| `server::routes::meetings` | `src/server/routes/meetings.rs` | 2024 | giant-file |
+| `server::routes::meetings` | `src/server/routes/meetings.rs` | 2134 | giant-file |
 | `server::routes::memory_api` | `src/server/routes/memory_api.rs` | 652 |  |
 | `server::routes::messages` | `src/server/routes/messages.rs` | 185 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 127 |  |
