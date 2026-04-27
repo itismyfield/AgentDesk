@@ -1475,6 +1475,63 @@ pub(super) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Rewrite a file's contents while preserving its prior modified time. Used
+/// by the adoption path to refresh the `.generation` marker payload (so the
+/// generation number on disk matches the current dcserver runtime) without
+/// changing the file's mtime — the mtime is the wrapper-identity signal that
+/// the regression resolver uses to distinguish "same wrapper, mid-flight
+/// rotation" from "fresh wrapper after cancel→respawn" (see
+/// `watermark_after_output_regression`). Adoption changes the runtime that
+/// owns the wrapper, but it does NOT respawn the wrapper itself, so the
+/// identity signal must stay pinned.
+///
+/// Failures are logged and swallowed: the worst case is a redundant fresh-
+/// wrapper reset on a restored offset, which is the same behaviour the
+/// codebase had before #1271. Returning an error would not unblock the
+/// adoption.
+pub(super) fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
+    let prior_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+    if let Err(e) = std::fs::write(path, content) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ preserve_mtime_after_write: failed to write {} (context={}, error={})",
+            path,
+            context,
+            e
+        );
+        return;
+    }
+    let Some(prior) = prior_mtime else {
+        // No prior mtime to preserve (file did not exist or metadata unavailable).
+        // The post-write mtime is the only baseline we have, which is the same
+        // outcome as before this helper existed.
+        return;
+    };
+    let times = std::fs::FileTimes::new().set_modified(prior);
+    let file = match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ preserve_mtime_after_write: failed to reopen {} for set_times (context={}, error={})",
+                path,
+                context,
+                e
+            );
+            return;
+        }
+    };
+    if let Err(e) = file.set_times(times) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ preserve_mtime_after_write: set_times failed for {} (context={}, error={})",
+            path,
+            context,
+            e
+        );
+    }
+}
+
 /// Decide what watermark a stale-output regression (current EOF lower than
 /// `confirmed`) should land on, based on whether the wrapper instance is
 /// the same one that advanced the watermark in the first place.
@@ -4049,6 +4106,20 @@ pub(super) async fn tmux_output_watcher_with_restore(
             } else {
                 None
             };
+            // #1275 P2 #2: snapshot the current `.generation` mtime alongside
+            // the resumed offset. Without this, the local mtime baseline stays
+            // at whatever the previous setter left it (often `None` for
+            // restored offsets that haven't gone through a relay/rotation
+            // cycle yet). A later same-wrapper jsonl rotation would then take
+            // the fresh-wrapper branch in `watermark_after_output_regression`,
+            // clear `last_relayed_offset`, and re-relay surviving bytes.
+            // Pair the mtime with the offset only when we keep the offset (the
+            // turn_delivered branch); otherwise the next loop walks from 0
+            // anyway and a baseline would be misleading.
+            if last_relayed_offset.is_some() {
+                last_observed_generation_mtime_ns =
+                    Some(read_generation_file_mtime_ns(&tmux_session_name));
+            }
             // Clear turn_delivered after preserving the duplicate-relay guard so
             // future turns beyond this resume point can be relayed normally.
             turn_delivered.store(false, Ordering::Relaxed);
@@ -7366,8 +7437,24 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 session_gen,
                 current_gen
             );
-            // Update generation marker to current gen
-            let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
+            // Update generation marker to current gen, preserving the
+            // existing mtime.
+            //
+            // #1275 P2 #1: the `.generation` mtime is the wrapper-identity
+            // signal used by `watermark_after_output_regression`. Adoption
+            // does NOT respawn the wrapper (the tmux session and Claude CLI
+            // process are still alive from the previous dcserver), so the
+            // mtime must stay pinned to its original value. Otherwise a
+            // restored watcher with `last_watcher_relayed_generation_mtime_ns`
+            // captured before the dcserver restart will mismatch the freshly
+            // touched `.generation` mtime, the regression check classifies
+            // as fresh wrapper, clears `last_relayed_offset`, and a rotated
+            // jsonl re-relays surviving content.
+            preserve_mtime_after_write(
+                &gen_marker_path,
+                current_gen.to_string().as_bytes(),
+                "adoption_marker_rewrite",
+            );
         }
 
         if !tmux_session_has_live_pane(session_name) {
@@ -8624,6 +8711,206 @@ mod tests {
             last_relayed_offset, None,
             "fresh wrapper must clear local offset so next tick starts at 0"
         );
+    }
+
+    // ─── #1275 P2 #1: adoption preserves `.generation` mtime ──────────────
+    #[test]
+    fn preserve_mtime_after_write_pins_mtime_across_content_rewrite() {
+        // The adoption path rewrites the `.generation` payload from the old
+        // generation number to the current one. If the rewrite bumps the
+        // mtime, a restored watcher with `last_watcher_relayed_generation_mtime_ns`
+        // captured before the dcserver restart will mismatch the freshly
+        // touched mtime, the regression resolver classifies as fresh wrapper,
+        // and a rotated jsonl re-relays surviving content.
+        //
+        // This test pins the helper's contract: same content rewrite, but
+        // mtime stays at the prior value within filesystem resolution.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("adoption.generation");
+        std::fs::write(&path, b"42").expect("seed generation");
+
+        // Backdate the file so the post-write set_times target is far
+        // enough from "now" that any drift would be detectable.
+        let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24);
+        let times = std::fs::FileTimes::new().set_modified(backdated);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopen for backdate");
+        f.set_times(times).expect("backdate set_times");
+        drop(f);
+        let prior_mtime = std::fs::metadata(&path)
+            .expect("metadata before")
+            .modified()
+            .expect("modified before");
+
+        super::preserve_mtime_after_write(
+            path.to_str().expect("utf8 path"),
+            b"99",
+            "unit-test-adoption",
+        );
+
+        let after_content = std::fs::read_to_string(&path).expect("read after");
+        assert_eq!(after_content, "99", "content must reflect new generation");
+        let after_mtime = std::fs::metadata(&path)
+            .expect("metadata after")
+            .modified()
+            .expect("modified after");
+        // Tolerate ≤1ms slop: APFS records sub-microsecond mtimes, but some
+        // filesystems clamp to microseconds. We backdated by 24h, so any
+        // difference within a millisecond means the helper successfully
+        // restored the prior mtime instead of letting `std::fs::write` stamp
+        // "now".
+        let drift = after_mtime
+            .duration_since(prior_mtime)
+            .unwrap_or_else(|_| prior_mtime.duration_since(after_mtime).unwrap_or_default());
+        assert!(
+            drift < std::time::Duration::from_millis(1),
+            "mtime drift {:?} after preserve_mtime_after_write — adoption \
+             would mis-classify the wrapper as fresh-respawn",
+            drift
+        );
+    }
+
+    #[test]
+    fn preserve_mtime_after_write_creates_file_when_missing() {
+        // If the prior file does not exist, the helper still writes the new
+        // content. Without a prior mtime to restore, the post-write mtime is
+        // accepted as the new baseline — this is the same behaviour as the
+        // pre-#1275 raw `std::fs::write` and is the only safe fallback.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("missing.generation");
+        super::preserve_mtime_after_write(
+            path.to_str().expect("utf8 path"),
+            b"7",
+            "unit-test-missing",
+        );
+        let content = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(content, "7");
+    }
+
+    // ─── #1275 P2 #2: resume_offset path snapshots `.generation` mtime ────
+    //
+    // The race itself is in the watcher loop body, which is hundreds of
+    // lines of async I/O behind a `tmux_session_alive` poll — extracting it
+    // for a unit test would require a refactor on the scale of this PR
+    // itself. We pin the policy by exercising the helpers the watcher loop
+    // calls (which is what the bug report describes: a missing
+    // `last_observed_generation_mtime_ns` snapshot lets the next regression
+    // check take the fresh-wrapper branch on a same-wrapper rotation).
+    #[test]
+    fn same_wrapper_rotation_does_not_clear_local_offset_when_mtime_baseline_present() {
+        // The fix at the resume_offset site stores the current `.generation`
+        // mtime in `last_observed_generation_mtime_ns` whenever it preserves
+        // `last_relayed_offset` across the resume. Once that baseline is in
+        // place, a later jsonl rotation that regresses `observed_output_end`
+        // below the stored offset must classify as same-wrapper (mtime
+        // unchanged) and pin to the new EOF — NOT clear to None.
+        //
+        // We model this with a temp `.generation` file whose mtime stays
+        // pinned across the regression check, mimicking same-wrapper jsonl
+        // rotation right after the resume_offset consumer ran.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let tmux_name = format!(
+            "AgentDesk-claude-adk-issue-1275-resume-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let gen_path = crate::services::tmux_common::session_temp_path(&tmux_name, "generation");
+        if let Some(parent) = std::path::Path::new(&gen_path).parent() {
+            std::fs::create_dir_all(parent).expect("runtime dir");
+        }
+        std::fs::write(&gen_path, b"42").expect("seed generation");
+        let baseline_mtime = super::read_generation_file_mtime_ns(&tmux_name);
+        assert!(
+            baseline_mtime > 0,
+            "test fixture must produce a non-zero generation mtime"
+        );
+
+        // Simulate the post-resume state: offset preserved + mtime baseline
+        // captured (the #1275 P2 #2 fix). The same-wrapper jsonl rotation
+        // then regresses observed_output_end below the stored offset.
+        let channel_id = ChannelId::new(1485506232256168129);
+        let mut last_relayed_offset = Some(1_548_758_u64);
+        let mut last_observed_generation_mtime_ns: Option<i64> = Some(baseline_mtime);
+
+        let observed_after_rotation = 438_675_u64;
+        assert!(reset_stale_local_relay_offset_if_output_regressed(
+            &mut last_relayed_offset,
+            &mut last_observed_generation_mtime_ns,
+            channel_id,
+            &tmux_name,
+            observed_after_rotation,
+            "unit-test-1275-p2-2",
+        ));
+        assert_eq!(
+            last_relayed_offset,
+            Some(observed_after_rotation),
+            "same-wrapper rotation must pin the local offset to current \
+             EOF, NOT clear it (would re-relay surviving content)"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
+    #[test]
+    fn missing_mtime_baseline_clears_local_offset_on_regression() {
+        // Reverse-direction guard: when the resume_offset path forgets to
+        // snapshot the mtime baseline (the pre-#1275 bug), a same-wrapper
+        // rotation falls through to the fresh-wrapper branch and clears the
+        // local offset to None — re-relaying surviving content. This test
+        // documents that bad behaviour so flipping the snapshot OFF would
+        // immediately fail `same_wrapper_rotation_does_not_clear_local_offset_*`.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let tmux_name = format!(
+            "AgentDesk-claude-adk-issue-1275-no-baseline-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let gen_path = crate::services::tmux_common::session_temp_path(&tmux_name, "generation");
+        if let Some(parent) = std::path::Path::new(&gen_path).parent() {
+            std::fs::create_dir_all(parent).expect("runtime dir");
+        }
+        std::fs::write(&gen_path, b"42").expect("seed generation");
+
+        let channel_id = ChannelId::new(1485506232256168130);
+        let mut last_relayed_offset = Some(1_548_758_u64);
+        // The bug state: no baseline captured at the resume site.
+        let mut last_observed_generation_mtime_ns: Option<i64> = None;
+
+        assert!(reset_stale_local_relay_offset_if_output_regressed(
+            &mut last_relayed_offset,
+            &mut last_observed_generation_mtime_ns,
+            channel_id,
+            &tmux_name,
+            438_675,
+            "unit-test-1275-no-baseline",
+        ));
+        assert_eq!(
+            last_relayed_offset, None,
+            "without an mtime baseline, the regression check must \
+             conservatively classify as fresh-wrapper (this is the bug \
+             P2 #2 closes — the baseline is now snapshotted at the \
+             resume_offset site)"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
     #[test]
