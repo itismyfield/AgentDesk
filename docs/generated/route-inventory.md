@@ -168,11 +168,11 @@
 | `GET` | `/api/pipeline/cards/{card_id}` | `pipeline::get_card_pipeline` | `src/server/routes/pipeline.rs:321` | `src/server/routes/domains/ops.rs:52` |
 | `GET` | `/api/pipeline/cards/{card_id}/history` | `pipeline::get_card_history` | `src/server/routes/pipeline.rs:389` | `src/server/routes/domains/ops.rs:56` |
 | `GET` | `/api/pipeline/cards/{card_id}/transcripts` | `pipeline::get_card_transcripts` | `src/server/routes/pipeline.rs:410` | `src/server/routes/domains/ops.rs:60` |
-| `GET` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::get_agent_pipeline` | `src/server/routes/pipeline.rs:663` | `src/server/routes/domains/ops.rs:76` |
-| `PUT` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::set_agent_pipeline` | `src/server/routes/pipeline.rs:698` | `src/server/routes/domains/ops.rs:76` |
+| `GET` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::get_agent_pipeline` | `src/server/routes/pipeline.rs:664` | `src/server/routes/domains/ops.rs:76` |
+| `PUT` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::set_agent_pipeline` | `src/server/routes/pipeline.rs:699` | `src/server/routes/domains/ops.rs:76` |
 | `GET` | `/api/pipeline/config/default` | `pipeline::get_default_pipeline` | `src/server/routes/pipeline.rs:465` | `src/server/routes/domains/ops.rs:64` |
 | `GET` | `/api/pipeline/config/effective` | `pipeline::get_effective_pipeline` | `src/server/routes/pipeline.rs:477` | `src/server/routes/domains/ops.rs:68` |
-| `GET` | `/api/pipeline/config/graph` | `pipeline::get_pipeline_graph` | `src/server/routes/pipeline.rs:764` | `src/server/routes/domains/ops.rs:80` |
+| `GET` | `/api/pipeline/config/graph` | `pipeline::get_pipeline_graph` | `src/server/routes/pipeline.rs:766` | `src/server/routes/domains/ops.rs:80` |
 | `GET` | `/api/pipeline/config/repo/{owner}/{repo}` | `pipeline::get_repo_pipeline` | `src/server/routes/pipeline.rs:564` | `src/server/routes/domains/ops.rs:72` |
 | `PUT` | `/api/pipeline/config/repo/{owner}/{repo}` | `pipeline::set_repo_pipeline` | `src/server/routes/pipeline.rs:600` | `src/server/routes/domains/ops.rs:72` |
 | `DELETE` | `/api/pipeline/stages` | `pipeline::delete_stages` | `src/server/routes/pipeline.rs:292` | `src/server/routes/domains/ops.rs:46` |
@@ -205,9 +205,9 @@
 | `POST` | `/api/review-decision` | `deprecated_submit_review_decision` | `src/server/routes/domains/reviews.rs:52` | `src/server/routes/domains/reviews.rs:32` |
 | `POST` | `/api/review-tuning/aggregate` | `deprecated_aggregate_review_tuning` | `src/server/routes/domains/reviews.rs:60` | `src/server/routes/domains/reviews.rs:37` |
 | `POST` | `/api/review-verdict` | `deprecated_submit_verdict` | `src/server/routes/domains/reviews.rs:44` | `src/server/routes/domains/reviews.rs:27` |
-| `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:1136` | `src/server/routes/domains/reviews.rs:28` |
+| `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:1138` | `src/server/routes/domains/reviews.rs:28` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:622` | `src/server/routes/domains/reviews.rs:33` |
-| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:259` | `src/server/routes/domains/reviews.rs:26` |
+| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:261` | `src/server/routes/domains/reviews.rs:26` |
 | `GET` | `/api/round-table-meetings` | `meetings::list_meetings` | `src/server/routes/meetings.rs:646` | `src/server/routes/domains/integrations.rs:41` |
 | `POST` | `/api/round-table-meetings` | `meetings::upsert_meeting` | `src/server/routes/meetings.rs:1240` | `src/server/routes/domains/integrations.rs:41` |
 | `GET` | `/api/round-table-meetings/channels` | `meetings::list_meeting_channels` | `src/server/routes/meetings.rs:694` | `src/server/routes/domains/integrations.rs:45` |
