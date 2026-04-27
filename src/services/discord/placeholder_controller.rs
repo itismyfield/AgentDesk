@@ -75,6 +75,13 @@ impl Default for PlaceholderEntry {
     }
 }
 
+/// Cap on retained `PlaceholderController` entries. Each Discord message id is
+/// unique, so an unbounded map would leak entries across the lifetime of a
+/// long-running dcserver — codex round-3 #1308 P2. Sized for ~hours of heavy
+/// background-tool activity; eviction prefers terminal entries over Active
+/// ones so we never drop a live card mid-flight.
+const PLACEHOLDER_ENTRIES_MAX: usize = 4096;
+
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
     entries: dashmap::DashMap<PlaceholderKey, Arc<Mutex<PlaceholderEntry>>>,
@@ -101,10 +108,37 @@ impl PlaceholderController {
         if let Some(existing) = self.entries.get(key) {
             return existing.clone();
         }
+        if self.entries.len() >= PLACEHOLDER_ENTRIES_MAX {
+            self.evict_terminal_entries();
+        }
         self.entries
             .entry(key.clone())
             .or_insert_with(|| Arc::new(Mutex::new(PlaceholderEntry::default())))
             .clone()
+    }
+
+    /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) so
+    /// the map can't grow without bound on a long-running process. Active and
+    /// NotCreated entries are left in place. Called from `entry()` whenever
+    /// the cap is reached. Uses `try_lock` to avoid blocking on entries that
+    /// the caller is mid-edit on.
+    fn evict_terminal_entries(&self) {
+        let mut to_remove: Vec<PlaceholderKey> = Vec::new();
+        for kv in self.entries.iter() {
+            if let Ok(guard) = kv.value().try_lock() {
+                if matches!(
+                    guard.state,
+                    PlaceholderLifecycle::Completed
+                        | PlaceholderLifecycle::TimedOut
+                        | PlaceholderLifecycle::Aborted
+                ) {
+                    to_remove.push(kv.key().clone());
+                }
+            }
+        }
+        for key in to_remove {
+            self.entries.remove(&key);
+        }
     }
 
     /// Drive the placeholder into `Active`. Issues a Discord PATCH only if the
@@ -583,6 +617,40 @@ mod tests {
         assert_eq!(
             controller.lifecycle(&key()).await,
             PlaceholderLifecycle::NotCreated
+        );
+    }
+
+    // codex round-3 #1308 P2: terminal entries are evicted once the map hits
+    // its cap so a long-running dcserver does not retain a per-message entry
+    // for every closed card.
+    #[tokio::test]
+    async fn evict_terminal_entries_drops_completed_keys() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+
+        let make_key = |msg_id_seed: u64| PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(1_000_000_000_000_001),
+            message_id: MessageId::new(2_000_000_000_000_000 + msg_id_seed),
+        };
+
+        // Walk a handful of keys through the full Active -> Completed cycle.
+        for seed in 1..=4 {
+            let k = make_key(seed);
+            let _ = controller
+                .ensure_active(gateway.as_ref(), k.clone(), sample_input())
+                .await;
+            let _ = controller
+                .transition(gateway.as_ref(), k, PlaceholderLifecycle::Completed)
+                .await;
+        }
+
+        assert_eq!(controller.entries.len(), 4);
+        controller.evict_terminal_entries();
+        assert_eq!(
+            controller.entries.len(),
+            0,
+            "all-Completed entries should be removed by the eviction sweep"
         );
     }
 }
