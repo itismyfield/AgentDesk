@@ -205,20 +205,20 @@ fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
     let shared = make_shared_data_for_tests();
     let channel_id = ChannelId::new(1486333430516945999);
 
-    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(128));
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(128), None);
     let relay_coord = shared.tmux_relay_coord(channel_id);
     assert_eq!(
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
     );
 
-    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(64));
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, Some(64), None);
     assert_eq!(
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
     );
 
-    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, None);
+    advance_tmux_relay_confirmed_end(shared.as_ref(), channel_id, None, None);
     assert_eq!(
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
