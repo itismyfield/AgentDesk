@@ -26,6 +26,131 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
 }
 
+fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+    let mut config = crate::config::Config::default();
+    config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.hot_reload = false;
+    PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+}
+
+/// Per-test Postgres database lifecycle for the #1238 PG-fixture migration of
+/// review_verdict / review-decision handler tests. After PR #1306 these
+/// handlers are PG-only so the corresponding tests need a PG pool wired into
+/// `AppState`.
+struct ReviewVerdictPgDatabase {
+    _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    admin_url: String,
+    database_name: String,
+    database_url: String,
+}
+
+impl ReviewVerdictPgDatabase {
+    async fn create() -> Self {
+        let lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let admin_url = pg_test_admin_database_url();
+        let database_name = format!("agentdesk_review_verdict_{}", uuid::Uuid::new_v4().simple());
+        let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+        crate::db::postgres::create_test_database(
+            &admin_url,
+            &database_name,
+            "review_verdict handler pg",
+        )
+        .await
+        .expect("create review_verdict postgres test db");
+
+        Self {
+            _lifecycle: lifecycle,
+            admin_url,
+            database_name,
+            database_url,
+        }
+    }
+
+    async fn migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(
+            &self.database_url,
+            "review_verdict handler pg",
+        )
+        .await
+        .expect("connect + migrate review_verdict postgres test db")
+    }
+
+    async fn drop(self) {
+        crate::db::postgres::drop_test_database(
+            &self.admin_url,
+            &self.database_name,
+            "review_verdict handler pg",
+        )
+        .await
+        .expect("drop review_verdict postgres test db");
+    }
+}
+
+fn pg_test_base_database_url() -> String {
+    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    let user = std::env::var("PGUSER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "postgres".to_string());
+    let password = std::env::var("PGPASSWORD")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let host = std::env::var("PGHOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = std::env::var("PGPORT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "5432".to_string());
+    match password {
+        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+        None => format!("postgresql://{user}@{host}:{port}"),
+    }
+}
+
+fn pg_test_admin_database_url() -> String {
+    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "postgres".to_string());
+    format!("{}/{}", pg_test_base_database_url(), admin_db)
+}
+
+async fn seed_review_card_pg(pool: &sqlx::PgPool, dispatch_id: &str) {
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+         VALUES ('agent-1', 'Agent 1', '123', '456')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+         review_status, created_at, updated_at) \
+         VALUES ('card-1', 'Review Target', 'review', 'agent-1', $1, 'reviewing', NOW(), NOW())",
+    )
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+         title, created_at, updated_at) \
+         VALUES ($1, 'card-1', 'agent-1', 'review', 'pending', '[Review R1] card-1', NOW(), NOW())",
+    )
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn env_lock() -> MutexGuard<'static, ()> {
     crate::config::shared_test_env_lock()
         .lock()
@@ -85,10 +210,13 @@ fn count_active_dispatches(db: &Db, card_id: &str, dispatch_type: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn submit_verdict_pass_marks_done_and_clears_review_status() {
+async fn submit_verdict_pass_pg_marks_done_and_clears_review_status() {
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    seed_review_card(&db, "dispatch-pass");
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    seed_review_card_pg(&pool, "dispatch-pass").await;
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
 
     let (status, _) = submit_verdict(
         State(state),
@@ -107,25 +235,23 @@ async fn submit_verdict_pass_marks_done_and_clears_review_status() {
     assert_eq!(status, StatusCode::OK);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let conn = db.lock().unwrap();
-    let (card_status, review_status): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, review_status FROM kanban_cards WHERE id = 'card-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    let dispatch_status: String = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = 'dispatch-pass'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let (card_status, review_status): (String, Option<String>) =
+        sqlx::query_as("SELECT status, review_status FROM kanban_cards WHERE id = 'card-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'dispatch-pass'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     assert_eq!(dispatch_status, "completed");
     assert_eq!(card_status, "done");
     assert_eq!(review_status, None);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -205,34 +331,36 @@ async fn review_verdict_allows_same_agent_submission() {
 }
 
 #[tokio::test]
-async fn repeated_findings_after_approach_change_creates_session_reset_rework_dispatch() {
+async fn repeated_findings_after_approach_change_pg_creates_session_reset_rework_dispatch() {
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    seed_review_card(&db, "dispatch-reset");
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "UPDATE kanban_cards
-             SET title = 'Reset Test',
-                 review_round = 3,
-                 review_notes = 'same validation failure',
-                 github_issue_number = 420,
-                 updated_at = datetime('now')
-             WHERE id = 'card-1'",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO card_review_state (
-                card_id, state, review_round, approach_change_round, updated_at
-             ) VALUES (
-                'card-1', 'reviewing', 3, 2, datetime('now')
-             )",
-            [],
-        )
-        .unwrap();
-    }
+    seed_review_card_pg(&pool, "dispatch-reset").await;
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET title = 'Reset Test',
+             review_round = 3,
+             review_notes = 'same validation failure',
+             github_issue_number = 420,
+             updated_at = NOW()
+         WHERE id = 'card-1'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, state, review_round, approach_change_round, updated_at
+         ) VALUES (
+            'card-1', 'reviewing', 3, 2, NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
     let (status, _) = submit_verdict(
         State(state),
         Json(SubmitVerdictBody {
@@ -250,33 +378,32 @@ async fn repeated_findings_after_approach_change_creates_session_reset_rework_di
     assert_eq!(status, StatusCode::OK);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let conn = db.lock().unwrap();
-    let (card_status, review_status, latest_dispatch_id): (String, Option<String>, String) = conn
-        .query_row(
+    let (card_status, review_status, latest_dispatch_id): (String, Option<String>, String) =
+        sqlx::query_as(
             "SELECT status, review_status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .fetch_one(&pool)
+        .await
         .unwrap();
-    let rework_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches
-             WHERE kanban_card_id = 'card-1' AND dispatch_type = 'rework'
-             AND status IN ('pending', 'dispatched')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let rework_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_dispatches
+         WHERE kanban_card_id = 'card-1' AND dispatch_type = 'rework'
+         AND status IN ('pending', 'dispatched')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(card_status, "in_progress");
     assert_eq!(review_status.as_deref(), Some("rework_pending"));
     assert_eq!(rework_count, 1);
 
     let (dispatch_type, dispatch_status, title, context): (String, String, String, Option<String>) =
-        conn.query_row(
-            "SELECT dispatch_type, status, title, context FROM task_dispatches WHERE id = ?1",
-            [&latest_dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        sqlx::query_as(
+            "SELECT dispatch_type, status, title, context FROM task_dispatches WHERE id = $1",
         )
+        .bind(&latest_dispatch_id)
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(dispatch_type, "rework");
     assert_eq!(dispatch_status, "pending");
@@ -289,15 +416,17 @@ async fn repeated_findings_after_approach_change_creates_session_reset_rework_di
     assert_eq!(context_json["reset_provider_state"], true);
     assert_eq!(context_json["recreate_tmux"], false);
 
-    let (review_state, session_reset_round): (String, Option<i64>) = conn
-        .query_row(
-            "SELECT state, session_reset_round FROM card_review_state WHERE card_id = 'card-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (review_state, session_reset_round): (String, Option<i64>) = sqlx::query_as(
+        "SELECT state, session_reset_round FROM card_review_state WHERE card_id = 'card-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(review_state, "rework_pending");
     assert_eq!(session_reset_round, Some(3));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1364,42 +1493,30 @@ async fn accept_then_dispute_returns_conflict() {
 /// OnCardTerminal fires immediately (not deferred to next tick).
 /// This ensures auto-queue continuation path is triggered.
 #[tokio::test]
-async fn submit_verdict_pass_fires_terminal_hook_via_drain() {
+async fn submit_verdict_pass_pg_fires_terminal_hook_via_drain() {
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    seed_review_card(&db, "dispatch-drain");
+    seed_review_card_pg(&pool, "dispatch-drain").await;
 
-    // Create auto-queue tables and entry to verify terminal hook fires
-    {
-        let conn = db.lock().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
-                id TEXT PRIMARY KEY, repo TEXT, agent_id TEXT,
-                status TEXT DEFAULT 'active', ai_model TEXT, ai_rationale TEXT,
-                timeout_minutes INTEGER DEFAULT 120,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME
-            );
-            CREATE TABLE IF NOT EXISTS auto_queue_entries (
-                id TEXT PRIMARY KEY, run_id TEXT REFERENCES auto_queue_runs(id),
-                kanban_card_id TEXT, agent_id TEXT,
-                priority_rank INTEGER DEFAULT 0, reason TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                dispatched_at DATETIME, completed_at DATETIME
-            );",
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, status, agent_id) VALUES ('run-drain', 'active', 'agent-1')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
-             VALUES ('entry-drain', 'run-drain', 'card-1', 'agent-1', 'dispatched', 1)",
-            [],
-        ).unwrap();
-    }
+    // PG migrations already create auto_queue_runs and auto_queue_entries — only seed the rows.
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, status, agent_id) \
+         VALUES ('run-drain', 'active', 'agent-1')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+         VALUES ('entry-drain', 'run-drain', 'card-1', 'agent-1', 'dispatched', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
 
     let (status, _) = submit_verdict(
         State(state),
@@ -1417,43 +1534,38 @@ async fn submit_verdict_pass_fires_terminal_hook_via_drain() {
 
     assert_eq!(status, StatusCode::OK);
 
-    let conn = db.lock().unwrap();
-
     // Card must be done
-    let card_status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let card_status: String =
+        sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'card-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(card_status, "done");
 
     // completed_at must be set (proves OnCardTerminal or transition_status fired)
-    let completed_at: Option<String> = conn
-        .query_row(
-            "SELECT completed_at FROM kanban_cards WHERE id = 'card-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let completed_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT completed_at FROM kanban_cards WHERE id = 'card-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(
         completed_at.is_some(),
         "completed_at must be set — proves terminal hook fired via drain"
     );
 
     // auto_queue_entry must be 'done' (proves OnCardTerminal → auto-queue.js ran)
-    let entry_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_entries WHERE id = 'entry-drain'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let entry_status: String =
+        sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-drain'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         entry_status, "done",
         "auto_queue_entry must be marked done by terminal hook"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// #116: accept is not a valid counter-model verdict — only pass/approved/improve/reject/rework.
@@ -1752,39 +1864,49 @@ fn latest_completed_review_lookup_prefers_completed_at() {
 /// turn (skip_rework / direct_review_created path), OnReviewEnter sets
 /// review_status='reviewing'. The accept cleanup must NOT clear it.
 #[tokio::test]
-async fn accept_direct_review_preserves_reviewing_status() {
+async fn accept_direct_review_pg_preserves_reviewing_status() {
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
+    let pg_db = ReviewVerdictPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
-             review_status, review_round, suggestion_pending_at, github_issue_number, created_at, updated_at) \
-             VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
-             'suggestion_pending', 1, datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
-            [],
-        ).unwrap();
-        // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, \
-             context, completed_at, created_at, updated_at) \
-             VALUES ('review-prev', 'card-266dr', 'agent-1', 'review', 'completed', '[Review R1]', \
-             '{\"reviewed_commit\":\"aaa1111\"}', datetime('now', '-5 minutes'), datetime('now', '-10 minutes'), datetime('now'))",
-            [],
-        ).unwrap();
-        // Pending review-decision dispatch
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-             VALUES ('rd-266dr', 'card-266dr', 'agent-1', 'review-decision', 'pending', 'RD #266 direct', datetime('now'), datetime('now'))",
-            [],
-        ).unwrap();
-    }
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+         VALUES ('agent-1', 'Agent 1', '123', '456')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+         review_status, review_round, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+         VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
+         'suggestion_pending', 1, NOW() - INTERVAL '10 minutes', 266, NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, \
+         context, completed_at, created_at, updated_at) \
+         VALUES ('review-prev', 'card-266dr', 'agent-1', 'review', 'completed', '[Review R1]', \
+         '{\"reviewed_commit\":\"aaa1111\"}', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '10 minutes', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Pending review-decision dispatch
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+         VALUES ('rd-266dr', 'card-266dr', 'agent-1', 'review-decision', 'pending', 'RD #266 direct', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
 
     let (status, body) = submit_review_decision(
         State(state),
@@ -1810,42 +1932,39 @@ async fn accept_direct_review_preserves_reviewing_status() {
         "skip_rework accept must not create a rework dispatch"
     );
 
-    let conn = db.lock().unwrap();
-    let review_status: Option<String> = conn
-        .query_row(
-            "SELECT review_status FROM kanban_cards WHERE id = 'card-266dr'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let review_status: Option<String> =
+        sqlx::query_scalar("SELECT review_status FROM kanban_cards WHERE id = 'card-266dr'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         review_status,
         Some("reviewing".to_string()),
         "#266: direct-review accept must preserve review_status='reviewing' set by OnReviewEnter"
     );
-    let review_round: i64 = conn
-        .query_row(
-            "SELECT review_round FROM kanban_cards WHERE id = 'card-266dr'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let review_round: i64 =
+        sqlx::query_scalar("SELECT review_round FROM kanban_cards WHERE id = 'card-266dr'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         review_round, 2,
         "#487: direct-review accept must advance review_round for the new review cycle"
     );
-    let review_title: String = conn
-        .query_row(
-            "SELECT title FROM task_dispatches \
-             WHERE kanban_card_id = 'card-266dr' AND dispatch_type = 'review' \
-             AND status IN ('pending', 'dispatched') \
-             ORDER BY created_at DESC, id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let review_title: String = sqlx::query_scalar(
+        "SELECT title FROM task_dispatches \
+         WHERE kanban_card_id = 'card-266dr' AND dispatch_type = 'review' \
+         AND status IN ('pending', 'dispatched') \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         review_title, "[Review R2] card-266dr",
         "#487: direct-review accept must create an R2 review dispatch title"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
