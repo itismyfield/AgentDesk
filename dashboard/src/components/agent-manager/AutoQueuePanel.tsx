@@ -11,6 +11,8 @@ import type {
 
 import type { Agent, UiLanguage } from "../../types";
 import { localeName } from "../../i18n";
+import { useLocalStorage } from "../../lib/useLocalStorage";
+import { STORAGE_KEYS } from "../../lib/storageKeys";
 import {
   createEmptyAutoQueueStatus,
   getAutoQueuePrimaryAction,
@@ -638,7 +640,7 @@ export default function AutoQueuePanel({
   selectedAgentId,
 }: Props) {
   const [status, setStatus] = useState<AutoQueueStatus | null>(null);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanAutoQueueOpen, true);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1156,30 +1158,30 @@ export default function AutoQueuePanel({
 
   return (
     <section
-      className="rounded-2xl border p-3 sm:p-4 space-y-3"
+      className="rounded-2xl border px-3 py-2 sm:px-4 sm:py-2.5 space-y-2"
       style={{
         borderColor: run ? "rgba(16,185,129,0.35)" : "rgba(148,163,184,0.22)",
         backgroundColor: "var(--th-bg-surface)",
       }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 flex-wrap">
+      {/* Header — single-line on all widths to avoid vertical text spread */}
+      <div className="flex items-center justify-between gap-2 min-w-0">
         <button
           onClick={() => setExpanded((p) => !p)}
-          className="flex items-center gap-2 min-w-0"
+          className="flex items-center gap-1.5 min-w-0 flex-1"
         >
-          <span className="text-sm" style={{ color: "var(--th-text-muted)" }}>
+          <span className="text-sm shrink-0" style={{ color: "var(--th-text-muted)" }}>
             {expanded ? "▾" : "▸"}
           </span>
           <h3
-            className="text-sm font-semibold"
+            className="text-sm font-semibold shrink-0"
             style={{ color: "var(--th-text-heading)" }}
           >
             {tr("자동 큐", "Auto Queue")}
           </h3>
           {run && (
             <span
-              className="text-xs px-2 py-0.5 rounded-full"
+              className="text-[11px] px-1.5 py-0.5 rounded-full shrink-0"
               style={{
                 backgroundColor: RUN_STATUS_STYLE[run.status].bg,
                 color: RUN_STATUS_STYLE[run.status].text,
@@ -1190,7 +1192,7 @@ export default function AutoQueuePanel({
           )}
           {totalCount > 0 && (
             <span
-              className="text-xs px-1.5 py-0.5 rounded bg-surface-medium"
+              className="text-[11px] px-1.5 py-0.5 rounded bg-surface-medium shrink-0"
               style={{ color: "var(--th-text-muted)" }}
             >
               {completedCount}/{totalCount}
@@ -1198,7 +1200,7 @@ export default function AutoQueuePanel({
           )}
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 shrink-0">
           {showRunStartControls && (
             <>
               <button
