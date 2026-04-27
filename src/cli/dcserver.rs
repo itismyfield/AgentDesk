@@ -1347,17 +1347,17 @@ pub fn handle_dcserver(token: Option<String>) {
                         discord_engine = Some(engine.clone());
                         let http_config = ad_config.clone();
                         let registry_for_http = health_registry.clone();
-                        // #1237 (843f): switched to the PG-only `server::run`
-                        // signature. The dcserver entry no longer hands the
-                        // legacy `Db` to the HTTP runtime — Discord-side
-                        // helpers continue to use `ad_db` directly.
-                        let pool_for_http = discord_pg_pool.clone();
+                        // #1237 (843f) / #1238 (843g): keep handing the legacy
+                        // SQLite handle to the HTTP runtime so unported handlers
+                        // (`update_card`, `/api/onboarding/*`, …) can still read
+                        // their compatibility tables in production.
+                        let ad_db_for_http = ad_db.clone();
                         tokio::spawn(async move {
                             if let Err(e) = server::run(
                                 http_config,
+                                ad_db_for_http,
                                 engine,
                                 Some(registry_for_http),
-                                pool_for_http,
                             )
                             .await
                             {
