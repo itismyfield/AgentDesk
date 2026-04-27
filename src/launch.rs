@@ -14,8 +14,9 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
-    let db = crate::db::init(&config).context("Failed to init legacy compatibility DB")?;
-
+    // #1237 (843f): SQLite legacy compatibility DB is no longer initialized at
+    // server startup. The runtime is PG-required (see crate::server::run); any
+    // remaining SQLite call sites are tracked under #1238 (843g).
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)
         .await
         .map_err(anyhow::Error::msg)
@@ -51,7 +52,7 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         config.server.port
     );
 
-    crate::server::run(config.clone(), db, engine, None)
+    crate::server::run(config.clone(), engine, None, pg_pool)
         .await
         .context("Server error")?;
 

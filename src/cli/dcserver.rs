@@ -1347,10 +1347,19 @@ pub fn handle_dcserver(token: Option<String>) {
                         discord_engine = Some(engine.clone());
                         let http_config = ad_config.clone();
                         let registry_for_http = health_registry.clone();
+                        // #1237 (843f): switched to the PG-only `server::run`
+                        // signature. The dcserver entry no longer hands the
+                        // legacy `Db` to the HTTP runtime — Discord-side
+                        // helpers continue to use `ad_db` directly.
+                        let pool_for_http = discord_pg_pool.clone();
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                server::run(http_config, ad_db, engine, Some(registry_for_http))
-                                    .await
+                            if let Err(e) = server::run(
+                                http_config,
+                                engine,
+                                Some(registry_for_http),
+                                pool_for_http,
+                            )
+                            .await
                             {
                                 eprintln!("  ⚠ HTTP server error: {e}");
                             }

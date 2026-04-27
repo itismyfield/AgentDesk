@@ -13,8 +13,16 @@ use crate::db::agents::AgentChannelBindings;
 
 /// GET /api/discord/bindings
 /// (Legacy alias: /api/discord-bindings — kept for backward-compat, deprecated via #1065.)
+///
+/// TODO(#1238 / 843g): this handler is one of the few remaining direct
+/// SQLite readers in `src/server/routes`. PG-only deployments will get an
+/// empty bindings list because no `Db` is available; #1238 will rewrite the
+/// query against the postgres `agents` table.
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.sqlite_db().lock() {
+    let Some(legacy_db) = state.legacy_db().or_else(|| state.engine.legacy_db()) else {
+        return (StatusCode::OK, Json(json!({"bindings": []})));
+    };
+    let conn = match legacy_db.lock() {
         Ok(c) => c,
         Err(e) => {
             return (

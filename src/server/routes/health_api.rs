@@ -16,6 +16,17 @@ use crate::services::provider::ProviderKind;
 
 use super::AppState;
 
+/// TODO(#1238 / 843g): see agents::agent_quality_legacy_db.
+fn health_legacy_db(state: &AppState) -> &crate::db::Db {
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
+    state
+        .engine
+        .legacy_db()
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
+}
+
 const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
 
 struct DispatchOutboxStats {
@@ -674,7 +685,7 @@ pub async fn send_handler(
 
     let body_str = String::from_utf8_lossy(&body);
     let (status_str, response_body) =
-        health::handle_send(registry, state.sqlite_db(), &body_str).await;
+        health::handle_send(registry, health_legacy_db(&state), &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
@@ -747,7 +758,7 @@ pub async fn send_to_agent_handler(
 
     let body_str = String::from_utf8_lossy(&body);
     let (status_str, response_body) =
-        health::handle_send_to_agent(registry, state.sqlite_db(), &body_str).await;
+        health::handle_send_to_agent(registry, health_legacy_db(&state), &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));

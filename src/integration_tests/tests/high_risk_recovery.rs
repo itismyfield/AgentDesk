@@ -303,7 +303,7 @@ mod failure_recovery {
             "pending",
         );
 
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine, None)
+        let stats = crate::reconcile::reconcile_boot_runtime(Some(&db), &engine, None)
             .await
             .unwrap();
         assert_eq!(
@@ -395,7 +395,7 @@ mod failure_recovery {
             .unwrap();
         }
 
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine, None)
+        let stats = crate::reconcile::reconcile_boot_runtime(Some(&db), &engine, None)
             .await
             .unwrap();
         assert_eq!(
@@ -529,7 +529,7 @@ mod failure_recovery {
                     let stats = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         crate::reconcile::reconcile_boot_runtime(
-                            &sqlite,
+                            Some(&sqlite),
                             &engine,
                             Some(&startup_pool),
                         ),
@@ -590,7 +590,7 @@ mod failure_recovery {
         seed_agent(&db);
         seed_card(&db, "card-251-review", "review");
 
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine, None)
+        let stats = crate::reconcile::reconcile_boot_runtime(Some(&db), &engine, None)
             .await
             .unwrap();
         assert_eq!(

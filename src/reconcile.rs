@@ -106,7 +106,7 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
 }
 
 pub(crate) async fn reconcile_boot_runtime(
-    db: &Db,
+    db: Option<&Db>,
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
 ) -> Result<BootReconcileStats> {
@@ -115,6 +115,9 @@ pub(crate) async fn reconcile_boot_runtime(
     } else {
         #[cfg(test)]
         {
+            // #1237 (843f): tests still drive the SQLite path; the runtime is
+            // PG-only and never reaches this branch.
+            let db = db.ok_or_else(|| anyhow!("legacy SQLite db required for boot reconcile"))?;
             let conn = db
                 .lock()
                 .map_err(|e| anyhow!("boot reconcile DB lock poisoned: {e}"))?;
@@ -127,10 +130,14 @@ pub(crate) async fn reconcile_boot_runtime(
     };
 
     stats.missing_review_dispatches_refired = if let Some(pool) = pg_pool {
+        // #1237 (843f): the PG path no longer requires a SQLite handle; the
+        // optional `db` is only used by drain_hook_side_effects, which
+        // already accepts None at runtime.
         refire_missing_review_dispatches_pg(pool, db, engine).await?
     } else {
         #[cfg(test)]
         {
+            let db = db.ok_or_else(|| anyhow!("legacy SQLite db required for review reconcile"))?;
             refire_missing_review_dispatches(db, engine)?
         }
         #[cfg(not(test))]
@@ -523,7 +530,7 @@ fn refire_missing_review_dispatches(db: &Db, engine: &PolicyEngine) -> Result<us
 
 async fn refire_missing_review_dispatches_pg(
     pool: &PgPool,
-    db: &Db,
+    db: Option<&Db>,
     engine: &PolicyEngine,
 ) -> Result<usize> {
     crate::pipeline::ensure_loaded();
@@ -576,7 +583,7 @@ async fn refire_missing_review_dispatches_pg(
             );
             continue;
         }
-        crate::kanban::drain_hook_side_effects(db, engine);
+        crate::kanban::drain_hook_side_effects_with_backends(db, engine);
 
         let has_review_dispatch = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(

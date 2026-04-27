@@ -6,13 +6,18 @@ use super::super::AppState;
 use crate::services::provider::ProviderKind;
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    /* PG-only runtimes don't carry an engine-side legacy SQLite handle.
-    Fall back to AppState's sqlite handle instead of panicking — same
-    fix as kanban.rs::legacy_db. */
+    /* TODO(#1238 / 843g): see decision_route::legacy_db. PG-only runtimes
+    never read the result; the placeholder shim only satisfies signatures
+    of helpers that have not been ported yet. */
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
     state
         .engine
         .legacy_db()
-        .unwrap_or_else(|| state.sqlite_db())
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| {
+            PLACEHOLDER.get_or_init(super::super::pending_migration_shim_for_callers)
+        })
 }
 
 /// Write a review-passed marker file for the reviewed commit.
