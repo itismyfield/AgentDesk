@@ -63,7 +63,8 @@ async fn stop_turn_with_policy(
 ) -> TurnLifecycleStopResult {
     if let Some(channel_id) = target.channel_id {
         let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
-        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason);
+        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
+            .await;
     }
 
     let mut lifecycle_path = "direct-fallback";

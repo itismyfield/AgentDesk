@@ -287,7 +287,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11963 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11981 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
@@ -352,7 +352,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 418 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 419 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2070 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 827 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |

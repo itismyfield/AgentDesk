@@ -187,44 +187,50 @@ fn tmux_output_offset(tmux_session_name: &str) -> Option<u64> {
     std::fs::metadata(output_path).ok().map(|meta| meta.len())
 }
 
-pub(super) fn record_recent_turn_stop(
+pub(super) async fn record_recent_turn_stop(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
     let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
     // #1309: in-memory publish is synchronous + immediate so an in-process
-    // watcher can suppress the very next death without waiting on PG. The
-    // PG mirror is spawned fire-and-forget; cross-restart durability is
-    // preserved by the shared `client_id` plus
-    // `cancel_tombstones::register_drained_ids` skipping any late-landing
-    // PG row whose UUID was already drained via the in-memory path
-    // (codex rounds 3/4 on PR #1310).
+    // watcher can suppress the very next death without waiting on PG.
+    // The PG insert is awaited (with a 500 ms cap) so a quick dcserver
+    // restart immediately after the cancel cannot lose the durable copy.
+    // Cross-restart correctness AND in-process race safety are layered:
+    //   - in-memory: instant suppression for live watchers
+    //   - PG: durable across restart
+    //   - shared `client_id` + drained-id registry: skip + delete late
+    //     PG rows whose UUID was already drained in-memory
     record_recent_turn_stop_with_offset(
         channel_id,
         tmux_session_name,
         stop_output_offset,
         reason,
         crate::db::cancel_tombstones::global_pool(),
-    );
+    )
+    .await;
 }
 
-fn record_recent_turn_stop_with_offset(
+/// Bounded foreground budget for the durable PG mirror. Normal inserts
+/// finish in well under 10 ms; if a saturated pool exceeds this we fall
+/// back to in-memory only and warn — the cancel signal must not stall
+/// behind PG since `turn_bridge` polls `cancel_token` and could kill the
+/// wrapper before the C-c path runs (codex round-3 P2 on PR #1310).
+const CANCEL_TOMBSTONE_PERSIST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn record_recent_turn_stop_with_offset(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     stop_output_offset: Option<u64>,
     reason: &str,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
-    // Codex round-3/4 fix on PR #1310: publish the in-memory tombstone
-    // FIRST so an in-process watcher can suppress immediately, with no
-    // dependency on PG latency. The PG mirror is best-effort (spawned)
-    // because the shared `client_id` plus the
-    // `cancel_tombstones::register_drained_ids` registry let
-    // `consume_cancel_tombstone` skip + delete any late-landing PG row
-    // whose UUID was already drained via the in-memory path. That
-    // closes the stale-row race without blocking the foreground cancel.
     let client_id = uuid::Uuid::new_v4();
+
+    // Phase 1 — publish the in-memory entry synchronously. An in-process
+    // watcher firing right after `cancel_active_turn` returns will see
+    // the tombstone with zero PG dependency.
     let now = std::time::Instant::now();
     {
         let mut stops = recent_turn_stops();
@@ -242,30 +248,41 @@ fn record_recent_turn_stop_with_offset(
         });
     }
 
+    // Phase 2 — durable PG mirror with a bounded foreground budget. The
+    // await guarantees the row is committed before the cancel path
+    // returns, so a dcserver restart immediately after the cancel can
+    // still see the tombstone (codex round-2/5 P1/P2 on PR #1310). The
+    // 500 ms timeout caps worst-case foreground latency under PG
+    // saturation.
     if let Some(pool) = pg_pool {
-        let pool = pool.clone();
         let channel_id_i64 = channel_id.get() as i64;
         let stop_output_offset_i64 = stop_output_offset.map(|v| v as i64);
-        let tmux_session_name = tmux_session_name.map(str::to_string);
-        let reason = reason.to_string();
-        tokio::spawn(async move {
-            if let Err(error) = crate::db::cancel_tombstones::insert_cancel_tombstone(
-                &pool,
-                client_id,
-                channel_id_i64,
-                tmux_session_name.as_deref(),
-                stop_output_offset_i64,
-                &reason,
-            )
-            .await
-            {
+        let persist = crate::db::cancel_tombstones::insert_cancel_tombstone(
+            pool,
+            client_id,
+            channel_id_i64,
+            tmux_session_name,
+            stop_output_offset_i64,
+            reason,
+        );
+        match tokio::time::timeout(CANCEL_TOMBSTONE_PERSIST_TIMEOUT, persist).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
                 tracing::warn!(
                     "[cancel-tombstone] PG persist failed for channel {}: {}",
                     channel_id_i64,
                     error
                 );
             }
-        });
+            Err(_) => {
+                tracing::warn!(
+                    "[cancel-tombstone] PG persist for channel {} exceeded {:?}; \
+                     falling back to in-memory only",
+                    channel_id_i64,
+                    CANCEL_TOMBSTONE_PERSIST_TIMEOUT
+                );
+            }
+        }
     }
 }
 
