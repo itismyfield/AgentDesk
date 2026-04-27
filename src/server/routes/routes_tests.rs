@@ -832,13 +832,15 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
 }
 
 #[tokio::test]
-async fn health_detail_and_stale_mailbox_repair_require_bearer_when_auth_enabled() {
+async fn health_detail_and_stale_mailbox_repair_pg_require_bearer_when_auth_enabled() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let mut config = crate::config::Config::default();
     config.server.host = "0.0.0.0".to_string();
     config.server.auth_token = Some("secret-token".to_string());
-    let app = test_api_router_with_config(db, engine, config, None);
+    let app = test_api_router_with_pg(db, engine, config, None, pool.clone());
 
     let mut detail_request = Request::builder()
         .uri("/health/detail")
@@ -889,6 +891,9 @@ async fn health_detail_and_stale_mailbox_repair_require_bearer_when_auth_enabled
         ));
     let authorized_detail_response = app.oneshot(authorized_detail_request).await.unwrap();
     assert_eq!(authorized_detail_response.status(), StatusCode::OK);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1306,14 +1311,22 @@ async fn public_domain_router_wraps_plain_server_errors_in_app_error_json() {
 }
 
 #[tokio::test]
-async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backlog() {
+async fn health_api_http_pg_reports_observability_metrics_and_degraded_outbox_backlog() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     harness.set_recovery_duration_ms(1_250);
     let app = axum::Router::new().nest(
         "/api",
-        test_api_router(db.clone(), engine, Some(harness.registry())),
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pool.clone(),
+        ),
     );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1345,15 +1358,14 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
         healthy_json["recovery_duration"]
     );
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
-             VALUES (?1, 'notify', 'pending', datetime('now', '-5 minutes'))",
-            ["dispatch-1"],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
+         VALUES ($1, 'notify', 'pending', NOW() - INTERVAL '5 minutes')",
+    )
+    .bind("dispatch-1")
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let degraded_response = reqwest::get(&url).await.unwrap();
     assert_eq!(degraded_response.status(), reqwest::StatusCode::OK);
@@ -1376,6 +1388,9 @@ async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backl
         "expected dispatch_outbox_oldest_pending_age reason, got {:?}",
         degraded_json["degraded_reasons"]
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1433,10 +1448,21 @@ async fn health_api_reports_server_up_before_full_recovery_on_postgres() {
 }
 
 #[tokio::test]
-async fn health_api_standalone_mode_reports_status_field() {
+async fn health_api_pg_standalone_mode_reports_status_field() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = axum::Router::new().nest("/api", test_api_router(db, engine, None));
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            None,
+            pool.clone(),
+        ),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1459,6 +1485,9 @@ async fn health_api_standalone_mode_reports_status_field() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["db"], true);
     assert_eq!(json["server_up"], true);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1526,24 +1555,31 @@ async fn health_wait_script_passes_when_server_is_up_before_full_recovery_pg() {
 }
 
 #[tokio::test]
-async fn health_wait_script_rejects_non_reconcile_degraded_server_up_response() {
+async fn health_wait_script_pg_rejects_non_reconcile_degraded_server_up_response() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     let app = axum::Router::new().nest(
         "/api",
-        test_api_router(db.clone(), engine, Some(harness.registry())),
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pool.clone(),
+        ),
     );
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
-             VALUES (?1, 'notify', 'pending', datetime('now', '-5 minutes'))",
-            ["dispatch-degraded"],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
+         VALUES ($1, 'notify', 'pending', NOW() - INTERVAL '5 minutes')",
+    )
+    .bind("dispatch-degraded")
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1586,6 +1622,9 @@ async fn health_wait_script_rejects_non_reconcile_degraded_server_up_response() 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -1696,17 +1735,24 @@ async fn stats_memento_endpoint_reports_hourly_counts_and_dedup_hits() {
 }
 
 #[tokio::test]
-async fn health_api_includes_latest_config_audit_report() {
+async fn health_api_pg_includes_latest_config_audit_report() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     let app = axum::Router::new().nest(
         "/api",
-        test_api_router(db.clone(), engine, Some(harness.registry())),
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pool.clone(),
+        ),
     );
 
     {
-        let conn = db.lock().unwrap();
         let report = crate::services::discord_config_audit::ConfigAuditReport {
             generated_at: "2026-04-11T01:23:45Z".to_string(),
             status: "warn".to_string(),
@@ -1731,10 +1777,13 @@ async fn health_api_includes_latest_config_audit_report() {
                 synced_agents: Some(1),
             },
         };
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('config_audit_report', ?1)",
-            [serde_json::to_string(&report).unwrap()],
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ('config_audit_report', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         )
+        .bind(serde_json::to_string(&report).unwrap())
+        .execute(&pool)
+        .await
         .unwrap();
     }
 
@@ -1759,20 +1808,30 @@ async fn health_api_includes_latest_config_audit_report() {
     assert_eq!(json["config_audit"]["status"], "warn");
     assert_eq!(json["config_audit"]["warnings_count"], 1);
     assert_eq!(json["config_audit"]["db"]["mismatched_agents"][0], "alpha");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
+async fn health_api_pg_includes_pipeline_override_report_and_degraded_reason() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     let app = axum::Router::new().nest(
         "/api",
-        test_api_router(db.clone(), engine, Some(harness.registry())),
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            Some(harness.registry()),
+            pool.clone(),
+        ),
     );
 
     {
-        let conn = db.lock().unwrap();
         let report = crate::pipeline::PipelineOverrideHealthReport {
             generated_at: "2026-04-20T00:00:00Z".to_string(),
             status: "warn".to_string(),
@@ -1793,10 +1852,13 @@ async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
                 ],
             }],
         };
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('pipeline_override_health_report', ?1)",
-            [serde_json::to_string(&report).unwrap()],
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ('pipeline_override_health_report', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         )
+        .bind(serde_json::to_string(&report).unwrap())
+        .execute(&pool)
+        .await
         .unwrap();
     }
 
@@ -1835,6 +1897,9 @@ async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
         "expected pipeline_override_warnings degraded reason, got {:?}",
         json["degraded_reasons"]
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -2376,9 +2441,11 @@ async fn stop_agent_turn_preserves_matching_tmux_session() {
 }
 
 #[tokio::test]
-async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
+async fn stop_agent_turn_pg_preserves_pending_queue_via_mailbox_fallback_cleanup() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
         crate::services::provider::ProviderKind::Codex,
     )
@@ -2388,22 +2455,23 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
     let tmux_name = "AgentDesk-codex-stop-canonical";
     let session_key = format!("mac-mini:{tmux_name}");
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-             VALUES ('agent-stop-canonical', 'Agent Stop Canonical', 'codex', ?1, datetime('now'), datetime('now'))",
-            [channel_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'agent-stop-canonical', 'codex', 'working', datetime('now'), datetime('now'))",
-            [session_key.as_str()],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+         VALUES ('agent-stop-canonical', 'Agent Stop Canonical', 'codex', $1, NOW(), NOW())",
+    )
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'agent-stop-canonical', 'codex', 'working', NOW(), NOW())",
+    )
+    .bind(session_key.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     harness
         .seed_channel_session(
@@ -2418,7 +2486,13 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
         .await;
     harness.insert_dispatch_role_override(channel_num, 1485506232256168999);
 
-    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -2436,7 +2510,7 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
         .unwrap();
     if status != StatusCode::OK {
         panic!(
-            "auto_queue_activate_dispatches_pg_only_run_without_sqlite_mirror status={} body={}",
+            "stop_agent_turn_pg_preserves_pending_queue status={} body={}",
             status,
             String::from_utf8_lossy(&body)
         );
@@ -2452,21 +2526,24 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() 
     assert_eq!(session_id, None);
     assert!(harness.has_dispatch_role_override(channel_num));
 
-    let conn = db.lock().unwrap();
-    let session_status: String = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [session_key],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let session_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(&session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(session_status, "disconnected");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_watcher() {
+async fn stop_agent_turn_tmux_only_pg_fallback_clears_mailbox_without_detaching_watcher() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let provider = crate::services::provider::ProviderKind::Codex;
     let harness =
         crate::services::discord::health::TestHealthHarness::new_with_provider(provider.clone())
@@ -2476,22 +2553,22 @@ async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_wat
     let tmux_name = provider.build_tmux_session_name(channel_name);
     let session_key = format!("mac-mini:{tmux_name}");
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, created_at, updated_at)
-             VALUES ('agent-stop-tmux-only', 'Agent Stop Tmux Only', 'codex', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'agent-stop-tmux-only', 'codex', 'working', datetime('now'), datetime('now'))",
-            [session_key.as_str()],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, created_at, updated_at)
+         VALUES ('agent-stop-tmux-only', 'Agent Stop Tmux Only', 'codex', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'agent-stop-tmux-only', 'codex', 'working', NOW(), NOW())",
+    )
+    .bind(session_key.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     harness
         .seed_channel_session(channel_num, channel_name, Some("session-stop-tmux-only"))
@@ -2499,7 +2576,13 @@ async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_wat
     harness.seed_active_turn(channel_num, 9, 91).await;
     let watcher_cancel = harness.seed_watcher(channel_num);
 
-    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -2541,15 +2624,16 @@ async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_wat
         "tmux-only operator stop fallback must not cancel the watcher",
     );
 
-    let conn = db.lock().unwrap();
-    let session_status: String = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [session_key],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let session_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(&session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(session_status, "disconnected");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -9143,7 +9227,7 @@ async fn api_docs_retry_redispatch_resume_reopen_semantics_are_distinguished() {
 }
 
 #[tokio::test]
-async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
+async fn skills_catalog_pg_filters_stale_entries_and_exposes_disk_presence() {
     let _env_lock = env_lock();
     let home = tempfile::tempdir().unwrap();
     let runtime_root = home.path().join(".adk").join("release");
@@ -9151,41 +9235,59 @@ async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
     let _home_env = EnvVarGuard::set_path("HOME", home.path());
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &runtime_root);
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO skills (id, name, description, source_path, updated_at)
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            sqlite_params![
-                "stale-skill",
-                "stale-skill",
-                "Stale skill description",
-                home.path()
-                    .join("missing")
-                    .join("stale-skill")
-                    .join("SKILL.md")
-                    .display()
-                    .to_string()
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            sqlite_params!["stale-skill", "agent-stale", "session-stale"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            sqlite_params!["live-skill", "agent-live", "session-live"],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let stale_path = home
+        .path()
+        .join("missing")
+        .join("stale-skill")
+        .join("SKILL.md")
+        .display()
+        .to_string();
+    sqlx::query(
+        "INSERT INTO skills (id, name, description, source_path, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("stale-skill")
+    .bind("stale-skill")
+    .bind("Stale skill description")
+    .bind(&stale_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind("stale-skill")
+    .bind("agent-stale")
+    .bind("session-stale")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind("live-skill")
+    .bind("agent-live")
+    .bind("session-live")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = axum::Router::new().nest("/api", test_api_router(db, engine, None));
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db,
+            engine,
+            crate::config::Config::default(),
+            None,
+            pool.clone(),
+        ),
+    );
     let response = app
         .clone()
         .oneshot(
@@ -9245,10 +9347,13 @@ async fn skills_catalog_filters_stale_entries_and_exposes_disk_presence() {
             .all(|entry| entry["name"] != "stale-skill"),
         "default catalog response must filter stale skills"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
+async fn skills_prune_dry_run_pg_previews_and_delete_preserves_usage() {
     let _env_lock = env_lock();
     let home = tempfile::tempdir().unwrap();
     let runtime_root = home.path().join(".adk").join("release");
@@ -9256,35 +9361,49 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
     let _home_env = EnvVarGuard::set_path("HOME", home.path());
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &runtime_root);
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO skills (id, name, description, source_path, updated_at)
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            sqlite_params![
-                "stale-skill",
-                "stale-skill",
-                "Stale skill description",
-                home.path()
-                    .join("missing")
-                    .join("stale-skill")
-                    .join("SKILL.md")
-                    .display()
-                    .to_string()
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
-             VALUES (?1, ?2, ?3, datetime('now'))",
-            sqlite_params!["stale-skill", "agent-stale", "session-stale"],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let stale_path = home
+        .path()
+        .join("missing")
+        .join("stale-skill")
+        .join("SKILL.md")
+        .display()
+        .to_string();
+    sqlx::query(
+        "INSERT INTO skills (id, name, description, source_path, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())",
+    )
+    .bind("stale-skill")
+    .bind("stale-skill")
+    .bind("Stale skill description")
+    .bind(&stale_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key, used_at)
+         VALUES ($1, $2, $3, NOW())",
+    )
+    .bind("stale-skill")
+    .bind("agent-stale")
+    .bind("session-stale")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = axum::Router::new().nest("/api", test_api_router(db.clone(), engine, None));
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router_with_pg(
+            db.clone(),
+            engine,
+            crate::config::Config::default(),
+            None,
+            pool.clone(),
+        ),
+    );
     let dry_run = app
         .clone()
         .oneshot(
@@ -9313,17 +9432,13 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
         "dry-run must preview stale skill ids"
     );
 
-    {
-        let conn = db.lock().unwrap();
-        let stale_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stale_count, 1, "dry-run must not delete skills rows");
-    }
+    let stale_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM skills WHERE id = 'stale-skill'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale_count, 1, "dry-run must not delete skills rows");
 
     let prune = app
         .clone()
@@ -9345,29 +9460,24 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
     assert_eq!(prune_json["soft_deleted_from_skills"], 1);
     assert_eq!(prune_json["skill_usage_policy"], "preserved");
 
-    {
-        let conn = db.lock().unwrap();
-        let stale_live_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM skills WHERE id = 'stale-skill' AND deleted_at IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            stale_live_count, 0,
-            "prune must soft-delete stale skill metadata"
-        );
+    let stale_live_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM skills WHERE id = 'stale-skill' AND deleted_at IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stale_live_count, 0,
+        "prune must soft-delete stale skill metadata"
+    );
 
-        let usage_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM skill_usage WHERE skill_id = 'stale-skill'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(usage_count, 1, "prune must preserve historical skill usage");
-    }
+    let usage_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM skill_usage WHERE skill_id = 'stale-skill'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(usage_count, 1, "prune must preserve historical skill usage");
 
     let filtered = app
         .oneshot(
@@ -9392,30 +9502,48 @@ async fn skills_prune_dry_run_previews_and_delete_preserves_usage() {
             .all(|entry| entry["name"] != "stale-skill"),
         "default catalog response must hide pruned stale skills"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn resume_requested_creates_single_notify_backed_dispatch() {
+async fn resume_requested_pg_creates_single_notify_backed_dispatch() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-resume");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ($1, $1, '111', '222')",
+    )
+    .bind("agent-resume")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, NOW(), NOW()
+        )",
+    )
+    .bind("card-resume")
+    .bind("Resume Card")
+    .bind("requested")
+    .bind("medium")
+    .bind("agent-resume")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, created_at, updated_at
-            ) VALUES (
-                'card-resume', 'Resume Card', 'requested', 'medium', 'agent-resume',
-                datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-    }
-
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -9436,40 +9564,39 @@ async fn resume_requested_creates_single_notify_backed_dispatch() {
     let dispatch_id = json["action"]["dispatch_id"].as_str().unwrap().to_string();
     assert_eq!(json["action"]["type"], "new_implementation_dispatch");
 
-    let conn = db.lock().unwrap();
-    let (dispatch_type, dispatch_status, context, latest_dispatch_id): (
-        String,
-        String,
-        String,
-        Option<String>,
-    ) = conn
-        .query_row(
-            "SELECT td.dispatch_type, td.status, td.context, kc.latest_dispatch_id
-             FROM task_dispatches td
-             JOIN kanban_cards kc ON kc.id = td.kanban_card_id
-             WHERE td.id = ?1",
-            [&dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .unwrap();
+    let row: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT td.dispatch_type, td.status, td.context, kc.latest_dispatch_id
+         FROM task_dispatches td
+         JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+         WHERE td.id = $1",
+    )
+    .bind(&dispatch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (dispatch_type, dispatch_status, context, latest_dispatch_id) = row;
     assert_eq!(dispatch_type, "implementation");
     assert_eq!(dispatch_status, "pending");
     assert_eq!(latest_dispatch_id.as_deref(), Some(dispatch_id.as_str()));
-    let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+    let context_json: serde_json::Value =
+        serde_json::from_str(context.as_deref().unwrap_or("{}")).unwrap();
     assert_eq!(context_json["resume"], true);
     assert_eq!(context_json["resumed_from"], "requested");
 
-    let notify_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-            [&dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let notify_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE dispatch_id = $1 AND action = 'notify'",
+    )
+    .bind(&dispatch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         notify_count, 1,
         "resume(requested) must create exactly one notify outbox row via canonical core"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -11221,14 +11348,26 @@ async fn kanban_repos_pg_create_update_delete_round_trip() {
 }
 
 #[tokio::test]
-async fn pipeline_config_repo_get_set_override() {
+async fn pipeline_config_pg_repo_get_set_override() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_repo(&db, "owner/repo-a");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("owner/repo-a")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // GET — initially null
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -11248,7 +11387,13 @@ async fn pipeline_config_repo_get_set_override() {
     assert!(body["pipeline_config"].is_null());
 
     // PUT — set override
-    let app2 = test_api_router(db.clone(), engine.clone(), None);
+    let app2 = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp2 = app2
         .oneshot(
             Request::builder()
@@ -11265,7 +11410,13 @@ async fn pipeline_config_repo_get_set_override() {
     assert_eq!(resp2.status(), StatusCode::OK);
 
     // GET — now has override
-    let app3 = test_api_router(db, engine, None);
+    let app3 = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp3 = app3
         .oneshot(
             Request::builder()
@@ -11288,17 +11439,34 @@ async fn pipeline_config_repo_get_set_override() {
             .iter()
             .any(|v| v == "CustomReviewHook")
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn pipeline_config_agent_get_set_override() {
+async fn pipeline_config_pg_agent_get_set_override() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-x");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ($1, $1, '111', '222')",
+    )
+    .bind("agent-x")
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // PUT
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -11315,7 +11483,13 @@ async fn pipeline_config_agent_get_set_override() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // GET
-    let app2 = test_api_router(db, engine, None);
+    let app2 = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp2 = app2
         .oneshot(
             Request::builder()
@@ -11335,18 +11509,39 @@ async fn pipeline_config_agent_get_set_override() {
         body["pipeline_config"]["timeouts"]["in_progress"]["duration"],
         "4h"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn pipeline_config_effective_merges_layers() {
+async fn pipeline_config_pg_effective_merges_layers() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_repo(&db, "owner/repo-e");
-    seed_agent(&db, "agent-e");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("owner/repo-e")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ($1, $1, '111', '222')",
+    )
+    .bind("agent-e")
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Set repo override (hooks)
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     app.oneshot(
         Request::builder()
             .method("PUT")
@@ -11361,7 +11556,13 @@ async fn pipeline_config_effective_merges_layers() {
     .unwrap();
 
     // Get effective — should include repo hook
-    let app2 = test_api_router(db.clone(), engine.clone(), None);
+    let app2 = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app2
         .oneshot(
             Request::builder()
@@ -11383,15 +11584,26 @@ async fn pipeline_config_effective_merges_layers() {
     // Hooks from repo override should be in effective pipeline
     let hooks = &body["pipeline"]["hooks"]["in_progress"]["on_enter"];
     assert!(hooks.as_array().unwrap().iter().any(|v| v == "RepoHook"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn pipeline_config_graph_returns_nodes_and_edges() {
+async fn pipeline_config_pg_graph_returns_nodes_and_edges() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -11419,6 +11631,9 @@ async fn pipeline_config_graph_returns_nodes_and_edges() {
     assert!(edges[0]["from"].is_string());
     assert!(edges[0]["to"].is_string());
     assert!(edges[0]["type"].is_string());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -11444,17 +11659,29 @@ async fn pipeline_config_repo_invalid_override_rejected() {
 }
 
 #[tokio::test]
-async fn pipeline_config_repo_broken_merge_rejected() {
+async fn pipeline_config_pg_repo_broken_merge_rejected() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_repo(&db, "owner/repo-merge");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query("INSERT INTO github_repos (id, display_name) VALUES ($1, $1)")
+        .bind("owner/repo-merge")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Override that adds a timeout referencing an unknown clock and a non-existent state.
     // This parses as valid JSON but the merged effective pipeline should fail validate().
     let body = r#"{"config":{"timeouts":{"nonexistent_state":{"duration":"1h","clock":"no_such_clock"}}}}"#;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -11481,6 +11708,9 @@ async fn pipeline_config_repo_broken_merge_rejected() {
         "expected merged validation error, got: {}",
         body
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -12166,6 +12396,175 @@ fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str,
         ],
     )
     .unwrap();
+}
+
+async fn seed_repo_pg(pool: &sqlx::PgPool, repo_id: &str) {
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name) VALUES ($1, $1)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(repo_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_agent_pg(pool: &sqlx::PgPool, agent_id: &str) {
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ($1, $1, '111', '222')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_auto_queue_card_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    issue_number: i64,
+    status: &str,
+    agent_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, 'medium', $4, 'test-repo', $5, NOW(), NOW()
+        )",
+    )
+    .bind(card_id)
+    .bind(format!("Issue #{issue_number}"))
+    .bind(status)
+    .bind(agent_id)
+    .bind(issue_number as i32)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_parallel_test_cards_pg(pool: &sqlx::PgPool) -> Vec<String> {
+    seed_repo_pg(pool, "test-repo").await;
+    for i in 1..=4 {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id, discord_channel_alt)
+             VALUES ($1, $2, 'claude', 'idle', $3, $4)",
+        )
+        .bind(format!("agent-{i}"))
+        .bind(format!("Agent{i}"))
+        .bind(format!("{}", 1000 + i))
+        .bind(format!("{}", 2000 + i))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let labels = ["A", "B", "C", "D", "E", "F", "G"];
+    let issue_nums: [i32; 7] = [1, 2, 3, 4, 5, 6, 7];
+    let agents = [
+        "agent-1", "agent-2", "agent-3", "agent-4", "agent-4", "agent-4", "agent-4",
+    ];
+    let metadata: [Option<&str>; 7] = [
+        None,
+        None,
+        None,
+        None,
+        Some(r#"{"depends_on":[4]}"#),
+        Some(r#"{"depends_on":[5]}"#),
+        Some(r#"{"depends_on":[5,6]}"#),
+    ];
+    let mut card_ids = Vec::new();
+    for i in 0..7 {
+        let card_id = format!("card-{}", labels[i]);
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, repo_id, title, status, priority, assigned_agent_id, github_issue_number, metadata)
+             VALUES ($1, 'test-repo', $2, 'ready', 'medium', $3, $4, CAST($5 AS jsonb))",
+        )
+        .bind(&card_id)
+        .bind(format!("Task {}", labels[i]))
+        .bind(agents[i])
+        .bind(issue_nums[i])
+        .bind(metadata[i].map(|s| s.to_string()))
+        .execute(pool)
+        .await
+        .unwrap();
+        card_ids.push(card_id);
+    }
+    card_ids
+}
+
+async fn seed_similarity_group_cards_pg(pool: &sqlx::PgPool) -> Vec<String> {
+    seed_repo_pg(pool, "test-repo").await;
+    for i in 1..=3 {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id, discord_channel_alt)
+             VALUES ($1, $2, 'claude', 'idle', $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(format!("sim-agent-{i}"))
+        .bind(format!("SimAgent{i}"))
+        .bind(format!("{}", 3000 + i))
+        .bind(format!("{}", 4000 + i))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let rows = [
+        (
+            "sim-card-auth-1",
+            "sim-agent-1",
+            101_i32,
+            "Auto-queue route generate update",
+            "Touches src/server/routes/auto_queue.rs and dashboard/src/components/agent-manager/AutoQueuePanel.tsx",
+        ),
+        (
+            "sim-card-auth-2",
+            "sim-agent-1",
+            102_i32,
+            "Auto-queue panel reason rendering",
+            "Updates src/server/routes/auto_queue.rs plus dashboard/src/api/client.ts for generated reason text",
+        ),
+        (
+            "sim-card-billing-1",
+            "sim-agent-2",
+            201_i32,
+            "Unified thread nested map cleanup",
+            "Files: src/server/routes/dispatches/discord_delivery.rs and policies/auto-queue.js",
+        ),
+        (
+            "sim-card-billing-2",
+            "sim-agent-2",
+            202_i32,
+            "Auto queue follow-up dispatch policy",
+            "Relevant files: policies/auto-queue.js and src/server/routes/routes_tests.rs",
+        ),
+        (
+            "sim-card-ops-1",
+            "sim-agent-3",
+            301_i32,
+            "Release health probe logs",
+            "Only docs/operations/release-health.md changes are needed here",
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (card_id, agent_id, issue_num, title, description) in rows {
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, repo_id, title, description, status, priority, assigned_agent_id, github_issue_number
+             ) VALUES ($1, 'test-repo', $2, $3, 'ready', 'medium', $4, $5)",
+        )
+        .bind(card_id)
+        .bind(title)
+        .bind(description)
+        .bind(agent_id)
+        .bind(issue_num)
+        .execute(pool)
+        .await
+        .unwrap();
+        ids.push(card_id.to_string());
+    }
+    ids
 }
 
 #[test]
@@ -12883,41 +13282,106 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
 }
 
 #[tokio::test]
-async fn stalled_cards_and_stats_use_latest_activity_timestamp() {
+async fn stalled_cards_and_stats_pg_use_latest_activity_timestamp() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-stalled");
-    seed_repo(&db, "test-repo");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_agent_pg(&pool, "agent-stalled").await;
+    seed_repo_pg(&pool, "test-repo").await;
 
-    seed_in_progress_stall_case(
-        &db,
+    async fn seed_stall_case_pg(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+        title: &str,
+        agent_id: &str,
+        started_offset: &str,
+        updated_offset: &str,
+        latest_dispatch: Option<(&str, &str)>,
+    ) {
+        let started = format!("NOW() + INTERVAL '{started_offset}'");
+        let updated = format!("NOW() + INTERVAL '{updated_offset}'");
+        let sql = format!(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                started_at, created_at, updated_at
+            ) VALUES (
+                $1, $2, 'in_progress', 'medium', $3, 'test-repo',
+                {started}, {started}, {updated}
+            )"
+        );
+        sqlx::query(&sql)
+            .bind(card_id)
+            .bind(title)
+            .bind(agent_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        if let Some((dispatch_id, dispatch_offset)) = latest_dispatch {
+            let dispatch_at = format!("NOW() + INTERVAL '{dispatch_offset}'");
+            let sql = format!(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, 'implementation', 'dispatched', $4, {dispatch_at}, {dispatch_at}
+                )"
+            );
+            sqlx::query(&sql)
+                .bind(dispatch_id)
+                .bind(card_id)
+                .bind(agent_id)
+                .bind(format!("{title} Dispatch"))
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+                .bind(dispatch_id)
+                .bind(card_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    seed_stall_case_pg(
+        &pool,
         "card-fresh-dispatch",
         "Fresh Dispatch",
         "agent-stalled",
         "-3 hours",
         "-3 hours",
         Some(("dispatch-fresh", "-10 minutes")),
-    );
-    seed_in_progress_stall_case(
-        &db,
+    )
+    .await;
+    seed_stall_case_pg(
+        &pool,
         "card-reentered",
         "Re-entered",
         "agent-stalled",
         "-3 hours",
         "-10 minutes",
         Some(("dispatch-old", "-3 hours")),
-    );
-    seed_in_progress_stall_case(
-        &db,
+    )
+    .await;
+    seed_stall_case_pg(
+        &pool,
         "card-truly-stalled",
         "Truly Stalled",
         "agent-stalled",
         "-3 hours",
         "-3 hours",
         Some(("dispatch-stale", "-3 hours")),
-    );
+    )
+    .await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let stalled_resp = app
         .clone()
@@ -12965,6 +13429,9 @@ async fn stalled_cards_and_stats_use_latest_activity_timestamp() {
         serde_json::json!(1),
         "stats stale_in_progress count must match latest-activity stalled detection"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -14589,14 +15056,15 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
 }
 
 #[tokio::test]
-async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
+async fn dispute_repeat_pg_does_not_reuse_poisoned_review_target() {
     crate::pipeline::ensure_loaded();
     let _env_lock = env_lock();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-dispute-repeat");
-    seed_repo(&db, "test-repo");
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_agent_pg(&pool, "agent-dispute-repeat").await;
+    seed_repo_pg(&pool, "test-repo").await;
 
     let repo = tempfile::tempdir().unwrap();
     run_git(repo.path(), &["init", "-b", "main"]);
@@ -14624,66 +15092,76 @@ async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
         &_config_dir.path().join("agentdesk.yaml"),
     );
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, repo_id,
-                github_issue_number, latest_dispatch_id, review_status, created_at, updated_at
-            ) VALUES (
-                'card-dispute-repeat', 'Issue #472', 'review', 'medium', 'agent-dispute-repeat', 'test-repo',
-                472, 'rd-dispute-1', 'suggestion_pending', datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
-                created_at, updated_at, completed_at
-            ) VALUES (
-                'impl-dispute-repeat', 'card-dispute-repeat', 'agent-dispute-repeat', 'implementation',
-                'completed', 'impl', ?1, ?2, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'),
-                datetime('now', '-10 minutes')
-            )",
-            sqlite_params![
-                serde_json::json!({
-                    "worktree_path": worktree_path,
-                    "branch": "wt/472-poison"
-                })
-                .to_string(),
-                serde_json::json!({
-                    "completed_worktree_path": worktree_path,
-                    "completed_branch": "wt/472-poison",
-                    "completed_commit": poisoned_commit.clone(),
-                })
-                .to_string(),
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
-                created_at, updated_at
-            ) VALUES (
-                'rd-dispute-1', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
-                'pending', '[Review Decision]', datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO card_review_state (
-                card_id, state, pending_dispatch_id, review_round, updated_at
-            ) VALUES (
-                'card-dispute-repeat', 'suggestion_pending', 'rd-dispute-1', 1, datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, review_status, created_at, updated_at
+        ) VALUES (
+            'card-dispute-repeat', 'Issue #472', 'review', 'medium', 'agent-dispute-repeat', 'test-repo',
+            472, 'rd-dispute-1', 'suggestion_pending', NOW(), NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
+            created_at, updated_at, completed_at
+        ) VALUES (
+            'impl-dispute-repeat', 'card-dispute-repeat', 'agent-dispute-repeat', 'implementation',
+            'completed', 'impl', $1, $2,
+            NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes'
+        )",
+    )
+    .bind(
+        serde_json::json!({
+            "worktree_path": worktree_path,
+            "branch": "wt/472-poison"
+        })
+        .to_string(),
+    )
+    .bind(
+        serde_json::json!({
+            "completed_worktree_path": worktree_path,
+            "completed_branch": "wt/472-poison",
+            "completed_commit": poisoned_commit.clone(),
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+            created_at, updated_at
+        ) VALUES (
+            'rd-dispute-1', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+            'pending', '[Review Decision]', NOW() - INTERVAL '1 minutes', NOW() - INTERVAL '1 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO card_review_state (
+            card_id, state, pending_dispatch_id, review_round, updated_at
+        ) VALUES (
+            'card-dispute-repeat', 'suggestion_pending', 'rd-dispute-1', 1, NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let dispute_request = |dispatch_id: &str| {
         Request::builder()
             .method("POST")
@@ -14722,50 +15200,51 @@ async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
     assert_eq!(first_reviewed_commit, safe_commit);
     assert_ne!(first_reviewed_commit, poisoned_commit);
 
-    {
-        let conn = db.lock().unwrap();
-        let first_rd_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = 'rd-dispute-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(first_rd_status, "completed");
+    let first_rd_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM task_dispatches WHERE id = 'rd-dispute-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_rd_status, "completed");
 
-        conn.execute(
-            "UPDATE task_dispatches
-             SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
-             WHERE id = ?1",
-            [&first_review_dispatch_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
-                created_at, updated_at
-            ) VALUES (
-                'rd-dispute-2', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
-                'pending', '[Review Decision 2]', datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE kanban_cards
-             SET latest_dispatch_id = 'rd-dispute-2', review_status = 'suggestion_pending', updated_at = datetime('now')
-             WHERE id = 'card-dispute-repeat'",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE card_review_state
-             SET state = 'suggestion_pending', pending_dispatch_id = 'rd-dispute-2', updated_at = datetime('now')
-             WHERE card_id = 'card-dispute-repeat'",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(&first_review_dispatch_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+            created_at, updated_at
+        ) VALUES (
+            'rd-dispute-2', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+            'pending', '[Review Decision 2]', NOW(), NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET latest_dispatch_id = 'rd-dispute-2', review_status = 'suggestion_pending', updated_at = NOW()
+         WHERE id = 'card-dispute-repeat'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE card_review_state
+         SET state = 'suggestion_pending', pending_dispatch_id = 'rd-dispute-2', updated_at = NOW()
+         WHERE card_id = 'card-dispute-repeat'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let response2 = app.oneshot(dispute_request("rd-dispute-2")).await.unwrap();
     assert_eq!(response2.status(), StatusCode::OK);
@@ -14786,16 +15265,16 @@ async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
     assert_eq!(second_reviewed_commit, safe_commit);
     assert_ne!(second_reviewed_commit, poisoned_commit);
 
-    let conn = db.lock().unwrap();
-    let second_context = conn
-        .query_row(
-            "SELECT context FROM task_dispatches WHERE id = ?1",
-            [&second_review_dispatch_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .unwrap()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .expect("second review dispatch must persist context");
+    let second_context_raw = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context FROM task_dispatches WHERE id = $1",
+    )
+    .bind(&second_review_dispatch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let second_context: serde_json::Value =
+        serde_json::from_str(second_context_raw.as_deref().unwrap_or("{}"))
+            .expect("second review dispatch must persist context");
     assert_eq!(second_context["reviewed_commit"], safe_commit);
     let actual_worktree_path = std::fs::canonicalize(
         second_context["worktree_path"]
@@ -14811,6 +15290,9 @@ async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
         .to_string();
     assert_eq!(actual_worktree_path, expected_worktree_path);
     assert_eq!(second_context["branch"], "main");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -20037,12 +20519,20 @@ fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn smart_generate_creates_correct_thread_groups_and_batch_phases() {
+async fn smart_generate_pg_creates_correct_thread_groups_and_batch_phases() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_parallel_test_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_parallel_test_cards_pg(&pool).await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -20143,6 +20633,9 @@ async fn smart_generate_creates_correct_thread_groups_and_batch_phases() {
         vec![0, 1, 2, 3],
         "dependency chain should advance one batch phase at a time"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -21846,12 +22339,20 @@ async fn auto_queue_generate_entries_payload_persists_batch_phases() {
 }
 
 #[tokio::test]
-async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
+async fn generate_smart_planner_pg_groups_by_file_paths_and_recommends_threads() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_similarity_group_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_similarity_group_cards_pg(&pool).await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .clone()
         .oneshot(
@@ -21931,15 +22432,26 @@ async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
         5,
         "status should expose all planner-emitted thread groups"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_smart_planner_without_file_paths_uses_dependency_only_groups() {
+async fn generate_smart_planner_pg_without_file_paths_uses_dependency_only_groups() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_parallel_test_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_parallel_test_cards_pg(&pool).await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -21992,27 +22504,45 @@ async fn generate_smart_planner_without_file_paths_uses_dependency_only_groups()
         }),
         "fallback path should not stamp similarity reasons"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn generate_ignores_non_dependency_issue_references_in_description() {
+async fn generate_pg_ignores_non_dependency_issue_references_in_description() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-context");
-    seed_auto_queue_card(&db, "card-context-only", 497, "ready", "agent-context");
-    seed_auto_queue_card(&db, "card-referenced-open", 494, "backlog", "agent-context");
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "UPDATE kanban_cards
-             SET description = ?1
-             WHERE id = 'card-context-only'",
-            ["## 컨텍스트\n관련 작업: #494"],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-context").await;
+    seed_auto_queue_card_pg(&pool, "card-context-only", 497, "ready", "agent-context").await;
+    seed_auto_queue_card_pg(
+        &pool,
+        "card-referenced-open",
+        494,
+        "backlog",
+        "agent-context",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET description = $1
+         WHERE id = 'card-context-only'",
+    )
+    .bind("## 컨텍스트\n관련 작업: #494")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -22042,33 +22572,45 @@ async fn generate_ignores_non_dependency_issue_references_in_description() {
         "context-only references must not exclude the card"
     );
     assert_eq!(entries[0]["github_issue_number"].as_i64(), Some(497));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn generate_excludes_card_with_explicit_external_dependency() {
+async fn generate_pg_excludes_card_with_explicit_external_dependency() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-dependency");
-    seed_auto_queue_card(&db, "card-explicit-dep", 497, "ready", "agent-dependency");
-    seed_auto_queue_card(
-        &db,
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-dependency").await;
+    seed_auto_queue_card_pg(&pool, "card-explicit-dep", 497, "ready", "agent-dependency").await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-explicit-target",
         494,
         "backlog",
         "agent-dependency",
-    );
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "UPDATE kanban_cards
-             SET description = ?1
-             WHERE id = 'card-explicit-dep'",
-            ["Depends on #494"],
-        )
-        .unwrap();
-    }
+    )
+    .await;
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET description = $1
+         WHERE id = 'card-explicit-dep'",
+    )
+    .bind("Depends on #494")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -22099,15 +22641,26 @@ async fn generate_excludes_card_with_explicit_external_dependency() {
         json["message"].as_str(),
         Some("No cards available (1개 외부 의존성 미충족으로 제외)")
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
+async fn generate_pg_ignores_legacy_mode_and_still_uses_smart_planner() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_similarity_group_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_similarity_group_cards_pg(&pool).await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -22141,10 +22694,13 @@ async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
         !entries.is_empty(),
         "legacy mode input should be ignored rather than triggering PM-assisted flow"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn smart_activate_dispatches_multiple_groups() {
+async fn smart_activate_pg_dispatches_multiple_groups() {
     crate::pipeline::ensure_loaded();
 
     let (repo, _repo_guard) = setup_test_repo();
@@ -22154,11 +22710,19 @@ async fn smart_activate_dispatches_multiple_groups() {
         &config_dir.path().join("agentdesk.yaml"),
     );
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_parallel_test_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_parallel_test_cards_pg(&pool).await;
 
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     // Step 1: Generate with the smart planner (no agent_id filter — cards have mixed agents)
     let resp = app
@@ -22255,15 +22819,26 @@ async fn smart_activate_dispatches_multiple_groups() {
         pending_count > 0,
         "should have pending groups (4th group not yet started)"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn generate_ignores_legacy_parallel_toggle_and_keeps_smart_groups() {
+async fn generate_pg_ignores_legacy_parallel_toggle_and_keeps_smart_groups() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let _card_ids = seed_parallel_test_cards(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let _card_ids = seed_parallel_test_cards_pg(&pool).await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let resp = app
         .oneshot(
@@ -22303,10 +22878,13 @@ async fn generate_ignores_legacy_parallel_toggle_and_keeps_smart_groups() {
         4,
         "legacy parallel=false should be ignored in favor of smart grouping"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() {
+async fn activate_waits_for_current_batch_phase_pg_before_dispatching_next_phase() {
     crate::pipeline::ensure_loaded();
 
     let (repo, _repo_guard) = setup_test_repo();
@@ -22316,67 +22894,48 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         &config_dir.path().join("agentdesk.yaml"),
     );
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
-    seed_repo(&db, "test-repo");
-    seed_agent(&db, "agent-phase-a");
-    seed_agent(&db, "agent-phase-b");
-    seed_auto_queue_card(&db, "card-phase-1-a", 4241, "ready", "agent-phase-a");
-    seed_auto_queue_card(&db, "card-phase-1-b", 4242, "ready", "agent-phase-b");
-    seed_auto_queue_card(&db, "card-phase-2-a", 4243, "ready", "agent-phase-a");
-    seed_auto_queue_card(&db, "card-phase-2-b", 4244, "ready", "agent-phase-b");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-phase-a").await;
+    seed_agent_pg(&pool, "agent-phase-b").await;
+    seed_auto_queue_card_pg(&pool, "card-phase-1-a", 4241, "ready", "agent-phase-a").await;
+    seed_auto_queue_card_pg(&pool, "card-phase-1-b", 4242, "ready", "agent-phase-b").await;
+    seed_auto_queue_card_pg(&pool, "card-phase-2-a", 4243, "ready", "agent-phase-a").await;
+    seed_auto_queue_card_pg(&pool, "card-phase-2-b", 4244, "ready", "agent-phase-b").await;
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (
-                id, repo, status, max_concurrent_threads, thread_group_count
-            ) VALUES (
-                'run-batch-phase', 'test-repo', 'active', 2, 2
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
-            ) VALUES (
-                'entry-phase-1-a', 'run-batch-phase', 'card-phase-1-a', 'agent-phase-a', 'pending', 0, 0, 1
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
-            ) VALUES (
-                'entry-phase-1-b', 'run-batch-phase', 'card-phase-1-b', 'agent-phase-b', 'pending', 1, 1, 1
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
-            ) VALUES (
-                'entry-phase-2-a', 'run-batch-phase', 'card-phase-2-a', 'agent-phase-a', 'pending', 2, 0, 2
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
-            ) VALUES (
-                'entry-phase-2-b', 'run-batch-phase', 'card-phase-2-b', 'agent-phase-b', 'pending', 3, 1, 2
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (
+            id, repo, status, max_concurrent_threads, thread_group_count
+        ) VALUES (
+            'run-batch-phase', 'test-repo', 'active', 2, 2
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+        ) VALUES
+        ('entry-phase-1-a', 'run-batch-phase', 'card-phase-1-a', 'agent-phase-a', 'pending', 0, 0, 1),
+        ('entry-phase-1-b', 'run-batch-phase', 'card-phase-1-b', 'agent-phase-b', 'pending', 1, 1, 1),
+        ('entry-phase-2-a', 'run-batch-phase', 'card-phase-2-a', 'agent-phase-a', 'pending', 2, 0, 2),
+        ('entry-phase-2-b', 'run-batch-phase', 'card-phase-2-b', 'agent-phase-b', 'pending', 3, 1, 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let first_response = app
         .clone()
@@ -22403,39 +22962,29 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
     let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(first_json["count"], 2);
 
-    {
-        let conn = db.lock().unwrap();
-        let dispatched_phases: std::collections::HashMap<String, i64> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, COALESCE(batch_phase, 0)
-                     FROM auto_queue_entries
-                     WHERE status = 'dispatched'
-                     ORDER BY id ASC",
-                )
-                .unwrap();
-            stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .unwrap()
-            .filter_map(|row| row.ok())
-            .collect()
-        };
-        assert_eq!(dispatched_phases.len(), 2);
-        assert_eq!(dispatched_phases.get("entry-phase-1-a"), Some(&1));
-        assert_eq!(dispatched_phases.get("entry-phase-1-b"), Some(&1));
-    }
+    let dispatched_phases: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, COALESCE(batch_phase, 0)::BIGINT
+         FROM auto_queue_entries
+         WHERE status = 'dispatched'
+         ORDER BY id ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let dispatched_phases: std::collections::HashMap<String, i64> =
+        dispatched_phases.into_iter().collect();
+    assert_eq!(dispatched_phases.len(), 2);
+    assert_eq!(dispatched_phases.get("entry-phase-1-a"), Some(&1));
+    assert_eq!(dispatched_phases.get("entry-phase-1-b"), Some(&1));
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET status = 'done', dispatch_id = NULL, completed_at = datetime('now')
-             WHERE id = 'entry-phase-1-a'",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET status = 'done', dispatch_id = NULL, completed_at = NOW()
+         WHERE id = 'entry-phase-1-a'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let second_response = app
         .clone()
@@ -22465,16 +23014,14 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         "phase 2 must stay blocked while phase 1 still has an in-flight entry"
     );
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET status = 'done', dispatch_id = NULL, completed_at = datetime('now')
-             WHERE id = 'entry-phase-1-b'",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET status = 'done', dispatch_id = NULL, completed_at = NOW()
+         WHERE id = 'entry-phase-1-b'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let third_response = app
         .oneshot(
@@ -22503,16 +23050,17 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         "next batch phase should become dispatchable once phase 1 is complete"
     );
 
-    let conn = db.lock().unwrap();
-    let phase_two_dispatched: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM auto_queue_entries
-             WHERE status = 'dispatched' AND COALESCE(batch_phase, 0) = 2",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let phase_two_dispatched = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM auto_queue_entries
+         WHERE status = 'dispatched' AND COALESCE(batch_phase, 0) = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(phase_two_dispatched, 2);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -24828,183 +25376,6 @@ async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_r
         !crate::db::auto_queue::slot_has_active_dispatch(&conn, "agent-cancel-phase-gate", 0,),
         "cancelled phase-gate dispatches must not keep the slot blocked"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn activate_run_id_blocks_phase_gate_paused_runs() {
-    crate::pipeline::ensure_loaded();
-
-    let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
-    seed_repo(&db, "test-repo");
-    seed_agent(&db, "agent-phase-gate");
-    seed_auto_queue_card(
-        &db,
-        "card-phase-gate-paused",
-        4381,
-        "ready",
-        "agent-phase-gate",
-    );
-
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-phase-gate-paused', 'test-repo', 'agent-phase-gate', 'paused')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase
-            ) VALUES (
-                'entry-phase-gate-paused', 'run-phase-gate-paused', 'card-phase-gate-paused',
-                'agent-phase-gate', 'pending', 0, 2
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_phase_gates (
-                run_id, phase, status, dispatch_id, pass_verdict
-             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
-            sqlite_params!["run-phase-gate-paused", 1, "pending",],
-        )
-        .unwrap();
-    }
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/dispatch-next")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "run_id": "run-phase-gate-paused",
-                        "active_only": true,
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["count"], 0);
-    assert_eq!(json["message"], "Run is waiting on phase gate");
-
-    let conn = db.lock().unwrap();
-    let run_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-gate-paused'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(run_status, "paused");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resume_run_skips_phase_gate_blocked_runs() {
-    crate::pipeline::ensure_loaded();
-
-    let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
-    seed_repo(&db, "test-repo");
-    seed_agent(&db, "agent-resume-gate");
-    seed_agent(&db, "agent-resume-free");
-    seed_auto_queue_card(&db, "card-resume-gate", 4382, "ready", "agent-resume-gate");
-    seed_auto_queue_card(&db, "card-resume-free", 4383, "ready", "agent-resume-free");
-
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-resume-gate', 'test-repo', 'agent-resume-gate', 'paused')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-resume-free', 'test-repo', 'agent-resume-free', 'paused')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase
-            ) VALUES (
-                'entry-resume-gate', 'run-resume-gate', 'card-resume-gate',
-                'agent-resume-gate', 'pending', 0, 2
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank
-            ) VALUES (
-                'entry-resume-free', 'run-resume-free', 'card-resume-free',
-                'agent-resume-free', 'pending', 0
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_phase_gates (
-                run_id, phase, status, dispatch_id, pass_verdict
-             ) VALUES (?1, ?2, ?3, NULL, 'phase_gate_passed')",
-            sqlite_params!["run-resume-gate", 1, "failed",],
-        )
-        .unwrap();
-    }
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/resume")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["resumed_runs"], 1);
-    assert_eq!(json["blocked_runs"], 1);
-
-    let conn = db.lock().unwrap();
-    let blocked_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'run-resume-gate'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let resumed_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'run-resume-free'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(blocked_status, "paused");
-    assert_eq!(resumed_status, "active");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
