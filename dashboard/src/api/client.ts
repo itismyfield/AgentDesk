@@ -639,10 +639,14 @@ export async function getTokenAnalytics(
   // The endpoint now ships with `Cache-Control: max-age=15, swr=300` so a
   // background re-entry to /stats can paint instantly. The Refresh button
   // and any other "user explicitly asked for fresh data" caller passes
-  // forceRefresh=true so we bypass the browser cache via fetch's
-  // `cache: "reload"` directive — restores the explicit-refresh contract
-  // Codex flagged on PR #1258.
-  return request(`/api/token-analytics?period=${period}`, {
+  // forceRefresh=true so we bypass:
+  //   - the browser cache via fetch's `cache: "reload"` directive
+  //   - the new server-side in-process cache via `&fresh=1` query param
+  //     (the server short-circuits to its 30s memo without it).
+  // Together these restore the explicit-refresh contract Codex flagged on
+  // PR #1258 while still letting background traffic skip the ~9s scan.
+  const force = opts?.forceRefresh ? "&fresh=1" : "";
+  return request(`/api/token-analytics?period=${period}${force}`, {
     signal: opts?.signal,
     timeoutMs: TOKEN_ANALYTICS_TIMEOUT_MS,
     cache: opts?.forceRefresh ? "reload" : "default",
