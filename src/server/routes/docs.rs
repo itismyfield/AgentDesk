@@ -3204,6 +3204,35 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )]),
         ep(
             "GET",
+            "/api/home/kpi-trends",
+            "analytics",
+            "Home KPI sparkline data — tokens, cost, in-progress dispatch counts, and rate-limit utilization in a single payload (#1242). Each series exposes `label`, `unit`, and a `values` array sized to the requested `days` window so a sparkline component can render any tile with the same axis. The rate-limit section returns one entry per provider with `current_pct`, `unsupported`, `stale`, `reason`, and a flat `values` sparkline; providers without telemetry come back with `unsupported: true` and an empty `values` array so the dashboard can render a placeholder.",
+        )
+        .with_params([(
+            "days",
+            query_param("integer", false, "Lookback window in days (default 14, clamped to [1, 30])"),
+        )])
+        .with_example(
+            json!({"query": {"days": 14}}),
+            json!({
+                "days": 14,
+                "generated_at": "2026-04-27T00:00:00Z",
+                "dates": ["2026-04-14", "2026-04-15", "..."],
+                "tokens":      {"label": "Today's tokens", "unit": "tokens",     "values": [0, 0]},
+                "cost":        {"label": "API cost",       "unit": "usd",        "values": [0.0, 0.0]},
+                "in_progress": {"label": "In progress",    "unit": "dispatches", "values": [0, 0]},
+                "rate_limit": {
+                    "label": "Rate limit",
+                    "unit": "percent",
+                    "providers": [
+                        {"provider": "claude", "current_pct": 25.0, "unsupported": false, "stale": false, "reason": null, "values": [25.0, 25.0]},
+                        {"provider": "qwen",   "current_pct": null, "unsupported": true,  "stale": false, "reason": "no telemetry yet", "values": []}
+                    ]
+                }
+            }),
+        ),
+        ep(
+            "GET",
             "/api/skills-trend",
             "analytics",
             "Skill usage trend by day // TODO: example",

@@ -1250,7 +1250,11 @@ pub async fn rate_limits(State(state): State<AppState>) -> (StatusCode, Json<ser
     (StatusCode::OK, Json(json!({"providers": providers})))
 }
 
-async fn build_rate_limit_provider_payloads_pg(
+/// Shared by `/api/rate-limits` and `/api/home/kpi-trends` (#1242). The home
+/// KPI tile reuses this exact provider/bucket shape so the dashboard sees a
+/// single, consistent rate-limit schema regardless of which endpoint the
+/// data came from.
+pub(super) async fn build_rate_limit_provider_payloads_pg(
     pool: &sqlx::PgPool,
     now: i64,
 ) -> Vec<serde_json::Value> {
