@@ -1627,10 +1627,11 @@ export default function AppShell({
                         key={option.id}
                         type="button"
                         title={option.label}
-                        aria-label={option.label}
+                        aria-label={`${option.label} accent`}
                         aria-pressed={active}
+                        data-accent-preset={option.id}
                         onClick={() => setAccentPreset(option.id)}
-                        className="flex h-9 w-9 items-center justify-center rounded-full transition-transform"
+                        className="dash-accent-swatch flex h-9 w-9 items-center justify-center rounded-full transition-transform"
                         style={{
                           border: active
                             ? "2px solid var(--th-text-heading)"

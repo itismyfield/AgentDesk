@@ -8,13 +8,21 @@ use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    /* PG-only runtimes don't carry an engine-side legacy SQLite handle.
-    Fall back to AppState's sqlite handle instead of panicking — same
-    fix as kanban.rs::legacy_db. */
+    /* TODO(#1238 / 843g): the runtime is PG-only, so neither the engine nor
+    AppState carry a legacy SQLite handle. Every caller in this file is
+    guarded by a `pg_pool_ref()` PG-first branch — the value returned here
+    is only read in the SQLite fallback used by tests. The static
+    placeholder satisfies the existing `&Db` signatures until #1238 ports
+    the call sites to PG-only. */
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
     state
         .engine
         .legacy_db()
-        .unwrap_or_else(|| state.sqlite_db())
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| {
+            PLACEHOLDER.get_or_init(super::super::pending_migration_shim_for_callers)
+        })
 }
 
 /// PG-first wrapper around `crate::kanban::transition_status_with_opts`.

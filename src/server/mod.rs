@@ -141,7 +141,12 @@ fn is_five_min_policy_tick(count: u64) -> bool {
 }
 
 pub(crate) struct RunInputs {
-    legacy_db: crate::db::Db,
+    /// #1237 (843f): the runtime no longer carries an `AppState.db` (SQLite
+    /// legacy compatibility handle) — the only remaining `Db` source is
+    /// `engine.legacy_db()`, populated by `PolicyEngine::new_with_legacy_db`
+    /// in test fixtures. Production runtimes set this to `None` and the
+    /// remaining SQLite-backed call sites are tracked under #1238 (843g).
+    legacy_db: Option<crate::db::Db>,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<PgPool>,
@@ -154,10 +159,7 @@ pub(crate) trait IntoRunInputs {
 impl IntoRunInputs for (PolicyEngine, Option<Arc<HealthRegistry>>, Option<PgPool>) {
     fn into_run_inputs(self) -> RunInputs {
         let (engine, health_registry, pg_pool) = self;
-        let legacy_db = engine
-            .legacy_db()
-            .cloned()
-            .unwrap_or_else(routes::legacy_sqlite_shim);
+        let legacy_db = engine.legacy_db().cloned();
         RunInputs {
             legacy_db,
             engine,
@@ -172,7 +174,7 @@ impl IntoRunInputs for (crate::db::Db, PolicyEngine, Option<Arc<HealthRegistry>>
         let (legacy_db, engine, health_registry) = self;
         let pg_pool = engine.pg_pool().cloned();
         RunInputs {
-            legacy_db,
+            legacy_db: Some(legacy_db),
             engine,
             health_registry,
             pg_pool,
@@ -217,7 +219,7 @@ where
         anyhow::bail!("PostgreSQL is required for AgentDesk server runtime");
     }
     crate::services::observability::init_observability(legacy_db.clone(), pg_pool.clone());
-    crate::pipeline::refresh_override_health_report(&legacy_db, pg_pool.as_ref()).await;
+    crate::pipeline::refresh_override_health_report(legacy_db.as_ref(), pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
             &config,
@@ -227,7 +229,7 @@ where
     };
     let startup_pool = startup_pg_pool.as_ref().or(pg_pool.as_ref());
     crate::reconcile::reconcile_boot_runtime(
-        &legacy_db,
+        legacy_db.as_ref(),
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
     )
@@ -300,6 +302,8 @@ where
             ),
         )
         .fallback_service(dashboard_service);
+    // ^^ #1237 (843f): legacy_db is Option<Db>; routes::api_router_with_pg
+    // signature accepts the optional handle and forwards to AppState.
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

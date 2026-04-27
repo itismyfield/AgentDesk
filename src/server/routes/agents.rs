@@ -69,6 +69,19 @@ const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
 const TURN_CAPTURE_TAIL_LINES: usize = 60;
 const TURN_OUTPUT_MAX_CHARS: usize = 4000;
 
+/// TODO(#1238 / 843g): observability::query_agent_quality_* expects a `&Db`.
+/// Production runtimes always have a `pg_pool` and short-circuit before
+/// reading from this handle; the placeholder shim only satisfies signatures.
+fn agent_quality_legacy_db(state: &AppState) -> &crate::db::Db {
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
+    state
+        .engine
+        .legacy_db()
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
+}
+
 fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -82,8 +95,12 @@ pub async fn agent_quality(
     Query(query): Query<AgentQualityQuery>,
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // TODO(#1238 / 843g): query_agent_quality_summary still expects a `&Db`
+    // for its SQLite branch. PG runtimes always have a pool and never
+    // consult the SQLite path; fall through to the legacy_db helper for
+    // shape compatibility until #1238 removes the parameter.
     match crate::services::observability::query_agent_quality_summary(
-        state.sqlite_db(),
+        agent_quality_legacy_db(&state),
         state.pg_pool_ref(),
         &id,
         query.days.unwrap_or(30),
@@ -109,7 +126,7 @@ pub async fn agents_quality_ranking(
     let window = QualityRankingWindow::parse(query.window.as_deref());
     let min_sample_size = query.min_sample_size.unwrap_or(5);
     match crate::services::observability::query_agent_quality_ranking_with(
-        state.sqlite_db(),
+        agent_quality_legacy_db(&state),
         state.pg_pool_ref(),
         query.limit.unwrap_or(50),
         metric,

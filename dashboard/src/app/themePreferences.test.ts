@@ -44,6 +44,14 @@ describe("themePreferences", () => {
     expect(readStoredAccentPreset(storage, DEFAULT_ACCENT_PRESET)).toBe("rose");
   });
 
+  it.each(["indigo", "violet", "amber", "rose", "cyan", "lime"] as const)(
+    "round-trips accent preset %s through storage",
+    (preset) => {
+      const storage = createStorage({ "agentdesk.accent": preset });
+      expect(readStoredAccentPreset(storage, DEFAULT_ACCENT_PRESET)).toBe(preset);
+    },
+  );
+
   it("falls back when stored values are invalid", () => {
     const storage = createStorage({
       "agentdesk.theme": "sepia",

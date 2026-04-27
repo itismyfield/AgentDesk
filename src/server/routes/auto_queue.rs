@@ -2893,8 +2893,21 @@ pub(crate) struct AutoQueueActivateDeps {
 
 impl AutoQueueActivateDeps {
     fn from_state(state: &AppState) -> Self {
+        // TODO(#1238 / 843g): `AutoQueueActivateDeps.db` still carries a
+        // `Db` because the auto-queue activation path has not yet been
+        // ported to PG-only. Production runtimes never reach the SQLite
+        // branch inside `AutoQueueService`, so the placeholder Db sourced
+        // from `AppState::legacy_db_for_pending_migration` (via
+        // `auto_queue_service()`) is unused at runtime. Once #1238 ports
+        // the constructor signature to `Option<Db>`, replace this with
+        // `state.legacy_db().cloned()`.
+        let db = state
+            .legacy_db()
+            .cloned()
+            .or_else(|| state.engine.legacy_db().cloned())
+            .unwrap_or_else(super::pending_migration_shim_for_callers);
         Self {
-            db: state.sqlite_db().clone(),
+            db,
             pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
