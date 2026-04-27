@@ -870,16 +870,20 @@ pub(super) fn spawn_turn_bridge(
         // `controller.transition(Completed)`. The cancel / abort paths use
         // the same handle.
         let mut last_assistant_text_line: Option<String> = None;
-        // Pair the active key with the input snapshot + close-trigger kind so
-        // rollover can retarget the controller onto the new `current_msg_id`
-        // (otherwise the terminal transition would land on the frozen prior
-        // message and overwrite the delivered chunk) and so we can distinguish
-        // `Monitor`-style ToolResult-closes from background-dispatch ack
-        // events. See codex round-1/2 P1+P2 on PR #1308.
+        // Pair the active key with the input snapshot, close-trigger kind, and
+        // an `ack_consumed` flag.
+        //
+        // Rollover uses the snapshot to retarget the controller onto the new
+        // `current_msg_id`; the close-trigger distinguishes Monitor-style
+        // ToolResult-closes from background-dispatch ack events; and
+        // `ack_consumed` (codex round-6 P2 on #1308) prevents subsequent
+        // unrelated ToolResults — for example a failing `Read`/`Grep` later
+        // in the same turn — from closing a still-running background card.
         let mut long_running_placeholder_active: Option<(
             super::placeholder_controller::PlaceholderKey,
             super::placeholder_controller::PlaceholderActiveInput,
             super::formatting::LongRunningCloseTrigger,
+            bool, // ack_consumed
         )> = None;
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
@@ -1233,8 +1237,12 @@ pub(super) fn spawn_turn_bridge(
                                     // failure.
                                     use super::placeholder_controller::PlaceholderControllerOutcome::*;
                                     if matches!(outcome, Edited | Coalesced) {
-                                        long_running_placeholder_active =
-                                            Some((key, input_payload, close_trigger));
+                                        long_running_placeholder_active = Some((
+                                            key,
+                                            input_payload,
+                                            close_trigger,
+                                            false, // ack not yet consumed
+                                        ));
                                         inflight_state
                                             .long_running_placeholder_active = true;
                                         state_dirty = true;
@@ -1311,22 +1319,28 @@ pub(super) fn spawn_turn_bridge(
                             // close the card while the background job is
                             // still running. Keep those open until `Done` /
                             // cancel.
-                            if let Some((key, snapshot, close_trigger)) =
+                            if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
                                 let monitor_like = matches!(
                                     close_trigger,
                                     super::formatting::LongRunningCloseTrigger::MonitorLike
                                 );
+                                // codex round-6 P2: only the FIRST ToolResult
+                                // after the background ToolUse can be its
+                                // dispatch ack. Subsequent ToolResults belong
+                                // to other foreground tools and must not close
+                                // the still-running background card. Once the
+                                // ack is consumed, re-stash unconditionally
+                                // until `Done`/cancel.
+                                let is_dispatch_ack =
+                                    !monitor_like && !ack_consumed;
                                 // codex round-5 P2: an `is_error` ToolResult on
-                                // a background dispatch (e.g. the launch itself
-                                // failed) must close the card as Aborted —
-                                // otherwise `Done` would later mark it
-                                // Completed and Discord would report a failed
-                                // background launch as ✅. Successful acks for
-                                // background dispatch stay open until
-                                // `Done`/cancel.
-                                if monitor_like || is_error {
+                                // the background dispatch ack (launch failure)
+                                // closes the card as Aborted; otherwise `Done`
+                                // would later mark it Completed and Discord
+                                // would report a failed background launch as ✅.
+                                if monitor_like || (is_dispatch_ack && is_error) {
                                     let target = if is_error {
                                         super::placeholder_controller::PlaceholderLifecycle::Aborted
                                     } else {
@@ -1340,10 +1354,17 @@ pub(super) fn spawn_turn_bridge(
                                         .long_running_placeholder_active = false;
                                     state_dirty = true;
                                 } else {
-                                    // Successful background dispatch ack —
-                                    // re-stash so `Done`/cancel can close it.
-                                    long_running_placeholder_active =
-                                        Some((key, snapshot, close_trigger));
+                                    // Successful background dispatch ack OR a
+                                    // later unrelated ToolResult — re-stash so
+                                    // `Done`/cancel can close the card. Mark
+                                    // the ack consumed so future is_error
+                                    // results from other tools don't abort us.
+                                    long_running_placeholder_active = Some((
+                                        key,
+                                        snapshot,
+                                        close_trigger,
+                                        true,
+                                    ));
                                 }
                             }
                             // Reset the assistant-line summary so the next
@@ -1412,7 +1433,8 @@ pub(super) fn spawn_turn_bridge(
                             // it now so the user does not stare at a stale
                             // 🔄 card forever. Idempotent if a prior
                             // ToolResult already fired Completed.
-                            if let Some((key, _, _)) = long_running_placeholder_active.take() {
+                            if let Some((key, _, _, _)) = long_running_placeholder_active.take()
+                            {
                                 let target = if result == "__session_died_retry__" {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
@@ -1738,7 +1760,7 @@ pub(super) fn spawn_turn_bridge(
                             // codex round-4 P2: detach the old key first so
                             // its `Active` controller entry doesn't linger as
                             // a non-evictable row in the cap-bounded map.
-                            if let Some((old_key, snapshot, close_trigger)) =
+                            if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
                                 shared_owned
@@ -1760,8 +1782,12 @@ pub(super) fn spawn_turn_bridge(
                                     .await;
                                 use super::placeholder_controller::PlaceholderControllerOutcome::*;
                                 if matches!(outcome, Edited | Coalesced) {
-                                    long_running_placeholder_active =
-                                        Some((new_key, snapshot, close_trigger));
+                                    long_running_placeholder_active = Some((
+                                        new_key,
+                                        snapshot,
+                                        close_trigger,
+                                        ack_consumed,
+                                    ));
                                     // Flag is already true; refresh
                                     // updated_at-side bookkeeping by writing
                                     // through state_dirty.
@@ -2073,7 +2099,7 @@ pub(super) fn spawn_turn_bridge(
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is
             // safe even if the ToolResult event already fired Completed.
-            if let Some((key, _, _)) = long_running_placeholder_active.take() {
+            if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
                 let _ = shared_owned
                     .placeholder_controller
                     .transition(
