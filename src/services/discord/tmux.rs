@@ -220,22 +220,36 @@ fn recent_turn_stop_for_channel(channel_id: ChannelId) -> Option<RecentTurnStop>
 /// `record_tmux_exit_reason("watcher cleanup: dead session after turn")`
 /// and tears the session down — surfacing that as a 🔴 lifecycle notification
 /// or as the "대화를 이어붙이지 못했습니다" handoff is misleading because the
-/// death IS the cancel, not a crash. The same suppression applies to the
-/// immediate-respawn watcher death that can fire seconds later when the next
-/// message arrives, because both are direct consequences of the cancel.
+/// death IS the cancel, not a crash.
+///
+/// IMPORTANT: this consumes the matching tombstone on a true return so the
+/// suppression is one-shot per cancel (codex P1 on #1277). A follow-up turn
+/// reuses the same `(channel_id, tmux_session_name)` pair, so without
+/// consumption a real failure within the 60s metadata-fallback TTL would be
+/// silently swallowed. The cancel path's own post-stop watcher death is the
+/// only legitimate consumer; any subsequent death must surface its own
+/// lifecycle/handoff signal.
 fn cancel_induced_watcher_death(channel_id: ChannelId, tmux_session_name: &str) -> bool {
-    let Some(entry) = recent_turn_stop_for_channel(channel_id) else {
+    let now = std::time::Instant::now();
+    let mut stops = recent_turn_stops();
+    prune_recent_turn_stops(&mut stops, now);
+    let Some(idx) = stops.iter().rposition(|entry| {
+        if entry.channel_id != channel_id {
+            return false;
+        }
+        if now.saturating_duration_since(entry.recorded_at) > RECENT_TURN_STOP_METADATA_FALLBACK_TTL
+        {
+            return false;
+        }
+        match entry.tmux_session_name.as_deref() {
+            Some(entry_tmux) => entry_tmux == tmux_session_name,
+            None => true,
+        }
+    }) else {
         return false;
     };
-    if std::time::Instant::now().saturating_duration_since(entry.recorded_at)
-        > RECENT_TURN_STOP_METADATA_FALLBACK_TTL
-    {
-        return false;
-    }
-    match entry.tmux_session_name.as_deref() {
-        Some(entry_tmux) => entry_tmux == tmux_session_name,
-        None => true,
-    }
+    stops.remove(idx);
+    true
 }
 
 fn recent_turn_stop_for_watcher_range(
@@ -8962,16 +8976,70 @@ mod tests {
         );
 
         assert!(
-            cancel_induced_watcher_death(channel, tmux_name),
-            "watcher death right after a cancel for the same session must be classified as cancel-induced"
-        );
-        assert!(
             !cancel_induced_watcher_death(channel, "AgentDesk-claude-other-session"),
             "tombstone bound to a different tmux name must NOT suppress unrelated session deaths"
         );
         assert!(
             !cancel_induced_watcher_death(ChannelId::new(987_1271_002), tmux_name),
             "tombstone for a different channel must NOT suppress this channel's death"
+        );
+        assert!(
+            cancel_induced_watcher_death(channel, tmux_name),
+            "watcher death right after a cancel for the same session must be classified as cancel-induced"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn cancel_induced_watcher_death_consumes_tombstone_so_later_failures_surface() {
+        // Codex P1 on PR #1277: without consumption a follow-up turn that
+        // reuses the same channel/tmux name would inherit the cancel
+        // tombstone for the full 60s TTL, silently swallowing an unrelated
+        // crash. After a true return the tombstone must be gone.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1276_001);
+        let tmux_name = "AgentDesk-claude-cancel-consume";
+
+        record_recent_turn_stop_with_offset_for_tests(channel, tmux_name, 256, "user-cancel");
+
+        assert!(
+            cancel_induced_watcher_death(channel, tmux_name),
+            "first post-cancel watcher death is the legitimate consumer"
+        );
+        assert!(
+            !cancel_induced_watcher_death(channel, tmux_name),
+            "tombstone must be consumed so a later real failure on the reused session is NOT suppressed"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn cancel_induced_watcher_death_consumes_only_matching_tombstone() {
+        // When two channels independently cancel turns, consuming one
+        // channel's tombstone must NOT remove the other channel's.
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel_a = ChannelId::new(987_1276_010);
+        let channel_b = ChannelId::new(987_1276_011);
+        let tmux_a = "AgentDesk-claude-channel-a";
+        let tmux_b = "AgentDesk-claude-channel-b";
+
+        record_recent_turn_stop_with_offset_for_tests(channel_a, tmux_a, 100, "user-cancel-a");
+        record_recent_turn_stop_with_offset_for_tests(channel_b, tmux_b, 100, "user-cancel-b");
+
+        assert!(cancel_induced_watcher_death(channel_a, tmux_a));
+        assert!(
+            cancel_induced_watcher_death(channel_b, tmux_b),
+            "channel-b tombstone must remain intact after channel-a's was consumed"
         );
 
         clear_recent_turn_stops_for_tests();
