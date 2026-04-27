@@ -529,26 +529,30 @@ export default function OfficeView({
 
         <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div ref={sceneSectionRef} className="min-w-0">
-            <SurfaceCard
-              className="overflow-hidden rounded-[28px] p-0"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
-                background:
-                  "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 72%, #0d1420 28%) 0%, color-mix(in srgb, var(--th-bg-surface) 82%, #090d16 18%) 100%)",
-              }}
-            >
-              {isMobileLite ? (
-                <div className="px-3 pb-3 pt-4">
-                  <MobileAgentStatusGrid
-                    agents={agents}
-                    isKo={isKo}
-                    onSelectAgent={handleSelectAgent}
-                    manualInterventionByAgent={manualInterventionByAgent}
-                    primaryCardByAgent={primaryCardByAgent}
-                    seatStatusByAgent={seatStatusByAgent}
-                  />
-                </div>
-              ) : (
+            {isMobileLite ? (
+              /* User feedback (#1273 follow-up): the gray SurfaceCard +
+                 desktop legend bar around the mobile agent grid added
+                 visible chrome that didn't carry information on mobile.
+                 Render the grid flat on the page background instead, so
+                 the office tab is "그냥 오피스 뷰만" — no gray empty
+                 space, no canvas legend. */
+              <MobileAgentStatusGrid
+                agents={agents}
+                isKo={isKo}
+                onSelectAgent={handleSelectAgent}
+                manualInterventionByAgent={manualInterventionByAgent}
+                primaryCardByAgent={primaryCardByAgent}
+                seatStatusByAgent={seatStatusByAgent}
+              />
+            ) : (
+              <SurfaceCard
+                className="overflow-hidden rounded-[28px] p-0"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                  background:
+                    "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 72%, #0d1420 28%) 0%, color-mix(in srgb, var(--th-bg-surface) 82%, #090d16 18%) 100%)",
+                }}
+              >
                 <div className="relative min-h-[28.75rem] overflow-hidden">
                   <div ref={containerRef} className="min-h-[28.75rem] w-full" style={{ imageRendering: "pixelated" }} />
                   <OfficeManualWarningOverlay
@@ -557,39 +561,39 @@ export default function OfficeView({
                     onSelectAgent={handleSelectAgent}
                   />
                 </div>
-              )}
-              <div
-                className="flex flex-wrap items-center gap-4 border-t px-4 py-3 text-[11px]"
-                style={{
-                  borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
-                  color: "var(--th-text-muted)",
-                }}
-              >
-                <span className="inline-flex items-center gap-2">
-                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-primary)" }} />
-                  {isKo ? "작업 중" : "Working"}
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-warn)" }} />
-                  {isKo ? "리뷰" : "Review"}
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-text-muted)" }} />
-                  {isKo ? "대기" : "Idle"}
-                </span>
-                {activeMeeting ? (
+                <div
+                  className="flex flex-wrap items-center gap-4 border-t px-4 py-3 text-[11px]"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
+                    color: "var(--th-text-muted)",
+                  }}
+                >
                   <span className="inline-flex items-center gap-2">
-                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-info)" }} />
-                    {isKo ? `회의 · ${activeMeeting.agenda}` : `Meeting · ${activeMeeting.agenda}`}
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-primary)" }} />
+                    {isKo ? "작업 중" : "Working"}
                   </span>
-                ) : null}
-                <span className="ml-auto text-right" style={{ color: "var(--th-text-faint)" }}>
-                  {selectedAgentLabel
-                    ? (isKo ? `${selectedAgentLabel} 상세 보기` : `${selectedAgentLabel} selected`)
-                    : (isKo ? "클릭해서 상세 보기" : "Click to inspect details")}
-                </span>
-              </div>
-            </SurfaceCard>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-warn)" }} />
+                    {isKo ? "리뷰" : "Review"}
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-text-muted)" }} />
+                    {isKo ? "대기" : "Idle"}
+                  </span>
+                  {activeMeeting ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="inline-block h-2 w-2 rounded-full" style={{ background: "var(--th-accent-info)" }} />
+                      {isKo ? `회의 · ${activeMeeting.agenda}` : `Meeting · ${activeMeeting.agenda}`}
+                    </span>
+                  ) : null}
+                  <span className="ml-auto text-right" style={{ color: "var(--th-text-faint)" }}>
+                    {selectedAgentLabel
+                      ? (isKo ? `${selectedAgentLabel} 상세 보기` : `${selectedAgentLabel} selected`)
+                      : (isKo ? "클릭해서 상세 보기" : "Click to inspect details")}
+                  </span>
+                </div>
+              </SurfaceCard>
+            )}
           </div>
 
           <div ref={railSectionRef} className="min-w-0">
@@ -864,56 +868,43 @@ function MobileAgentStatusGrid({
   }, [expandedWarningAgentId, manualInterventionByAgent]);
 
   return (
+    /* User feedback: drop the gray SurfaceSubsection wrapper that
+       previously wrapped this grid (title "에이전트 현황" + description
+       + bordered card background). On mobile we now render the agent
+       count + warning chip inline above the grid and let the grid sit
+       directly on the page background. The redundant subtitle
+       ("수동 개입, 좌석 상태, ... 카드로 빠르게 확인합니다.") is dropped
+       since the cards themselves are the explanation. */
     <div className="mt-3 px-3 pb-6">
-      <SurfaceSubsection
-        title={isKo ? "에이전트 현황" : "Agent Status"}
-        description={
-          isKo
-            ? "수동 개입, 좌석 상태, 대표 작업을 모바일 카드로 빠르게 확인합니다."
-            : "Review manual interventions, seat state, and the primary task in compact mobile cards."
-        }
-        actions={(
-          <div className="flex flex-wrap gap-2">
-            <span
-              className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
-              style={{
-                borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-                background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
-                color: "var(--th-text-muted)",
-              }}
-            >
-              {isKo ? `${sorted.length}명` : `${sorted.length} agents`}
-            </span>
-            {manualCount > 0 && (
-              <span
-                className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
-                style={{
-                  borderColor: "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)",
-                  background: "color-mix(in srgb, var(--th-badge-amber-bg) 60%, var(--th-card-bg) 40%)",
-                  color: "var(--th-accent-warn)",
-                }}
-              >
-                {isKo ? `경고 ${manualCount}` : `Warnings ${manualCount}`}
-              </span>
-            )}
-          </div>
-        )}
-        className="rounded-[28px] p-4"
-        style={{
-          borderColor: "color-mix(in srgb, var(--th-border) 66%, transparent)",
-          background:
-            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 94%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
-        }}
-      >
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1 pb-3">
+        <span
+          className="text-[11px] font-semibold uppercase tracking-[0.14em]"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {isKo ? `${sorted.length}명` : `${sorted.length} agents`}
+        </span>
         {manualCount > 0 && (
-          <SurfaceNotice tone="warn" compact className="mt-4">
-            <div className="text-[11px] leading-5">
-              {isKo
-                ? `수동 개입이 필요한 에이전트 ${manualCount}명이 상단으로 정렬되어 있습니다.`
-                : `${manualCount} agents with manual intervention are pinned to the top.`}
-            </div>
-          </SurfaceNotice>
+          <span
+            className="inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-accent-warn) 24%, var(--th-border) 76%)",
+              background: "color-mix(in srgb, var(--th-badge-amber-bg) 60%, var(--th-card-bg) 40%)",
+              color: "var(--th-accent-warn)",
+            }}
+          >
+            {isKo ? `경고 ${manualCount}` : `Warnings ${manualCount}`}
+          </span>
         )}
+      </div>
+      {manualCount > 0 && (
+        <SurfaceNotice tone="warn" compact className="mb-3">
+          <div className="text-[11px] leading-5">
+            {isKo
+              ? `수동 개입이 필요한 에이전트 ${manualCount}명이 상단으로 정렬되어 있습니다.`
+              : `${manualCount} agents with manual intervention are pinned to the top.`}
+          </div>
+        </SurfaceNotice>
+      )}
         <div className="mt-4 grid grid-cols-1 gap-2.5 min-[520px]:grid-cols-2">
         {sorted.map((agent) => {
           const status = seatStatusByAgent.get(agent.id) ?? "idle";
@@ -1077,8 +1068,7 @@ function MobileAgentStatusGrid({
             </SurfaceCard>
           );
         })}
-        </div>
-      </SurfaceSubsection>
+      </div>
     </div>
   );
 }

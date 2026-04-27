@@ -52,6 +52,7 @@ import {
   type Notification,
 } from "../components/NotificationCenter";
 import { deriveOfficeAgentState } from "../components/office-view/officeAgentState";
+import { MiniRateLimitBar } from "../components/office-view/OfficeInsightPanel";
 import OfficeSelectorBar from "../components/OfficeSelectorBar";
 import { MOBILE_LAYOUT_MEDIA_QUERY } from "./breakpoints";
 import {
@@ -119,86 +120,6 @@ type AgentsPageTab = "agents" | "departments" | "backlog" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 const MOBILE_TABBAR_SAFE_AREA_HEIGHT = "calc(3.5rem + env(safe-area-inset-bottom))";
-
-/* --- Rate-limit KPI tile: read /api/rate-limits and surface the highest
-   utilization across visible providers/buckets. The full RateLimitWidget on
-   /stats has the same data shape; the home tile only needs a single max %
-   plus the offending bucket label, so we transform inline rather than
-   importing the heavy widget module. */
-const RATE_LIMIT_HIDDEN_PROVIDERS = new Set(["github"]);
-const RATE_LIMIT_HIDDEN_BUCKETS = new Set(["7d Sonnet"]);
-const RATE_LIMIT_WARNING_PCT = 80;
-const RATE_LIMIT_DANGER_PCT = 95;
-const RATE_LIMIT_REFRESH_MS = 60_000;
-const RATE_LIMIT_FETCH_TIMEOUT_MS = 8_000;
-
-interface HomeRateLimitSummary {
-  loadedAt: number;
-  providersChecked: number;
-  bucketsChecked: number;
-  warnCount: number;
-  dangerCount: number;
-  topPct: number | null;
-  topLabel: string | null;
-  level: "normal" | "warning" | "danger" | null;
-  bucketPcts: number[];
-  staleProviders: string[];
-}
-
-function buildHomeRateLimitSummary(
-  raw: { providers?: Array<{
-    provider: string;
-    stale: boolean;
-    unsupported?: boolean;
-    buckets?: Array<{ name: string; limit: number; used: number }>;
-  }> | undefined } | null,
-): HomeRateLimitSummary | null {
-  if (!raw || !Array.isArray(raw.providers)) return null;
-  const summary: HomeRateLimitSummary = {
-    loadedAt: Date.now(),
-    providersChecked: 0,
-    bucketsChecked: 0,
-    warnCount: 0,
-    dangerCount: 0,
-    topPct: null,
-    topLabel: null,
-    level: null,
-    bucketPcts: [],
-    staleProviders: [],
-  };
-  for (const provider of raw.providers) {
-    const key = provider.provider?.toLowerCase() ?? "";
-    if (RATE_LIMIT_HIDDEN_PROVIDERS.has(key)) continue;
-    if (provider.unsupported) continue;
-    summary.providersChecked += 1;
-    if (provider.stale) summary.staleProviders.push(provider.provider);
-    for (const bucket of provider.buckets ?? []) {
-      if (RATE_LIMIT_HIDDEN_BUCKETS.has(bucket.name)) continue;
-      if (!bucket.limit || bucket.limit <= 0) continue;
-      const pct = Math.round((bucket.used / bucket.limit) * 100);
-      summary.bucketsChecked += 1;
-      summary.bucketPcts.push(pct);
-      if (pct >= RATE_LIMIT_DANGER_PCT) summary.dangerCount += 1;
-      else if (pct >= RATE_LIMIT_WARNING_PCT) summary.warnCount += 1;
-      if (summary.topPct === null || pct > summary.topPct) {
-        summary.topPct = pct;
-        summary.topLabel = `${provider.provider} ${bucket.name}`;
-      }
-    }
-  }
-  if (summary.providersChecked === 0) return summary;
-  if (summary.topPct === null) {
-    summary.level = "normal";
-  } else if (summary.topPct >= RATE_LIMIT_DANGER_PCT) {
-    summary.level = "danger";
-  } else if (summary.topPct >= RATE_LIMIT_WARNING_PCT) {
-    summary.level = "warning";
-  } else {
-    summary.level = "normal";
-  }
-  return summary;
-}
-
 
 const HOME_DEFAULT_WIDGETS = [
   "m_tokens",
@@ -1893,7 +1814,6 @@ function HomeOverviewPage({
   );
   const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
   const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
-  const [rateLimitSummary, setRateLimitSummary] = useState<HomeRateLimitSummary | null>(null);
   const defaultWidgets = useMemo(
     () => [...HOME_DEFAULT_WIDGETS],
     [],
@@ -2024,33 +1944,6 @@ function HomeOverviewPage({
     return () => {
       active = false;
       controller.abort();
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const fetchRateLimits = async () => {
-      const ctrl = new AbortController();
-      const timer = window.setTimeout(() => ctrl.abort(), RATE_LIMIT_FETCH_TIMEOUT_MS);
-      try {
-        const res = await fetch("/api/rate-limits", { signal: ctrl.signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const raw = (await res.json()) as Parameters<typeof buildHomeRateLimitSummary>[0];
-        if (!active) return;
-        const summary = buildHomeRateLimitSummary(raw);
-        if (summary) setRateLimitSummary(summary);
-      } catch (error) {
-        if (!active || ctrl.signal.aborted) return;
-        console.warn("Failed to load rate limits for home tile", error);
-      } finally {
-        window.clearTimeout(timer);
-      }
-    };
-    void fetchRateLimits();
-    const interval = window.setInterval(() => void fetchRateLimits(), RATE_LIMIT_REFRESH_MS);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
     };
   }, []);
 
@@ -2312,84 +2205,34 @@ function HomeOverviewPage({
       },
       m_rate_limit: {
         className: "lg:col-span-3",
-        render: () => {
-          const summary = rateLimitSummary;
-          /* The tile starts in the "데이터 수집 대기" state until the first
-             /api/rate-limits response arrives. Once we have data we surface
-             the highest utilization across visible buckets so the home
-             screen reflects the actual provider headroom — was previously
-             a permanent placeholder even when the API had real numbers. */
-          if (!summary) {
-            return (
-              <HomeMetricTile
-                icon={<Gauge size={14} />}
-                title={tr("한도", "Rate limit")}
-                value="—"
-                sub={tr(
-                  "프로바이더 한도 데이터 수집 대기",
-                  "Awaiting provider rate-limit telemetry",
-                )}
-                deltaTone="flat"
-                accent="var(--th-accent-info)"
-                trend={[]}
-              />
-            );
-          }
-          if (summary.providersChecked === 0 || summary.topPct === null) {
-            return (
-              <HomeMetricTile
-                icon={<Gauge size={14} />}
-                title={tr("한도", "Rate limit")}
-                value={tr("정상", "Normal")}
-                sub={tr(
-                  "한도 데이터를 노출하는 프로바이더가 없습니다.",
-                  "No provider exposes rate-limit telemetry yet.",
-                )}
-                deltaTone="flat"
-                accent="var(--th-accent-info)"
-                trend={[]}
-              />
-            );
-          }
-          const pct = summary.topPct;
-          const accent =
-            summary.level === "danger"
-              ? "var(--th-accent-danger)"
-              : summary.level === "warning"
-                ? "var(--th-accent-warn)"
-                : "var(--th-accent-success)";
-          const deltaTone: "up" | "down" | "flat" =
-            summary.level === "danger" ? "down" : summary.level === "warning" ? "down" : "up";
-          const levelLabel =
-            summary.level === "danger"
-              ? tr("위험", "Critical")
-              : summary.level === "warning"
-                ? tr("경고", "Warning")
-                : tr("정상", "Normal");
-          const subParts: string[] = [];
-          if (summary.topLabel) subParts.push(summary.topLabel);
-          if (summary.warnCount > 0 || summary.dangerCount > 0) {
-            const flagged = summary.dangerCount + summary.warnCount;
-            subParts.push(tr(`${flagged}/${summary.bucketsChecked} 위험권`, `${flagged}/${summary.bucketsChecked} flagged`));
-          } else {
-            subParts.push(tr(`${summary.bucketsChecked} 버킷 정상`, `${summary.bucketsChecked} buckets ok`));
-          }
-          if (summary.staleProviders.length > 0) {
-            subParts.push(tr(`데이터 stale (${summary.staleProviders.join(", ")})`, `stale (${summary.staleProviders.join(", ")})`));
-          }
-          return (
-            <HomeMetricTile
-              icon={<Gauge size={14} />}
-              title={tr("한도", "Rate limit")}
-              value={`${pct}%`}
-              sub={subParts.join(" · ")}
-              delta={levelLabel}
-              deltaTone={deltaTone}
-              accent={accent}
-              trend={summary.bucketPcts}
-            />
-          );
-        },
+        /* User reported "한도 UI 정보 밀도 낮음" — replace the previous
+           single-percentage HomeMetricTile + sparkline with the same
+           per-provider/per-bucket gauge rows used by the office "운영신호"
+           panel (`MiniRateLimitBar`). One card now shows every provider's
+           5h/7d bucket utilization with the same color/glow language as
+           /stats, and fetches its own data on a 30 s timer so the home
+           tile no longer needs the manual fetch + summary state. */
+        render: () => (
+          <div
+            className="h-full overflow-hidden rounded-[1.15rem] border"
+            style={{
+              borderColor: "var(--th-border-subtle)",
+              background:
+                "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+            }}
+          >
+            <div className="px-4 py-4 sm:px-5">
+              <div
+                className="flex items-center gap-2 text-[11.5px] font-medium uppercase tracking-[0.08em]"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                <Gauge size={14} />
+                <span>{tr("한도", "Rate limit")}</span>
+              </div>
+              <MiniRateLimitBar isKo={isKo} />
+            </div>
+          </div>
+        ),
       },
       office: {
         className: "lg:col-span-8",
@@ -2663,7 +2506,6 @@ function HomeOverviewPage({
       streakLeader,
       t,
       localeTag,
-      rateLimitSummary,
     ],
   );
 

@@ -471,7 +471,12 @@ const RL_ICONS: Record<string, string> = {
   API: "🔌",
 };
 
-function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
+/* Exported so the home `m_rate_limit` KPI tile can mount the same gauge
+   the office `오피스 운영신호` panel uses. The previous home tile rendered
+   only a single max-utilization percentage with a sparkline, which the
+   user reported as low-density compared to the per-provider/per-bucket
+   bars on the office page. */
+export function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
   const [providers, setProviders] = useState<RLProvider[]>([]);
 
   useEffect(() => {
