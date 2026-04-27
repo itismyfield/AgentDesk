@@ -1631,6 +1631,7 @@ mod tests {
                 claude: Some("123456789012345678".into()),
                 codex: None,
                 gemini: None,
+                opencode: None,
                 qwen: None,
             },
             keywords: Vec::new(),
