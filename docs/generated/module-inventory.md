@@ -139,7 +139,7 @@
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
 | `server` | `src/server/mod.rs` | 3270 | giant-file |
 | `server::background` | `src/server/background.rs` | 535 |  |
-| `server::boot` | `src/server/boot.rs` | 182 |  |
+| `server::boot` | `src/server/boot.rs` | 190 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 933 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 245 |  |
@@ -185,7 +185,7 @@
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4482 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1370 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
-| `server::routes::receipt` | `src/server/routes/receipt.rs` | 254 |  |
+| `server::routes::receipt` | `src/server/routes/receipt.rs` | 304 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2003 | giant-file |

@@ -63,6 +63,14 @@ pub(super) async fn serve_http(
                 "[zombie-reconcile] boot sweep complete"
             );
         });
+
+        // Pre-warm the token-analytics in-process cache so the first
+        // home/stats visit doesn't pay the ~9 s filesystem scan
+        // synchronously. Detached, low priority — health endpoint stays
+        // up while the prewarm runs in the background.
+        tokio::spawn(async {
+            crate::server::routes::receipt::prewarm_token_analytics_cache().await;
+        });
     }
 
     let app = build_app(

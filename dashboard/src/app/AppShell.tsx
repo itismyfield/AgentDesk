@@ -2210,11 +2210,23 @@ function HomeOverviewPage({
           <HomeMetricTile
             icon={<Zap size={14} />}
             title={tr("오늘 토큰", "Today's tokens")}
-            value={formatCompact(latestAnalyticsDay?.total_tokens ?? 0)}
-            sub={tr(
-              `7일 평균 ${formatCompact(Math.round(analytics?.summary.average_daily_tokens ?? 0))}`,
-              `7d avg ${formatCompact(Math.round(analytics?.summary.average_daily_tokens ?? 0))}`,
-            )}
+            /* `analytics` is null on the first home visit until
+               /api/token-analytics resolves (~9 s cold path on PG-only
+               runtimes; ~10 ms once the server-side in-process cache is
+               warm). The previous fallback `?? 0` showed a real-looking
+               "0" while the fetch was inflight, which made the tile look
+               broken. Render the loading placeholder explicitly and
+               mark the trend slot as pending too so the dashed line
+               doesn't briefly show as the real sparkline. */
+            value={analytics ? formatCompact(latestAnalyticsDay?.total_tokens ?? 0) : "…"}
+            sub={
+              analytics
+                ? tr(
+                    `7일 평균 ${formatCompact(Math.round(analytics.summary.average_daily_tokens ?? 0))}`,
+                    `7d avg ${formatCompact(Math.round(analytics.summary.average_daily_tokens ?? 0))}`,
+                  )
+                : tr("7일 평균 집계 중", "Loading 7-day average")
+            }
             delta={
               analytics?.summary.total_tokens
                 ? tr(`7일 ${formatCompact(analytics.summary.total_tokens)}`, `7d ${formatCompact(analytics.summary.total_tokens)}`)
@@ -2232,11 +2244,15 @@ function HomeOverviewPage({
           <HomeMetricTile
             icon={<Sparkles size={14} />}
             title={tr("API 비용", "API cost")}
-            value={formatCurrency(latestAnalyticsDay?.cost ?? 0)}
-            sub={tr(
-              `캐시 절감 ${formatCurrency(analytics?.summary.cache_discount ?? 0)}`,
-              `Cache saved ${formatCurrency(analytics?.summary.cache_discount ?? 0)}`,
-            )}
+            value={analytics ? formatCurrency(latestAnalyticsDay?.cost ?? 0) : "…"}
+            sub={
+              analytics
+                ? tr(
+                    `캐시 절감 ${formatCurrency(analytics.summary.cache_discount ?? 0)}`,
+                    `Cache saved ${formatCurrency(analytics.summary.cache_discount ?? 0)}`,
+                  )
+                : tr("비용 집계 중", "Loading cost")
+            }
             delta={
               analytics?.summary.total_cost != null
                 ? tr(`7일 ${formatCurrency(analytics.summary.total_cost)}`, `7d ${formatCurrency(analytics.summary.total_cost)}`)
