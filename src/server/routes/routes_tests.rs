@@ -1838,30 +1838,32 @@ async fn health_api_includes_pipeline_override_report_and_degraded_reason() {
 }
 
 #[tokio::test]
-async fn offices_reorder_accepts_bare_array_and_updates_listing_order() {
+async fn offices_reorder_pg_accepts_bare_array_and_updates_listing_order() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO offices (id, name, sort_order) VALUES ('office-a', 'Alpha', 2)",
-            [],
-        )
+    sqlx::query("INSERT INTO offices (id, name, sort_order) VALUES ('office-a', 'Alpha', 2)")
+        .execute(&pool)
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO offices (id, name, sort_order) VALUES ('office-b', 'Beta', 0)",
-            [],
-        )
+    sqlx::query("INSERT INTO offices (id, name, sort_order) VALUES ('office-b', 'Beta', 0)")
+        .execute(&pool)
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO offices (id, name, sort_order) VALUES ('office-c', 'Gamma', 1)",
-            [],
-        )
+    sqlx::query("INSERT INTO offices (id, name, sort_order) VALUES ('office-c', 'Gamma', 1)")
+        .execute(&pool)
+        .await
         .unwrap();
-    }
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let reorder_response = app
         .clone()
         .oneshot(
@@ -1909,6 +1911,9 @@ async fn offices_reorder_accepts_bare_array_and_updates_listing_order() {
     assert_eq!(offices[1]["sort_order"], 1);
     assert_eq!(offices[2]["id"], "office-b");
     assert_eq!(offices[2]["sort_order"], 2);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -2070,7 +2075,7 @@ async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fa
 }
 
 #[tokio::test]
-async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
+async fn agent_turn_pg_returns_recent_output_from_inflight_snapshot() {
     let _env_lock = env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -2113,26 +2118,35 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     )
     .unwrap();
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-             VALUES ('agent-turn', 'Agent Turn', 'codex', '1485506232256168011', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
-             VALUES (?1, 'agent-turn', 'codex', 'working', 'dispatch-turn', datetime('now'), '2026-04-06 10:00:00')",
-            [format!("mac-mini:{tmux_name}")],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let app = test_api_router(db, engine, None);
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+         VALUES ('agent-turn', 'Agent Turn', 'codex', '1485506232256168011', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
+         VALUES ($1, 'agent-turn', 'codex', 'working', 'dispatch-turn', NOW(), '2026-04-06 10:00:00')",
+    )
+    .bind(format!("mac-mini:{tmux_name}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .clone()
         .oneshot(
@@ -2169,23 +2183,33 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     assert_eq!(tool_events[0]["status"], "success");
     assert_eq!(tool_events[1]["tool_name"], "Bash");
     assert_eq!(tool_events[1]["status"], "running");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
+async fn agent_turn_pg_reports_idle_when_agent_has_no_active_session() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, created_at, updated_at)
-             VALUES ('agent-idle', 'Agent Idle', 'codex', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let app = test_api_router(db, engine, None);
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, created_at, updated_at)
+         VALUES ('agent-idle', 'Agent Idle', 'codex', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .clone()
         .oneshot(
@@ -2212,6 +2236,9 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
     assert!(json["prev_tool_status"].is_null());
     assert_eq!(json["tool_count"], 0);
     assert!(json["tool_events"].as_array().unwrap().is_empty());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -2526,9 +2553,11 @@ async fn stop_agent_turn_tmux_only_fallback_clears_mailbox_without_detaching_wat
 }
 
 #[tokio::test]
-async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
+async fn start_agent_turn_pg_returns_conflict_when_mailbox_is_busy() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
         crate::services::provider::ProviderKind::Codex,
     )
@@ -2536,20 +2565,25 @@ async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
     let channel_id = "1485506232256168123";
     let channel_num = channel_id.parse::<u64>().unwrap();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents
-             (id, name, provider, discord_channel_id, discord_channel_alt, created_at, updated_at)
-             VALUES ('agent-turn-start-busy', 'Agent Turn Start Busy', 'codex', 'legacy-busy', ?1, datetime('now'), datetime('now'))",
-            [channel_id],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents
+         (id, name, provider, discord_channel_id, discord_channel_alt, created_at, updated_at)
+         VALUES ('agent-turn-start-busy', 'Agent Turn Start Busy', 'codex', 'legacy-busy', $1, NOW(), NOW())",
+    )
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     harness.seed_active_turn(channel_num, 7, 77).await;
 
-    let app = test_api_router(db, engine, Some(harness.registry()));
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -2580,12 +2614,17 @@ async fn start_agent_turn_returns_conflict_when_mailbox_is_busy() {
             .is_some_and(|value| value.contains("mailbox is busy")),
         "unexpected error body: {json}"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn start_agent_turn_rejects_channel_override_outside_agent_bindings() {
+async fn start_agent_turn_pg_rejects_channel_override_outside_agent_bindings() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
         crate::services::provider::ProviderKind::Codex,
     )
@@ -2593,18 +2632,23 @@ async fn start_agent_turn_rejects_channel_override_outside_agent_bindings() {
     let bound_channel_id = "1485506232256168124";
     let forbidden_channel_id = "1485506232256168125";
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents
-             (id, name, provider, discord_channel_id, discord_channel_alt, created_at, updated_at)
-             VALUES ('agent-turn-start-forbidden', 'Agent Turn Start Forbidden', 'codex', 'legacy-forbidden', ?1, datetime('now'), datetime('now'))",
-            [bound_channel_id],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents
+         (id, name, provider, discord_channel_id, discord_channel_alt, created_at, updated_at)
+         VALUES ('agent-turn-start-forbidden', 'Agent Turn Start Forbidden', 'codex', 'legacy-forbidden', $1, NOW(), NOW())",
+    )
+    .bind(bound_channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, Some(harness.registry()));
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -2632,6 +2676,9 @@ async fn start_agent_turn_rejects_channel_override_outside_agent_bindings() {
             .is_some_and(|value| value.contains("not allowed")),
         "unexpected error body: {json}"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -2946,10 +2993,18 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent() {
 }
 
 #[tokio::test]
-async fn health_returns_ok_with_db_status() {
+async fn health_pg_returns_ok_with_db_status() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -2969,13 +3024,24 @@ async fn health_returns_ok_with_db_status() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["db"], true);
     assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agents_empty_list() {
+async fn agents_pg_empty_list() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -2993,24 +3059,32 @@ async fn agents_empty_list() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["agents"].as_array().unwrap().is_empty());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agents_returns_synced_agents() {
+async fn agents_pg_returns_synced_agents() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    // Insert an agent
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'claude', 'idle', 0)",
-                [],
-            )
-            .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'claude', 'idle', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -3029,29 +3103,40 @@ async fn agents_returns_synced_agents() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["id"], "a1");
     assert_eq!(agents[0]["name"], "Agent1");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agents_include_current_thread_channel_id_from_working_session() {
+async fn agents_pg_include_current_thread_channel_id_from_working_session() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'codex', 'idle', 0)",
-                [],
-            )
-            .unwrap();
-        conn.execute(
-                "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat)
-                 VALUES (?1, 'a1', 'codex', 'working', '1485506232256168011', datetime('now'))",
-                ["mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011"],
-            )
-            .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'codex', 'idle', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat)
+         VALUES ($1, 'a1', 'codex', 'working', '1485506232256168011', NOW())",
+    )
+    .bind("mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let list_response = app
         .clone()
@@ -3089,6 +3174,9 @@ async fn agents_include_current_thread_channel_id_from_working_session() {
         get_json["agent"]["current_thread_channel_id"],
         serde_json::Value::String("1485506232256168011".to_string())
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -3185,25 +3273,31 @@ async fn agents_pg_crud_round_trip() {
 }
 
 #[tokio::test]
-async fn claude_session_id_get_clears_stale_fixed_working_session() {
+async fn claude_session_id_pg_get_clears_stale_fixed_working_session() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sessions (
-                session_key, provider, status, active_dispatch_id, claude_session_id, last_heartbeat, created_at
-             ) VALUES (
-                'test:stale-working', 'claude', 'working', 'dispatch-123', 'stale-sid',
-                datetime('now', '-7 hours'), datetime('now', '-7 hours')
-             )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, provider, status, active_dispatch_id, claude_session_id, last_heartbeat, created_at
+         ) VALUES (
+            'test:stale-working', 'claude', 'working', 'dispatch-123', 'stale-sid',
+            NOW() - INTERVAL '7 hours', NOW() - INTERVAL '7 hours'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -3222,41 +3316,48 @@ async fn claude_session_id_get_clears_stale_fixed_working_session() {
     assert!(json["claude_session_id"].is_null());
     assert!(json["session_id"].is_null());
 
-    let conn = db.lock().unwrap();
-    let (status, dispatch_id, session_id): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT status, active_dispatch_id, claude_session_id
-             FROM sessions
-             WHERE session_key = 'test:stale-working'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(status, "disconnected");
-    assert!(dispatch_id.is_none());
-    assert!(session_id.is_none());
+    let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status, active_dispatch_id, claude_session_id
+         FROM sessions
+         WHERE session_key = 'test:stale-working'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, "disconnected");
+    assert!(row.1.is_none());
+    assert!(row.2.is_none());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn claude_session_id_get_keeps_old_idle_fixed_session() {
+async fn claude_session_id_pg_get_keeps_old_idle_fixed_session() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sessions (
-                session_key, provider, status, claude_session_id, last_heartbeat, created_at
-             ) VALUES (
-                'test:old-idle', 'claude', 'idle', 'idle-sid',
-                datetime('now', '-7 hours'), datetime('now', '-7 hours')
-             )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, provider, status, claude_session_id, last_heartbeat, created_at
+         ) VALUES (
+            'test:old-idle', 'claude', 'idle', 'idle-sid',
+            NOW() - INTERVAL '7 hours', NOW() - INTERVAL '7 hours'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -3274,28 +3375,37 @@ async fn claude_session_id_get_keeps_old_idle_fixed_session() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["claude_session_id"], "idle-sid");
     assert_eq!(json["session_id"], "idle-sid");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn claude_session_id_get_returns_null_on_provider_mismatch() {
+async fn claude_session_id_pg_get_returns_null_on_provider_mismatch() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sessions (
-                session_key, provider, status, claude_session_id, last_heartbeat, created_at
-             ) VALUES (
-                'host:AgentDesk-codex-adk-cdx', 'claude', 'idle', 'claude-sid',
-                datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
-             )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, provider, status, claude_session_id, last_heartbeat, created_at
+         ) VALUES (
+            'host:AgentDesk-codex-adk-cdx', 'claude', 'idle', 'claude-sid',
+            NOW() - INTERVAL '1 minutes', NOW() - INTERVAL '1 minutes'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -3315,28 +3425,37 @@ async fn claude_session_id_get_returns_null_on_provider_mismatch() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["claude_session_id"].is_null());
     assert!(json["session_id"].is_null());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn claude_session_id_get_keeps_value_on_provider_match() {
+async fn claude_session_id_pg_get_keeps_value_on_provider_match() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sessions (
-                session_key, provider, status, claude_session_id, last_heartbeat, created_at
-             ) VALUES (
-                'host:AgentDesk-codex-adk-cdx', 'codex', 'idle', 'codex-sid',
-                datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
-             )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, provider, status, claude_session_id, last_heartbeat, created_at
+         ) VALUES (
+            'host:AgentDesk-codex-adk-cdx', 'codex', 'idle', 'codex-sid',
+            NOW() - INTERVAL '1 minutes', NOW() - INTERVAL '1 minutes'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let resp = app
         .oneshot(
             Request::builder()
@@ -3356,23 +3475,32 @@ async fn claude_session_id_get_keeps_value_on_provider_match() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["claude_session_id"], "codex-sid");
     assert_eq!(json["session_id"], "codex-sid");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn get_agent_found() {
+async fn get_agent_pg_found() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'claude', 'idle', 0)",
-                [],
-            )
-            .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'Agent1', 'claude', 'idle', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -3388,13 +3516,24 @@ async fn get_agent_found() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["agent"]["id"], "a1");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn get_agent_not_found() {
+async fn get_agent_pg_not_found() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -3411,13 +3550,24 @@ async fn get_agent_not_found() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "agent not found");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn sessions_empty_list() {
+async fn sessions_pg_empty_list() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -3435,6 +3585,9 @@ async fn sessions_empty_list() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["sessions"].as_array().unwrap().is_empty());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 // ── Kanban CRUD tests ──────────────────────────────────────────
@@ -5855,10 +6008,18 @@ async fn kanban_delete_card_pg_only_without_sqlite_mirror() {
 // ── Dispatch API tests ─────────────────────────────────────────
 
 #[tokio::test]
-async fn dispatch_list_empty() {
+async fn dispatch_pg_list_empty() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -5876,23 +6037,38 @@ async fn dispatch_list_empty() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["dispatches"].as_array().unwrap().is_empty());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn dispatch_create_and_get() {
+async fn dispatch_pg_create_and_get() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('ch-td', 'TD', '111', '222')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .clone()
         .oneshot(
@@ -5919,25 +6095,28 @@ async fn dispatch_create_and_get() {
     assert_eq!(json["dispatch"]["kanban_card_id"], "c1");
 
     // #255: ready→requested is free, so dispatch from ready kicks off to "in_progress"
-    let conn = db.lock().unwrap();
-    let card_status: String = conn
-        .query_row("SELECT status FROM kanban_cards WHERE id = 'c1'", [], |r| {
-            r.get(0)
-        })
+    let card_status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'c1'")
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(card_status, "in_progress");
-    let notify_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-            [&dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let notify_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE dispatch_id = $1 AND action = 'notify'",
+    )
+    .bind(&dispatch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(notify_count, 1, "API create must persist notify outbox");
-    drop(conn);
 
     // GET single dispatch
-    let app2 = test_api_router(db, engine, None);
+    let app2 = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -5954,6 +6133,9 @@ async fn dispatch_create_and_get() {
         .unwrap();
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert_eq!(json2["dispatch"]["id"], dispatch_id);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6236,22 +6418,33 @@ async fn dispatch_routes_allow_same_agent_parallel_delivery_on_different_provide
 }
 
 #[tokio::test]
-async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
+async fn dispatch_pg_create_for_terminal_card_returns_conflict_with_reason() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, priority, assigned_agent_id, created_at, updated_at)
-             VALUES ('c-terminal', 'Terminal Card', 'done', 'medium', 'agent-1', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '555', '666')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, assigned_agent_id, created_at, updated_at)
+         VALUES ('c-terminal', 'Terminal Card', 'done', 'medium', 'agent-1', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .clone()
         .oneshot(
@@ -6279,6 +6472,9 @@ async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
             .contains("terminal card c-terminal (status: done)"),
         "expected terminal-card detail, got {json}"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -7941,19 +8137,26 @@ async fn agent_pg_duplicate_ignores_sensitive_fields_from_body() {
 }
 
 #[tokio::test]
-async fn create_issue_route_builds_pmd_body_and_agent_label() {
+async fn create_issue_route_pg_builds_pmd_body_and_agent_label() {
     let _env_lock = env_lock();
     let gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 819);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    db.lock()
-        .unwrap()
-        .execute(
-            "INSERT INTO agents (id, name) VALUES (?1, ?2)",
-            sqlite_params!["adk-backend", "ADK Backend"],
-        )
+    let engine = test_engine_with_pg(&db, pool.clone());
+    sqlx::query("INSERT INTO agents (id, name) VALUES ($1, $2)")
+        .bind("adk-backend")
+        .bind("ADK Backend")
+        .execute(&pool)
+        .await
         .unwrap();
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -8002,30 +8205,22 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
     assert_eq!(json["applied_labels"], json!(["agent:adk-backend"]));
     assert_eq!(json["pmd_format_version"], 1);
 
-    let conn = db.lock().unwrap();
-    let (repo_id, status, issue_number, assigned_agent_id, metadata_raw): (
+    let row: (
         Option<String>,
         String,
-        Option<i64>,
+        Option<i32>,
         Option<String>,
         Option<String>,
-    ) = conn
-        .query_row(
-            "SELECT repo_id, status, github_issue_number, assigned_agent_id, metadata
+    ) = sqlx::query_as(
+        "SELECT repo_id, status, github_issue_number, assigned_agent_id, metadata::text
              FROM kanban_cards
-             WHERE id = ?1",
-            [card_id.as_str()],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .unwrap();
+             WHERE id = $1",
+    )
+    .bind(card_id.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (repo_id, status, issue_number, assigned_agent_id, metadata_raw) = row;
     assert_eq!(repo_id.as_deref(), Some("itismyfield/AgentDesk"));
     assert_eq!(status, "backlog");
     assert_eq!(issue_number, Some(819));
@@ -8058,6 +8253,9 @@ async fn create_issue_route_builds_pmd_body_and_agent_label() {
     assert!(issue_body.contains("## DoD\n- [ ] 성공 시 issue URL과 번호를 반환한다\n- [ ] DoD 항목은 체크리스트로 렌더링된다"));
     assert!(!issue_body.contains("## 의존성"));
     assert!(!issue_body.contains("## 리스크"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -8270,36 +8468,43 @@ async fn github_issues_create_canonical_path_returns_created_issue() {
 
 // #1067: skill promotion integration test — watch-agent-turn.
 #[tokio::test]
-async fn sessions_tmux_output_http_route_returns_shape_for_seeded_session() {
+async fn sessions_tmux_output_pg_http_route_returns_shape_for_seeded_session() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let session_id: i64;
+    let engine = test_engine_with_pg(&db, pool.clone());
     let tmux_name = format!("AgentDesk-codex-1067-http-{}", std::process::id());
     let session_key = format!("mac-mini:{tmux_name}");
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-             VALUES ('agent-1067-http', 'Agent 1067', 'codex', '123456789012345678', datetime('now'), datetime('now'))",
-            [],
-        )
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+         VALUES ('agent-1067-http', 'Agent 1067', 'codex', '123456789012345678', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'agent-1067-http', 'codex', 'working', NOW(), NOW())",
+    )
+    .bind(&session_key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let session_id: i64 = sqlx::query_scalar("SELECT id FROM sessions WHERE session_key = $1")
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'agent-1067-http', 'codex', 'working', datetime('now'), datetime('now'))",
-            sqlite_params![session_key.clone()],
-        )
-        .unwrap();
-        session_id = conn
-            .query_row(
-                "SELECT id FROM sessions WHERE session_key = ?1",
-                [&session_key],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-    }
-    let app = test_api_router(db, engine, None);
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -8329,6 +8534,9 @@ async fn sessions_tmux_output_http_route_returns_shape_for_seeded_session() {
     assert_eq!(json["tmux_alive"], false);
     assert_eq!(json["recent_output"], "");
     assert!(json["captured_at_ms"].as_i64().unwrap() > 0);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -9265,10 +9473,18 @@ async fn resume_requested_creates_single_notify_backed_dispatch() {
 }
 
 #[tokio::test]
-async fn dispatch_create_card_not_found() {
+async fn dispatch_pg_create_card_not_found() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -9285,24 +9501,39 @@ async fn dispatch_create_card_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn dispatch_complete() {
+async fn dispatch_pg_complete() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('ch-td', 'TD', '111', '222')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Create dispatch
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -9324,7 +9555,13 @@ async fn dispatch_complete() {
     let dispatch_id = json["dispatch"]["id"].as_str().unwrap().to_string();
 
     // Complete dispatch
-    let app2 = test_api_router(db, engine, None);
+    let app2 = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -9345,13 +9582,24 @@ async fn dispatch_complete() {
         .unwrap();
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert_eq!(json2["dispatch"]["status"], "completed");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn dispatch_get_not_found() {
+async fn dispatch_pg_get_not_found() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -9364,6 +9612,9 @@ async fn dispatch_get_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 // ── Policy hook firing tests ───────────────────────────────────
@@ -9448,27 +9699,38 @@ async fn kanban_terminal_status_fires_hook() {
 }
 
 #[tokio::test]
-async fn dispatch_list_with_filter() {
+async fn dispatch_pg_list_with_filter() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at) VALUES ('d1', 'c1', 'ag1', 'pending', 'T1', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at) VALUES ('d2', 'c1', 'ag1', 'completed', 'T2', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at) VALUES ('d1', 'c1', 'ag1', 'pending', 'T1', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, status, title, created_at, updated_at) VALUES ('d2', 'c1', 'ag1', 'completed', 'T2', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -9486,52 +9748,74 @@ async fn dispatch_list_with_filter() {
     let dispatches = json["dispatches"].as_array().unwrap();
     assert_eq!(dispatches.len(), 1);
     assert_eq!(dispatches[0]["id"], "d1");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn dispatch_endpoints_include_normalized_result_summary() {
+async fn dispatch_pg_endpoints_include_normalized_result_summary() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    seed_test_agents(&db);
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
-             VALUES ('card-dispatch-summary', 'Dispatch Summary Card', 'review', 'medium', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
-             ) VALUES (
-                'dispatch-cancel-summary', 'card-dispatch-summary', 'agent-1', 'implementation', 'cancelled',
-                'Cancelled dispatch', ?1, datetime('now', '-1 minute'), datetime('now', '-1 minute')
-             )",
-            [json!({
-                "reason": "auto_cancelled_on_terminal_card"
-            })
-            .to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
-             ) VALUES (
-                'dispatch-review-summary', 'card-dispatch-summary', 'agent-1', 'review-decision', 'completed',
-                'Review decision', ?1, datetime('now'), datetime('now')
-             )",
-            [json!({
-                "decision": "accept",
-                "comment": "Looks good"
-            })
-            .to_string()],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '555', '666')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+         VALUES ('card-dispatch-summary', 'Dispatch Summary Card', 'review', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
+         ) VALUES (
+            'dispatch-cancel-summary', 'card-dispatch-summary', 'agent-1', 'implementation', 'cancelled',
+            'Cancelled dispatch', $1, NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute'
+         )",
+    )
+    .bind(
+        json!({
+            "reason": "auto_cancelled_on_terminal_card"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at
+         ) VALUES (
+            'dispatch-review-summary', 'card-dispatch-summary', 'agent-1', 'review-decision', 'completed',
+            'Review decision', $1, NOW(), NOW()
+         )",
+    )
+    .bind(
+        json!({
+            "decision": "accept",
+            "comment": "Looks good"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let list_response = app
         .clone()
         .oneshot(
@@ -9593,15 +9877,26 @@ async fn dispatch_endpoints_include_normalized_result_summary() {
         "Accepted review feedback: Looks good"
     );
     assert_eq!(get_json["dispatch"]["result"]["comment"], "Looks good");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 // ── GitHub Repos API tests ────────────────────────────────────
 
 #[tokio::test]
-async fn github_repos_empty_list() {
+async fn github_repos_pg_empty_list() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -9619,15 +9914,26 @@ async fn github_repos_empty_list() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["repos"].as_array().unwrap().is_empty());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn github_repos_register_and_list() {
+async fn github_repos_pg_register_and_list_basic() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
     // Register
-    let app = test_api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine.clone(),
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -9648,7 +9954,13 @@ async fn github_repos_register_and_list() {
     assert_eq!(json["repo"]["id"], "owner/repo1");
 
     // List
-    let app2 = test_api_router(db, engine, None);
+    let app2 = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -9664,6 +9976,9 @@ async fn github_repos_register_and_list() {
         .unwrap();
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert_eq!(json2["repos"].as_array().unwrap().len(), 1);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -9688,10 +10003,18 @@ async fn github_repos_register_bad_format() {
 }
 
 #[tokio::test]
-async fn github_repos_sync_not_registered() {
+async fn github_repos_pg_sync_not_registered() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -9705,6 +10028,9 @@ async fn github_repos_sync_not_registered() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -9919,20 +10245,26 @@ async fn cron_jobs_include_github_issue_card_sync_job_pg() {
 }
 
 #[tokio::test]
-async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::error::Error>> {
+async fn maintenance_jobs_pg_endpoint_lists_seed_job() -> Result<(), Box<dyn std::error::Error>> {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    {
-        let conn = db.lock()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            sqlite_params![
-                "maintenance_job:maintenance.noop_heartbeat:next_run_ms",
-                "1700000000000"
-            ],
-        )?;
-    }
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind("maintenance_job:maintenance.noop_heartbeat:next_run_ms")
+    .bind("1700000000000")
+    .execute(&pool)
+    .await?;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .clone()
@@ -10004,6 +10336,8 @@ async fn maintenance_jobs_endpoint_lists_seed_job() -> Result<(), Box<dyn std::e
         })?;
     assert_eq!(cron_maintenance_job["state"]["status"], "active");
 
+    pool.close().await;
+    pg_db.drop().await;
     Ok(())
 }
 
@@ -19375,10 +19709,18 @@ async fn auto_queue_activate_keeps_single_slot_agent_single_dispatched_group() {
 /// #107 regression: empty claude_session_id must be normalized to NULL at the API
 /// boundary so that stale clear paths don't poison the DB with "".
 #[tokio::test]
-async fn hook_session_normalizes_empty_claude_session_id_to_null() {
+async fn hook_session_pg_normalizes_empty_claude_session_id_to_null() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     // 1. Save a valid claude_session_id
     let resp = app
@@ -19398,17 +19740,13 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify it was stored
-    {
-        let conn = db.lock().unwrap();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored.as_deref(), Some("valid-id-123"));
-    }
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some("valid-id-123"));
 
     // 2. Send empty string — should be normalized to NULL (not stored as "")
     let resp = app
@@ -19430,21 +19768,17 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
     // The COALESCE in the upsert preserves the old value when the new one is NULL,
     // so the valid-id-123 should still be there (empty was normalized to NULL → COALESCE keeps old).
     // This is correct: to actually clear, use the dedicated clear-session-id endpoint.
-    {
-        let conn = db.lock().unwrap();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            stored.as_deref(),
-            Some("valid-id-123"),
-            "Empty string should be normalized to NULL, and COALESCE keeps the old value"
-        );
-    }
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some("valid-id-123"),
+        "Empty string should be normalized to NULL, and COALESCE keeps the old value"
+    );
 
     // 3. Use the dedicated clear endpoint to actually clear
     let resp = app
@@ -19462,20 +19796,16 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify it's actually cleared (NULL)
-    {
-        let conn = db.lock().unwrap();
-        let stored: Option<String> = conn
-            .query_row(
-                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(
-            stored.is_none(),
-            "After clear-session-id, value should be NULL"
-        );
-    }
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.is_none(),
+        "After clear-session-id, value should be NULL"
+    );
 
     // 4. Verify GET returns null after clear
     let resp = app
@@ -19496,13 +19826,24 @@ async fn hook_session_normalizes_empty_claude_session_id_to_null() {
         json["claude_session_id"].is_null(),
         "GET should return null after clear"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn hook_session_persists_raw_provider_session_id_separately() {
+async fn hook_session_pg_persists_raw_provider_session_id_separately() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let resp = app
         .clone()
@@ -19520,23 +19861,19 @@ async fn hook_session_persists_raw_provider_session_id_separately() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    {
-        let conn = db.lock().unwrap();
-        let stored: (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT claude_session_id, raw_provider_session_id
-                 FROM sessions
-                 WHERE session_key = 'test:gemini-raw'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(stored.0.as_deref(), Some("latest"));
-        assert_eq!(
-            stored.1.as_deref(),
-            Some("aa678e6b-c6d3-4dd2-9197-58580c00cc6c")
-        );
-    }
+    let stored: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT claude_session_id, raw_provider_session_id
+         FROM sessions
+         WHERE session_key = 'test:gemini-raw'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0.as_deref(), Some("latest"));
+    assert_eq!(
+        stored.1.as_deref(),
+        Some("aa678e6b-c6d3-4dd2-9197-58580c00cc6c")
+    );
 
     let resp = app
         .oneshot(
@@ -19559,6 +19896,9 @@ async fn hook_session_persists_raw_provider_session_id_separately() {
         json["raw_provider_session_id"],
         "aa678e6b-c6d3-4dd2-9197-58580c00cc6c"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 // ── #140: Parallel thread group auto-queue tests ──────────────────
@@ -25866,27 +26206,40 @@ fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolve
 /// #265: PATCH /dispatches/:id with an invalid status like "done" must return
 /// 400 and must NOT modify the dispatch or its associated card state.
 #[tokio::test]
-async fn patch_dispatch_rejects_invalid_status() {
+async fn patch_dispatch_pg_rejects_invalid_status() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_test_agents(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    // Seed a card in in_progress + a rework dispatch
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
-             VALUES ('card-265', 'Stuck Card', 'in_progress', 'ch-td', 'dispatch-265', datetime('now'), datetime('now'))",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
-             VALUES ('dispatch-265', 'card-265', 'ch-td', 'rework', 'dispatched', 'Rework task', datetime('now'), datetime('now'))",
-            [],
-        ).unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('ch-td', 'TD', '111', '222')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-265', 'Stuck Card', 'in_progress', 'ch-td', 'dispatch-265', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+         VALUES ('dispatch-265', 'card-265', 'ch-td', 'rework', 'dispatched', 'Rework task', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -25917,31 +26270,29 @@ async fn patch_dispatch_rejects_invalid_status() {
     );
 
     // Verify dispatch status is unchanged (pipeline invariant)
-    let conn = db.lock().unwrap();
-    let dispatch_status: String = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = 'dispatch-265'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = 'dispatch-265'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         dispatch_status, "dispatched",
         "dispatch status must be unchanged after rejected update"
     );
 
     // Verify card state is also unchanged (pipeline invariant)
-    let card_status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-265'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let card_status: String =
+        sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'card-265'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         card_status, "in_progress",
         "card status must be unchanged after rejected dispatch update"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// #265: Valid statuses like "cancelled" must still work through the generic path.
