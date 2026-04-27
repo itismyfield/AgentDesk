@@ -205,7 +205,7 @@ export default function KanbanTab({
   const [selectedBacklogIssue, setSelectedBacklogIssue] = useState<GitHubIssue | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [scopeOpen, setScopeOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanScopeOpen, true);
-  const [autoQueueOpen, setAutoQueueOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanAutoQueueOpen, true);
+  const [headerOpen, setHeaderOpen] = useLocalStorage<boolean>(STORAGE_KEYS.kanbanHeaderOpen, false);
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const advancedFiltersRef = useRef<HTMLDivElement | null>(null);
   const [reviewData, setReviewData] = useState<KanbanReview | null>(null);
@@ -1220,6 +1220,68 @@ export default function KanbanTab({
       className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden pb-24 md:pb-0"
       style={{ paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))" }}
     >
+      {!headerOpen && (
+        <div
+          data-testid="kanban-header-collapsed"
+          className="flex items-center gap-2 rounded-2xl border px-3 py-2 min-w-0"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-accent-info) 16%, var(--th-border) 84%)",
+            background: "color-mix(in srgb, var(--th-card-bg) 96%, var(--th-accent-info) 4%)",
+          }}
+        >
+          <div className="-mx-1 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto px-1">
+            {repoSources.length === 0 ? (
+              <span
+                className="rounded-full border border-dashed px-3 py-1 text-xs shrink-0"
+                style={{ color: "var(--th-text-muted)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}
+              >
+                {tr("repo 없음", "No repo")}
+              </span>
+            ) : (
+              repoSources.map((source) => {
+                const active = selectedRepo === source.repo;
+                return (
+                  <button
+                    key={source.id}
+                    type="button"
+                    onClick={() => setSelectedRepo(source.repo)}
+                    className="max-w-[160px] truncate rounded-full border px-2.5 py-1 text-xs shrink-0"
+                    style={{
+                      borderColor: active
+                        ? "color-mix(in srgb, var(--th-accent-info) 32%, var(--th-border) 68%)"
+                        : "color-mix(in srgb, var(--th-border) 72%, transparent)",
+                      background: active
+                        ? "color-mix(in srgb, var(--th-badge-sky-bg) 72%, var(--th-card-bg) 28%)"
+                        : "transparent",
+                      color: active ? "var(--th-accent-info)" : "var(--th-text-primary)",
+                    }}
+                    title={source.repo}
+                  >
+                    {source.repo.split("/")[1] ?? source.repo}
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <span className="text-[11px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+            {tr(`${openCount}건`, `${openCount}`)}
+          </span>
+          <button
+            type="button"
+            data-testid="kanban-header-expand"
+            onClick={() => setHeaderOpen(true)}
+            className="rounded-lg border px-2 py-1 text-xs shrink-0"
+            style={{
+              borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+              color: "var(--th-text-secondary)",
+            }}
+            aria-label={tr("칸반 헤더 펼치기", "Expand kanban header")}
+          >
+            ▼
+          </button>
+        </div>
+      )}
+      {headerOpen && (
       <SurfaceSection
         eyebrow={tr("워크 오케스트레이션", "Work orchestration")}
         title={tr("칸반", "Kanban")}
@@ -1434,6 +1496,15 @@ export default function KanbanTab({
               onClick={() => setSettingsOpen((prev) => !prev)}
             >
               {settingsOpen ? tr("설정 접기", "Close settings") : tr("설정 열기", "Open settings")}
+            </SurfaceActionButton>
+
+            <SurfaceActionButton
+              data-testid="kanban-header-collapse"
+              tone="neutral"
+              compact
+              onClick={() => setHeaderOpen(false)}
+            >
+              {tr("헤더 접기 ▲", "Collapse ▲")}
             </SurfaceActionButton>
           </div>
         </div>
@@ -1672,57 +1743,6 @@ export default function KanbanTab({
           </SurfaceNotice>
         )}
 
-        {/* Assignee selection modal: shown when moving to "ready" without an assignee */}
-        {assignBeforeReady && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setAssignBeforeReady(null)}>
-            <SurfaceCard
-              onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-sm space-y-4 rounded-[28px] p-5"
-              style={{
-                background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
-                borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
-              }}
-            >
-              <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>{tr("담당자 할당", "Assign Agent")}</h3>
-              <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>{tr("준비됨 상태로 이동하려면 담당자를 지정해야 합니다.", "Assign an agent before moving to ready.")}</p>
-              <select
-                value={assignBeforeReady.agentId}
-                onChange={(e) => setAssignBeforeReady((prev) => prev ? { ...prev, agentId: e.target.value } : null)}
-                className="w-full rounded-xl border px-3 py-2 text-sm"
-                style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
-              >
-                <option value="">{tr("선택...", "Select...")}</option>
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>{a.name_ko || a.name} ({a.id})</option>
-                ))}
-              </select>
-              <div className="flex justify-end gap-2">
-                <SurfaceActionButton
-                  onClick={() => setAssignBeforeReady(null)}
-                  tone="neutral"
-                >
-                  {tr("취소", "Cancel")}
-                </SurfaceActionButton>
-                <SurfaceActionButton
-                  disabled={!assignBeforeReady.agentId}
-                  tone="success"
-                  onClick={async () => {
-                    const { cardId, agentId } = assignBeforeReady;
-                    setAssignBeforeReady(null);
-                    try {
-                      await onUpdateCard(cardId, { status: "ready", assignee_agent_id: agentId });
-                    } catch (error) {
-                      setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
-                    }
-                  }}
-                >
-                  {tr("할당 후 준비됨", "Assign & Ready")}
-                </SurfaceActionButton>
-              </div>
-            </SurfaceCard>
-          </div>
-        )}
-
         {deferredDodPopup && (() => {
           const deferredItems = cards.flatMap((c) => {
             const meta = parseCardMetadata(c.metadata_json);
@@ -1872,6 +1892,61 @@ export default function KanbanTab({
           </SurfaceCard>
         )}
       </SurfaceSection>
+      )}
+
+      {/* Assignee selection modal: shown when moving to "ready" without an assignee.
+          Rendered outside the collapsible header so a card-status transition that
+          fires `setAssignBeforeReady(...)` still surfaces the modal even when the
+          header is collapsed. */}
+      {assignBeforeReady && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setAssignBeforeReady(null)}>
+          <SurfaceCard
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm space-y-4 rounded-[28px] p-5"
+            style={{
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+              borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
+            }}
+          >
+            <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>{tr("담당자 할당", "Assign Agent")}</h3>
+            <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>{tr("준비됨 상태로 이동하려면 담당자를 지정해야 합니다.", "Assign an agent before moving to ready.")}</p>
+            <select
+              value={assignBeforeReady.agentId}
+              onChange={(e) => setAssignBeforeReady((prev) => prev ? { ...prev, agentId: e.target.value } : null)}
+              className="w-full rounded-xl border px-3 py-2 text-sm"
+              style={{ ...SURFACE_FIELD_STYLE, color: "var(--th-text-primary)" }}
+            >
+              <option value="">{tr("선택...", "Select...")}</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name_ko || a.name} ({a.id})</option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <SurfaceActionButton
+                onClick={() => setAssignBeforeReady(null)}
+                tone="neutral"
+              >
+                {tr("취소", "Cancel")}
+              </SurfaceActionButton>
+              <SurfaceActionButton
+                disabled={!assignBeforeReady.agentId}
+                tone="success"
+                onClick={async () => {
+                  const { cardId, agentId } = assignBeforeReady;
+                  setAssignBeforeReady(null);
+                  try {
+                    await onUpdateCard(cardId, { status: "ready", assignee_agent_id: agentId });
+                  } catch (error) {
+                    setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
+                  }
+                }}
+              >
+                {tr("할당 후 준비됨", "Assign & Ready")}
+              </SurfaceActionButton>
+            </div>
+          </SurfaceCard>
+        </div>
+      )}
 
       {/* Cancel confirmation modal — ask whether to also close GitHub issues */}
       {cancelConfirm && (() => {
@@ -1942,82 +2017,13 @@ export default function KanbanTab({
       })()}
 
       {selectedRepo && (
-        <SurfaceCard
-          className="rounded-[24px] p-4"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-accent-primary) 18%, var(--th-border) 82%)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-badge-emerald-bg) 34%, var(--th-card-bg) 66%) 100%)",
-          }}
-        >
-          <div className="flex flex-wrap items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-                {tr("Queue Summary", "Queue Summary")}
-              </div>
-              <div className="mt-1 text-sm" style={{ color: "var(--th-text-primary)" }}>
-                {tr(
-                  `${selectedRepoLabel} backlog와 진행 흐름을 한눈에 봅니다.`,
-                  `Review ${selectedRepoLabel} backlog and live flow at a glance.`,
-                )}
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <SurfaceMetricPill tone="accent" label={tr("열린 카드", "Open")} value={openCount} className="min-w-[108px]" />
-              <SurfaceMetricPill tone="info" label={tr("진행 중", "In Progress")} value={inProgressCount} className="min-w-[108px]" />
-              <SurfaceMetricPill tone="warn" label={tr("리뷰", "Review")} value={reviewQueueCount} className="min-w-[108px]" />
-              <SurfaceMetricPill tone="danger" label={tr("수동 개입", "Manual")} value={manualInterventionCount} className="min-w-[108px]" />
-              <SurfaceMetricPill tone="neutral" label={tr("준비됨", "Ready")} value={readyCount} className="min-w-[108px]" />
-            </div>
-          </div>
-        </SurfaceCard>
-      )}
-
-      {/* #1253: AutoQueuePanel was buried in the post-board "Extensions"
-          section, which made next-up dispatch state invisible until users
-          scrolled past the whole board. Promote it as a collapsible card
-          right above the board so the auto-queue stays the first thing
-          ops sees, while keeping the collapsed-state preference in
-          localStorage so power users can still hide it. */}
-      {selectedRepo && (
-        <SurfaceCard
-          data-testid="kanban-autoqueue-card"
-          className="rounded-[24px] p-0"
-          style={{
-            borderColor: "color-mix(in srgb, var(--th-accent-info) 18%, var(--th-border) 82%)",
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
-          }}
-        >
-          <button
-            type="button"
-            data-testid="kanban-autoqueue-toggle"
-            onClick={() => setAutoQueueOpen((prev) => !prev)}
-            className="flex w-full items-center gap-3 px-4 py-3 text-left"
-            aria-expanded={autoQueueOpen}
-          >
-            <span className="text-[11px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-              {tr("자동 큐", "Auto Queue")}
-            </span>
-            <span className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-              {tr("다음 디스패치 대기열을 보드 바로 위에서 확인합니다.", "Watch the upcoming dispatch queue right above the board.")}
-            </span>
-            <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {autoQueueOpen ? tr("접기 ▲", "Collapse ▲") : tr("펼치기 ▼", "Expand ▼")}
-            </span>
-          </button>
-          {autoQueueOpen && (
-            <div className="border-t px-4 pb-4 pt-3" style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}>
-              <AutoQueuePanel
-                tr={tr}
-                locale={locale}
-                agents={agents}
-                selectedRepo={selectedRepo}
-                selectedAgentId={selectedAgentId}
-              />
-            </div>
-          )}
-        </SurfaceCard>
+        <AutoQueuePanel
+          tr={tr}
+          locale={locale}
+          agents={agents}
+          selectedRepo={selectedRepo}
+          selectedAgentId={selectedAgentId}
+        />
       )}
 
       <div className="min-w-0">
