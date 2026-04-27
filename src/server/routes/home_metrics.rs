@@ -75,10 +75,22 @@ pub async fn home_kpi_trends(
     // Reuse the shared receipt::token-analytics 30 s in-process cache (#1303)
     // so cold dashboard loads don't pay two ~9 s filesystem scans (one here,
     // one for /api/token-analytics).
-    let label = format!("Last {days} Days");
-    let period_id = format!("{days}d");
-    let analytics_data =
-        super::receipt::cached_or_collect_token_analytics(&period_id, days, &label, now).await;
+    //
+    // The cache is keyed by the canonical analytics periods (7d / 30d / 90d)
+    // that `prewarm_token_analytics_cache` populates and `/api/token-analytics`
+    // writes. Round the home-trends `days` value up to the nearest covering
+    // canonical period so a `days=14` request hits the same `30d` cache slot
+    // that the token-analytics endpoint and prewarm already populate. The
+    // sparkline slice afterwards is already keyed off `date_keys`, so the
+    // wider cached payload naturally narrows down to the requested window.
+    let (cache_period_id, cache_days, cache_label) = canonical_cache_window(days);
+    let analytics_data = super::receipt::cached_or_collect_token_analytics(
+        cache_period_id,
+        cache_days,
+        cache_label,
+        now,
+    )
+    .await;
 
     let (tokens_values, cost_values) = match analytics_data.as_deref() {
         Some(data) => {
@@ -135,6 +147,23 @@ pub async fn home_kpi_trends(
     });
 
     (StatusCode::OK, Json(body))
+}
+
+/// Round the requested home-trends `days` value up to the nearest canonical
+/// token-analytics period (7d / 30d / 90d) so the cache slot collides with
+/// what `prewarm_token_analytics_cache` and `/api/token-analytics` populate.
+/// Returns (period_id, days_for_scan, label) consumed by
+/// `cached_or_collect_token_analytics`. The home sparkline already slices
+/// down to the requested window via `date_keys`, so a wider cached payload
+/// is harmless.
+fn canonical_cache_window(days: i64) -> (&'static str, i64, &'static str) {
+    if days <= 7 {
+        ("7d", 7, "Last 7 Days")
+    } else if days <= 30 {
+        ("30d", 30, "Last 30 Days")
+    } else {
+        ("90d", 90, "Last 90 Days")
+    }
 }
 
 /// Build the ordered list of YYYY-MM-DD keys covering the trailing
