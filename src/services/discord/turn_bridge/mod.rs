@@ -933,6 +933,22 @@ pub(super) fn spawn_turn_bridge(
         let status_interval = super::status_update_interval();
         let turn_start = std::time::Instant::now();
 
+        // codex round-5 P2 on PR #1308: a dcserver restart resumed an inflight
+        // turn whose persisted state still flags `long_running_placeholder_active`.
+        // The in-memory controller is empty here and the original
+        // `PlaceholderActiveInput` snapshot was never persisted, so we cannot
+        // reconstruct the Active entry. Edit the stale 🔄 card to a generic
+        // resumed-aborted notice and clear the flag so subsequent streaming /
+        // sweeper logic treats this turn as a fresh resume.
+        if inflight_state.long_running_placeholder_active {
+            let resumed_notice =
+                "🛑 백그라운드 카드 종료됨 — 서버 재시작으로 이전 흐름이 끊겨 새 응답으로 이어집니다.";
+            let _ = gateway
+                .edit_message(channel_id, current_msg_id, resumed_notice)
+                .await;
+            inflight_state.long_running_placeholder_active = false;
+        }
+
         let _ = save_inflight_state(&inflight_state);
         crate::services::observability::emit_turn_started(
             provider.as_str(),
@@ -1298,10 +1314,19 @@ pub(super) fn spawn_turn_bridge(
                             if let Some((key, snapshot, close_trigger)) =
                                 long_running_placeholder_active.take()
                             {
-                                if matches!(
+                                let monitor_like = matches!(
                                     close_trigger,
                                     super::formatting::LongRunningCloseTrigger::MonitorLike
-                                ) {
+                                );
+                                // codex round-5 P2: an `is_error` ToolResult on
+                                // a background dispatch (e.g. the launch itself
+                                // failed) must close the card as Aborted —
+                                // otherwise `Done` would later mark it
+                                // Completed and Discord would report a failed
+                                // background launch as ✅. Successful acks for
+                                // background dispatch stay open until
+                                // `Done`/cancel.
+                                if monitor_like || is_error {
                                     let target = if is_error {
                                         super::placeholder_controller::PlaceholderLifecycle::Aborted
                                     } else {
@@ -1315,7 +1340,8 @@ pub(super) fn spawn_turn_bridge(
                                         .long_running_placeholder_active = false;
                                     state_dirty = true;
                                 } else {
-                                    // Re-stash so `Done`/cancel can close it.
+                                    // Successful background dispatch ack —
+                                    // re-stash so `Done`/cancel can close it.
                                     long_running_placeholder_active =
                                         Some((key, snapshot, close_trigger));
                                 }
@@ -2266,6 +2292,12 @@ pub(super) fn spawn_turn_bridge(
                     source: "turn_bridge_tmux_handoff",
                 },
             );
+            // codex round-5 P2 on PR #1308: after handoff, the watcher owns
+            // the placeholder lifecycle through `placeholder_cleanup` and
+            // direct edits — it never calls `transition`/`detach`. Drop the
+            // controller's `Active` entry now so it does not survive as a
+            // non-evictable row in the cap-bounded map.
+            shared_owned.placeholder_controller.detach(&key);
             let ts = chrono::Local::now().format("%H:%M:%S");
             if handoff_committed {
                 tracing::warn!(
