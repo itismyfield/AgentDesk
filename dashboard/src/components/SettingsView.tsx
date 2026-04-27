@@ -1,4 +1,4 @@
-import { Check, Eye, Info, Search } from "lucide-react";
+import { Check, ChevronDown, Eye, Info, Search } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
 import type { CompanySettings, Agent } from "../types";
 import * as api from "../api";
@@ -66,6 +66,68 @@ interface AuditNote {
   descriptionEn: string;
   keys: string[];
   status: AuditNoteStatus;
+}
+
+/**
+ * Source of a setting (where the value lives + governance).
+ * - repo_canonical:  canonical config (e.g. agentdesk.yaml / repo defaults)
+ * - runtime_config:  kv_meta['runtime-config'] live values
+ * - kv_meta:         individual whitelisted kv_meta keys
+ * - live_override:   kv_meta override active over baseline
+ * - legacy_readonly: alias / non-canonical surface kept visible only
+ * - computed:        derived value (no direct edit path)
+ */
+export type SettingSource =
+  | "repo_canonical"
+  | "runtime_config"
+  | "kv_meta"
+  | "live_override"
+  | "legacy_readonly"
+  | "computed";
+
+export type SettingFlag =
+  | "kv_meta"
+  | "live_override"
+  | "alert"
+  | "read_only"
+  | "restart_required";
+
+export type ValidationState =
+  | { ok: true }
+  | { ok: false; messageKo: string; messageEn: string };
+
+export type SettingGroupId = "pipeline" | "runtime" | "onboarding" | "general";
+
+/**
+ * Canonical metadata that drives every SettingRow rendered in the settings page.
+ * All settings — whether kv_meta, runtime config, or general identity — funnel
+ * through this type so the UI can expose source / editable / restartRequired
+ * uniformly.
+ */
+export interface SettingRowMeta {
+  key: string;
+  group: SettingGroupId | string;
+  source: SettingSource;
+  editable: boolean;
+  restartRequired: boolean;
+  defaultValue?: unknown;
+  effectiveValue: unknown;
+  validation?: ValidationState;
+  flags: SettingFlag[];
+  // Presentation extras (not part of the issue's required type but used by
+  // the UI; declared as optional so the public type signature still matches).
+  labelKo?: string;
+  labelEn?: string;
+  hintKo?: string;
+  hintEn?: string;
+  inputKind?: "text" | "number" | "toggle" | "select" | "readonly";
+  selectOptions?: Array<{ value: string; labelKo: string; labelEn: string }>;
+  valueUnit?: string;
+  numericRange?: { min: number; max: number; step: number };
+  storageLayerKo?: string;
+  storageLayerEn?: string;
+  restartNoteKo?: string;
+  restartNoteEn?: string;
 }
 
 const SETTINGS_PANEL_QUERY_KEY = "settingsPanel";
@@ -732,6 +794,93 @@ function formatConfigValue(value: ConfigEditValue): string {
   return typeof value === "boolean" ? String(value) : value;
 }
 
+/**
+ * Build a SettingRowMeta from a /api/settings/config kv_meta entry.
+ * Drives the pipeline + runtime panel rows.
+ */
+function metaFromConfigEntry(
+  entry: ConfigEntry,
+  edits: Record<string, ConfigEditValue>,
+): SettingRowMeta {
+  const hasEdit = Object.prototype.hasOwnProperty.call(edits, entry.key);
+  const effective = hasEdit ? edits[entry.key] : (entry.value ?? entry.default ?? "");
+  const readOnly =
+    READ_ONLY_CONFIG_KEYS.has(entry.key) || entry.editable === false;
+  const overrideActive = Boolean(entry.override_active);
+  const restartRequired =
+    entry.restart_behavior === "reseed-from-yaml" ||
+    entry.restart_behavior === "reset-to-baseline" ||
+    entry.restart_behavior === "config-only";
+
+  let source: SettingSource;
+  if (readOnly) {
+    source = entry.baseline_source === "config" ? "repo_canonical" : "legacy_readonly";
+  } else if (overrideActive) {
+    source = "live_override";
+  } else if (entry.baseline_source === "yaml" || entry.baseline_source === "hardcoded") {
+    source = "repo_canonical";
+  } else if (entry.baseline_source === "config") {
+    source = "repo_canonical";
+  } else {
+    source = "kv_meta";
+  }
+
+  const flags: SettingFlag[] = [];
+  if (!readOnly) flags.push("kv_meta");
+  if (overrideActive) flags.push("live_override");
+  if (readOnly) flags.push("read_only");
+  if (restartRequired) flags.push("restart_required");
+
+  const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
+
+  let inputKind: SettingRowMeta["inputKind"] = "text";
+  if (readOnly) inputKind = "readonly";
+  else if (BOOLEAN_CONFIG_KEYS.has(entry.key)) inputKind = "toggle";
+  else if (NUMERIC_CONFIG_KEYS.has(entry.key)) inputKind = "number";
+
+  return {
+    key: entry.key,
+    group: configCategoryToGroup(entry.category, entry.key),
+    source,
+    editable: !readOnly,
+    restartRequired,
+    defaultValue: entry.default ?? null,
+    effectiveValue: effective,
+    flags,
+    labelKo: entry.label_ko ?? entry.key,
+    labelEn: entry.label_en ?? entry.key,
+    hintKo: description?.ko,
+    hintEn: description?.en,
+    inputKind,
+    storageLayerKo:
+      source === "live_override"
+        ? "kv_meta override"
+        : source === "kv_meta"
+          ? "kv_meta"
+          : source === "repo_canonical"
+            ? entry.baseline_source === "yaml"
+              ? "agentdesk.yaml"
+              : entry.baseline_source === "config"
+                ? "server config"
+                : "default"
+            : undefined,
+    storageLayerEn:
+      source === "live_override"
+        ? "kv_meta override"
+        : source === "kv_meta"
+          ? "kv_meta"
+          : source === "repo_canonical"
+            ? entry.baseline_source === "yaml"
+              ? "agentdesk.yaml"
+              : entry.baseline_source === "config"
+                ? "server config"
+                : "default"
+            : undefined,
+    restartNoteKo: restartBehaviorNote(entry.restart_behavior, true) ?? undefined,
+    restartNoteEn: restartBehaviorNote(entry.restart_behavior, false) ?? undefined,
+  };
+}
+
 function applyConfigEdits(
   entries: ConfigEntry[],
   edits: Record<string, ConfigEditValue>,
@@ -795,6 +944,364 @@ function restartBehaviorNote(behavior: string | null | undefined, isKo: boolean)
     return isKo ? "서버 설정에서 직접 읽는 값이라 여기서는 읽기 전용입니다." : "This value comes directly from server config and is read-only here.";
   }
   return null;
+}
+
+interface SettingGroupMeta {
+  id: SettingGroupId;
+  nameKo: string;
+  nameEn: string;
+  descKo: string;
+  descEn: string;
+}
+
+const SETTING_GROUPS: SettingGroupMeta[] = [
+  {
+    id: "pipeline",
+    nameKo: "파이프라인",
+    nameEn: "Pipeline",
+    descKo: "칸반 흐름과 상태 전환에 직접 영향을 주는 값입니다.",
+    descEn: "Values that directly affect kanban flow and state transitions.",
+  },
+  {
+    id: "runtime",
+    nameKo: "런타임",
+    nameEn: "Runtime",
+    descKo: "실행 환경과 리소스 제어, 컨텍스트 정책을 다룹니다.",
+    descEn: "Execution environment, resource controls, and context policy.",
+  },
+  {
+    id: "onboarding",
+    nameKo: "온보딩",
+    nameEn: "Onboarding",
+    descKo: "신규 워크스페이스가 처음 겪는 경로와 위저드 전용 키입니다.",
+    descEn: "First-run path and wizard-managed keys for new workspaces.",
+  },
+  {
+    id: "general",
+    nameKo: "일반",
+    nameEn: "General",
+    descKo: "회사 정보, 표시 환경, 메타 설정.",
+    descEn: "Company identity, display environment, and meta settings.",
+  },
+];
+
+/**
+ * Maps a kv_meta whitelist category onto the four spec groups.
+ * Kept as a function so individual keys can override the default.
+ */
+function configCategoryToGroup(category: string, key: string): SettingGroupId {
+  if (key === "server_port") return "general";
+  if (key.startsWith("context_compact_")) return "runtime";
+  if (key.startsWith("context_clear_")) return "runtime";
+  if (category === "pipeline") return "pipeline";
+  if (category === "review") return "pipeline";
+  if (category === "timeout") return "pipeline";
+  if (category === "dispatch") return "pipeline";
+  if (category === "context") return "runtime";
+  if (category === "system") return "pipeline";
+  return "pipeline";
+}
+
+function flagTone(flag: SettingFlag): { bg: string; fg: string; border: string } {
+  switch (flag) {
+    case "kv_meta":
+      return {
+        bg: "color-mix(in srgb, var(--th-overlay-medium) 92%, transparent)",
+        fg: "var(--th-text-secondary)",
+        border: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+      };
+    case "live_override":
+      return {
+        bg: "rgba(56, 189, 248, 0.16)",
+        fg: "rgba(186, 230, 253, 0.92)",
+        border: "rgba(56, 189, 248, 0.42)",
+      };
+    case "alert":
+      return {
+        bg: "rgba(251, 191, 36, 0.16)",
+        fg: "rgba(253, 230, 138, 0.92)",
+        border: "rgba(251, 191, 36, 0.42)",
+      };
+    case "read_only":
+      return {
+        bg: "rgba(148, 163, 184, 0.18)",
+        fg: "rgba(226, 232, 240, 0.85)",
+        border: "rgba(148, 163, 184, 0.40)",
+      };
+    case "restart_required":
+      return {
+        bg: "rgba(244, 114, 182, 0.16)",
+        fg: "rgba(251, 207, 232, 0.92)",
+        border: "rgba(244, 114, 182, 0.42)",
+      };
+  }
+}
+
+function flagLabel(flag: SettingFlag, isKo: boolean): string {
+  if (flag === "kv_meta") return "kv_meta";
+  if (flag === "live_override") return isKo ? "live override" : "live override";
+  if (flag === "alert") return isKo ? "alert" : "alert";
+  if (flag === "read_only") return isKo ? "read-only" : "read-only";
+  if (flag === "restart_required") return isKo ? "restart" : "restart";
+  return flag;
+}
+
+function settingSourceLabel(source: SettingSource, isKo: boolean): string {
+  if (source === "repo_canonical") return isKo ? "repo 정본" : "repo canonical";
+  if (source === "runtime_config") return isKo ? "런타임 설정" : "runtime config";
+  if (source === "kv_meta") return "kv_meta";
+  if (source === "live_override") return isKo ? "실시간 override" : "live override";
+  if (source === "legacy_readonly") return isKo ? "legacy alias" : "legacy alias";
+  if (source === "computed") return isKo ? "유도값" : "computed";
+  return source;
+}
+
+interface SettingRowProps {
+  meta: SettingRowMeta;
+  isKo: boolean;
+  onChange?: (key: string, value: string | boolean | number) => void;
+  // Allow callers to render bespoke control surfaces (e.g. range slider) when
+  // the default control is not enough. The default control is rendered if not
+  // provided.
+  renderControl?: (meta: SettingRowMeta) => ReactNode;
+  controlOverlay?: ReactNode;
+  trailingMeta?: ReactNode;
+}
+
+function SettingRow({
+  meta,
+  isKo,
+  onChange,
+  renderControl,
+  controlOverlay,
+  trailingMeta,
+}: SettingRowProps) {
+  const [open, setOpen] = useState(false);
+  const tr = (ko: string, en: string) => (isKo ? ko : en);
+
+  const labelText = isKo ? meta.labelKo ?? meta.key : meta.labelEn ?? meta.key;
+  const hintText = isKo ? meta.hintKo : meta.hintEn;
+  const readOnly = !meta.editable;
+
+  const renderDefaultControl = () => {
+    if (renderControl) return renderControl(meta);
+    if (readOnly) {
+      return (
+        <div
+          className="w-full truncate rounded-xl px-3 py-2 text-xs"
+          style={{
+            background: "color-mix(in srgb, var(--th-bg-surface) 60%, transparent)",
+            border: "1px dashed color-mix(in srgb, var(--th-border) 70%, transparent)",
+            color: "var(--th-text-muted)",
+            fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+          }}
+        >
+          {String(meta.effectiveValue ?? "")}
+        </div>
+      );
+    }
+    if (meta.inputKind === "toggle") {
+      const enabled = Boolean(
+        meta.effectiveValue === true ||
+          meta.effectiveValue === "true" ||
+          meta.effectiveValue === 1 ||
+          meta.effectiveValue === "1",
+      );
+      return (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          onClick={() => onChange?.(meta.key, !enabled)}
+          className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+          style={{
+            background: enabled ? "var(--th-accent-primary)" : "color-mix(in srgb, var(--th-border) 80%, transparent)",
+          }}
+        >
+          <span
+            className="inline-block h-5 w-5 rounded-full bg-white shadow transition-transform"
+            style={{ transform: enabled ? "translateX(1.4rem)" : "translateX(0.15rem)" }}
+          />
+        </button>
+      );
+    }
+    if (meta.inputKind === "select" && meta.selectOptions) {
+      return (
+        <select
+          value={String(meta.effectiveValue ?? "")}
+          onChange={(event) => onChange?.(meta.key, event.target.value)}
+          className="w-full rounded-xl px-3 py-2 text-sm"
+          style={{
+            background: "var(--th-bg-surface)",
+            border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
+            color: "var(--th-text)",
+          }}
+        >
+          {meta.selectOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {isKo ? opt.labelKo : opt.labelEn}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    return (
+      <input
+        type={meta.inputKind === "number" ? "number" : "text"}
+        inputMode={meta.inputKind === "number" ? "numeric" : undefined}
+        min={meta.numericRange?.min}
+        max={meta.numericRange?.max}
+        step={meta.numericRange?.step}
+        value={String(meta.effectiveValue ?? "")}
+        onChange={(event) =>
+          onChange?.(
+            meta.key,
+            meta.inputKind === "number" ? Number(event.target.value) : event.target.value,
+          )
+        }
+        className="w-full rounded-xl px-3 py-2 text-xs"
+        style={{
+          background: "var(--th-bg-surface)",
+          border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
+          color: "var(--th-text)",
+          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+        }}
+      />
+    );
+  };
+
+  return (
+    <div
+      className="setting-row border-b last:border-b-0"
+      style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
+      data-testid={`setting-row-${meta.key}`}
+    >
+      <div className="setting-row-grid items-center gap-3 px-2 py-3 sm:gap-4 sm:px-3 sm:py-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+              {labelText}
+            </span>
+            {meta.flags.map((flag) => {
+              const tone = flagTone(flag);
+              return (
+                <span
+                  key={flag}
+                  className="inline-flex items-center rounded-full border px-1.5 py-px text-[10px] font-medium uppercase tracking-wide"
+                  style={{ background: tone.bg, color: tone.fg, borderColor: tone.border }}
+                >
+                  {flagLabel(flag, isKo)}
+                </span>
+              );
+            })}
+          </div>
+          {hintText ? (
+            <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+              {hintText}
+            </div>
+          ) : null}
+          <code
+            className="mt-1 inline-block rounded px-1 py-px text-[10px]"
+            style={{
+              background: "color-mix(in srgb, var(--th-overlay-medium) 80%, transparent)",
+              color: "var(--th-text-muted)",
+              fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+            }}
+          >
+            {meta.key}
+          </code>
+        </div>
+        <div className="min-w-0">
+          {controlOverlay ?? renderDefaultControl()}
+        </div>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={tr("자세히 보기", "Show details")}
+          onClick={() => setOpen((current) => !current)}
+          className="grid h-8 w-8 place-items-center rounded-full border"
+          style={{
+            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+            color: "var(--th-text-muted)",
+            background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+          }}
+        >
+          <ChevronDown
+            size={14}
+            style={{
+              transform: open ? "rotate(180deg)" : "none",
+              transition: "transform 0.2s",
+            }}
+          />
+        </button>
+      </div>
+      {open ? (
+        <div
+          className="mx-2 mb-3 grid gap-2 rounded-2xl p-3 text-[11px] sm:mx-3 sm:grid-cols-2 sm:gap-3 sm:p-4"
+          style={{
+            background: "color-mix(in srgb, var(--th-overlay-medium) 70%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--th-border) 60%, transparent)",
+            color: "var(--th-text-muted)",
+          }}
+        >
+          <div>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("기본값:", "Default:")} </span>
+            <code
+              style={{
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                color: "var(--th-text)",
+              }}
+            >
+              {meta.defaultValue === undefined || meta.defaultValue === null
+                ? tr("없음", "—")
+                : String(meta.defaultValue)}
+            </code>
+          </div>
+          <div>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("저장 레이어:", "Storage:")} </span>
+            <code
+              style={{
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                color: "var(--th-text)",
+              }}
+            >
+              {settingSourceLabel(meta.source, isKo)}
+            </code>
+            {meta.storageLayerKo || meta.storageLayerEn ? (
+              <span className="ml-1" style={{ color: "var(--th-text-muted)" }}>
+                · {tr(meta.storageLayerKo ?? "", meta.storageLayerEn ?? "")}
+              </span>
+            ) : null}
+          </div>
+          <div>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("편집 가능:", "Editable:")} </span>
+            <span style={{ color: "var(--th-text)" }}>
+              {meta.editable ? tr("예", "yes") : tr("아니오 (읽기 전용)", "no (read-only)")}
+            </span>
+          </div>
+          <div>
+            <span style={{ color: "var(--th-text-muted)" }}>{tr("재시작 필요:", "Restart required:")} </span>
+            <span style={{ color: "var(--th-text)" }}>
+              {meta.restartRequired ? tr("예", "yes") : tr("아니오", "no")}
+            </span>
+          </div>
+          {meta.restartNoteKo || meta.restartNoteEn ? (
+            <div className="sm:col-span-2" style={{ color: "var(--th-text-muted)" }}>
+              {tr(meta.restartNoteKo ?? "", meta.restartNoteEn ?? "")}
+            </div>
+          ) : null}
+          {meta.validation && meta.validation.ok === false ? (
+            <div className="sm:col-span-2" style={{ color: "rgba(252,165,165,0.95)" }}>
+              {tr(meta.validation.messageKo, meta.validation.messageEn)}
+            </div>
+          ) : null}
+          {trailingMeta ? <div className="sm:col-span-2">{trailingMeta}</div> : null}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function PanelNavButton({
@@ -1358,42 +1865,324 @@ export default function SettingsView({
     setShowOnboarding(true);
   }, [handlePanelChange]);
 
-  const navItems = useMemo(
+  // ----- SettingRowMeta roster -----
+  // Every visible setting funnels through this catalog so the spec invariant
+  // "all SettingRow rendered through SettingRowMeta" holds and search/badges
+  // share the same data source.
+  const generalMetas = useMemo<SettingRowMeta[]>(
     () => [
       {
-        id: "general" as const,
-        title: tr("일반", "General"),
-        detail: tr("회사명, CEO, 언어, 테마", "Company name, CEO, language, theme"),
-        count: String(generalFieldCount),
+        key: "companyName",
+        group: "general",
+        source: "kv_meta",
+        editable: true,
+        restartRequired: false,
+        defaultValue: settings.companyName,
+        effectiveValue: companyName,
+        validation: companyNameError
+          ? { ok: false, messageKo: companyNameError, messageEn: companyNameError }
+          : { ok: true },
+        flags: ["kv_meta"],
+        labelKo: "회사 이름",
+        labelEn: "Company name",
+        hintKo: "대시보드와 주요 헤더에 표시되는 이름입니다.",
+        hintEn: "Shown in the dashboard and primary headers.",
+        inputKind: "text",
+        storageLayerKo: "kv_meta['settings']",
+        storageLayerEn: "kv_meta['settings']",
       },
       {
-        id: "runtime" as const,
-        title: tr("런타임", "Runtime"),
-        detail: tr("폴링, 캐시, 경고 임계값", "Polling, cache, alert thresholds"),
-        count: String(runtimeFieldCount),
+        key: "ceoName",
+        group: "general",
+        source: "kv_meta",
+        editable: true,
+        restartRequired: false,
+        defaultValue: settings.ceoName,
+        effectiveValue: ceoName,
+        validation: ceoNameError
+          ? { ok: false, messageKo: ceoNameError, messageEn: ceoNameError }
+          : { ok: true },
+        flags: ["kv_meta"],
+        labelKo: "CEO 이름",
+        labelEn: "CEO name",
+        hintKo: "오피스와 일부 운영 UI에서 대표 인물 이름으로 사용됩니다.",
+        hintEn: "Used as the representative persona name in office and ops surfaces.",
+        inputKind: "text",
+        storageLayerKo: "kv_meta['settings']",
+        storageLayerEn: "kv_meta['settings']",
       },
       {
-        id: "pipeline" as const,
-        title: tr("파이프라인", "Pipeline"),
-        detail: tr("리뷰, 타임아웃, 상태 전환 정책", "Review, timeout, transition policy"),
-        count: String(visibleConfigEntries.length),
+        key: "language",
+        group: "general",
+        source: "kv_meta",
+        editable: true,
+        restartRequired: false,
+        defaultValue: settings.language,
+        effectiveValue: language,
+        flags: ["kv_meta"],
+        labelKo: "언어",
+        labelEn: "Language",
+        hintKo: "대시보드 전반의 기본 언어와 로캘을 정합니다.",
+        hintEn: "Sets the default language and locale across the dashboard.",
+        inputKind: "select",
+        selectOptions: [
+          { value: "ko", labelKo: "한국어", labelEn: "Korean" },
+          { value: "en", labelKo: "영어", labelEn: "English" },
+          { value: "ja", labelKo: "일본어", labelEn: "Japanese" },
+          { value: "zh", labelKo: "중국어", labelEn: "Chinese" },
+        ],
+        storageLayerKo: "kv_meta['settings']",
+        storageLayerEn: "kv_meta['settings']",
       },
       {
-        id: "onboarding" as const,
-        title: tr("온보딩", "Onboarding"),
-        detail: tr("Discord 연결과 초기 세팅 재실행", "Re-run Discord wiring and first-run setup"),
+        key: "theme",
+        group: "general",
+        source: "kv_meta",
+        editable: true,
+        restartRequired: false,
+        defaultValue: settings.theme,
+        effectiveValue: theme,
+        flags: ["kv_meta"],
+        labelKo: "테마",
+        labelEn: "Theme",
+        hintKo: "대시보드와 오피스 화면의 기본 분위기를 정합니다.",
+        hintEn: "Sets the base look and feel for dashboard and office views.",
+        inputKind: "select",
+        selectOptions: [
+          { value: "dark", labelKo: "다크", labelEn: "Dark" },
+          { value: "light", labelKo: "라이트", labelEn: "Light" },
+          { value: "auto", labelKo: "자동 (시스템)", labelEn: "Auto (System)" },
+        ],
+        storageLayerKo: "kv_meta['settings']",
+        storageLayerEn: "kv_meta['settings']",
       },
     ],
-    [generalFieldCount, runtimeFieldCount, tr, visibleConfigEntries.length],
+    [
+      ceoName,
+      ceoNameError,
+      companyName,
+      companyNameError,
+      language,
+      settings.ceoName,
+      settings.companyName,
+      settings.language,
+      settings.theme,
+      theme,
+    ],
+  );
+
+  const runtimeMetas = useMemo<SettingRowMeta[]>(
+    () =>
+      CATEGORIES.flatMap((category) =>
+        category.fields.map<SettingRowMeta>((field) => {
+          const current = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
+          const def = rcDefaults[field.key] ?? 0;
+          const overrideActive = current !== def;
+          return {
+            key: field.key,
+            group: "runtime",
+            source: overrideActive ? "live_override" : "runtime_config",
+            editable: true,
+            restartRequired: false,
+            defaultValue: def,
+            effectiveValue: current,
+            flags: overrideActive ? ["kv_meta", "live_override"] : ["kv_meta"],
+            labelKo: field.labelKo,
+            labelEn: field.labelEn,
+            hintKo: `${field.descriptionKo} · ${field.min}–${field.max}${field.unit}`,
+            hintEn: `${field.descriptionEn} · ${field.min}–${field.max}${field.unit}`,
+            inputKind: "number",
+            valueUnit: field.unit,
+            numericRange: { min: field.min, max: field.max, step: field.step },
+            storageLayerKo: "kv_meta['runtime-config']",
+            storageLayerEn: "kv_meta['runtime-config']",
+            restartNoteKo: "저장 즉시 반영, 재시작 없이 다음 폴링 주기에 적용됩니다.",
+            restartNoteEn: "Applies on the next poll without restart.",
+          };
+        }),
+      ),
+    [rcValues, rcDefaults],
+  );
+
+  const pipelineMetas = useMemo<SettingRowMeta[]>(
+    () => configEntries.map((entry) => metaFromConfigEntry(entry, configEdits)),
+    [configEntries, configEdits],
+  );
+
+  // Onboarding-managed kv_meta keys are exposed read-only here. They are
+  // edited through the onboarding wizard / dedicated API, but the spec
+  // requires them to be visible (with legacy_readonly chip + editable=false).
+  const onboardingMetas = useMemo<SettingRowMeta[]>(
+    () => [
+      {
+        key: "greeting_template",
+        group: "onboarding",
+        source: "kv_meta",
+        editable: false,
+        restartRequired: false,
+        defaultValue: "welcome to AgentDesk",
+        effectiveValue: "(managed by wizard)",
+        flags: ["kv_meta", "read_only"],
+        labelKo: "인사 템플릿",
+        labelEn: "Greeting template",
+        hintKo: "신규 에이전트 첫 메시지. 위저드에서 관리합니다.",
+        hintEn: "First message for new agents. Managed by the wizard.",
+        inputKind: "readonly",
+        storageLayerKo: "kv_meta (wizard)",
+        storageLayerEn: "kv_meta (wizard)",
+      },
+      {
+        key: "trial_card_count",
+        group: "onboarding",
+        source: "kv_meta",
+        editable: false,
+        restartRequired: false,
+        defaultValue: 2,
+        effectiveValue: "(managed by wizard)",
+        flags: ["kv_meta", "read_only"],
+        labelKo: "트라이얼 카드 수",
+        labelEn: "Trial card count",
+        hintKo: "연습용으로 할당하는 카드 수입니다.",
+        hintEn: "Practice cards allocated to a new workspace.",
+        inputKind: "readonly",
+        storageLayerKo: "kv_meta (wizard)",
+        storageLayerEn: "kv_meta (wizard)",
+      },
+      {
+        key: "onboarding_bot_token",
+        group: "onboarding",
+        source: "legacy_readonly",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: "(stored via onboarding API)",
+        flags: ["read_only"],
+        labelKo: "Discord 봇 토큰",
+        labelEn: "Discord bot token",
+        hintKo: "/api/onboarding/* 가 관리합니다. 위저드를 사용하세요.",
+        hintEn: "Managed by /api/onboarding/*. Use the wizard.",
+        inputKind: "readonly",
+        storageLayerKo: "/api/onboarding + kv_meta",
+        storageLayerEn: "/api/onboarding + kv_meta",
+      },
+      {
+        key: "onboarding_guild_id",
+        group: "onboarding",
+        source: "legacy_readonly",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: "(stored via onboarding API)",
+        flags: ["read_only"],
+        labelKo: "Guild ID",
+        labelEn: "Guild ID",
+        hintKo: "/api/onboarding/* 가 관리합니다.",
+        hintEn: "Managed by /api/onboarding/*.",
+        inputKind: "readonly",
+        storageLayerKo: "/api/onboarding + kv_meta",
+        storageLayerEn: "/api/onboarding + kv_meta",
+      },
+      {
+        key: "onboarding_owner_id",
+        group: "onboarding",
+        source: "legacy_readonly",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: "(stored via onboarding API)",
+        flags: ["read_only"],
+        labelKo: "Owner ID",
+        labelEn: "Owner ID",
+        hintKo: "/api/onboarding/* 가 관리합니다.",
+        hintEn: "Managed by /api/onboarding/*.",
+        inputKind: "readonly",
+        storageLayerKo: "/api/onboarding + kv_meta",
+        storageLayerEn: "/api/onboarding + kv_meta",
+      },
+      {
+        key: "onboarding_provider",
+        group: "onboarding",
+        source: "legacy_readonly",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: "(stored via onboarding API)",
+        flags: ["read_only"],
+        labelKo: "Provider 연결",
+        labelEn: "Provider wiring",
+        hintKo: "/api/onboarding/* 가 관리합니다.",
+        hintEn: "Managed by /api/onboarding/*.",
+        inputKind: "readonly",
+        storageLayerKo: "/api/onboarding + kv_meta",
+        storageLayerEn: "/api/onboarding + kv_meta",
+      },
+    ],
+    [],
+  );
+
+  const allMetas = useMemo<SettingRowMeta[]>(
+    () => [...pipelineMetas, ...runtimeMetas, ...onboardingMetas, ...generalMetas],
+    [pipelineMetas, runtimeMetas, onboardingMetas, generalMetas],
+  );
+
+  const groupCounts = useMemo(() => {
+    const counts: Record<string, number> = {
+      pipeline: 0,
+      runtime: 0,
+      onboarding: 0,
+      general: 0,
+    };
+    for (const m of allMetas) {
+      const g = String(m.group);
+      counts[g] = (counts[g] ?? 0) + 1;
+    }
+    return counts;
+  }, [allMetas]);
+
+  const navItems = useMemo(
+    () =>
+      SETTING_GROUPS.map((group) => ({
+        id: group.id,
+        title: tr(group.nameKo, group.nameEn),
+        detail: tr(group.descKo, group.descEn),
+        count: String(groupCounts[group.id] ?? 0),
+      })),
+    [groupCounts, tr],
   );
   const panelQueryNormalized = panelQuery.trim().toLowerCase();
   const filteredNavItems = useMemo(
     () =>
       navItems.filter((item) => {
         if (!panelQueryNormalized) return true;
-        return `${item.title} ${item.detail}`.toLowerCase().includes(panelQueryNormalized);
+        if (`${item.title} ${item.detail}`.toLowerCase().includes(panelQueryNormalized)) {
+          return true;
+        }
+        // also match if any item inside the group matches the search
+        return allMetas.some((meta) => {
+          if (meta.group !== item.id) return false;
+          const haystack =
+            `${meta.key} ${meta.labelKo ?? ""} ${meta.labelEn ?? ""} ${meta.hintKo ?? ""} ${meta.hintEn ?? ""}`.toLowerCase();
+          return haystack.includes(panelQueryNormalized);
+        });
       }),
-    [navItems, panelQueryNormalized],
+    [allMetas, navItems, panelQueryNormalized],
+  );
+  // Track which row keys match the current search inside the active panel.
+  const matchingKeysInActivePanel = useMemo<Set<string>>(() => {
+    const set = new Set<string>();
+    if (!panelQueryNormalized) return set;
+    for (const meta of allMetas) {
+      if (meta.group !== activePanel) continue;
+      const haystack =
+        `${meta.key} ${meta.labelKo ?? ""} ${meta.labelEn ?? ""} ${meta.hintKo ?? ""} ${meta.hintEn ?? ""}`.toLowerCase();
+      if (haystack.includes(panelQueryNormalized)) {
+        set.add(meta.key);
+      }
+    }
+    return set;
+  }, [activePanel, allMetas, panelQueryNormalized]);
+  const isRowVisible = useCallback(
+    (key: string) => {
+      if (!panelQueryNormalized) return true;
+      return matchingKeysInActivePanel.has(key);
+    },
+    [matchingKeysInActivePanel, panelQueryNormalized],
   );
   const activeNavItem = navItems.find((item) => item.id === activePanel) ?? navItems[0];
   const pipelineLiveOverrideCount = useMemo(
@@ -1513,142 +2302,132 @@ export default function SettingsView({
     }
   };
 
-  const renderGeneralPanel = () => (
-    <div className="space-y-5">
-      <form className="space-y-5" onSubmit={handleSave} noValidate>
-        <fieldset className="space-y-3">
-          <legend className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            {tr("브랜드 정보", "Brand identity")}
-          </legend>
-          <p className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "대시보드 헤더와 오피스에서 반복 노출되는 이름을 정리합니다.",
-              "Controls the names that repeat across dashboard headers and office surfaces.",
-            )}
-          </p>
-          <div className="grid gap-3 md:grid-cols-2">
-            <GeneralSettingsField
-              id="settings-company-name"
-              label={tr("회사 이름", "Company name")}
-              description={tr("대시보드와 주요 헤더에 표시되는 이름입니다.", "Shown in the dashboard and primary headers.")}
-              error={companyNameError}
-              footer={tr(
-                `${GENERAL_FIELD_LIMITS.companyName}자 이내, 저장 시 앞뒤 공백을 자동으로 정리합니다.`,
-                `Up to ${GENERAL_FIELD_LIMITS.companyName} characters. Leading and trailing spaces are trimmed on save.`,
-              )}
-            >
-              <input
-                id="settings-company-name"
-                type="text"
-                value={companyName}
-                onChange={(event) => setCompanyName(event.target.value)}
-                onBlur={() => setCompanyName((current) => current.trim())}
-                required
-                maxLength={GENERAL_FIELD_LIMITS.companyName}
-                aria-invalid={Boolean(companyNameError)}
-                aria-describedby={joinDescribedBy(
-                  "settings-company-name-description",
-                  companyNameError ? "settings-company-name-error" : null,
-                )}
-                className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                style={inputStyle}
-              />
-            </GeneralSettingsField>
+  // Dispatcher for SettingRow value changes — routes to the correct setter
+  // based on the meta.group + key.
+  const handleSettingRowChange = useCallback(
+    (key: string, value: string | boolean | number) => {
+      // general
+      if (key === "companyName" && typeof value === "string") {
+        setCompanyName(value);
+        return;
+      }
+      if (key === "ceoName" && typeof value === "string") {
+        setCeoName(value);
+        return;
+      }
+      if (key === "language" && typeof value === "string") {
+        setLanguage(value as typeof language);
+        return;
+      }
+      if (key === "theme" && typeof value === "string") {
+        setTheme(value as typeof theme);
+        return;
+      }
+      // runtime
+      if (rcDefaults[key] !== undefined && typeof value === "number") {
+        handleRcChange(key, value);
+        return;
+      }
+      // pipeline kv_meta — value can be string or boolean
+      if (typeof value === "boolean") {
+        handleConfigEdit(key, value);
+        return;
+      }
+      handleConfigEdit(key, String(value));
+    },
+    [handleRcChange, rcDefaults],
+  );
 
-            <GeneralSettingsField
-              id="settings-ceo-name"
-              label={tr("CEO 이름", "CEO name")}
-              description={tr("오피스와 일부 운영 UI에서 대표 인물 이름으로 사용됩니다.", "Used as the representative persona name in office and ops surfaces.")}
-              error={ceoNameError}
-              footer={tr(
-                `${GENERAL_FIELD_LIMITS.ceoName}자 이내, 비워둘 수 있지만 저장 시 공백만 있는 값은 제거합니다.`,
-                `Up to ${GENERAL_FIELD_LIMITS.ceoName} characters. Whitespace-only values are cleared on save.`,
-              )}
-            >
-              <input
-                id="settings-ceo-name"
-                type="text"
-                value={ceoName}
-                onChange={(event) => setCeoName(event.target.value)}
-                onBlur={() => setCeoName((current) => current.trim())}
-                maxLength={GENERAL_FIELD_LIMITS.ceoName}
-                aria-invalid={Boolean(ceoNameError)}
-                aria-describedby={joinDescribedBy(
-                  "settings-ceo-name-description",
-                  ceoNameError ? "settings-ceo-name-error" : null,
-                )}
-                className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                style={inputStyle}
-              />
-            </GeneralSettingsField>
-          </div>
-        </fieldset>
+  // Render a SettingRow for a meta with optional control overlay (e.g. range).
+  const renderSettingRow = useCallback(
+    (meta: SettingRowMeta, options?: { controlOverlay?: ReactNode; trailingMeta?: ReactNode }) => {
+      if (!isRowVisible(meta.key)) return null;
+      return (
+        <SettingRow
+          key={meta.key}
+          meta={meta}
+          isKo={isKo}
+          onChange={handleSettingRowChange}
+          controlOverlay={options?.controlOverlay}
+          trailingMeta={options?.trailingMeta}
+        />
+      );
+    },
+    [handleSettingRowChange, isKo, isRowVisible],
+  );
 
-        <fieldset className="space-y-3">
-          <legend className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            {tr("표시 환경", "Display preferences")}
-          </legend>
-          <p className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "언어와 테마처럼 화면에 바로 드러나는 표시 옵션을 조정합니다.",
-              "Adjusts the presentation options that immediately change how the dashboard looks.",
-            )}
-          </p>
-          <div className="grid gap-3 md:grid-cols-2">
-            <GeneralSettingsField
-              id="settings-language"
-              label={tr("언어", "Language")}
-              description={tr("대시보드 전반의 기본 언어와 로캘을 정합니다.", "Sets the default language and locale across the dashboard.")}
-            >
-              <select
-                id="settings-language"
-                value={language}
-                onChange={(event) => setLanguage(event.target.value as typeof language)}
-                aria-describedby="settings-language-description"
-                className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                style={inputStyle}
-              >
-                <option value="ko">한국어</option>
-                <option value="en">English</option>
-                <option value="ja">日本語</option>
-                <option value="zh">中文</option>
-              </select>
-            </GeneralSettingsField>
-
-            <GeneralSettingsField
-              id="settings-theme"
-              label={tr("테마", "Theme")}
-              description={tr("대시보드와 오피스 화면의 기본 분위기를 정합니다.", "Sets the base look and feel for dashboard and office views.")}
-            >
-              <select
-                id="settings-theme"
-                value={theme}
-                onChange={(event) => setTheme(event.target.value as typeof theme)}
-                aria-describedby="settings-theme-description"
-                className="w-full rounded-2xl px-3 py-2.5 text-sm"
-                style={inputStyle}
-              >
-                <option value="dark">{tr("다크", "Dark")}</option>
-                <option value="light">{tr("라이트", "Light")}</option>
-                <option value="auto">{tr("자동 (시스템)", "Auto (System)")}</option>
-              </select>
-            </GeneralSettingsField>
-          </div>
-        </fieldset>
-
+  // Render a card-shaped group of SettingRow entries (header + count chip + rows).
+  const renderSettingGroupCard = useCallback(
+    (
+      args: {
+        titleKo: string;
+        titleEn: string;
+        descriptionKo: string;
+        descriptionEn: string;
+        rows: ReactNode[];
+        totalCount: number;
+      },
+    ) => {
+      const filteredRows = args.rows.filter(Boolean);
+      return (
         <div
-          className="flex flex-col gap-3 rounded-2xl border px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
+          className="setting-group-card overflow-hidden rounded-[20px] border"
           style={{
-            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
-            background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
+            borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+            background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
           }}
         >
-          <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-            {tr(
-              "일반 설정은 한 번에 저장되며 기존 `settings` JSON과 병합해 hidden key 손실을 막습니다. 회사 이름은 필수이고 텍스트 입력은 저장 시 trim 처리됩니다.",
-              "General settings save together and merge into the existing `settings` JSON so hidden keys are preserved. Company name is required, and text inputs are trimmed on save.",
+          <div
+            className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-4 sm:px-5"
+            style={{ borderColor: "color-mix(in srgb, var(--th-border) 60%, transparent)" }}
+          >
+            <div className="min-w-0">
+              <div className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
+                {tr(args.titleKo, args.titleEn)}
+              </div>
+              <div className="mt-1 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
+                {tr(args.descriptionKo, args.descriptionEn)}
+              </div>
+            </div>
+            <span
+              className="inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-medium"
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+                background: "color-mix(in srgb, var(--th-overlay-medium) 88%, transparent)",
+                color: "var(--th-text-muted)",
+              }}
+            >
+              {`${args.totalCount} items`}
+            </span>
+          </div>
+          <div className="px-2 pb-1 pt-1 sm:px-3">
+            {filteredRows.length > 0 ? (
+              filteredRows
+            ) : (
+              <SettingsEmptyState className="text-sm">
+                {tr("검색 결과가 없습니다.", "No matching settings.")}
+              </SettingsEmptyState>
             )}
-          </p>
+          </div>
+        </div>
+      );
+    },
+    [tr],
+  );
+
+  const renderGeneralPanel = () => (
+    <form className="space-y-5" onSubmit={handleSave} noValidate>
+      {renderSettingGroupCard({
+        titleKo: "일반",
+        titleEn: "General",
+        descriptionKo: "회사 정보와 표시 환경, 메타 설정.",
+        descriptionEn: "Company identity, display environment, and meta settings.",
+        totalCount: generalMetas.length,
+        rows: generalMetas.map((meta) => renderSettingRow(meta)),
+      })}
+
+      <SettingsCallout
+        action={(
           <button
             type="submit"
             disabled={saving || !companyDirty || generalFormInvalid}
@@ -1657,8 +2436,15 @@ export default function SettingsView({
           >
             {saving ? tr("저장 중...", "Saving...") : tr("일반 설정 저장", "Save general settings")}
           </button>
-        </div>
-      </form>
+        )}
+      >
+        <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+          {tr(
+            "일반 설정은 한 번에 저장되며 기존 `settings` JSON과 병합해 hidden key 손실을 막습니다. 회사 이름은 필수이고 텍스트 입력은 저장 시 trim 처리됩니다.",
+            "General settings save together and merge into the existing `settings` JSON so hidden keys are preserved. Company name is required, and text inputs are trimmed on save.",
+          )}
+        </p>
+      </SettingsCallout>
 
       <SettingsSubsection
         title={tr("저장 경로", "Storage surfaces")}
@@ -1702,7 +2488,7 @@ export default function SettingsView({
           />
         </div>
       </SettingsSubsection>
-    </div>
+    </form>
   );
 
   const renderRuntimePanel = () => (
@@ -1731,77 +2517,79 @@ export default function SettingsView({
                     : subtleButtonStyle.background,
                 }}
               >
-                {tr(category.titleKo, category.titleEn)}
+                {tr(category.titleKo, category.titleEn)}{" "}
+                <span className="ml-1 opacity-60">{category.fields.length}</span>
               </button>
             ))}
           </div>
 
-          {activeRuntimeCategory && (
-            <SettingsSubsection
-              title={tr(activeRuntimeCategory.titleKo, activeRuntimeCategory.titleEn)}
-              description={tr(activeRuntimeCategory.descriptionKo, activeRuntimeCategory.descriptionEn)}
-            >
-              <div className="grid gap-3 md:grid-cols-2">
-                {activeRuntimeCategory.fields.map((field) => {
-                  const value = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
-                  const defaultValue = rcDefaults[field.key] ?? 0;
+          {activeRuntimeCategory &&
+            (() => {
+              const categoryMetas = runtimeMetas.filter((meta) =>
+                activeRuntimeCategory.fields.some((f) => f.key === meta.key),
+              );
+              return renderSettingGroupCard({
+                titleKo: activeRuntimeCategory.titleKo,
+                titleEn: activeRuntimeCategory.titleEn,
+                descriptionKo: activeRuntimeCategory.descriptionKo,
+                descriptionEn: activeRuntimeCategory.descriptionEn,
+                totalCount: categoryMetas.length,
+                rows: categoryMetas.map((meta) => {
+                  const field = activeRuntimeCategory.fields.find((f) => f.key === meta.key);
+                  if (!field) return renderSettingRow(meta);
+                  const value = Number(meta.effectiveValue) || 0;
+                  const defaultValue = Number(meta.defaultValue) || 0;
                   const isDefault = value === defaultValue;
-
-                  return (
-                    <CompactFieldCard
-                      key={field.key}
-                      label={tr(field.labelKo, field.labelEn)}
-                      description={tr(field.descriptionKo, field.descriptionEn)}
-                      footer={tr(
-                        `현재 ${formatUnit(value, field.unit)} · 기본값 ${formatUnit(defaultValue, field.unit)}`,
-                        `Current ${formatUnit(value, field.unit)} · Default ${formatUnit(defaultValue, field.unit)}`,
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="range"
-                          min={field.min}
-                          max={field.max}
-                          step={field.step}
-                          value={value}
-                          onChange={(event) => handleRcChange(field.key, Number(event.target.value))}
-                          className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-                          style={{ accentColor: "var(--th-accent-primary)" }}
-                        />
-                        <input
-                          type="number"
-                          min={field.min}
-                          max={field.max}
-                          step={field.step}
-                          value={value}
-                          onChange={(event) => {
-                            const next = Number(event.target.value);
-                            if (Number.isFinite(next) && next >= field.min && next <= field.max) {
-                              handleRcChange(field.key, next);
-                            }
-                          }}
-                          className="w-24 rounded-xl px-2.5 py-1.5 text-right text-xs font-mono"
-                          style={inputStyle}
-                        />
-                      </div>
-                      {!isDefault && (
-                        <div className="mt-3 flex justify-end">
-                          <button
-                            type="button"
-                            onClick={() => handleRcReset(field.key)}
-                            className={subtleButtonClass}
-                            style={subtleButtonStyle}
-                          >
-                            {tr("기본값 복원", "Reset")}
-                          </button>
-                        </div>
-                      )}
-                    </CompactFieldCard>
+                  // Use a custom control: range slider + numeric input + reset.
+                  const controlOverlay = (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        value={value}
+                        onChange={(event) =>
+                          handleRcChange(field.key, Number(event.target.value))
+                        }
+                        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
+                        style={{ accentColor: "var(--th-accent-primary)" }}
+                      />
+                      <input
+                        type="number"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        value={value}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          if (Number.isFinite(next) && next >= field.min && next <= field.max) {
+                            handleRcChange(field.key, next);
+                          }
+                        }}
+                        className="w-20 rounded-xl px-2 py-1.5 text-right text-xs"
+                        style={{
+                          ...inputStyle,
+                          fontFamily:
+                            "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
+                        }}
+                      />
+                    </div>
                   );
-                })}
-              </div>
-            </SettingsSubsection>
-          )}
+                  const trailingMeta = !isDefault ? (
+                    <button
+                      type="button"
+                      onClick={() => handleRcReset(field.key)}
+                      className={subtleButtonClass}
+                      style={subtleButtonStyle}
+                    >
+                      {tr("기본값 복원", "Reset to default")}
+                    </button>
+                  ) : null;
+                  return renderSettingRow(meta, { controlOverlay, trailingMeta });
+                }),
+              });
+            })()}
 
           <SettingsCallout
             className="mt-0"
@@ -1829,131 +2617,32 @@ export default function SettingsView({
   );
 
   const renderPipelineCategory = (categoryKey: keyof typeof SYSTEM_CATEGORY_META) => {
+    // Pipeline group rows are built directly from configEntries via pipelineMetas.
+    // We still group them by category for visual hierarchy inside the pipeline panel.
     const entries = groupedConfigEntries[categoryKey] ?? [];
     if (entries.length === 0) return null;
     const meta = SYSTEM_CATEGORY_META[categoryKey];
-
-    return (
-      <SettingsSubsection
-        key={categoryKey}
-        title={tr(meta.titleKo, meta.titleEn)}
-        description={tr(meta.descriptionKo, meta.descriptionEn)}
-      >
-        <div className="grid gap-3 md:grid-cols-2">
-          {entries.map((entry) => {
-            const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
-            const hasLocalEdit = Object.prototype.hasOwnProperty.call(configEdits, entry.key);
-            const currentValue = hasLocalEdit ? configEdits[entry.key] : (entry.value ?? entry.default ?? "");
-            const defaultLabel = entry.default ?? tr("없음", "None");
-            const readOnly = isReadOnlyConfigKey(entry.key) || entry.editable === false;
-            const isEnabled = parseBooleanConfigValue(currentValue);
-            const layerLabel = configLayerLabel(Boolean(entry.override_active), isKo);
-            const layerClass = configLayerClass(Boolean(entry.override_active));
-            const baselineNote = baselineSourceNote(entry.baseline_source, isKo);
-            const restartNote = restartBehaviorNote(entry.restart_behavior, isKo);
-            const descriptionText = isKo ? description?.ko ?? entry.key : description?.en ?? entry.key;
-            const precisionNote = entry.key.endsWith("_channel_id")
-              ? tr(
-                  "Discord channel ID는 정밀도 손실을 피하려고 문자열로 유지합니다.",
-                  "Discord channel IDs stay as strings to avoid precision loss.",
-                )
-              : null;
-
-            const footer = (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${configSourceClass(entry)}`}>
-                    {configSourceLabel(entry, isKo)}
-                  </span>
-                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${layerClass}`}>
-                    {layerLabel}
-                  </span>
-                  {readOnly ? (
-                    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${auditStatusClass("read-only")}`}>
-                      {auditStatusLabel("read-only", isKo)}
-                    </span>
-                  ) : null}
-                  <code className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: "rgba(15,23,42,0.42)", color: "var(--th-text-secondary)" }}>
-                    {entry.key}
-                  </code>
-                </div>
-                <div className="space-y-1" style={{ color: "var(--th-text-muted)" }}>
-                  <div>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</div>
-                  {entry.baseline ? <div>{tr(`baseline: ${entry.baseline}`, `baseline: ${entry.baseline}`)}</div> : null}
-                  {baselineNote ? <div>{baselineNote}</div> : null}
-                  {restartNote ? <div>{restartNote}</div> : null}
-                  {precisionNote ? <div>{precisionNote}</div> : null}
-                </div>
-              </div>
-            );
-
-            if (isBooleanConfigKey(entry.key)) {
-              return (
-                <CompactFieldCard
-                  key={entry.key}
-                  label={isKo ? entry.label_ko : entry.label_en}
-                  description={descriptionText}
-                  footer={footer}
-                >
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={isEnabled}
-                    aria-readonly={readOnly}
-                    disabled={readOnly}
-                    onClick={() => handleConfigEdit(entry.key, !isEnabled)}
-                    className="flex min-h-[52px] w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-70"
-                    style={{
-                      borderColor: isEnabled ? "rgba(16,185,129,0.35)" : "rgba(148,163,184,0.24)",
-                      background: isEnabled ? "rgba(16,185,129,0.12)" : "rgba(15,23,42,0.2)",
-                    }}
-                  >
-                    <div className="pr-3">
-                      <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
-                        {isEnabled ? tr("활성화", "Enabled") : tr("비활성", "Disabled")}
-                      </div>
-                      {readOnly ? (
-                        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                          {tr("현재 상태만 표시합니다.", "Displayed as status only.")}
-                        </div>
-                      ) : null}
-                    </div>
-                    <span
-                      className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors"
-                      style={{ background: isEnabled ? "#10b981" : "rgba(148,163,184,0.32)" }}
-                    >
-                      <span
-                        className="absolute h-5 w-5 rounded-full bg-white transition-transform"
-                        style={{ transform: isEnabled ? "translateX(1.55rem)" : "translateX(0.3rem)" }}
-                      />
-                    </span>
-                  </button>
-                </CompactFieldCard>
-              );
-            }
-
-            return (
-              <CompactFieldCard
-                key={entry.key}
-                label={isKo ? entry.label_ko : entry.label_en}
-                description={descriptionText}
-                footer={footer}
-              >
-                <input
-                  type={isNumericConfigKey(entry.key) && !readOnly ? "number" : "text"}
-                  inputMode={isNumericConfigKey(entry.key) ? "numeric" : undefined}
-                  disabled={readOnly}
-                  className="w-full rounded-2xl px-3 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-80"
-                  style={inputStyle}
-                  value={String(currentValue)}
-                  onChange={(event) => handleConfigEdit(entry.key, event.target.value)}
-                />
-              </CompactFieldCard>
-            );
-          })}
-        </div>
-      </SettingsSubsection>
-    );
+    const metasInCategory = entries
+      .map((entry) => pipelineMetas.find((m) => m.key === entry.key))
+      .filter((m): m is SettingRowMeta => Boolean(m));
+    return renderSettingGroupCard({
+      titleKo: meta.titleKo,
+      titleEn: meta.titleEn,
+      descriptionKo: meta.descriptionKo,
+      descriptionEn: meta.descriptionEn,
+      totalCount: metasInCategory.length,
+      rows: metasInCategory.map((m) => {
+        const trailingMeta = m.key.endsWith("_channel_id") ? (
+          <span style={{ color: "var(--th-text-muted)" }}>
+            {tr(
+              "Discord channel ID는 정밀도 손실을 피하려고 문자열로 유지합니다.",
+              "Discord channel IDs stay as strings to avoid precision loss.",
+            )}
+          </span>
+        ) : null;
+        return renderSettingRow(m, { trailingMeta });
+      }),
+    });
   };
 
   const renderPipelinePanel = () => (
@@ -2131,7 +2820,17 @@ export default function SettingsView({
   );
 
   const renderOnboardingPanel = () => (
-    <div className="grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
+    <div className="space-y-5">
+      {renderSettingGroupCard({
+        titleKo: "온보딩",
+        titleEn: "Onboarding",
+        descriptionKo: "위저드 / /api/onboarding/* 가 관리하는 키. 일반 폼이 아니라 위저드를 사용하세요.",
+        descriptionEn: "Wizard- and /api/onboarding/*-managed keys. Use the wizard instead of editing here.",
+        totalCount: onboardingMetas.length,
+        rows: onboardingMetas.map((meta) => renderSettingRow(meta)),
+      })}
+
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1.15fr)_minmax(16rem,0.85fr)]">
         <SettingsCard
           className="rounded-3xl p-5"
           style={{
@@ -2166,6 +2865,7 @@ export default function SettingsView({
           </div>
         </SettingsCard>
       </div>
+    </div>
   );
 
   const renderActivePanel = () => {
@@ -2305,8 +3005,8 @@ export default function SettingsView({
         <div className="flex flex-wrap gap-2">{renderHeaderActions()}</div>
       </div>
 
-      <div className="mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
-        <aside className="min-w-0 md:sticky md:top-4 md:self-start">
+      <div className="settings-grid mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="settings-nav min-w-0 md:sticky md:top-4 md:self-start">
           <div className="relative mb-3">
             <Search
               size={13}
@@ -2320,13 +3020,14 @@ export default function SettingsView({
               placeholder={tr("설정 검색", "Search settings")}
               className="w-full rounded-xl py-2.5 pl-9 pr-3 text-sm"
               style={inputStyle}
+              data-testid="settings-search-input"
             />
           </div>
 
           <div
             role="tablist"
             aria-label={tr("설정 패널", "Settings panels")}
-            className="space-y-1"
+            className="settings-nav-items space-y-1"
           >
             {filteredNavItems.length > 0 ? (
               filteredNavItems.map((item) => (

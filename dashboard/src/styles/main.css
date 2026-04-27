@@ -661,3 +661,54 @@ textarea {
   background: var(--th-overlay-medium);
   color: var(--th-text-heading);
 }
+
+/* === Settings page (issue #1257) === */
+.setting-row-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px auto;
+  align-items: center;
+}
+/* Desktop default: 2-col grid (220px nav + 1fr content). On <768px the nav
+   collapses into a horizontal scroll tab bar and SettingRow becomes a 1-col
+   stack. The Tailwind classes already drive desktop layout; these media
+   overrides apply the spec mobile rules. */
+@media (max-width: 767px) {
+  .settings-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .settings-nav {
+    position: relative !important;
+    top: 0 !important;
+    align-self: stretch !important;
+  }
+  .settings-nav .settings-nav-items {
+    flex-direction: row !important;
+    display: flex !important;
+    overflow-x: auto;
+    gap: 0.5rem;
+    padding-bottom: 0.25rem;
+  }
+  .settings-nav .settings-nav-items > * {
+    flex: 0 0 auto;
+    min-width: 12rem;
+  }
+  .setting-row .setting-row-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0.625rem !important;
+  }
+  /* FSM editor PC/mobile split — JS controls which surface renders, but the
+     spec class names provide a CSS-driven fallback for grid sizing. */
+  .fsm-actions {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 0.4rem !important;
+    width: 100% !important;
+  }
+  .fsm-actions > button,
+  .fsm-actions > .btn {
+    font-size: 11px !important;
+    padding: 7px 8px !important;
+    justify-content: center !important;
+    white-space: nowrap !important;
+  }
+}

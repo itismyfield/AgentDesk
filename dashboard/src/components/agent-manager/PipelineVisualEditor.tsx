@@ -1798,17 +1798,17 @@ export default function PipelineVisualEditor({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="fsm-actions flex flex-wrap items-center justify-end gap-2">
                 <button
                   onClick={addState}
-                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
                   style={BUTTON_INFO_STYLE}
                 >
                   + {tr("상태 추가", "State")}
                 </button>
                 <button
                   onClick={addTransition}
-                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
                   style={BUTTON_ACCENT_STYLE}
                 >
                   + {tr("전환 추가", "Edge")}
@@ -1816,7 +1816,7 @@ export default function PipelineVisualEditor({
                 <button
                   onClick={handleExportJson}
                   disabled={!pipelineDraft}
-                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
                   style={{
                     ...BUTTON_NEUTRAL_STYLE,
                     opacity: pipelineDraft ? 1 : 0.45,
@@ -1827,7 +1827,7 @@ export default function PipelineVisualEditor({
                 <button
                   onClick={() => void handleClearOverride()}
                   disabled={saving || !overrideExists}
-                  className="rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
+                  className="btn rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
                   style={{
                     ...BUTTON_NEUTRAL_STYLE,
                     opacity: saving || !overrideExists ? 0.45 : 1,
@@ -2088,7 +2088,7 @@ export default function PipelineVisualEditor({
               )}
 
               <div
-                className={`${useScrollableMobileFsmCanvas ? "rounded-[24px] border p-3 sm:p-4" : "overflow-hidden rounded-[24px] border p-3 sm:p-4"}`}
+                className={`${useScrollableMobileFsmCanvas ? "rounded-[24px] border p-3 sm:p-4" : "overflow-hidden rounded-[24px] border p-3 sm:p-4"} ${isFsmVariant ? "fsm-graph-desktop" : ""}`}
                 style={isFsmVariant ? FSM_CANVAS_SHELL_STYLE : CANVAS_SHELL_STYLE}
               >
                 <div
@@ -2538,7 +2538,7 @@ export default function PipelineVisualEditor({
             >
               {useScrollableMobileFsmCanvas && pipelineDraft && (
                 <div
-                  className="rounded-[20px] border p-3 space-y-4"
+                  className="fsm-stack-mobile rounded-[20px] border p-3 space-y-4"
                   style={FSM_DETAIL_PANEL_STYLE}
                   data-testid="fsm-mobile-selector"
                 >
