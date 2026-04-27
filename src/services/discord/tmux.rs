@@ -3892,29 +3892,28 @@ pub(super) async fn tmux_output_watcher_with_restore(
     // the relay is suppressed.
     // Initialize from persisted inflight state so replacement watcher instances skip
     // already-delivered output (fixes double-reply on stale watcher replacement).
-    let mut last_relayed_offset: Option<u64> = {
-        if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name) {
-            super::inflight::load_inflight_state(&pk, channel_id.get())
-                .and_then(|s| s.last_watcher_relayed_offset)
-        } else {
-            None
-        }
-    };
-    // #1270: track the `.generation` mtime alongside the local offset so a
-    // later regression check can tell apart mid-flight rotation (same
-    // wrapper, same mtime) from cancel→respawn (new wrapper, new mtime).
-    //
-    // Initialize to None — NOT to the current `.generation` mtime — when
-    // `last_relayed_offset` is restored from inflight state (the offset
-    // belongs to whichever wrapper was running before this dcserver
-    // restarted/rebound the watcher; we don't actually know its mtime).
-    // Pre-seeding with current_mtime would let the regression check
-    // misclassify a cancel→respawn-with-shorter-jsonl as a same-wrapper
-    // rotation, pinning the local offset to the new EOF and making the
-    // duplicate guard suppress fresh bytes starting at offset 0 (codex P1
-    // on PR #1271). The first regression check (or the first own advance)
-    // populates this with the real mtime.
-    let mut last_observed_generation_mtime_ns: Option<i64> = None;
+    // #1270: load both the persisted offset AND its matching
+    // `.generation` mtime so a replacement watcher can correctly classify
+    // an output regression on restored state. When we have a persisted
+    // mtime, it labels the wrapper that produced the persisted offset:
+    //   - matches current `.generation` mtime → same wrapper after
+    //     `truncate_jsonl_head_safe` → pin to EOF (don't re-flood
+    //     surviving content; codex P2 on PR #1271).
+    //   - differs from current `.generation` mtime → cancel→respawn into
+    //     the same session name → reset to 0 to pick up the fresh
+    //     response.
+    // When the persisted state predates this field (legacy `None`), we
+    // fall back to "no baseline known" semantics — the regression check
+    // treats it as a first observation and resets to 0, which is the
+    // safer choice for not silently dropping a fresh response.
+    let restored_inflight = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
+        .and_then(|(pk, _)| super::inflight::load_inflight_state(&pk, channel_id.get()));
+    let mut last_relayed_offset: Option<u64> = restored_inflight
+        .as_ref()
+        .and_then(|s| s.last_watcher_relayed_offset);
+    let mut last_observed_generation_mtime_ns: Option<i64> = restored_inflight
+        .as_ref()
+        .and_then(|s| s.last_watcher_relayed_generation_mtime_ns);
     if let Ok(meta) = std::fs::metadata(&output_path) {
         let observed_output_end = meta.len();
         reset_stale_relay_watermark_if_output_regressed(
@@ -5674,6 +5673,14 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             super::inflight::load_inflight_state(&pk, channel_id.get())
                         {
                             inflight.last_watcher_relayed_offset = Some(data_start_offset);
+                            // #1270: persist the matching `.generation` mtime
+                            // alongside the offset so a replacement watcher
+                            // (e.g. after dcserver restart) can disambiguate
+                            // same-wrapper rotation (mtime unchanged → pin to
+                            // EOF) from cancel→respawn (mtime changed → reset
+                            // to 0) when restoring this offset.
+                            inflight.last_watcher_relayed_generation_mtime_ns =
+                                last_observed_generation_mtime_ns;
                             let _ = super::inflight::save_inflight_state(&inflight);
                         }
                     }

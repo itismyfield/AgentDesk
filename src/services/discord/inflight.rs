@@ -87,6 +87,16 @@ pub(super) struct InflightTurnState {
     /// Persisted so that replacement watcher instances can skip already-delivered output.
     #[serde(default)]
     pub last_watcher_relayed_offset: Option<u64>,
+    /// `.generation` marker file mtime (nanos since epoch) snapshotted at
+    /// the same moment as `last_watcher_relayed_offset`. Persisted so that
+    /// a replacement watcher (post dcserver restart) can tell whether a
+    /// shorter-than-restored-offset jsonl is the same wrapper after a
+    /// `truncate_jsonl_head_safe` rotation (mtime unchanged → pin to
+    /// EOF) or a fresh wrapper after cancel→respawn (mtime changed →
+    /// reset to 0). See `tmux::watermark_after_output_regression`
+    /// (#1270). `None` for offsets persisted before this field existed.
+    #[serde(default)]
+    pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
     /// Lifecycle-aware restart/handoff mode for recovery semantics.
     #[serde(default)]
     pub restart_mode: Option<InflightRestartMode>,
@@ -160,6 +170,7 @@ impl InflightTurnState {
             session_key: None,
             dispatch_id: None,
             last_watcher_relayed_offset: None,
+            last_watcher_relayed_generation_mtime_ns: None,
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
