@@ -331,3 +331,23 @@ jobs:
           else
             echo "::warning::Generated docs drift detected — the Regen inventory docs workflow will push a fix commit. If CI PR does not re-run on the new commit (a known GitHub Actions limitation when bots push via GITHUB_TOKEN), push an empty commit or rerun this workflow."
           fi
+
+      - name: Maintainability audit (non-blocking, #1282)
+        id: maintainability_audit
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          python3 scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml
+          python3 scripts/audit_maintainability.py --check
+          echo "Wrote target/maintainability-audit.yaml"
+
+      - name: Upload maintainability audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maintainability-audit
+          path: target/maintainability-audit.yaml
+          if-no-files-found: ignore
+          retention-days: 14

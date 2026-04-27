@@ -1,0 +1,46 @@
+# Allowlist for scripts/audit_maintainability.py (#1282).
+#
+# Each entry is a repo-relative POSIX path. Keep this list narrow:
+# additions must reference an issue or rationale in a comment on the
+# preceding line so future reviewers can decide whether to retire them.
+#
+# The audit is non-blocking, so allowlisting is mostly about keeping the
+# generated report short — not about silencing genuine regressions.
+
+# Giant files: legacy modules pending split (see follow-up issues).
+giant_files = [
+  # Discord recovery decision tree — split tracked by #1283 follow-up.
+  "src/services/discord/recovery_engine.rs",
+  # Tracing span helpers grew large; refactor candidate.
+  "src/integration_tests.rs",
+]
+
+# Route SRP: temporary tolerated mixed-concerns route handlers.
+route_srp_violations = [
+]
+
+# Direct Discord sends: only the outbound dispatcher is allowed; nothing
+# here yet.
+direct_discord_sends = [
+]
+
+# Manual JSON row mapping: legacy mapping callsites pending typed migration.
+manual_json_row_mapping = [
+]
+
+# limit/days clamp duplication: helper introduction TBD.
+limit_clamp_duplication = [
+]
+
+# Git subprocess callsites tolerated outside services::git.
+git_subprocess_callsites = [
+]
+
+# Legacy SQLite references: cli/migrate and compat are exempt by path rule
+# already; this list is for anything else that is unavoidable.
+legacy_sqlite_refs = [
+]
+
+# Source-of-truth alias writes: runtime_layout is already exempt.
+source_of_truth_alias_writes = [
+]
