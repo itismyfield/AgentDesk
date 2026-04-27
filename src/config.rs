@@ -250,6 +250,8 @@ pub struct AgentChannels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<AgentChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qwen: Option<AgentChannel>,
 }
 
@@ -265,14 +267,20 @@ impl AgentChannels {
                 .as_ref()
                 .and_then(AgentChannel::target)
                 .is_none()
+            && self
+                .opencode
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .is_none()
             && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
     }
 
-    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
+    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 5] {
         [
             ("claude", self.claude.as_ref()),
             ("codex", self.codex.as_ref()),
             ("gemini", self.gemini.as_ref()),
+            ("opencode", self.opencode.as_ref()),
             ("qwen", self.qwen.as_ref()),
         ]
     }

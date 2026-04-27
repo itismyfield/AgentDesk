@@ -46,6 +46,7 @@ impl AgentChannelBindings {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
+            ProviderKind::OpenCode => self.legacy_primary_channel(),
             _ => None,
         }
     }
@@ -321,7 +322,23 @@ fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Resul
         .as_ref()
         .and_then(AgentChannel::target);
     let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-    let discord_channel_id = discord_channel_cc.clone();
+    // For providers without dedicated columns (gemini, opencode, qwen), store the
+    // provider-specific channel in discord_channel_id so primary_channel() can find it.
+    let provider_primary = match agent.provider.as_str() {
+        "gemini" => agent
+            .channels
+            .gemini
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "opencode" => agent
+            .channels
+            .opencode
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
+        _ => None,
+    };
+    let discord_channel_id = discord_channel_cc.clone().or(provider_primary);
     let discord_channel_alt = discord_channel_cdx.clone();
 
     conn.execute(

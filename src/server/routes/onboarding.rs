@@ -1359,6 +1359,7 @@ fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     match primary_provider {
         "codex" => "claude",
         "gemini" => "codex",
+        "opencode" => "claude",
         _ => "codex",
     }
 }
@@ -1455,6 +1456,7 @@ fn agent_channel_slot_mut<'a>(
         "claude" => Some(&mut channels.claude),
         "codex" => Some(&mut channels.codex),
         "gemini" => Some(&mut channels.gemini),
+        "opencode" => Some(&mut channels.opencode),
         "qwen" => Some(&mut channels.qwen),
         _ => None,
     }
@@ -1924,6 +1926,7 @@ fn agent_channel_slot_ref<'a>(
         "claude" => Some(&channels.claude),
         "codex" => Some(&channels.codex),
         "gemini" => Some(&channels.gemini),
+        "opencode" => Some(&channels.opencode),
         "qwen" => Some(&channels.qwen),
         _ => None,
     }
@@ -4321,10 +4324,42 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini/qwen) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini/opencode/qwen) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // OpenCode uses its own binary resolver and has no user-login concept.
+    if body.provider == "opencode" {
+        let bin_path =
+            tokio::task::spawn_blocking(crate::services::opencode::resolve_opencode_path)
+                .await
+                .ok()
+                .flatten();
+        let installed = bin_path.is_some();
+        let version = bin_path.as_deref().and_then(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "installed": installed,
+                "logged_in": installed,
+                "version": version,
+                "path": bin_path,
+                "canonical_path": serde_json::Value::Null,
+                "source": "path",
+                "failure_kind": if installed { serde_json::Value::Null } else { json!("not_found") },
+                "attempts": [],
+            })),
+        );
+    }
+
     let cmd = match body.provider.as_str() {
         "claude" => "claude",
         "codex" => "codex",
@@ -4333,7 +4368,9 @@ pub async fn check_provider(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "provider must be 'claude', 'codex', 'gemini', or 'qwen'"})),
+                Json(
+                    json!({"error": "provider must be 'claude', 'codex', 'gemini', 'opencode', or 'qwen'"}),
+                ),
             );
         }
     };

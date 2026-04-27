@@ -106,6 +106,7 @@ pub(crate) fn ensure_agent_setup_config(
         "claude" => channels.claude = Some(channel),
         "codex" => channels.codex = Some(channel),
         "gemini" => channels.gemini = Some(channel),
+        "opencode" => channels.opencode = Some(channel),
         "qwen" => channels.qwen = Some(channel),
         _ => {
             return AgentSetupConfigMutation::Conflict(format!(
@@ -155,6 +156,7 @@ fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -
         "claude" => agent.channels.claude.as_ref(),
         "codex" => agent.channels.codex.as_ref(),
         "gemini" => agent.channels.gemini.as_ref(),
+        "opencode" => agent.channels.opencode.as_ref(),
         "qwen" => agent.channels.qwen.as_ref(),
         _ => None,
     };
