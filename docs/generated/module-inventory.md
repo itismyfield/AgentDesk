@@ -151,7 +151,7 @@
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10262 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 200 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
-| `server::routes::discord` | `src/server/routes/discord.rs` | 173 |  |
+| `server::routes::discord` | `src/server/routes/discord.rs` | 212 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 4498 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 424 |  |
