@@ -167,11 +167,11 @@
 | `GET` | `/api/pipeline/cards/{card_id}` | `pipeline::get_card_pipeline` | `src/server/routes/pipeline.rs:321` | `src/server/routes/domains/ops.rs:52` |
 | `GET` | `/api/pipeline/cards/{card_id}/history` | `pipeline::get_card_history` | `src/server/routes/pipeline.rs:389` | `src/server/routes/domains/ops.rs:56` |
 | `GET` | `/api/pipeline/cards/{card_id}/transcripts` | `pipeline::get_card_transcripts` | `src/server/routes/pipeline.rs:410` | `src/server/routes/domains/ops.rs:60` |
-| `GET` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::get_agent_pipeline` | `src/server/routes/pipeline.rs:655` | `src/server/routes/domains/ops.rs:76` |
-| `PUT` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::set_agent_pipeline` | `src/server/routes/pipeline.rs:690` | `src/server/routes/domains/ops.rs:76` |
+| `GET` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::get_agent_pipeline` | `src/server/routes/pipeline.rs:658` | `src/server/routes/domains/ops.rs:76` |
+| `PUT` | `/api/pipeline/config/agent/{agent_id}` | `pipeline::set_agent_pipeline` | `src/server/routes/pipeline.rs:693` | `src/server/routes/domains/ops.rs:76` |
 | `GET` | `/api/pipeline/config/default` | `pipeline::get_default_pipeline` | `src/server/routes/pipeline.rs:465` | `src/server/routes/domains/ops.rs:64` |
 | `GET` | `/api/pipeline/config/effective` | `pipeline::get_effective_pipeline` | `src/server/routes/pipeline.rs:477` | `src/server/routes/domains/ops.rs:68` |
-| `GET` | `/api/pipeline/config/graph` | `pipeline::get_pipeline_graph` | `src/server/routes/pipeline.rs:748` | `src/server/routes/domains/ops.rs:80` |
+| `GET` | `/api/pipeline/config/graph` | `pipeline::get_pipeline_graph` | `src/server/routes/pipeline.rs:754` | `src/server/routes/domains/ops.rs:80` |
 | `GET` | `/api/pipeline/config/repo/{owner}/{repo}` | `pipeline::get_repo_pipeline` | `src/server/routes/pipeline.rs:564` | `src/server/routes/domains/ops.rs:72` |
 | `PUT` | `/api/pipeline/config/repo/{owner}/{repo}` | `pipeline::set_repo_pipeline` | `src/server/routes/pipeline.rs:600` | `src/server/routes/domains/ops.rs:72` |
 | `DELETE` | `/api/pipeline/stages` | `pipeline::delete_stages` | `src/server/routes/pipeline.rs:292` | `src/server/routes/domains/ops.rs:46` |

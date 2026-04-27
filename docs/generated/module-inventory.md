@@ -183,7 +183,7 @@
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 127 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 547 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4482 | giant-file |
-| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1370 | giant-file |
+| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1376 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 304 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
