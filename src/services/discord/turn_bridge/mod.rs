@@ -303,6 +303,7 @@ fn advance_tmux_relay_confirmed_end(
     shared: &SharedData,
     channel_id: ChannelId,
     confirmed_end_offset: Option<u64>,
+    tmux_session_name: Option<&str>,
 ) {
     let Some(target_end) = confirmed_end_offset.filter(|offset| *offset > 0) else {
         return;
@@ -333,6 +334,24 @@ fn advance_tmux_relay_confirmed_end(
         chrono::Utc::now().timestamp_millis(),
         std::sync::atomic::Ordering::Release,
     );
+
+    // #1270: snapshot the `.generation` mtime alongside the watermark
+    // advance so a later output-regression check can tell apart same-wrapper
+    // rotation (`truncate_jsonl_head_safe` rename) from cancel→respawn (new
+    // `.generation` mtime). Mirrors the same snapshot in
+    // `tmux::advance_watcher_confirmed_end`; without it, deliveries that
+    // advance the watermark via this turn_bridge path would leave the
+    // stored mtime stale, and the next regression detection would
+    // misclassify a same-wrapper rotation as fresh and reset the
+    // already-delivered output back to 0.
+    if let Some(session) = tmux_session_name {
+        let mtime = super::tmux::read_generation_file_mtime_ns(session);
+        if mtime != 0 {
+            relay_coord
+                .confirmed_end_generation_mtime_ns
+                .store(mtime, std::sync::atomic::Ordering::Release);
+        }
+    }
 
     let confirmed_end = relay_coord
         .confirmed_end_offset
@@ -1873,6 +1892,7 @@ pub(super) fn spawn_turn_bridge(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
                     tmux_last_offset,
+                    inflight_state.tmux_session_name.as_deref(),
                 );
             } else {
                 preserve_inflight_for_cleanup_retry = true;
@@ -1908,6 +1928,7 @@ pub(super) fn spawn_turn_bridge(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
                     tmux_last_offset,
+                    inflight_state.tmux_session_name.as_deref(),
                 );
             } else {
                 preserve_inflight_for_cleanup_retry = true;
@@ -2235,6 +2256,7 @@ pub(super) fn spawn_turn_bridge(
                             shared_owned.as_ref(),
                             watcher_owner_channel_id,
                             tmux_last_offset,
+                            inflight_state.tmux_session_name.as_deref(),
                         );
                     } else {
                         preserve_inflight_for_cleanup_retry = true;

@@ -1368,15 +1368,22 @@ fn ensure_monitor_auto_turn_inflight(
 }
 
 /// Read the `.generation` marker file mtime in nanoseconds since the unix
-/// epoch. Returns 0 when the file is missing or its mtime cannot be
-/// resolved — both conditions are treated by callers as "fresh wrapper".
+/// epoch. Returns 0 when the marker is missing in BOTH the canonical
+/// persistent location (`runtime_root()/runtime/sessions/`) and the legacy
+/// `/tmp/` fallback supported by `resolve_session_temp_path` (#892
+/// migration window). All of those conditions are treated by callers as
+/// "fresh wrapper".
 ///
 /// `.generation` is written exactly once per spawn by `claude.rs` after
 /// `tmux::create_session` and never touched by the live wrapper, so its
 /// mtime uniquely identifies the wrapper instance even when jsonl
 /// rotation changes the jsonl inode (#1270).
-fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
-    let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+pub(super) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
+    let Some(path) =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
+    else {
+        return 0;
+    };
     let Ok(meta) = std::fs::metadata(&path) else {
         return 0;
     };
@@ -3878,8 +3885,18 @@ pub(super) async fn tmux_output_watcher_with_restore(
     // #1270: track the `.generation` mtime alongside the local offset so a
     // later regression check can tell apart mid-flight rotation (same
     // wrapper, same mtime) from cancel→respawn (new wrapper, new mtime).
-    let mut last_observed_generation_mtime_ns: Option<i64> =
-        Some(read_generation_file_mtime_ns(&tmux_session_name));
+    //
+    // Initialize to None — NOT to the current `.generation` mtime — when
+    // `last_relayed_offset` is restored from inflight state (the offset
+    // belongs to whichever wrapper was running before this dcserver
+    // restarted/rebound the watcher; we don't actually know its mtime).
+    // Pre-seeding with current_mtime would let the regression check
+    // misclassify a cancel→respawn-with-shorter-jsonl as a same-wrapper
+    // rotation, pinning the local offset to the new EOF and making the
+    // duplicate guard suppress fresh bytes starting at offset 0 (codex P1
+    // on PR #1271). The first regression check (or the first own advance)
+    // populates this with the real mtime.
+    let mut last_observed_generation_mtime_ns: Option<i64> = None;
     if let Ok(meta) = std::fs::metadata(&output_path) {
         let observed_output_end = meta.len();
         reset_stale_relay_watermark_if_output_regressed(
