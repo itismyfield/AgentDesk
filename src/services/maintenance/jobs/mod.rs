@@ -90,24 +90,15 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
     );
 
     // Weekly postgres retention sweep (#1093). Postgres-only; skipped if no pool.
-    match pg_pool.clone() {
+    // The cancel-tombstone pruner (#1309) lives on the static
+    // `MaintenanceJobRegistry` (`server::maintenance::CancelTombstonePruneJob`)
+    // so it runs through the production `worker_registry::MaintenanceScheduler`
+    // path that owns persistent state in PG; no dynamic registration needed.
+    match pg_pool {
         Some(pool) => register_db_retention(pool),
         None => {
             tracing::info!(
                 "[maintenance] storage.db_retention skipped (postgres pool unavailable)"
-            );
-        }
-    }
-
-    // 30-minute cancel-tombstone prune (#1309). Postgres-only; skipped if no
-    // pool. The 10-minute TTL × 3 safety margin is generous so an idle channel
-    // never accumulates stale rows when its watcher never observes the
-    // cancel-induced death.
-    match pg_pool {
-        Some(pool) => register_cancel_tombstone_prune(pool),
-        None => {
-            tracing::info!(
-                "[maintenance] storage.cancel_tombstone_prune skipped (postgres pool unavailable)"
             );
         }
     }
@@ -136,30 +127,6 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
             Box::pin(async {
                 let _stats = crate::reconcile::reconcile_zombie_resources().await;
                 Ok(())
-            })
-        },
-    );
-}
-
-fn register_cancel_tombstone_prune(pool: PgPool) {
-    register_maintenance_job(
-        "storage.cancel_tombstone_prune",
-        Duration::from_secs(30 * 60),
-        move || {
-            let pool = pool.clone();
-            Box::pin(async move {
-                match crate::db::cancel_tombstones::prune_expired_cancel_tombstones(&pool).await {
-                    Ok(deleted) => {
-                        if deleted > 0 {
-                            tracing::info!(
-                                deleted,
-                                "[maintenance] cancel_tombstone_prune removed expired rows"
-                            );
-                        }
-                        Ok(())
-                    }
-                    Err(error) => Err(anyhow::anyhow!("cancel_tombstone_prune failed: {error}")),
-                }
             })
         },
     );

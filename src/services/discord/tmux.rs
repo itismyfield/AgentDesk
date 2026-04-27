@@ -180,7 +180,7 @@ fn tmux_output_offset(tmux_session_name: &str) -> Option<u64> {
     std::fs::metadata(output_path).ok().map(|meta| meta.len())
 }
 
-pub(super) fn record_recent_turn_stop(
+pub(super) async fn record_recent_turn_stop(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
@@ -188,17 +188,20 @@ pub(super) fn record_recent_turn_stop(
     let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
     // #1309: prefer the global PG pool published at boot so call sites
     // that don't already thread a pool (e.g. turn_lifecycle) still mirror
-    // cancel tombstones into the durable store.
+    // cancel tombstones into the durable store. The insert is awaited
+    // (codex round-2 P1) so a dcserver shutdown right after the cancel
+    // can't lose the row.
     record_recent_turn_stop_with_offset(
         channel_id,
         tmux_session_name,
         stop_output_offset,
         reason,
         crate::db::cancel_tombstones::global_pool(),
-    );
+    )
+    .await;
 }
 
-fn record_recent_turn_stop_with_offset(
+async fn record_recent_turn_stop_with_offset(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     stop_output_offset: Option<u64>,
@@ -206,48 +209,45 @@ fn record_recent_turn_stop_with_offset(
     pg_pool: Option<&sqlx::PgPool>,
 ) {
     let now = std::time::Instant::now();
-    let mut stops = recent_turn_stops();
-    prune_recent_turn_stops(&mut stops, now);
-    while stops.len() >= RECENT_TURN_STOP_CAPACITY {
-        stops.pop_front();
+    {
+        let mut stops = recent_turn_stops();
+        prune_recent_turn_stops(&mut stops, now);
+        while stops.len() >= RECENT_TURN_STOP_CAPACITY {
+            stops.pop_front();
+        }
+        stops.push_back(RecentTurnStop {
+            channel_id,
+            tmux_session_name: tmux_session_name.map(str::to_string),
+            stop_output_offset,
+            reason: reason.to_string(),
+            recorded_at: now,
+        });
     }
-    stops.push_back(RecentTurnStop {
-        channel_id,
-        tmux_session_name: tmux_session_name.map(str::to_string),
-        stop_output_offset,
-        reason: reason.to_string(),
-        recorded_at: now,
-    });
-    drop(stops);
 
     if let Some(pool) = pg_pool {
         // #1309: mirror the cancel tombstone into PG so a dcserver restart
         // between cancel and watcher-death observation can still suppress
-        // the misleading 🔴 lifecycle notice. Best-effort fire-and-forget;
-        // the in-memory entry above is authoritative for the in-process
-        // happy path.
-        let pool = pool.clone();
+        // the misleading 🔴 lifecycle notice. The insert is awaited so the
+        // row is committed before the cancel path returns; a dcserver
+        // shutdown immediately after the cancel can't lose the row
+        // (codex round-2 P1 on PR #1310).
         let channel_id_i64 = channel_id.get() as i64;
-        let tmux_session_name = tmux_session_name.map(str::to_string);
         let stop_output_offset_i64 = stop_output_offset.map(|v| v as i64);
-        let reason = reason.to_string();
-        tokio::spawn(async move {
-            if let Err(error) = crate::db::cancel_tombstones::insert_cancel_tombstone(
-                &pool,
+        if let Err(error) = crate::db::cancel_tombstones::insert_cancel_tombstone(
+            pool,
+            channel_id_i64,
+            tmux_session_name,
+            stop_output_offset_i64,
+            reason,
+        )
+        .await
+        {
+            tracing::warn!(
+                "[cancel-tombstone] PG persist failed for channel {}: {}",
                 channel_id_i64,
-                tmux_session_name.as_deref(),
-                stop_output_offset_i64,
-                &reason,
-            )
-            .await
-            {
-                tracing::warn!(
-                    "[cancel-tombstone] PG persist failed for channel {}: {}",
-                    channel_id_i64,
-                    error
-                );
-            }
-        });
+                error
+            );
+        }
     }
 }
 
@@ -448,13 +448,22 @@ fn record_recent_turn_stop_with_offset_for_tests(
     stop_output_offset: u64,
     reason: &str,
 ) {
-    record_recent_turn_stop_with_offset(
+    // Tests target the in-memory fast path; bypass the async PG mirror so
+    // the helper stays sync and existing `#[test]` cases don't need to be
+    // rewritten as `#[tokio::test]`.
+    let now = std::time::Instant::now();
+    let mut stops = recent_turn_stops();
+    prune_recent_turn_stops(&mut stops, now);
+    while stops.len() >= RECENT_TURN_STOP_CAPACITY {
+        stops.pop_front();
+    }
+    stops.push_back(RecentTurnStop {
         channel_id,
-        Some(tmux_session_name),
-        Some(stop_output_offset),
-        reason,
-        None,
-    );
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        stop_output_offset: Some(stop_output_offset),
+        reason: reason.to_string(),
+        recorded_at: now,
+    });
 }
 
 #[cfg(test)]

@@ -142,7 +142,7 @@
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 190 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
-| `server::maintenance` | `src/server/maintenance.rs` | 933 |  |
+| `server::maintenance` | `src/server/maintenance.rs` | 968 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 302 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2039 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
@@ -217,7 +217,7 @@
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1679 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 650 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 3613 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 3615 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 722 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1164 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
@@ -287,7 +287,7 @@
 | `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 356 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11920 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 11929 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
@@ -311,7 +311,7 @@
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 177 |  |
 | `services::maintenance` | `src/services/maintenance/mod.rs` | 465 |  |
-| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 233 |  |
+| `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 200 |  |
 | `services::maintenance::jobs::db_retention` | `src/services/maintenance/jobs/db_retention.rs` | 555 |  |
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 194 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 406 |  |
@@ -352,7 +352,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 418 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 419 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2070 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 827 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
