@@ -174,7 +174,7 @@
 | `server::routes::github` | `src/server/routes/github.rs` | 537 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 959 |  |
-| `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 590 |  |
+| `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 578 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4796 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
@@ -187,7 +187,7 @@
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4483 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1388 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
-| `server::routes::receipt` | `src/server/routes/receipt.rs` | 307 |  |
+| `server::routes::receipt` | `src/server/routes/receipt.rs` | 347 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2011 | giant-file |

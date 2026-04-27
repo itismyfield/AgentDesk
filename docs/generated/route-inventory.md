@@ -201,7 +201,7 @@
 | `POST` | `/api/queue/slots/{agent_id}/{slot_index}/reset-thread` | `auto_queue::reset_slot_thread` | `src/server/routes/auto_queue.rs:9390` | `src/server/routes/domains/ops.rs:188` |
 | `GET` | `/api/queue/status` | `auto_queue::status` | `src/server/routes/auto_queue.rs:8363` | `src/server/routes/domains/ops.rs:155` |
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:1240` | `src/server/routes/domains/admin.rs:78` |
-| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:130` | `src/server/routes/domains/admin.rs:79` |
+| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:170` | `src/server/routes/domains/admin.rs:79` |
 | `POST` | `/api/review-decision` | `deprecated_submit_review_decision` | `src/server/routes/domains/reviews.rs:52` | `src/server/routes/domains/reviews.rs:32` |
 | `POST` | `/api/review-tuning/aggregate` | `deprecated_aggregate_review_tuning` | `src/server/routes/domains/reviews.rs:60` | `src/server/routes/domains/reviews.rs:37` |
 | `POST` | `/api/review-verdict` | `deprecated_submit_verdict` | `src/server/routes/domains/reviews.rs:44` | `src/server/routes/domains/reviews.rs:27` |
@@ -240,7 +240,7 @@
 | `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:499` | `src/server/routes/domains/admin.rs:46` |
 | `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:519` | `src/server/routes/domains/admin.rs:47` |
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:562` | `src/server/routes/domains/admin.rs:73` |
-| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:213` | `src/server/routes/domains/admin.rs:80` |
+| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:253` | `src/server/routes/domains/admin.rs:80` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:162` | `src/server/routes/domains/ops.rs:225` |
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:251` | `src/server/routes/domains/ops.rs:226` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:298` |
