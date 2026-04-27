@@ -642,6 +642,9 @@ pub async fn set_repo_pipeline(
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
                 );
             }
+            // #1230 — refresh persisted override health report so /api/health and the
+            // postgres `kv_meta` mirror reflect the latest repo override warnings.
+            crate::pipeline::refresh_override_health_report(&state.db, Some(pool)).await;
             (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
         }
         Err(error) => (
@@ -731,6 +734,9 @@ pub async fn set_agent_pipeline(
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
                 );
             }
+            // #1230 — refresh persisted override health report so /api/health and the
+            // postgres `kv_meta` mirror reflect the latest agent override warnings.
+            crate::pipeline::refresh_override_health_report(&state.db, Some(pool)).await;
             (
                 StatusCode::OK,
                 Json(json!({"ok": true, "agent_id": agent_id})),
