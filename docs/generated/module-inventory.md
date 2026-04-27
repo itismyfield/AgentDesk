@@ -143,10 +143,10 @@
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 933 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 245 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 1915 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 1927 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
-| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1548 | giant-file |
+| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1663 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10249 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 189 |  |
