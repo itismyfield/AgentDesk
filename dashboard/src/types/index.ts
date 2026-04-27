@@ -267,6 +267,14 @@ export interface AuditLogEntry {
   summary: string;
   metadata?: Record<string, unknown> | null;
   created_at: number;
+  /* Enrichment fields populated by the audit-logs LEFT JOIN with kanban_cards
+     when entity_type === "kanban_card". Used by the agent drawer's restored
+     "감사 / Audit" panel so rows can render the human-readable card title +
+     issue number instead of raw `kanban_card:UUID` strings (#1258 follow-up). */
+  card_title?: string | null;
+  card_issue_number?: number | null;
+  card_issue_url?: string | null;
+  card_assigned_agent_id?: string | null;
 }
 
 // CLI Status
@@ -762,6 +770,12 @@ export interface DispatchedSession {
   guild_id?: string | null;
   channel_web_url?: string | null;
   channel_deeplink_url?: string | null;
+  /* The kanban card this session's active dispatch is bound to. Lets the
+     restored "감사 / Audit" panel on the agent drawer deeplink each audit
+     row to the most recent Discord turn for the same card without an extra
+     round-trip. Returned via LEFT JOIN with task_dispatches in
+     /api/agents/:id/dispatched-sessions. */
+  kanban_card_id?: string | null;
 }
 
 // Dashboard Stats

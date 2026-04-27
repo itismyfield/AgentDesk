@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getAgentDispatchedSessions,
   getAgentTranscripts,
+  getAuditLogs,
   getDiscordChannelInfo,
   getSkillRanking,
   type DiscordChannelInfo,
@@ -10,7 +11,14 @@ import {
 } from "../../api";
 import { getProviderMeta } from "../../app/providerTheme";
 import { localeName } from "../../i18n";
-import type { Agent, Department, DispatchedSession, KanbanCard, UiLanguage } from "../../types";
+import type {
+  Agent,
+  AuditLogEntry,
+  Department,
+  DispatchedSession,
+  KanbanCard,
+  UiLanguage,
+} from "../../types";
 import AgentAvatar from "../AgentAvatar";
 import {
   SurfaceActionButton,
@@ -278,6 +286,13 @@ export default function OfficeAgentDrawer({
   const [sessions, setSessions] = useState<DispatchedSession[]>([]);
   const [sessionChannelsById, setSessionChannelsById] = useState<Record<string, DiscordChannelInfo>>({});
   const [skillRows, setSkillRows] = useState<OfficeSkillRow[]>([]);
+  /* Restored "감사 / Audit" section: each entry is a kanban_card lifecycle
+     event (state transition / hook fire) for cards assigned to this agent.
+     Backend now enriches the row with the card title + GitHub issue number
+     so the panel renders meaningful summaries instead of the raw
+     `kanban_card:UUID` strings the previous implementation surfaced
+     (deleted in #1258). */
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
   useEffect(() => {
     if (!open) return;
@@ -285,11 +300,13 @@ export default function OfficeAgentDrawer({
     setLoading(true);
 
     void (async () => {
-      const [sessionsResult, rankingResult, transcriptsResult] = await Promise.allSettled([
-        getAgentDispatchedSessions(agent.id),
-        getSkillRanking("7d", 100),
-        getAgentTranscripts(agent.id, 80),
-      ]);
+      const [sessionsResult, rankingResult, transcriptsResult, auditResult] =
+        await Promise.allSettled([
+          getAgentDispatchedSessions(agent.id),
+          getSkillRanking("7d", 100),
+          getAgentTranscripts(agent.id, 80),
+          getAuditLogs(20, { agentId: agent.id }),
+        ]);
 
       if (cancelled) return;
 
@@ -312,6 +329,8 @@ export default function OfficeAgentDrawer({
         rankingResult.status === "fulfilled" ? rankingResult.value.byAgent : [];
       const transcriptRows =
         transcriptsResult.status === "fulfilled" ? transcriptsResult.value : [];
+      const loadedAuditLogs =
+        auditResult.status === "fulfilled" ? auditResult.value : [];
 
       const channelIds = Array.from(
         new Set(
@@ -342,6 +361,7 @@ export default function OfficeAgentDrawer({
         ),
       );
       setSkillRows(buildSkillRows(agent, rankingRows, transcriptRows));
+      setAuditLogs(loadedAuditLogs);
       setLoading(false);
     })();
 
@@ -349,6 +369,24 @@ export default function OfficeAgentDrawer({
       cancelled = true;
     };
   }, [agent, open]);
+
+  /* Map a kanban_card_id → most recent dispatched session so each audit row
+     can deeplink to the Discord turn the agent ran for that card. The
+     dispatched-sessions endpoint already returns guild_id + channel deeplink
+     URLs, so we just look up by entity_id and reuse the existing summary
+     formatter (no extra round-trip needed). */
+  const sessionByCardId = useMemo(() => {
+    const map = new Map<string, DispatchedSession>();
+    for (const session of sessions) {
+      const cardId = session.kanban_card_id ?? null;
+      if (!cardId) continue;
+      const existing = map.get(cardId);
+      if (!existing || sessionSortValue(session) > sessionSortValue(existing)) {
+        map.set(cardId, session);
+      }
+    }
+    return map;
+  }, [sessions]);
 
   const department = departments.find((item) => item.id === agent.department_id) ?? null;
   const providerMeta = getProviderMeta(agent.cli_provider);
@@ -627,6 +665,100 @@ export default function OfficeAgentDrawer({
                         )}
                         {summary.deepLink && (
                           <a href={summary.deepLink}>
+                            <SurfaceActionButton tone="neutral" compact>
+                              {t(isKo, "Discord 앱", "Discord app")}
+                            </SurfaceActionButton>
+                          </a>
+                        )}
+                      </div>
+                    )}
+                  </SurfaceCard>
+                );
+              })}
+            </div>
+          )}
+        </SurfaceSubsection>
+
+        {/* #1258 follow-up: restored "감사 / Audit" panel. The previous
+            OfficeInsightPanel rendered raw `kanban_card:UUID` strings and was
+            deleted as "no signal value". The backend now LEFT JOINs
+            kanban_cards on the audit_logs query so each row carries the
+            human-readable card title + GitHub issue number. Discord deeplinks
+            for each row are resolved client-side via the dispatched-sessions
+            data already loaded above (sessionByCardId map), so no extra
+            round-trip is needed. */}
+        <SurfaceSubsection
+          title={t(isKo, "감사", "Audit")}
+          description={t(
+            isKo,
+            "이 에이전트가 담당한 카드의 최근 상태 전환과 hook 실행 이력입니다.",
+            "Recent state transitions and hook fires for cards assigned to this agent.",
+          )}
+        >
+          {loading ? (
+            <SurfaceNotice compact>
+              {t(isKo, "감사 로그를 불러오는 중...", "Loading audit log...")}
+            </SurfaceNotice>
+          ) : auditLogs.length === 0 ? (
+            <SurfaceEmptyState className="text-sm">
+              {t(isKo, "기록된 감사 항목이 없습니다.", "No audit entries recorded yet.")}
+            </SurfaceEmptyState>
+          ) : (
+            <div className="space-y-2">
+              {auditLogs.map((entry) => {
+                const session = entry.entity_id
+                  ? sessionByCardId.get(entry.entity_id) ?? null
+                  : null;
+                const titleParts: string[] = [];
+                if (typeof entry.card_issue_number === "number") {
+                  titleParts.push(`#${entry.card_issue_number}`);
+                }
+                if (entry.card_title) titleParts.push(entry.card_title);
+                const headline = titleParts.length > 0
+                  ? titleParts.join(" ")
+                  : entry.summary || entry.entity_id || t(isKo, "(라벨 없음)", "(no label)");
+                const actorLabel = entry.actor || t(isKo, "시스템", "system");
+                return (
+                  <SurfaceCard key={entry.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div
+                          className="truncate text-sm font-semibold"
+                          style={{ color: "var(--th-text-heading)" }}
+                          title={entry.summary}
+                        >
+                          {headline}
+                        </div>
+                        <div
+                          className="mt-1 text-xs leading-5"
+                          style={{ color: "var(--th-text-muted)" }}
+                        >
+                          <span>{entry.action}</span>
+                          <span className="mx-1.5">·</span>
+                          <span>{actorLabel}</span>
+                          <span className="mx-1.5">·</span>
+                          <span>{formatDateTime(entry.created_at, locale)}</span>
+                        </div>
+                      </div>
+                    </div>
+                    {(entry.card_issue_url || session?.channel_web_url || session?.channel_deeplink_url) && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {entry.card_issue_url && (
+                          <a href={entry.card_issue_url} target="_blank" rel="noreferrer">
+                            <SurfaceActionButton tone="neutral" compact>
+                              {t(isKo, "GitHub 이슈", "GitHub issue")}
+                            </SurfaceActionButton>
+                          </a>
+                        )}
+                        {session?.channel_web_url && (
+                          <a href={session.channel_web_url} target="_blank" rel="noreferrer">
+                            <SurfaceActionButton tone="info" compact>
+                              {t(isKo, "Discord 웹", "Discord web")}
+                            </SurfaceActionButton>
+                          </a>
+                        )}
+                        {session?.channel_deeplink_url && (
+                          <a href={session.channel_deeplink_url}>
                             <SurfaceActionButton tone="neutral" compact>
                               {t(isKo, "Discord 앱", "Discord app")}
                             </SurfaceActionButton>
