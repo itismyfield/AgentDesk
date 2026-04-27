@@ -201,6 +201,15 @@ pub(super) async fn record_recent_turn_stop(
     .await;
 }
 
+/// Bounded worst-case latency we are willing to add to the foreground
+/// cancel path in exchange for tombstone durability across restart. PG
+/// inserts are normally well under 10 ms; a saturated pool that exceeds
+/// this window falls through to the in-memory store only — the cancel
+/// signal must not stall behind the PG write because `turn_bridge` polls
+/// `cancel_token` and could kill the wrapper before the C-c path runs
+/// (codex round-3 P2 on PR #1310).
+const CANCEL_TOMBSTONE_PERSIST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 async fn record_recent_turn_stop_with_offset(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
@@ -208,47 +217,56 @@ async fn record_recent_turn_stop_with_offset(
     reason: &str,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
-    let now = std::time::Instant::now();
-    {
-        let mut stops = recent_turn_stops();
-        prune_recent_turn_stops(&mut stops, now);
-        while stops.len() >= RECENT_TURN_STOP_CAPACITY {
-            stops.pop_front();
-        }
-        stops.push_back(RecentTurnStop {
-            channel_id,
-            tmux_session_name: tmux_session_name.map(str::to_string),
-            stop_output_offset,
-            reason: reason.to_string(),
-            recorded_at: now,
-        });
-    }
-
+    // codex round-3 P2 on PR #1310: persist the durable tombstone BEFORE
+    // publishing the in-memory entry. If a watcher death races in and
+    // consumes the in-memory row while a deferred PG insert was still in
+    // flight, the late row would survive past the consume and silently
+    // suppress a follow-up unrelated death within the 60 s fallback
+    // window. By inserting first we guarantee that any consume after the
+    // in-memory publish drains both layers atomically.
     if let Some(pool) = pg_pool {
-        // #1309: mirror the cancel tombstone into PG so a dcserver restart
-        // between cancel and watcher-death observation can still suppress
-        // the misleading 🔴 lifecycle notice. The insert is awaited so the
-        // row is committed before the cancel path returns; a dcserver
-        // shutdown immediately after the cancel can't lose the row
-        // (codex round-2 P1 on PR #1310).
         let channel_id_i64 = channel_id.get() as i64;
         let stop_output_offset_i64 = stop_output_offset.map(|v| v as i64);
-        if let Err(error) = crate::db::cancel_tombstones::insert_cancel_tombstone(
+        let persist = crate::db::cancel_tombstones::insert_cancel_tombstone(
             pool,
             channel_id_i64,
             tmux_session_name,
             stop_output_offset_i64,
             reason,
-        )
-        .await
-        {
-            tracing::warn!(
-                "[cancel-tombstone] PG persist failed for channel {}: {}",
-                channel_id_i64,
-                error
-            );
+        );
+        match tokio::time::timeout(CANCEL_TOMBSTONE_PERSIST_TIMEOUT, persist).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "[cancel-tombstone] PG persist failed for channel {}: {}",
+                    channel_id_i64,
+                    error
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "[cancel-tombstone] PG persist for channel {} exceeded {:?}; \
+                     falling back to in-memory only",
+                    channel_id_i64,
+                    CANCEL_TOMBSTONE_PERSIST_TIMEOUT
+                );
+            }
         }
     }
+
+    let now = std::time::Instant::now();
+    let mut stops = recent_turn_stops();
+    prune_recent_turn_stops(&mut stops, now);
+    while stops.len() >= RECENT_TURN_STOP_CAPACITY {
+        stops.pop_front();
+    }
+    stops.push_back(RecentTurnStop {
+        channel_id,
+        tmux_session_name: tmux_session_name.map(str::to_string),
+        stop_output_offset,
+        reason: reason.to_string(),
+        recorded_at: now,
+    });
 }
 
 fn recent_turn_stop_for_channel(channel_id: ChannelId) -> Option<RecentTurnStop> {
