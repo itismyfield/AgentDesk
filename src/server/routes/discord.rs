@@ -7,18 +7,20 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::db::agents::AgentChannelBindings;
+use crate::db::agents::{AgentChannelBindings, load_all_agent_channel_bindings_pg};
 
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/discord/bindings
 /// (Legacy alias: /api/discord-bindings — kept for backward-compat, deprecated via #1065.)
 ///
-/// TODO(#1238 / 843g): this handler is one of the few remaining direct
-/// SQLite readers in `src/server/routes`. PG-only deployments will get an
-/// empty bindings list because no `Db` is available; #1238 will rewrite the
-/// query against the postgres `agents` table.
+/// Reads agent channel bindings, preferring Postgres when available
+/// (codex P2 round 2 on #1306). Falls back to the legacy `Db` for older
+/// deployments still on SQLite. #1238 will retire the SQLite branch.
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(pool) = state.pg_pool_ref() {
+        return list_bindings_pg(pool).await;
+    }
     let Some(legacy_db) = state.legacy_db().or_else(|| state.engine.legacy_db()) else {
         return (StatusCode::OK, Json(json!({"bindings": []})));
     };
@@ -77,6 +79,43 @@ pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<s
         Some(iter) => iter.filter_map(|r| r.ok()).collect(),
         None => Vec::new(),
     };
+
+    (StatusCode::OK, Json(json!({"bindings": bindings})))
+}
+
+async fn list_bindings_pg(pool: &sqlx::PgPool) -> (StatusCode, Json<serde_json::Value>) {
+    let map = match load_all_agent_channel_bindings_pg(pool).await {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("pg query failed: {e}")})),
+            );
+        }
+    };
+
+    let bindings: Vec<serde_json::Value> = map
+        .into_iter()
+        .filter(|(_, b)| {
+            b.discord_channel_id.is_some()
+                || b.discord_channel_alt.is_some()
+                || b.discord_channel_cc.is_some()
+                || b.discord_channel_cdx.is_some()
+        })
+        .map(|(agent_id, b)| {
+            json!({
+                "agentId": agent_id,
+                "channelId": b.primary_channel(),
+                "counterModelChannelId": b.counter_model_channel(),
+                "provider": b.provider,
+                "discord_channel_id": b.discord_channel_id,
+                "discord_channel_alt": b.discord_channel_alt,
+                "discord_channel_cc": b.discord_channel_cc,
+                "discord_channel_cdx": b.discord_channel_cdx,
+                "source": "config",
+            })
+        })
+        .collect();
 
     (StatusCode::OK, Json(json!({"bindings": bindings})))
 }
