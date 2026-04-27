@@ -178,7 +178,18 @@ async fn run_placeholder_sweep_pass(
         if !inflight_state_still_same_turn(provider, &state, age_secs) {
             continue;
         }
-        match classify_age(age_secs) {
+        // codex round-7 P1 on PR #1308: don't abandon a turn that is healthily
+        // waiting on a long-running tool. The turn loop does not heartbeat the
+        // inflight file during the wait, so mtime can drift past the abandon
+        // threshold even when the tool is still in flight. Cancelling the
+        // live turn here would defeat the whole point of the placeholder
+        // card. Stalled visual updates are still allowed because they only
+        // edit the card text without finalizing the mailbox.
+        let mut decision = classify_age(age_secs);
+        if state.long_running_placeholder_active && matches!(decision, SweepDecision::Abandoned) {
+            decision = SweepDecision::Stalled;
+        }
+        match decision {
             SweepDecision::Active => {}
             SweepDecision::Stalled => {
                 if !stalled_tracker.mark_pending(provider, &state) {

@@ -194,7 +194,21 @@ impl PlaceholderController {
                 guarded.active_snapshot = Some(input);
                 PlaceholderControllerOutcome::Edited
             }
-            Err(_) => PlaceholderControllerOutcome::EditFailed,
+            Err(_) => {
+                // codex round-7 P3 on PR #1308: an initial PATCH failure
+                // leaves a fresh `NotCreated` entry behind that
+                // `evict_terminal_entries` will not sweep. Drop it now so a
+                // long stretch of failed first edits cannot grow the map past
+                // `PLACEHOLDER_ENTRIES_MAX`. Skip the removal if the FSM is
+                // already past `NotCreated` — that means a concurrent caller
+                // committed and we must not race it out.
+                let should_drop = matches!(guarded.state, PlaceholderLifecycle::NotCreated);
+                drop(guarded);
+                if should_drop {
+                    self.entries.remove(&key);
+                }
+                PlaceholderControllerOutcome::EditFailed
+            }
         }
     }
 
