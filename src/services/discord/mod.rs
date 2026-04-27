@@ -3551,23 +3551,115 @@ mod tests {
         assert_eq!(session_row.2, None);
     }
 
+    /// Per-test Postgres database lifecycle for the #1238 migration of the
+    /// idle-cleanup duplicate-audit guard test, which now exercises the
+    /// PG-aware `mark_session_disconnected_for_idle_cleanup` path and the
+    /// `session_termination_events` audit table on Postgres.
+    struct DiscordIdlePgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl DiscordIdlePgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_discord_idle_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "discord idle pg",
+            )
+            .await
+            .expect("create discord idle postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "discord idle pg",
+            )
+            .await
+            .expect("connect + migrate discord idle postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "discord idle pg",
+            )
+            .await
+            .expect("drop discord idle postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
     #[tokio::test]
-    async fn idle_cleanup_skips_duplicate_audit_when_force_kill_already_disconnected_session() {
-        let db = crate::db::test_db();
+    async fn idle_cleanup_skips_duplicate_audit_when_force_kill_pg_already_disconnected_session() {
+        let pg_db = DiscordIdlePgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let session_key = "host:cleanup-session-dedupe";
 
-        db.lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO sessions
-                 (session_key, status, created_at)
-                 VALUES (?1, 'disconnected', datetime('now'))",
-                [session_key],
-            )
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, status, created_at)
+             VALUES ($1, 'disconnected', NOW())",
+        )
+        .bind(session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        crate::services::termination_audit::record_termination_with_db(
-            &db,
+        crate::services::termination_audit::record_termination_with_handles(
+            None,
+            Some(&pool),
             session_key,
             None,
             "force_kill_api",
@@ -3578,16 +3670,40 @@ mod tests {
             Some(false),
         );
 
+        // record_termination_with_handles is fire-and-forget (spawns onto the
+        // tokio runtime); wait for the force-kill audit row to land before we
+        // exercise the cleanup dedupe path.
+        let mut force_kill_persisted = false;
+        for _ in 0..40 {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM session_termination_events WHERE session_key = $1",
+            )
+            .bind(session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if count >= 1 {
+                force_kill_persisted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            force_kill_persisted,
+            "force-kill termination audit row was not persisted to postgres"
+        );
+
         let should_record =
-            mark_session_disconnected_for_idle_cleanup(Some(&db), None, session_key).await;
+            mark_session_disconnected_for_idle_cleanup(None, Some(&pool), session_key).await;
         assert!(
             !should_record,
             "cleanup must skip a second termination audit when force-kill already disconnected the session"
         );
 
         if should_record {
-            crate::services::termination_audit::record_termination_with_db(
-                &db,
+            crate::services::termination_audit::record_termination_with_handles(
+                None,
+                Some(&pool),
                 session_key,
                 None,
                 "cleanup",
@@ -3599,15 +3715,16 @@ mod tests {
             );
         }
 
-        let audit_count: i64 = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM session_termination_events WHERE session_key = ?1",
-                [session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let audit_count: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM session_termination_events WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(audit_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
