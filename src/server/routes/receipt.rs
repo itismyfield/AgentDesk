@@ -76,6 +76,56 @@ fn write_cached_token_analytics(period: &str, data: Arc<receipt::TokenAnalyticsD
     }
 }
 
+/// Pre-warm the token-analytics in-process cache for every period the
+/// dashboard requests on first paint. The first home/stats visit on a fresh
+/// dcserver previously paid the ~9s filesystem scan synchronously while the
+/// user watched a placeholder; with this prewarm running off a detached
+/// `tokio::spawn` shortly after boot, the cache is already populated before
+/// the user lands on /home, so the first request hits the 30s in-process
+/// cache and returns in single-digit ms.
+///
+/// We deliberately stagger periods so the three blocking scans don't pile up
+/// onto the same blocking pool slot at the same moment, and we tolerate
+/// individual failures so a transient parse error in one period doesn't
+/// kill the prewarm for the others.
+pub async fn prewarm_token_analytics_cache() {
+    for period in ["7d", "30d", "90d"] {
+        let (days, label) = match period {
+            "7d" => (7_i64, "Last 7 Days"),
+            "90d" => (90_i64, "Last 90 Days"),
+            _ => (30_i64, "Last 30 Days"),
+        };
+        let now = chrono::Utc::now();
+        let local_now = now.with_timezone(&Local);
+        let start_date = local_now.date_naive() - chrono::Duration::days(days.saturating_sub(1));
+        let start = Local
+            .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|| now - chrono::Duration::days(days));
+        let label_owned = label.to_string();
+        let period_owned = period.to_string();
+        let started = Instant::now();
+        let data = match tokio::task::spawn_blocking(move || {
+            receipt::collect_token_analytics(start, now, &label_owned, &period_owned)
+        })
+        .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!(period, error = %error, "token-analytics prewarm failed");
+                continue;
+            }
+        };
+        write_cached_token_analytics(period, Arc::new(data));
+        tracing::info!(
+            period,
+            elapsed_ms = started.elapsed().as_millis(),
+            "token-analytics prewarm done"
+        );
+    }
+}
+
 /// GET /api/receipt?period=month
 pub async fn get_receipt(
     State(state): State<AppState>,
