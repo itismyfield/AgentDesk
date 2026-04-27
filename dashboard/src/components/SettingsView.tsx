@@ -916,8 +916,11 @@ function selectDefaultPipelineRepo(
 }
 
 function formatPipelineAgentLabel(agent: Agent, isKo: boolean): string {
+  // Native <option> cannot render React components, so we omit the emoji
+  // fallback (sprite rendering happens in non-<option> avatar UIs).
+  // Keeps the sprite-first policy from #1251 (emoji fallback禁止).
   const name = isKo ? agent.name_ko || agent.name : agent.name || agent.name_ko;
-  return `${agent.avatar_emoji} ${name}`;
+  return name;
 }
 
 function baselineSourceNote(source: string | null | undefined, isKo: boolean): string | null {

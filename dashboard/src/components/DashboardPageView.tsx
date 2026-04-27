@@ -62,7 +62,11 @@ import {
   AutoQueueHistoryWidget,
   BottleneckWidget,
   CronTimelineWidget,
+  DashboardDeptAndSquad,
+  GitHubIssuesWidget,
+  HeatmapWidget,
   SkillTrendWidget,
+  buildDepartmentPerformanceRows,
 } from "./dashboard/ExtraWidgets";
 import HealthWidget from "./dashboard/HealthWidget";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
@@ -396,6 +400,13 @@ export default function DashboardPageView({
         : [];
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
   const maxXp = topAgents.reduce((max, agent) => Math.max(max, agent.xp), 1);
+  const workingAgents = useMemo(() => agents.filter((agent) => agent.status === "working"), [agents]);
+  const idleAgentsList = useMemo(() => agents.filter((agent) => agent.status !== "working"), [agents]);
+  const deptPerformanceRows = useMemo(
+    () => buildDepartmentPerformanceRows(dashboardStats.departments, language),
+    [dashboardStats.departments, language],
+  );
+  const topGithubRepo = dashboardStats.kanban.top_repos[0]?.github_repo;
   const staleLinkedSessions = useMemo(() => getStaleLinkedSessions(sessions), [sessions]);
   const reconnectingSessions = useMemo(
     () => sessions.filter((session) => session.linked_agent_id && session.status === "disconnected"),
@@ -1049,11 +1060,23 @@ export default function DashboardPageView({
             <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           </div>
           <AgentQualityWidget agents={agents} t={t} localeTag={localeTag} />
+          <DashboardDeptAndSquad
+            deptRows={deptPerformanceRows}
+            workingAgents={workingAgents}
+            idleAgentsList={idleAgentsList}
+            agents={agents}
+            language={language}
+            numberFormatter={numberFormatter}
+            t={t}
+            onSelectAgent={onSelectAgent}
+          />
+          <GitHubIssuesWidget t={t} repo={topGithubRepo} />
           <BottleneckWidget t={t} />
       </DashboardTabPanel>
 
       <DashboardTabPanel tab="tokens" activeTab={activeTab} t={t}>
           <ReceiptWidget t={t} />
+          <HeatmapWidget t={t} />
           <TokenAnalyticsSection
             agents={agents}
             t={t}

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as api from "../api/client";
 import { localeName, useI18n } from "../i18n";
 import type { Agent, CompanySettings, DashboardStats } from "../types";
+import AgentAvatar from "./AgentAvatar";
 import { getAgentLevel, getAgentTitle } from "./agent-manager/AgentInfoCard";
 import { Drawer } from "./common/overlay";
 import {
@@ -275,12 +276,30 @@ function BadgeIcon({
 }
 
 function AchievementAvatar({
+  agent,
+  agents,
   emoji,
   label,
 }: {
-  emoji: string;
+  agent?: Agent;
+  agents?: Agent[];
+  emoji?: string;
   label: string;
 }) {
+  // Sprite-first: when an agent reference is available, render the canonical
+  // sprite (consistent with #1251 sprite policy). Emoji is only kept as a
+  // last-resort fallback when leaderboard rows lack a resolved Agent.
+  if (agent) {
+    return (
+      <AgentAvatar
+        agent={agent}
+        agents={agents}
+        size={28}
+        rounded="full"
+        className="border border-[color-mix(in_srgb,var(--line)_70%,transparent)]"
+      />
+    );
+  }
   return (
     <div
       title={label}
@@ -305,11 +324,13 @@ function AchievementCard({
   item,
   isKo,
   progressLabel,
+  agents,
   onOpen,
 }: {
   item: AchievementCardModel;
   isKo: boolean;
   progressLabel: string;
+  agents: Agent[];
   onOpen: (item: AchievementCardModel) => void;
 }) {
   const theme = getRarityTheme(item.rarity);
@@ -373,6 +394,8 @@ function AchievementCard({
               style={{ color: "var(--fg-faint)" }}
             >
               <AchievementAvatar
+                agent={item.agent}
+                agents={agents}
                 emoji={item.avatarEmoji || "🤖"}
                 label={item.agentName}
               />
@@ -1013,6 +1036,7 @@ export default function AchievementsPage({
                     item={item}
                     isKo={isKo}
                     progressLabel={t({ ko: "진행", en: "progress" })}
+                    agents={agents}
                     onOpen={setSelectedCard}
                   />
                 ))}
@@ -1160,7 +1184,12 @@ export default function AchievementsPage({
                         >
                           #{index + 1}
                         </div>
-                        <AchievementAvatar emoji={entry.avatarEmoji} label={entry.name} />
+                        <AchievementAvatar
+                          agent={entry.agent}
+                          agents={agents}
+                          emoji={entry.avatarEmoji}
+                          label={entry.name}
+                        />
                         <div className="min-w-0 flex-1">
                           <div
                             className="truncate text-sm font-semibold"
@@ -1262,6 +1291,8 @@ export default function AchievementsPage({
                       disabled={!selectedCard.agent || !onSelectAgent}
                     >
                       <AchievementAvatar
+                        agent={selectedCard.agent}
+                        agents={agents}
                         emoji={selectedCard.avatarEmoji || "🤖"}
                         label={selectedCard.agentName}
                       />
