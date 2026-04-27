@@ -1437,6 +1437,10 @@ async fn mailbox_cancel_active_turn(
     let result = shared.mailbox(channel_id).cancel_active_turn().await;
     #[cfg(unix)]
     if result.token.is_some() {
+        // #1309: `record_recent_turn_stop` mirrors the in-memory tombstone
+        // into PG via the global pool so a dcserver restart between cancel
+        // and watcher-death observation can still suppress the misleading
+        // 🔴 lifecycle notice.
         tmux::record_recent_turn_stop(
             channel_id,
             tmux_session_name.as_deref(),

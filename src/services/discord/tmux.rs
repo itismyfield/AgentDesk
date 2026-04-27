@@ -186,7 +186,16 @@ pub(super) fn record_recent_turn_stop(
     reason: &str,
 ) {
     let stop_output_offset = tmux_session_name.and_then(tmux_output_offset);
-    record_recent_turn_stop_with_offset(channel_id, tmux_session_name, stop_output_offset, reason);
+    // #1309: prefer the global PG pool published at boot so call sites
+    // that don't already thread a pool (e.g. turn_lifecycle) still mirror
+    // cancel tombstones into the durable store.
+    record_recent_turn_stop_with_offset(
+        channel_id,
+        tmux_session_name,
+        stop_output_offset,
+        reason,
+        crate::db::cancel_tombstones::global_pool(),
+    );
 }
 
 fn record_recent_turn_stop_with_offset(
@@ -194,6 +203,7 @@ fn record_recent_turn_stop_with_offset(
     tmux_session_name: Option<&str>,
     stop_output_offset: Option<u64>,
     reason: &str,
+    pg_pool: Option<&sqlx::PgPool>,
 ) {
     let now = std::time::Instant::now();
     let mut stops = recent_turn_stops();
@@ -208,6 +218,37 @@ fn record_recent_turn_stop_with_offset(
         reason: reason.to_string(),
         recorded_at: now,
     });
+    drop(stops);
+
+    if let Some(pool) = pg_pool {
+        // #1309: mirror the cancel tombstone into PG so a dcserver restart
+        // between cancel and watcher-death observation can still suppress
+        // the misleading 🔴 lifecycle notice. Best-effort fire-and-forget;
+        // the in-memory entry above is authoritative for the in-process
+        // happy path.
+        let pool = pool.clone();
+        let channel_id_i64 = channel_id.get() as i64;
+        let tmux_session_name = tmux_session_name.map(str::to_string);
+        let stop_output_offset_i64 = stop_output_offset.map(|v| v as i64);
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = crate::db::cancel_tombstones::insert_cancel_tombstone(
+                &pool,
+                channel_id_i64,
+                tmux_session_name.as_deref(),
+                stop_output_offset_i64,
+                &reason,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "[cancel-tombstone] PG persist failed for channel {}: {}",
+                    channel_id_i64,
+                    error
+                );
+            }
+        });
+    }
 }
 
 fn recent_turn_stop_for_channel(channel_id: ChannelId) -> Option<RecentTurnStop> {
@@ -291,6 +332,50 @@ fn cancel_induced_watcher_death(
     stops.len() != initial_len
 }
 
+/// PG-aware async wrapper around `cancel_induced_watcher_death` (#1309).
+///
+/// In-memory hit is the fast path. On miss, fall back to the durable
+/// `cancel_tombstones` table so a dcserver restart between cancel and
+/// watcher-death observation can still suppress the misleading 🔴 lifecycle
+/// notice. The PG row is consumed (DELETEd) in the same tx so suppression
+/// remains one-shot per cancel.
+async fn cancel_induced_watcher_death_async(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    current_output_offset: Option<u64>,
+    pg_pool: Option<&sqlx::PgPool>,
+) -> bool {
+    if cancel_induced_watcher_death(channel_id, tmux_session_name, current_output_offset) {
+        return true;
+    }
+
+    let Some(pool) = pg_pool else {
+        return false;
+    };
+
+    let channel_id_i64 = channel_id.get() as i64;
+    let current_offset_i64 = current_output_offset.and_then(|v| i64::try_from(v).ok());
+    match crate::db::cancel_tombstones::consume_cancel_tombstone(
+        pool,
+        channel_id_i64,
+        tmux_session_name,
+        current_offset_i64,
+    )
+    .await
+    {
+        Ok(consumed) => consumed,
+        Err(error) => {
+            tracing::warn!(
+                "[cancel-tombstone] PG consume failed for channel {} session {}: {}",
+                channel_id_i64,
+                tmux_session_name,
+                error
+            );
+            false
+        }
+    }
+}
+
 fn recent_turn_stop_for_watcher_range(
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -360,6 +445,7 @@ fn record_recent_turn_stop_with_offset_for_tests(
         Some(tmux_session_name),
         Some(stop_output_offset),
         reason,
+        None,
     );
 }
 
@@ -2439,11 +2525,13 @@ async fn handle_tmux_watcher_observed_death(
     // canceled the turn themselves. The same suppression applies to the
     // immediate-respawn watcher death that can fire seconds later when the
     // next message arrives, since both are direct consequences of the cancel.
-    let cancel_induced = cancel_induced_watcher_death(
+    let cancel_induced = cancel_induced_watcher_death_async(
         channel_id,
         tmux_session_name,
         tmux_output_offset(tmux_session_name),
-    );
+        shared.pg_pool.as_ref(),
+    )
+    .await;
     // Notify: tmux session termination with reason
     if cancel_induced {
         tracing::info!(
