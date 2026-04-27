@@ -1682,6 +1682,101 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    /// Per-test Postgres database lifecycle for the #1238 migration of
+    /// upsert_meeting handler tests, which now require a PG pool.
+    struct MeetingsPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl MeetingsPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_meetings_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "meetings handler pg",
+            )
+            .await
+            .expect("create meetings postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "meetings handler pg",
+            )
+            .await
+            .expect("connect + migrate meetings postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "meetings handler pg",
+            )
+            .await
+            .expect("drop meetings postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
     fn meeting_entry(seq: i64, round: i64, speaker_name: &str, content: &str) -> MeetingEntryBody {
         MeetingEntryBody {
             seq: Some(seq),
@@ -1870,9 +1965,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_meeting_preserves_existing_metadata_when_optional_fields_omitted() {
+    async fn upsert_meeting_pg_preserves_existing_metadata_when_optional_fields_omitted() {
+        let pg_db = MeetingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
 
         let (status, _) = upsert_meeting(
             State(state.clone()),
@@ -1924,42 +2025,53 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let row = conn
-            .query_row(
-                "SELECT title, status, effective_rounds, completed_at, summary, participant_names, selection_reason
-                 FROM meetings WHERE id = ?1",
-                ["meeting-meta"],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                    ))
-                },
-            )
-            .unwrap();
+        let row: (
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT title, status, effective_rounds, completed_at, summary,
+                    participant_names, selection_reason
+             FROM meetings WHERE id = $1",
+        )
+        .bind("meeting-meta")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         assert_eq!(row.0.as_deref(), Some("기존 안건"));
         assert_eq!(row.1.as_deref(), Some("in_progress"));
         assert_eq!(row.2, Some(7));
-        assert_eq!(row.3, Some(222));
+        assert_eq!(
+            row.3.map(|dt| dt.timestamp_millis()),
+            Some(222),
+            "completed_at must round-trip the second-call millis"
+        );
         assert_eq!(row.4.as_deref(), Some("요약 갱신"));
         assert_eq!(row.5.as_deref(), Some("[\"Alice\",\"Bob\"]"));
         assert_eq!(
             row.6.as_deref(),
             Some("리뷰 반영 후 중복 전문성을 줄이고 핵심 축을 유지하는 조합으로 확정")
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn upsert_meeting_persists_query_hashes_and_returns_them() {
+    async fn upsert_meeting_pg_persists_query_hashes_and_returns_them() {
+        let pg_db = MeetingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
 
         let (status, _) = upsert_meeting(
             State(state.clone()),
@@ -1994,31 +2106,29 @@ mod tests {
             json!("해시 검증을 위해 핵심 참여자만 압축 선정")
         );
 
-        let conn = db.lock().unwrap();
-        let stored_meeting_hash: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                ["meeting_query_hash:meeting-hash"],
-                |row| row.get(0),
-            )
+        let stored_meeting_hash: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("meeting_query_hash:meeting-hash")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let meeting_lookup: String = sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+            .bind(format!("meeting_query_hash_lookup:{expected_meeting_hash}"))
+            .fetch_one(&pool)
+            .await
             .unwrap();
-        let meeting_lookup: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [format!("meeting_query_hash_lookup:{expected_meeting_hash}")],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let stored_thread_hash: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                ["meeting_thread_hash:meeting-hash"],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let stored_thread_hash: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("meeting_thread_hash:meeting-hash")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(stored_meeting_hash, expected_meeting_hash);
         assert_eq!(meeting_lookup, "meeting-hash");
         assert_eq!(stored_thread_hash, expected_thread_hash);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }

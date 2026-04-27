@@ -199,6 +199,23 @@ impl AppState {
             health_registry: None,
         }
     }
+
+    /// PG-aware variant of [`test_state`]. Used by the #1238 PG-fixture
+    /// migration — handler tests that exercise PG-only routes need a state
+    /// whose `pg_pool` slot is populated.
+    pub fn test_state_with_pg(db: Db, engine: PolicyEngine, pg_pool: sqlx::PgPool) -> Self {
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        Self {
+            db: Some(db),
+            pg_pool: Some(pg_pool),
+            engine,
+            config: Arc::new(crate::config::Config::default()),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+        }
+    }
 }
 
 #[cfg(test)]
