@@ -33,14 +33,19 @@ async fn read_kv_str(state: &AppState, key: &str) -> String {
         }
     }
 
+    // TODO(#1238 / 843g): the runtime is PG-only and the kv_meta SQLite
+    // fallback is never reached. Tests still hit this branch through
+    // `AppState::test_state` which sets `db: Some(test_db)`.
     state
         .db
-        .lock()
-        .ok()
+        .as_ref()
+        .and_then(|db| db.lock().ok())
         .and_then(|conn| {
-            conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-                row.get::<_, String>(0)
-            })
+            conn.query_row::<String, _, _>(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
             .ok()
         })
         .unwrap_or_else(|| "unknown".to_string())
@@ -147,9 +152,15 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         }
     }
 
+    // #1237 (843f): runtime is PG-only, so `state.db` is None at runtime and
+    // the SQLite branch is reachable only from tests (which do supply a Db).
+    // #1238 (843g) will drop the SQLite branch entirely and require PG.
     let maintenance_jobs = match state.pg_pool_ref() {
         Some(pool) => crate::server::maintenance::list_job_statuses_pg(pool.clone()).await,
-        None => crate::server::maintenance::list_job_statuses_sqlite(state.db.clone()).await,
+        None => match state.db.clone() {
+            Some(db) => crate::server::maintenance::list_job_statuses_sqlite(db).await,
+            None => Vec::new(),
+        },
     };
     for job in maintenance_jobs {
         match serde_json::to_value(job) {

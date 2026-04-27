@@ -14,20 +14,19 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    /* PG-only runtimes (the production deploy target since 2026-04-19, see
-    PR #889) keep `engine.legacy_db()` as `None`. Every kanban handler
-    below routes through `KanbanService`, which always prefers the PG
-    branch when `state.pg_pool` is set, so the legacy `Db` we return
-    here is just a placeholder that the service never reads. Falling
-    back to `state.sqlite_db()` (the always-present in-process Db
-    wrapper) instead of `.expect()` panicking lets `/api/kanban-cards`
-    and friends respond cleanly on PG-only deployments — previously
-    every home-screen entry triggered a tokio worker panic and the
-    request hung until the timeout. */
+    /* TODO(#1238 / 843g): kept as a placeholder for KanbanService and
+    related callers that still take a `&Db`. The PG-only runtime never
+    reads from the placeholder — every kanban handler below routes through
+    `KanbanService`, which always prefers the PG branch when
+    `state.pg_pool` is set. Once #1238 migrates the constructor signatures
+    to `Option<Db>` (or PG-only), drop this helper entirely. */
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
     state
         .engine
         .legacy_db()
-        .unwrap_or_else(|| state.sqlite_db())
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
 }
 
 /// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.

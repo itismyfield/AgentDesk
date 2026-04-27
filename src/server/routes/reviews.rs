@@ -237,7 +237,7 @@ mod tests {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         AppState {
-            db,
+            db: Some(db),
             pg_pool: Some(pg_pool),
             engine,
             config: Arc::new(crate::config::Config::default()),

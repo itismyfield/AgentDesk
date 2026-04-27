@@ -14,6 +14,11 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
+    // #1237 (843f): AppState.db is now Option<Db>; runtime can host PG-only
+    // routes via state.pg_pool_ref(). Until #1238 (843g) ports the remaining
+    // SQLite-backed handlers (update_card, /api/onboarding/*, etc.), launch
+    // still initializes the compat SQLite handle and threads it through so
+    // those handlers keep working in production.
     let db = crate::db::init(&config).context("Failed to init legacy compatibility DB")?;
 
     let pg_pool = crate::db::postgres::connect_and_migrate(&config)

@@ -467,7 +467,7 @@ fn runtime() -> Arc<ObservabilityRuntime> {
         .clone()
 }
 
-pub fn init_observability(_db: Db, pg_pool: Option<PgPool>) {
+pub fn init_observability(_db: Option<Db>, pg_pool: Option<PgPool>) {
     let runtime = runtime();
     if let Ok(mut storage) = runtime.storage.lock() {
         storage.pg_pool = pg_pool;
@@ -3091,7 +3091,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         emit_turn_started(
             "codex",
@@ -3144,7 +3144,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         assert!(record_invariant_check(
             true,
@@ -3185,7 +3185,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         assert!(!record_invariant_check(
             false,
@@ -3225,7 +3225,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         emit_agent_quality_event(AgentQualityEvent {
             source_event_id: Some("turn-1".to_string()),
@@ -3263,7 +3263,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         let error = query_agent_quality_events(
             &db,
@@ -3286,7 +3286,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         let error = query_agent_quality_events(
             &db,
@@ -3309,7 +3309,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db.clone(), None);
+        init_observability(Some(db.clone()), None);
 
         let iterations = 500usize;
         let mut tasks = Vec::new();
@@ -3352,7 +3352,7 @@ mod tests {
                 .database("agentdesk"),
         );
 
-        init_observability(db, Some(pg_pool));
+        init_observability(Some(db), Some(pg_pool));
 
         let (has_db, has_pg_pool) = test_storage_presence();
         assert!(
@@ -3367,7 +3367,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(db, None);
+        init_observability(Some(db), None);
 
         let iterations = 20_000usize;
         let baseline_start = std::time::Instant::now();

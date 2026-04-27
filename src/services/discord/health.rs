@@ -2397,6 +2397,7 @@ pub async fn send_message(
 pub async fn handle_send<'a>(
     registry: &HealthRegistry,
     sqlite: &Db,
+    pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -2432,10 +2433,15 @@ pub async fn handle_send<'a>(
         _ => None,
     };
 
+    // Codex P1 on #1306 (843f): pass the runtime PG pool through so
+    // `target: "agent:<role>"` can resolve the agent's channel binding from
+    // Postgres. Before this fix the placeholder `sqlite` Db was the only
+    // backend handed in, leaving PG-only deployments unable to resolve any
+    // agent target through `/api/discord/send`.
     send_message_with_backends_and_delivery_id(
         registry,
         Some(sqlite),
-        None,
+        pg_pool,
         target,
         content,
         source,
@@ -2637,6 +2643,7 @@ fn parse_send_to_agent_body(body: &str) -> Result<ParsedSendToAgentRequest, &'st
 pub async fn handle_send_to_agent(
     registry: &HealthRegistry,
     sqlite: &Db,
+    pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'static str, String) {
     let request = match parse_send_to_agent_body(body) {
@@ -2650,9 +2657,12 @@ pub async fn handle_send_to_agent(
     };
 
     let target = format!("agent:{}", request.role_id);
-    send_message(
+    // Codex P1 on #1306 (843f): hand the runtime PG pool to the backend
+    // resolver so the role lookup can hit Postgres on PG-only deployments.
+    send_message_with_backends(
         registry,
-        sqlite,
+        Some(sqlite),
+        pg_pool,
         &target,
         &request.message,
         "system",
@@ -3433,9 +3443,13 @@ mod tests {
     async fn handle_send_to_agent_returns_not_found_for_unknown_role() {
         let registry = HealthRegistry::new();
         let db = test_db();
-        let (status, body) =
-            handle_send_to_agent(&registry, &db, r#"{"role_id":"missing","message":"hello"}"#)
-                .await;
+        let (status, body) = handle_send_to_agent(
+            &registry,
+            &db,
+            None,
+            r#"{"role_id":"missing","message":"hello"}"#,
+        )
+        .await;
         assert_eq!(status, "404 Not Found");
         assert!(body.contains("unknown agent target: missing"));
     }

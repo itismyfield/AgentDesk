@@ -15,14 +15,15 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    /* PG-only runtimes (post-#889) don't carry an engine-side legacy
-    SQLite handle, but onboarding routes still expect a `&Db`. Fall
-    back to the AppState's always-present sqlite handle instead of
-    panicking — same fix as kanban.rs::legacy_db. */
+    /* TODO(#1238 / 843g): see kanban.rs::legacy_db. Onboarding routes
+    still expect a `&Db`; PG-only runtimes never read it. */
+    use std::sync::OnceLock;
+    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
     state
         .engine
         .legacy_db()
-        .unwrap_or_else(|| state.sqlite_db())
+        .or_else(|| state.legacy_db())
+        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
 }
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
