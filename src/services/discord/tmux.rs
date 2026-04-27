@@ -213,6 +213,31 @@ fn recent_turn_stop_for_channel(channel_id: ChannelId) -> Option<RecentTurnStop>
         .cloned()
 }
 
+/// Returns true if a watcher death for `(channel_id, tmux_session_name)` was
+/// preceded by an explicit user-initiated turn-stop (cancel) within
+/// `RECENT_TURN_STOP_METADATA_FALLBACK_TTL`. The watcher cleanup path that
+/// follows a cancel writes
+/// `record_tmux_exit_reason("watcher cleanup: dead session after turn")`
+/// and tears the session down — surfacing that as a 🔴 lifecycle notification
+/// or as the "대화를 이어붙이지 못했습니다" handoff is misleading because the
+/// death IS the cancel, not a crash. The same suppression applies to the
+/// immediate-respawn watcher death that can fire seconds later when the next
+/// message arrives, because both are direct consequences of the cancel.
+fn cancel_induced_watcher_death(channel_id: ChannelId, tmux_session_name: &str) -> bool {
+    let Some(entry) = recent_turn_stop_for_channel(channel_id) else {
+        return false;
+    };
+    if std::time::Instant::now().saturating_duration_since(entry.recorded_at)
+        > RECENT_TURN_STOP_METADATA_FALLBACK_TTL
+    {
+        return false;
+    }
+    match entry.tmux_session_name.as_deref() {
+        Some(entry_tmux) => entry_tmux == tmux_session_name,
+        None => true,
+    }
+}
+
 fn recent_turn_stop_for_watcher_range(
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -2295,8 +2320,22 @@ async fn handle_tmux_watcher_observed_death(
     let reason_short = read_tmux_exit_reason(tmux_session_name);
     let is_normal_completion =
         tmux_death_is_normal_completion(reason_short.as_deref(), diagnostic.as_deref());
+    // The watcher cleanup path that follows an explicit cancel (user removed
+    // the activity reaction or invoked /stop) writes
+    // `record_tmux_exit_reason("watcher cleanup: dead session after turn")`
+    // and tears the session down. Without this gate that synthetic reason
+    // surfaces as a 🔴 lifecycle notification AND as the "대화를 이어붙이지
+    // 못했습니다" handoff — both of which are noise for a user who just
+    // canceled the turn themselves. The same suppression applies to the
+    // immediate-respawn watcher death that can fire seconds later when the
+    // next message arrives, since both are direct consequences of the cancel.
+    let cancel_induced = cancel_induced_watcher_death(channel_id, tmux_session_name);
     // Notify: tmux session termination with reason
-    if !is_normal_completion {
+    if cancel_induced {
+        tracing::info!(
+            "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
+        );
+    } else if !is_normal_completion {
         if let Some(reason_text) = tmux_death_lifecycle_notification_reason(reason_short.as_deref())
         {
             let reason_truncated: String = reason_text.chars().take(100).collect();
@@ -2328,7 +2367,7 @@ async fn handle_tmux_watcher_observed_death(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after normal completion, skipping lifecycle notification"
         );
     }
-    if !prompt_too_long_killed && !turn_result_relayed {
+    if !cancel_induced && !prompt_too_long_killed && !turn_result_relayed {
         // Suppress warning for normal dispatch completion — not an error.
         let suppress_restart = is_normal_completion
             || reason_short
@@ -7744,10 +7783,11 @@ mod tests {
         PlaceholderSuppressDecision, PlaceholderSuppressOrigin, READY_FOR_INPUT_STUCK_REASON,
         SUPPRESSED_INTERNAL_LABEL, SUPPRESSED_RESTART_LABEL, SuppressedPlaceholderAction,
         TmuxWatcherHandle, TmuxWatcherRegistry, WatcherClaimAction, WatcherToolState,
-        build_bg_trigger_session_key, claim_or_force_replace_watcher, claim_or_reuse_watcher,
-        clear_recent_turn_stops_for_tests, clear_recent_watcher_reattach_offsets_for_tests,
-        consume_monitor_auto_turn_preamble_once, dead_session_cleanup_plan,
-        decide_placeholder_suppression, enqueue_background_trigger_response_to_notify_outbox,
+        build_bg_trigger_session_key, cancel_induced_watcher_death, claim_or_force_replace_watcher,
+        claim_or_reuse_watcher, clear_recent_turn_stops_for_tests,
+        clear_recent_watcher_reattach_offsets_for_tests, consume_monitor_auto_turn_preamble_once,
+        dead_session_cleanup_plan, decide_placeholder_suppression,
+        enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         fallback_placeholder_cleanup_decision, finish_monitor_auto_turn,
         format_monitor_suppressed_body, format_monitor_suppressed_label,
@@ -8895,6 +8935,70 @@ mod tests {
         );
         assert!(later.trigger_reattach);
         assert!(!later.suppressed_by_recent_stop);
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn cancel_induced_watcher_death_matches_session_after_recent_stop() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1271_001);
+        let tmux_name = "AgentDesk-claude-cancel-induced";
+
+        assert!(
+            !cancel_induced_watcher_death(channel, tmux_name),
+            "no tombstone yet → not cancel-induced"
+        );
+
+        record_recent_turn_stop_with_offset_for_tests(
+            channel,
+            tmux_name,
+            128,
+            "mailbox_cancel_active_turn",
+        );
+
+        assert!(
+            cancel_induced_watcher_death(channel, tmux_name),
+            "watcher death right after a cancel for the same session must be classified as cancel-induced"
+        );
+        assert!(
+            !cancel_induced_watcher_death(channel, "AgentDesk-claude-other-session"),
+            "tombstone bound to a different tmux name must NOT suppress unrelated session deaths"
+        );
+        assert!(
+            !cancel_induced_watcher_death(ChannelId::new(987_1271_002), tmux_name),
+            "tombstone for a different channel must NOT suppress this channel's death"
+        );
+
+        clear_recent_turn_stops_for_tests();
+    }
+
+    #[test]
+    fn cancel_induced_watcher_death_allows_session_unscoped_tombstone() {
+        let _lock = match test_env_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clear_recent_turn_stops_for_tests();
+        let channel = ChannelId::new(987_1271_003);
+        let tmux_name = "AgentDesk-claude-no-session-tombstone";
+
+        record_recent_turn_stop_for_tests(
+            channel,
+            None,
+            None,
+            "session-less cancel",
+            std::time::Instant::now(),
+        );
+
+        assert!(
+            cancel_induced_watcher_death(channel, tmux_name),
+            "tombstones recorded without a tmux session name still cover any death on the same channel"
+        );
 
         clear_recent_turn_stops_for_tests();
     }
