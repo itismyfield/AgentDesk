@@ -145,6 +145,40 @@
   --th-overlay-light: color-mix(in oklch, black 5%, transparent);
   --th-overlay-medium: color-mix(in oklch, black 7%, transparent);
   --th-overlay-strong: color-mix(in oklch, black 10%, transparent);
+  /* Provider colors: lower L by ~0.18 and slightly bump C so the same hue stays
+     legible against the near-white bg. Soft variants use the white surface (bg-2)
+     as the mix anchor for consistent badge contrast. Per issue #1202 follow-up
+     spec: provider palette must stay consistent across light/dark via oklch
+     L/C tweaks. */
+  --claude: oklch(0.59 0.18 71);
+  --claude-soft: color-mix(in oklch, var(--claude) 14%, var(--bg-2) 86%);
+  --codex: oklch(0.56 0.14 214);
+  --codex-soft: color-mix(in oklch, var(--codex) 14%, var(--bg-2) 86%);
+  --gemini: oklch(0.54 0.18 258);
+  --gemini-soft: color-mix(in oklch, var(--gemini) 14%, var(--bg-2) 86%);
+  --qwen: oklch(0.55 0.2 319);
+  --qwen-soft: color-mix(in oklch, var(--qwen) 14%, var(--bg-2) 86%);
+  --opencode: oklch(0.56 0.13 195);
+  --opencode-soft: color-mix(in oklch, var(--opencode) 14%, var(--bg-2) 86%);
+  --copilot: oklch(0.55 0.16 160);
+  --copilot-soft: color-mix(in oklch, var(--copilot) 14%, var(--bg-2) 86%);
+  --antigravity: oklch(0.56 0.19 45);
+  --antigravity-soft: color-mix(in oklch, var(--antigravity) 14%, var(--bg-2) 86%);
+  --api: oklch(0.5 0.02 250);
+  --api-soft: color-mix(in oklch, var(--api) 12%, var(--bg-2) 88%);
+  /* Semantic accents also need a darker L on light bg so badge text passes AA. */
+  --ok: oklch(0.55 0.17 150);
+  --warn: oklch(0.62 0.16 85);
+  --err: oklch(0.55 0.22 22);
+  --info: oklch(0.55 0.13 230);
+}
+
+/* Accent swatch buttons (Tweaks panel). Keyboard focus must surface a clear
+   ring so accessibility audits pass — the inactive swatch state otherwise
+   has no focus indicator distinct from its hover state. */
+.dash-accent-swatch:focus-visible {
+  outline: 2px solid var(--th-accent-primary, var(--accent));
+  outline-offset: 2px;
 }
 
 [data-accent="indigo"] {
