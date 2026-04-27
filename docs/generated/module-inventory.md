@@ -142,7 +142,7 @@
 | `server::background` | `src/server/background.rs` | 535 |  |
 | `server::boot` | `src/server/boot.rs` | 190 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
-| `server::maintenance` | `src/server/maintenance.rs` | 968 |  |
+| `server::maintenance` | `src/server/maintenance.rs` | 966 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 302 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2039 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
