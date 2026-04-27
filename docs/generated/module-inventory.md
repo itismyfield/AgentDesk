@@ -196,7 +196,7 @@
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 603 |  |
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 530 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 371 |  |
-| `server::routes::settings` | `src/server/routes/settings.rs` | 1274 | giant-file |
+| `server::routes::settings` | `src/server/routes/settings.rs` | 1452 | giant-file |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 328 |  |
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 708 |  |
 | `server::routes::stats` | `src/server/routes/stats.rs` | 529 |  |
