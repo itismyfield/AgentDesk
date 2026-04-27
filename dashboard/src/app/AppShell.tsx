@@ -1812,6 +1812,10 @@ function HomeOverviewPage({
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
     () => api.getCachedTokenAnalytics("7d")?.data ?? null,
   );
+  // #1242: single combined endpoint that hydrates the in-progress sparkline
+  // (and, going forward, can replace the analytics-derived token/cost
+  // sparklines once we trust this codepath in production).
+  const [homeKpiTrends, setHomeKpiTrends] = useState<api.HomeKpiTrendsResponse | null>(null);
   const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
   const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
   const defaultWidgets = useMemo(
@@ -1947,6 +1951,28 @@ function HomeOverviewPage({
     };
   }, []);
 
+  // #1242: fetch the combined home KPI trend payload so the in-progress tile
+  // (and eventually the others) can render real sparklines instead of a
+  // hardcoded fallback.
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    api
+      .getHomeKpiTrends(14, { signal: controller.signal })
+      .then((next) => {
+        if (!active) return;
+        setHomeKpiTrends(next);
+      })
+      .catch((error) => {
+        if (!active || controller.signal.aborted) return;
+        console.error("Failed to load home KPI trends", error);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (window.localStorage.getItem(STORAGE_KEYS.homeOrder) !== null) return;
@@ -2007,6 +2033,9 @@ function HomeOverviewPage({
   const latestAnalyticsDay = analytics?.daily.at(-1) ?? null;
   const tokenTrend = analytics?.daily.slice(-7).map((day) => day.total_tokens) ?? [];
   const costTrend = analytics?.daily.slice(-7).map((day) => day.cost) ?? [];
+  // #1242: pull the dispatch-count sparkline from the new endpoint so the
+  // "진행 중" tile gets the same visual rhythm as the token/cost tiles.
+  const inProgressTrend = homeKpiTrends?.in_progress.values ?? [];
   const activityStreak = useMemo(() => {
     const daily = [...(analytics?.daily ?? [])].sort((left, right) =>
       left.date.localeCompare(right.date),
@@ -2171,6 +2200,7 @@ function HomeOverviewPage({
             delta={tr(`${totalActionableCards} 전체`, `${totalActionableCards} total`)}
             deltaTone="flat"
             accent="var(--th-accent-warn)"
+            trend={inProgressTrend}
           />
         ),
       },
@@ -2480,6 +2510,7 @@ function HomeOverviewPage({
       doneCards,
       fallbackActivity,
       inProgressCards,
+      inProgressTrend,
       isKo,
       kanbanCards,
       meetings.length,
