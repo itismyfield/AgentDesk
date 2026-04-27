@@ -117,18 +117,19 @@ impl PlaceholderController {
             .clone()
     }
 
-    /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) so
-    /// the map can't grow without bound on a long-running process. Active and
-    /// NotCreated entries are left in place. Called from `entry()` whenever
-    /// the cap is reached. Uses `try_lock` to avoid blocking on entries that
-    /// the caller is mid-edit on.
+    /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
+    /// `NotCreated` (initial edit failed; nobody committed) so the map cannot
+    /// grow without bound on a long-running process. `Active` entries are
+    /// left in place — they own a live Discord card. Uses `try_lock` to avoid
+    /// blocking on entries the caller is mid-edit on.
     fn evict_terminal_entries(&self) {
         let mut to_remove: Vec<PlaceholderKey> = Vec::new();
         for kv in self.entries.iter() {
             if let Ok(guard) = kv.value().try_lock() {
                 if matches!(
                     guard.state,
-                    PlaceholderLifecycle::Completed
+                    PlaceholderLifecycle::NotCreated
+                        | PlaceholderLifecycle::Completed
                         | PlaceholderLifecycle::TimedOut
                         | PlaceholderLifecycle::Aborted
                 ) {
@@ -195,18 +196,15 @@ impl PlaceholderController {
                 PlaceholderControllerOutcome::Edited
             }
             Err(_) => {
-                // codex round-7 P3 on PR #1308: an initial PATCH failure
-                // leaves a fresh `NotCreated` entry behind that
-                // `evict_terminal_entries` will not sweep. Drop it now so a
-                // long stretch of failed first edits cannot grow the map past
-                // `PLACEHOLDER_ENTRIES_MAX`. Skip the removal if the FSM is
-                // already past `NotCreated` — that means a concurrent caller
-                // committed and we must not race it out.
-                let should_drop = matches!(guarded.state, PlaceholderLifecycle::NotCreated);
-                drop(guarded);
-                if should_drop {
-                    self.entries.remove(&key);
-                }
+                // codex round-9 P2 on PR #1308: leave the `NotCreated` row
+                // in the map. Concurrent `ensure_active` callers may already
+                // hold a clone of the same `Arc` and could commit on a
+                // detached row, so future `transition` / `lifecycle` lookups
+                // would create a fresh `NotCreated` and the visible card
+                // would never reach a terminal state.
+                // `evict_terminal_entries` now sweeps `NotCreated` rows
+                // alongside terminal states, so failed initial edits still
+                // bound the map under `PLACEHOLDER_ENTRIES_MAX`.
                 PlaceholderControllerOutcome::EditFailed
             }
         }

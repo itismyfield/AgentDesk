@@ -1913,6 +1913,34 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        // codex round-9 P3 on PR #1308: drain any active long-running
+        // placeholder on stream-error / receive-disconnect exits too. The
+        // cancel branch already drives the controller to `Aborted`; here we
+        // also need to handle `StreamMessage::Error` and `rx_disconnected`
+        // exits so the controller does not leak an `Active` row and the
+        // persisted `long_running_placeholder_active` flag does not survive
+        // for the sweeper to abandon the card. Skip when `cancelled` (the
+        // dedicated cancel block below handles it). For tmux-handoff exits
+        // the dedicated handoff branch already calls `detach`, so we leave
+        // those alone.
+        if !cancelled
+            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
+        {
+            if let Some((key, _, _, _)) = long_running_placeholder_active.take() {
+                let target = if transport_error || rx_disconnected {
+                    super::placeholder_controller::PlaceholderLifecycle::Aborted
+                } else {
+                    super::placeholder_controller::PlaceholderLifecycle::Completed
+                };
+                let _ = shared_owned
+                    .placeholder_controller
+                    .transition(gateway.as_ref(), key, target)
+                    .await;
+                inflight_state.long_running_placeholder_active = false;
+                let _ = save_inflight_state(&inflight_state);
+            }
+        }
+
         // #1113 stream-end finalization: the main turn loop has exited, which
         // means we won't receive any more StreamMessage events for this turn.
         // If `current_tool_line` still carries the running ⚙ marker, the
