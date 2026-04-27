@@ -141,9 +141,9 @@
 | `POST` | `/api/kanban-reviews/{id}/trigger-rework` | `reviews::trigger_rework` | `src/server/routes/reviews.rs:172` | `src/server/routes/domains/reviews.rs:22` |
 | `GET` | `/api/machine-status` | `analytics::machine_status` | `src/server/routes/analytics.rs:1034` | `src/server/routes/domains/admin.rs:77` |
 | `GET` | `/api/maintenance/jobs` | `maintenance::list_jobs` | `src/server/routes/maintenance.rs:7` | `src/server/routes/domains/ops.rs:141` |
-| `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:213` | `src/server/routes/domains/admin.rs:89` |
-| `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:107` | `src/server/routes/domains/admin.rs:87` |
-| `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:147` | `src/server/routes/domains/admin.rs:88` |
+| `POST` | `/api/memory/forget` | `memory_api::memory_forget` | `src/server/routes/memory_api.rs:213` | `src/server/routes/domains/admin.rs:86` |
+| `POST` | `/api/memory/recall` | `memory_api::memory_recall` | `src/server/routes/memory_api.rs:107` | `src/server/routes/domains/admin.rs:84` |
+| `POST` | `/api/memory/remember` | `memory_api::memory_remember` | `src/server/routes/memory_api.rs:147` | `src/server/routes/domains/admin.rs:85` |
 | `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:41` | `src/server/routes/domains/ops.rs:133` |
 | `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:61` | `src/server/routes/domains/ops.rs:133` |
 | `GET` | `/api/offices` | `offices::list_offices` | `src/server/routes/offices.rs:58` | `src/server/routes/domains/admin.rs:16` |
@@ -233,7 +233,7 @@
 | `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1699` | `src/server/routes/domains/admin.rs:60` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:581` | `src/server/routes/domains/admin.rs:56` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:622` | `src/server/routes/domains/admin.rs:56` |
-| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:1234` | `src/server/routes/domains/admin.rs:85` |
+| `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:1234` | `src/server/routes/domains/admin.rs:82` |
 | `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:360` | `src/server/routes/domains/ops.rs:137` |
 | `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:666` | `src/server/routes/domains/ops.rs:139` |
 | `GET` | `/api/skills/ranking` | `skills_api::ranking` | `src/server/routes/skills_api.rs:479` | `src/server/routes/domains/ops.rs:138` |

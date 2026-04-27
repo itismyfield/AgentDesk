@@ -162,7 +162,7 @@
 | `server::routes::docs` | `src/server/routes/docs.rs` | 3697 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 62 |  |
-| `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 92 |  |
+| `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 89 |  |
 | `server::routes::domains::agents` | `src/server/routes/domains/agents.rs` | 51 |  |
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 85 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 61 |  |
@@ -173,7 +173,7 @@
 | `server::routes::github` | `src/server/routes/github.rs` | 537 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 938 |  |
-| `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 554 |  |
+| `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 550 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4797 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
