@@ -250,10 +250,36 @@ braces:
    *Not landed in this PR — flagged for the slice 1.1 author.*
 2. **`audit_maintainability.py` hard gate (medium cost).** Extend the audit
    script (#1282 follow-up) so a new `\.send_message\(|\.say\(|\.edit_message\(`
-   inside `src/services/discord/` (excluding the explicit exclusion buckets
-   above) fails CI. Recommended exclusion list keyed on this document's
-   §3.B.{1,2,3,4} buckets — when something graduates out of an exclusion
-   bucket, this document and the audit allowlist update together.
+   inside `src/services/discord/` fails CI unless the callsite lives in a
+   **hard-exclusion** path. The allowlist MUST consume only the
+   `permanent_exclusion` set below — categories tagged `migration_candidate`
+   are explicitly NOT exempt because they're still subject to follow-up
+   migration, and mixing the two would silently allow exactly the
+   callsites the migration is supposed to clean up (codex P2 on #1286).
+
+   - `permanent_exclusion` (allowlist source-of-truth — never migrated):
+     - §B.1 — poise slash-command ACK / interaction replies (framework
+       contract; #1175 exclusion)
+     - §B.2 — file / attachment uploads (multipart path is out of scope
+       for the v3 text-message surface)
+     - §B.3 — long-message streaming chunker, ordered-chunk continuation
+     - §B.4-rollover — tmux rollover freeze/post sequence dependent on
+       chunker ordering
+
+   - `migration_candidate` (tracked here; allowlist must NOT reference —
+     when a candidate lands a v3 migration the audit observes the
+     callsite disappear with no allowlist change):
+     - §B.1-intake-gate — short fixed-string reaction replies in
+       `intake_gate.rs` that don't need interaction-token semantics
+     - §B.4-lifecycle — short tmux lifecycle status notices outside the
+       rollover sequence
+     - §B.5 — router restore/watchdog announces
+
+   When something graduates out of `migration_candidate` to migrated, the
+   matching row in §3 flips to `migrated` and no allowlist change is
+   needed. Movement out of `permanent_exclusion` (rare — implies the v3
+   surface gained an interaction or multipart variant) updates this doc
+   and the allowlist together.
 3. **Refresh cadence.** Re-run §3 inventory every release-cut and on any PR
    that touches `src/services/discord/outbound/**` or adds files under
    `src/services/discord/`.
