@@ -1353,13 +1353,24 @@ pub(super) fn spawn_turn_bridge(
                                     } else {
                                         super::placeholder_controller::PlaceholderLifecycle::Completed
                                     };
-                                    let _ = shared_owned
+                                    let outcome = shared_owned
                                         .placeholder_controller
-                                        .transition(gateway.as_ref(), key, target)
+                                        .transition(gateway.as_ref(), key.clone(), target)
                                         .await;
-                                    inflight_state
-                                        .long_running_placeholder_active = false;
-                                    state_dirty = true;
+                                    // codex round-10 P2: only clear flag on
+                                    // committed/already-terminal outcome.
+                                    use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                    if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
+                                        inflight_state
+                                            .long_running_placeholder_active = false;
+                                        state_dirty = true;
+                                    } else {
+                                        // EditFailed — keep the placeholder
+                                        // active so the next event/sweeper
+                                        // can retry the terminal edit.
+                                        long_running_placeholder_active =
+                                            Some((key, snapshot, close_trigger, ack_consumed));
+                                    }
                                 } else {
                                     // Successful background dispatch ack OR a
                                     // later unrelated ToolResult — re-stash so
@@ -1447,12 +1458,21 @@ pub(super) fn spawn_turn_bridge(
                                 } else {
                                     super::placeholder_controller::PlaceholderLifecycle::Completed
                                 };
-                                let _ = shared_owned
+                                let outcome = shared_owned
                                     .placeholder_controller
                                     .transition(gateway.as_ref(), key, target)
                                     .await;
-                                inflight_state.long_running_placeholder_active = false;
-                                state_dirty = true;
+                                // codex round-10 P2: only clear the persisted
+                                // flag on a committed (or already-terminal)
+                                // transition. An `EditFailed` return leaves
+                                // the controller entry `Active` and the
+                                // visible 🔄 card unreplaced, so the sweeper
+                                // must still see the flag to retry/recover.
+                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
+                                    inflight_state.long_running_placeholder_active = false;
+                                    state_dirty = true;
+                                }
                             }
                             if let Some(resolved) = resolve_done_response(
                                 &full_response,
@@ -1932,11 +1952,16 @@ pub(super) fn spawn_turn_bridge(
                 } else {
                     super::placeholder_controller::PlaceholderLifecycle::Completed
                 };
-                let _ = shared_owned
+                let outcome = shared_owned
                     .placeholder_controller
                     .transition(gateway.as_ref(), key, target)
                     .await;
-                inflight_state.long_running_placeholder_active = false;
+                // codex round-10 P2: keep the persisted flag on EditFailed so
+                // the sweeper can finalize the still-visible 🔄 card later.
+                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
+                    inflight_state.long_running_placeholder_active = false;
+                }
                 let _ = save_inflight_state(&inflight_state);
             }
         }

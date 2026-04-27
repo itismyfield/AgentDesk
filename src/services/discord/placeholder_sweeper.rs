@@ -233,6 +233,22 @@ async fn run_placeholder_sweep_pass(
                     if delete_inflight_state_file(provider, state.channel_id) {
                         report.abandoned += 1;
                     }
+                    // codex round-10 P3 on PR #1308: detach the controller's
+                    // Active row that was tracking this card so the
+                    // cap-bounded map does not retain a non-evictable entry.
+                    if let (Some(provider_kind), msg_id) = (
+                        ProviderKind::from_str(&state.provider),
+                        state.current_msg_id,
+                    ) {
+                        if msg_id != 0 {
+                            let key = super::placeholder_controller::PlaceholderKey {
+                                provider: provider_kind,
+                                channel_id: serenity::ChannelId::new(state.channel_id),
+                                message_id: serenity::MessageId::new(msg_id),
+                            };
+                            shared.placeholder_controller.detach(&key);
+                        }
+                    }
                 }
             }
         }
