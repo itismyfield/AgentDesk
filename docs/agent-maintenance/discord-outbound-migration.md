@@ -93,7 +93,8 @@ slice 1.1 lands the v3 deliver impl + a thin compat shim.
 | `src/integration_tests/discord_flow/scenarios.rs:44, 55` | integration test harness | Mock-Discord roundtrip for §1.2 validation. |
 | `src/integration_tests/agents_setup_e2e.rs:259` | integration test | Wizard-ready E2E. |
 
-Total **migrated_v2 production callsites: 13** (excluding tests).
+Total **migrated_v2 production callsites: 11** (excluding tests). Verify with
+`rg -n 'deliver_outbound\(' src --type rust | rg -v 'integration_tests|outbound/legacy.rs'`.
 
 ### 3.B Direct sends (bypass outbound)
 
