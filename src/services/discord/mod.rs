@@ -2085,6 +2085,21 @@ async fn catch_up_missed_messages(
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
 
+        // Codex P2 on #1301: the 50-message fetch can exceed
+        // `MAX_INTERVENTIONS_PER_CHANNEL` (30) on a long restart gap. Without
+        // a cap `enqueue_intervention` would silently supersede older
+        // queued entries while catch-up still advances the checkpoint to the
+        // newest recovered id — meaning the evicted messages are lost. Cap
+        // recovery to the queue's remaining capacity at scan-start; the
+        // overflow stays unrecovered with the OLD checkpoint, so the next
+        // catch-up cycle picks it up from the same `after` cursor.
+        let queue_initial_len = mailbox_snapshot(shared, channel_id)
+            .await
+            .intervention_queue
+            .len();
+        let remaining_capacity = crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL
+            .saturating_sub(queue_initial_len);
+
         for msg in &messages {
             let text = msg.content.trim().to_string();
             let msg_ts = msg.id.created_at();
@@ -2110,6 +2125,14 @@ async fn catch_up_missed_messages(
             stats.record(outcome);
             if outcome != CatchUpClassification::Recover {
                 continue;
+            }
+
+            if stats.recovered >= remaining_capacity {
+                // Stopping iteration here keeps the checkpoint pinned at the
+                // last actually-queued message — newer entries that we
+                // declined to enqueue are still > `after_msg` for the next
+                // pass.
+                break;
             }
 
             mailbox_enqueue_intervention(
