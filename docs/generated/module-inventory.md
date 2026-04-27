@@ -4,7 +4,7 @@
 
 - Production Rust modules: `320`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `87`
+- Giant files: `86`
 
 ## Namespace Summary
 
@@ -88,7 +88,7 @@
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1877 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2363 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
-| `engine::intent` | `src/engine/intent.rs` | 1018 | giant-file |
+| `engine::intent` | `src/engine/intent.rs` | 995 |  |
 | `engine::loader` | `src/engine/loader.rs` | 731 |  |
 | `engine::ops` | `src/engine/ops.rs` | 193 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 362 |  |
@@ -119,7 +119,7 @@
 | `github::dod` | `src/github/dod.rs` | 395 |  |
 | `github::sync` | `src/github/sync.rs` | 1251 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 339 |  |
-| `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 549 |  |
+| `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 653 |  |
 | `integration_tests::discord_flow` | `src/integration_tests/discord_flow/mod.rs` | 46 |  |
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
