@@ -169,7 +169,6 @@ impl IntoRunInputs for (PolicyEngine, Option<Arc<HealthRegistry>>, Option<PgPool
     }
 }
 
-#[cfg(test)]
 impl IntoRunInputs for (crate::db::Db, PolicyEngine, Option<Arc<HealthRegistry>>) {
     fn into_run_inputs(self) -> RunInputs {
         let (legacy_db, engine, health_registry) = self;
