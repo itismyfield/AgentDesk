@@ -1208,7 +1208,17 @@ pub(super) fn spawn_turn_bridge(
                             // `run_in_background=true`.  Everything else
                             // streams its result inline and never touches the
                             // placeholder card.
-                            if long_running_placeholder_active.is_none() {
+                            // codex round-11 P2 on PR #1308: restart commands
+                            // already own a planned ♻️ handoff message via the
+                            // `is_dcserver_restart_command(&input)` branch
+                            // below; opening a long-running placeholder on
+                            // the same message_id would let a later
+                            // Done/Result write a generic background card
+                            // over the planned restart notice. Skip setup
+                            // for those.
+                            if long_running_placeholder_active.is_none()
+                                && !is_dcserver_restart_command(&input)
+                            {
                                 if let Some((reason, close_trigger)) =
                                     super::formatting::classify_long_running_tool(&name, &input)
                                 {
@@ -1451,7 +1461,8 @@ pub(super) fn spawn_turn_bridge(
                             // it now so the user does not stare at a stale
                             // 🔄 card forever. Idempotent if a prior
                             // ToolResult already fired Completed.
-                            if let Some((key, _, _, _)) = long_running_placeholder_active.take()
+                            if let Some((key, snapshot, close_trigger, ack_consumed)) =
+                                long_running_placeholder_active.take()
                             {
                                 let target = if result == "__session_died_retry__" {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
@@ -1460,18 +1471,21 @@ pub(super) fn spawn_turn_bridge(
                                 };
                                 let outcome = shared_owned
                                     .placeholder_controller
-                                    .transition(gateway.as_ref(), key, target)
+                                    .transition(gateway.as_ref(), key.clone(), target)
                                     .await;
-                                // codex round-10 P2: only clear the persisted
+                                // codex round-10/11 P2/P3: on `EditFailed`,
+                                // re-stash the tuple so subsequent
+                                // streaming/sweeper paths can retry the
+                                // terminal edit. Only clear the persisted
                                 // flag on a committed (or already-terminal)
-                                // transition. An `EditFailed` return leaves
-                                // the controller entry `Active` and the
-                                // visible 🔄 card unreplaced, so the sweeper
-                                // must still see the flag to retry/recover.
+                                // transition.
                                 use super::placeholder_controller::PlaceholderControllerOutcome::*;
                                 if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                                     inflight_state.long_running_placeholder_active = false;
                                     state_dirty = true;
+                                } else {
+                                    long_running_placeholder_active =
+                                        Some((key, snapshot, close_trigger, ack_consumed));
                                 }
                             }
                             if let Some(resolved) = resolve_done_response(
