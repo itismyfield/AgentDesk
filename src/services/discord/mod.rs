@@ -1437,17 +1437,15 @@ async fn mailbox_cancel_active_turn(
     let result = shared.mailbox(channel_id).cancel_active_turn().await;
     #[cfg(unix)]
     if result.token.is_some() {
-        // #1309: `record_recent_turn_stop` mirrors the in-memory tombstone
-        // into PG via the global pool so a dcserver restart between cancel
-        // and watcher-death observation can still suppress the misleading
-        // 🔴 lifecycle notice. Awaited so the row is committed before
-        // returning (codex round-2 P1 on PR #1310).
+        // #1309: synchronous in-memory tombstone publish + spawned PG mirror
+        // (the foreground stop path stays unblocked while durable
+        // persistence still survives dcserver restart via the shared
+        // client_id + drained-id registry).
         tmux::record_recent_turn_stop(
             channel_id,
             tmux_session_name.as_deref(),
             "mailbox_cancel_active_turn",
-        )
-        .await;
+        );
     }
     result
 }
@@ -1467,16 +1465,16 @@ fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<Stri
 }
 
 #[cfg(unix)]
-pub(crate) async fn record_turn_stop_tombstone(
+pub(crate) fn record_turn_stop_tombstone(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
-    tmux::record_recent_turn_stop(channel_id, tmux_session_name, reason).await;
+    tmux::record_recent_turn_stop(channel_id, tmux_session_name, reason);
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn record_turn_stop_tombstone(
+pub(crate) fn record_turn_stop_tombstone(
     _channel_id: ChannelId,
     _tmux_session_name: Option<&str>,
     _reason: &str,
