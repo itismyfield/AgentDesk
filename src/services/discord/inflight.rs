@@ -117,6 +117,15 @@ pub(super) struct InflightTurnState {
     /// identify a real Discord message.
     #[serde(default)]
     pub rebind_origin: bool,
+    /// #1255 codex round-2 P2: `true` while a long-running tool placeholder
+    /// (`Monitor` / background `Bash`/`Task`/`Agent`) owns `current_msg_id`.
+    /// `placeholder_sweeper` skips inflights whose `full_response` is non-empty
+    /// to avoid clobbering partially delivered text — but the placeholder
+    /// branch may have been opened *after* assistant prose, so the sweeper
+    /// would otherwise miss live cards that crash mid-flight. Set/cleared by
+    /// the turn loop alongside `long_running_placeholder_active`.
+    #[serde(default)]
+    pub long_running_placeholder_active: bool,
 }
 
 impl InflightTurnState {
@@ -174,6 +183,7 @@ impl InflightTurnState {
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
+            long_running_placeholder_active: false,
         }
     }
 

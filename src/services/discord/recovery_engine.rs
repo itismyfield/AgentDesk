@@ -3970,6 +3970,7 @@ mod tests {
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
+            long_running_placeholder_active: false,
         };
 
         assert!(
@@ -4086,6 +4087,7 @@ mod tests {
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
+            long_running_placeholder_active: false,
         };
 
         save_missing_session_handoff(

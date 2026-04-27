@@ -158,7 +158,14 @@ async fn run_placeholder_sweep_pass(
         // The "stalled after partial output" case is intentionally left for
         // a follow-up: it requires an append (rather than replace) strategy
         // so the partial response stays visible above the badge.
-        if !state.full_response.is_empty() || state.response_sent_offset > 0 {
+        // codex round-2 P2 on PR #1308: a long-running tool placeholder may
+        // be opened after assistant prose has already streamed, so
+        // `full_response` is non-empty even though `current_msg_id` now points
+        // at a pure background card. Honour the explicit flag from the turn
+        // loop and let those flow through to the stalled/abandoned branches.
+        if !state.long_running_placeholder_active
+            && (!state.full_response.is_empty() || state.response_sent_offset > 0)
+        {
             continue;
         }
         // Re-stat guard for the EDIT path: between

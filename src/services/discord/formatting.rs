@@ -211,11 +211,12 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MonitorHandoffReason, MonitorHandoffStatus, ReplaceLongMessageOutcome,
-        build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
-        build_placeholder_status_block, canonical_tool_name, classify_long_running_tool,
-        convert_markdown_tables, escape_for_code_fence, filter_codex_tool_logs,
-        finalize_in_progress_tool_status, normalize_allowed_tools, preserve_previous_tool_status,
+        LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus,
+        ReplaceLongMessageOutcome, build_monitor_handoff_placeholder,
+        build_monitor_handoff_placeholder_with_context, build_placeholder_status_block,
+        canonical_tool_name, classify_long_running_tool, convert_markdown_tables,
+        escape_for_code_fence, filter_codex_tool_logs, finalize_in_progress_tool_status,
+        normalize_allowed_tools, preserve_previous_tool_status,
         replace_long_message_outcome_to_result,
     };
 
@@ -1341,11 +1342,17 @@ mod tests {
     fn test_classify_long_running_tool_monitor_always_triggers() {
         assert_eq!(
             classify_long_running_tool("Monitor", "{\"session\":\"x\"}"),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::MonitorLike,
+            ))
         );
         assert_eq!(
             classify_long_running_tool("monitor", "{}"),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::MonitorLike,
+            ))
         );
     }
 
@@ -1356,7 +1363,10 @@ mod tests {
                 "Bash",
                 "{\"command\":\"sleep 999\",\"run_in_background\":true}"
             ),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::BackgroundDispatch,
+            ))
         );
         // Foreground Bash → no card (would otherwise spam users on every
         // ls/grep/cat).
@@ -1383,7 +1393,10 @@ mod tests {
                 "Task",
                 "{\"description\":\"x\",\"run_in_background\":true}"
             ),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::BackgroundDispatch,
+            ))
         );
         assert_eq!(
             classify_long_running_tool("Task", "{\"description\":\"x\"}"),
@@ -1399,11 +1412,17 @@ mod tests {
                 "Agent",
                 "{\"description\":\"x\",\"run_in_background\":true}"
             ),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::BackgroundDispatch,
+            ))
         );
         assert_eq!(
             classify_long_running_tool("agent", "{\"run_in_background\":true}"),
-            Some(MonitorHandoffReason::ExplicitCall)
+            Some((
+                MonitorHandoffReason::ExplicitCall,
+                LongRunningCloseTrigger::BackgroundDispatch,
+            ))
         );
         assert_eq!(
             classify_long_running_tool("Agent", "{\"description\":\"x\"}"),
@@ -2848,7 +2867,24 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
 /// streams its result back inline.  The tool-name comparison is
 /// case-insensitive via `canonical_tool_name` so that downstream Claude code
 /// providers that lower-case their tool names still trigger the placeholder.
-pub(super) fn classify_long_running_tool(name: &str, input: &str) -> Option<MonitorHandoffReason> {
+/// Lifecycle hint paired with `MonitorHandoffReason` so the turn loop knows
+/// whether `ToolResult` is the real completion signal.
+///
+/// - `MonitorLike`: `Monitor` tool calls deliver their final result via
+///   `ToolResult`, so terminating the placeholder there is correct.
+/// - `BackgroundDispatch`: `Bash`/`Task`/`Agent` with `run_in_background=true`
+///   return a job/task id ack immediately; the actual work continues and is
+///   read later. The placeholder must stay open until `Done` or cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LongRunningCloseTrigger {
+    MonitorLike,
+    BackgroundDispatch,
+}
+
+pub(super) fn classify_long_running_tool(
+    name: &str,
+    input: &str,
+) -> Option<(MonitorHandoffReason, LongRunningCloseTrigger)> {
     // `Agent` is not a canonical Claude Code tool name (the canonical entry is
     // `Task`), so it would not survive `canonical_tool_name`. Match it
     // explicitly first so the Task/Agent + run_in_background path stays alive.
@@ -2859,7 +2895,10 @@ pub(super) fn classify_long_running_tool(name: &str, input: &str) -> Option<Moni
         canonical_tool_name(trimmed)?
     };
     match resolved {
-        "Monitor" => Some(MonitorHandoffReason::ExplicitCall),
+        "Monitor" => Some((
+            MonitorHandoffReason::ExplicitCall,
+            LongRunningCloseTrigger::MonitorLike,
+        )),
         "Bash" | "Task" | "Agent" => {
             // Only escalate to the live-turn card when the call is explicitly
             // marked as background — foreground Bash/Task calls finish inline
@@ -2870,7 +2909,10 @@ pub(super) fn classify_long_running_tool(name: &str, input: &str) -> Option<Moni
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if bg {
-                Some(MonitorHandoffReason::ExplicitCall)
+                Some((
+                    MonitorHandoffReason::ExplicitCall,
+                    LongRunningCloseTrigger::BackgroundDispatch,
+                ))
             } else {
                 None
             }

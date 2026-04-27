@@ -870,13 +870,16 @@ pub(super) fn spawn_turn_bridge(
         // `controller.transition(Completed)`. The cancel / abort paths use
         // the same handle.
         let mut last_assistant_text_line: Option<String> = None;
-        // Pair the active key with the input snapshot so rollover can retarget
-        // the controller onto the new `current_msg_id` (otherwise the terminal
-        // transition would land on the frozen prior message and overwrite the
-        // delivered chunk). See codex round-1 P2 on PR #1308.
+        // Pair the active key with the input snapshot + close-trigger kind so
+        // rollover can retarget the controller onto the new `current_msg_id`
+        // (otherwise the terminal transition would land on the frozen prior
+        // message and overwrite the delivered chunk) and so we can distinguish
+        // `Monitor`-style ToolResult-closes from background-dispatch ack
+        // events. See codex round-1/2 P1+P2 on PR #1308.
         let mut long_running_placeholder_active: Option<(
             super::placeholder_controller::PlaceholderKey,
             super::placeholder_controller::PlaceholderActiveInput,
+            super::formatting::LongRunningCloseTrigger,
         )> = None;
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
@@ -1179,7 +1182,7 @@ pub(super) fn spawn_turn_bridge(
                             // streams its result inline and never touches the
                             // placeholder card.
                             if long_running_placeholder_active.is_none() {
-                                if let Some(reason) =
+                                if let Some((reason, close_trigger)) =
                                     super::formatting::classify_long_running_tool(&name, &input)
                                 {
                                     let started_at_unix = chrono::Utc::now().timestamp();
@@ -1197,7 +1200,7 @@ pub(super) fn spawn_turn_bridge(
                                             command_summary: Some(display_summary.clone()),
                                             context_line: last_assistant_text_line.clone(),
                                         };
-                                    let _ = shared_owned
+                                    let outcome = shared_owned
                                         .placeholder_controller
                                         .ensure_active(
                                             gateway.as_ref(),
@@ -1205,7 +1208,21 @@ pub(super) fn spawn_turn_bridge(
                                             input_payload.clone(),
                                         )
                                         .await;
-                                    long_running_placeholder_active = Some((key, input_payload));
+                                    // codex round-2 P2: only commit the active
+                                    // pointer when the controller actually
+                                    // committed (or coalesced an existing
+                                    // edit); otherwise the regular streaming
+                                    // path stays in charge so the turn isn't
+                                    // visually frozen on a transient edit
+                                    // failure.
+                                    use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                    if matches!(outcome, Edited | Coalesced) {
+                                        long_running_placeholder_active =
+                                            Some((key, input_payload, close_trigger));
+                                        inflight_state
+                                            .long_running_placeholder_active = true;
+                                        state_dirty = true;
+                                    }
                                 }
                             }
                             push_transcript_event(
@@ -1270,16 +1287,38 @@ pub(super) fn spawn_turn_bridge(
                             // the rest of the turn so the user can see the
                             // status line; the controller's idempotent terminal
                             // transition keeps duplicate edits free.
-                            if let Some((key, _)) = long_running_placeholder_active.take() {
-                                let target = if is_error {
-                                    super::placeholder_controller::PlaceholderLifecycle::Aborted
+                            // codex round-2 P1: only `Monitor`-style tools
+                            // deliver their real completion via `ToolResult`.
+                            // Background `Bash`/`Task`/`Agent` dispatches send
+                            // back a job/task id ack on `ToolResult` and the
+                            // actual work continues — terminating here would
+                            // close the card while the background job is
+                            // still running. Keep those open until `Done` /
+                            // cancel.
+                            if let Some((key, snapshot, close_trigger)) =
+                                long_running_placeholder_active.take()
+                            {
+                                if matches!(
+                                    close_trigger,
+                                    super::formatting::LongRunningCloseTrigger::MonitorLike
+                                ) {
+                                    let target = if is_error {
+                                        super::placeholder_controller::PlaceholderLifecycle::Aborted
+                                    } else {
+                                        super::placeholder_controller::PlaceholderLifecycle::Completed
+                                    };
+                                    let _ = shared_owned
+                                        .placeholder_controller
+                                        .transition(gateway.as_ref(), key, target)
+                                        .await;
+                                    inflight_state
+                                        .long_running_placeholder_active = false;
+                                    state_dirty = true;
                                 } else {
-                                    super::placeholder_controller::PlaceholderLifecycle::Completed
-                                };
-                                let _ = shared_owned
-                                    .placeholder_controller
-                                    .transition(gateway.as_ref(), key, target)
-                                    .await;
+                                    // Re-stash so `Done`/cancel can close it.
+                                    long_running_placeholder_active =
+                                        Some((key, snapshot, close_trigger));
+                                }
                             }
                             // Reset the assistant-line summary so the next
                             // long-running tool call captures its own context.
@@ -1347,7 +1386,7 @@ pub(super) fn spawn_turn_bridge(
                             // it now so the user does not stare at a stale
                             // 🔄 card forever. Idempotent if a prior
                             // ToolResult already fired Completed.
-                            if let Some((key, _)) = long_running_placeholder_active.take() {
+                            if let Some((key, _, _)) = long_running_placeholder_active.take() {
                                 let target = if result == "__session_died_retry__" {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
@@ -1357,6 +1396,8 @@ pub(super) fn spawn_turn_bridge(
                                     .placeholder_controller
                                     .transition(gateway.as_ref(), key, target)
                                     .await;
+                                inflight_state.long_running_placeholder_active = false;
+                                state_dirty = true;
                             }
                             if let Some(resolved) = resolve_done_response(
                                 &full_response,
@@ -1665,7 +1706,10 @@ pub(super) fn spawn_turn_bridge(
                             // the controller onto the new message_id so the
                             // eventual terminal transition lands on the live
                             // card instead of overwriting that frozen chunk.
-                            if let Some((_, snapshot)) =
+                            // codex round-2 P2: drop the active pointer if the
+                            // retarget edit fails — otherwise we'd suppress
+                            // streaming with no card visible.
+                            if let Some((_, snapshot, close_trigger)) =
                                 long_running_placeholder_active.take()
                             {
                                 let new_key =
@@ -1674,7 +1718,7 @@ pub(super) fn spawn_turn_bridge(
                                         channel_id,
                                         message_id: current_msg_id,
                                     };
-                                let _ = shared_owned
+                                let outcome = shared_owned
                                     .placeholder_controller
                                     .ensure_active(
                                         gateway.as_ref(),
@@ -1682,8 +1726,22 @@ pub(super) fn spawn_turn_bridge(
                                         snapshot.clone(),
                                     )
                                     .await;
-                                long_running_placeholder_active =
-                                    Some((new_key, snapshot));
+                                use super::placeholder_controller::PlaceholderControllerOutcome::*;
+                                if matches!(outcome, Edited | Coalesced) {
+                                    long_running_placeholder_active =
+                                        Some((new_key, snapshot, close_trigger));
+                                    // Flag is already true; refresh
+                                    // updated_at-side bookkeeping by writing
+                                    // through state_dirty.
+                                    state_dirty = true;
+                                } else {
+                                    // Retarget edit failed — drop the flag so
+                                    // the regular streaming loop and sweeper
+                                    // resume normal handling.
+                                    inflight_state.long_running_placeholder_active =
+                                        false;
+                                    state_dirty = true;
+                                }
                             }
                         }
                         Err(error) => {
@@ -1983,7 +2041,7 @@ pub(super) fn spawn_turn_bridge(
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is
             // safe even if the ToolResult event already fired Completed.
-            if let Some((key, _)) = long_running_placeholder_active.take() {
+            if let Some((key, _, _)) = long_running_placeholder_active.take() {
                 let _ = shared_owned
                     .placeholder_controller
                     .transition(
@@ -1992,6 +2050,8 @@ pub(super) fn spawn_turn_bridge(
                         super::placeholder_controller::PlaceholderLifecycle::Aborted,
                     )
                     .await;
+                inflight_state.long_running_placeholder_active = false;
+                let _ = save_inflight_state(&inflight_state);
             }
 
             if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
