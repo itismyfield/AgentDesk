@@ -1367,6 +1367,51 @@ fn ensure_monitor_auto_turn_inflight(
     }
 }
 
+/// Read the `.generation` marker file mtime in nanoseconds since the unix
+/// epoch. Returns 0 when the file is missing or its mtime cannot be
+/// resolved — both conditions are treated by callers as "fresh wrapper".
+///
+/// `.generation` is written exactly once per spawn by `claude.rs` after
+/// `tmux::create_session` and never touched by the live wrapper, so its
+/// mtime uniquely identifies the wrapper instance even when jsonl
+/// rotation changes the jsonl inode (#1270).
+fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
+    let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return 0;
+    };
+    let Ok(modified) = meta.modified() else {
+        return 0;
+    };
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+/// Decide what watermark a stale-output regression (current EOF lower than
+/// `confirmed`) should land on, based on whether the wrapper instance is
+/// the same one that advanced the watermark in the first place.
+///
+/// - Same wrapper (`.generation` mtime unchanged): mid-flight rotation
+///   (`truncate_jsonl_head_safe` rename). The byte stream beyond the
+///   surviving content is genuinely new, so we pin to `observed_output_end`
+///   to avoid re-relaying surviving content (PR #1256 intent).
+/// - Different wrapper (mtime changed, mtime missing, or first observation
+///   with stored mtime == 0): cancel→respawn or any fresh spawn. The
+///   current file is fully new content — reset to 0 so the watcher walks
+///   it from the beginning (#1270 regression fix).
+fn watermark_after_output_regression(
+    stored_generation_mtime_ns: i64,
+    current_generation_mtime_ns: i64,
+    observed_output_end: u64,
+) -> u64 {
+    let same_wrapper = stored_generation_mtime_ns != 0
+        && stored_generation_mtime_ns == current_generation_mtime_ns;
+    if same_wrapper { observed_output_end } else { 0 }
+}
+
 fn reset_stale_relay_watermark_if_output_regressed(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -1380,17 +1425,19 @@ fn reset_stale_relay_watermark_if_output_regressed(
         .load(std::sync::atomic::Ordering::Acquire);
 
     while confirmed != 0 && observed_output_end < confirmed {
-        // Resetting to 0 makes the watcher relay every byte already in the
-        // capture file from offset 0, which surfaces as an avalanche of stale
-        // assistant output to the Discord channel whenever the capture file
-        // is rotated/truncated (deploy restart, watcher death recovery, tmux
-        // session respawn). Treat the current end as "already past the
-        // watermark" instead — only output that arrives *after* this reset
-        // gets relayed, which matches what the user expects after a session
-        // rotation.
+        let stored_gen_mtime_ns = relay_coord
+            .confirmed_end_generation_mtime_ns
+            .load(std::sync::atomic::Ordering::Acquire);
+        let current_gen_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+        let new_watermark = watermark_after_output_regression(
+            stored_gen_mtime_ns,
+            current_gen_mtime_ns,
+            observed_output_end,
+        );
+
         match relay_coord.confirmed_end_offset.compare_exchange(
             confirmed,
-            observed_output_end,
+            new_watermark,
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
         ) {
@@ -1398,14 +1445,19 @@ fn reset_stale_relay_watermark_if_output_regressed(
                 relay_coord
                     .last_relay_ts_ms
                     .store(0, std::sync::atomic::Ordering::Release);
+                relay_coord
+                    .confirmed_end_generation_mtime_ns
+                    .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={})",
+                    "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={}, new_watermark={}, generation_mtime_changed={})",
                     tmux_session_name,
                     channel_id.get(),
                     context,
                     observed_output_end,
-                    confirmed
+                    confirmed,
+                    new_watermark,
+                    stored_gen_mtime_ns != current_gen_mtime_ns
                 );
                 return true;
             }
@@ -1418,6 +1470,7 @@ fn reset_stale_relay_watermark_if_output_regressed(
 
 fn reset_stale_local_relay_offset_if_output_regressed(
     last_relayed_offset: &mut Option<u64>,
+    last_observed_generation_mtime_ns: &mut Option<i64>,
     channel_id: ChannelId,
     tmux_session_name: &str,
     observed_output_end: u64,
@@ -1430,20 +1483,34 @@ fn reset_stale_local_relay_offset_if_output_regressed(
         return false;
     }
 
-    // See `reset_stale_relay_watermark_if_output_regressed` — clearing this to
-    // None lets the watcher loop relay from offset 0 again, which floods
-    // Discord with stale capture-file content after rotation. Pin to the
-    // observed end instead so subsequent ticks only relay genuinely new
-    // bytes.
-    *last_relayed_offset = Some(observed_output_end);
+    let stored_gen_mtime_ns = last_observed_generation_mtime_ns.unwrap_or(0);
+    let current_gen_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+    let new_offset = watermark_after_output_regression(
+        stored_gen_mtime_ns,
+        current_gen_mtime_ns,
+        observed_output_end,
+    );
+    let new_local = if new_offset == 0 {
+        // Fresh wrapper — clear the local watermark entirely so the next
+        // tick walks the file from offset 0 (matches the global reset
+        // semantics for cancel→respawn).
+        None
+    } else {
+        Some(new_offset)
+    };
+    *last_relayed_offset = new_local;
+    *last_observed_generation_mtime_ns = Some(current_gen_mtime_ns);
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
-        "  [{ts}] 👁 Reset stale tmux local relay offset for {} (channel {}, context={}, observed_output_end={}, stale_last_relayed={})",
+        "  [{ts}] 👁 Reset stale tmux local relay offset for {} (channel {}, context={}, observed_output_end={}, stale_last_relayed={}, new_local_offset={:?}, generation_mtime_changed={})",
         tmux_session_name,
         channel_id.get(),
         context,
         observed_output_end,
-        prev_offset
+        prev_offset,
+        new_local,
+        stored_gen_mtime_ns != current_gen_mtime_ns
     );
     true
 }
@@ -1470,6 +1537,16 @@ fn advance_watcher_confirmed_end(
             Ok(_) => break,
             Err(observed) => cur = observed,
         }
+    }
+    // #1270: snapshot the current `.generation` mtime alongside the
+    // watermark so a later regression detection can tell whether we're
+    // still watching the same wrapper instance (rotation case → pin to
+    // EOF) or a fresh one (cancel→respawn → reset to 0).
+    let current_gen_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+    if current_gen_mtime_ns != 0 {
+        relay_coord
+            .confirmed_end_generation_mtime_ns
+            .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
     }
     let confirmed_end = relay_coord
         .confirmed_end_offset
@@ -3798,6 +3875,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
             None
         }
     };
+    // #1270: track the `.generation` mtime alongside the local offset so a
+    // later regression check can tell apart mid-flight rotation (same
+    // wrapper, same mtime) from cancel→respawn (new wrapper, new mtime).
+    let mut last_observed_generation_mtime_ns: Option<i64> =
+        Some(read_generation_file_mtime_ns(&tmux_session_name));
     if let Ok(meta) = std::fs::metadata(&output_path) {
         let observed_output_end = meta.len();
         reset_stale_relay_watermark_if_output_regressed(
@@ -3809,6 +3891,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
         );
         reset_stale_local_relay_offset_if_output_regressed(
             &mut last_relayed_offset,
+            &mut last_observed_generation_mtime_ns,
             channel_id,
             &tmux_session_name,
             observed_output_end,
@@ -5129,6 +5212,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             );
             reset_stale_local_relay_offset_if_output_regressed(
                 &mut last_relayed_offset,
+                &mut last_observed_generation_mtime_ns,
                 channel_id,
                 &tmux_session_name,
                 observed_output_end,
@@ -8238,33 +8322,52 @@ mod tests {
         );
     }
 
+    // #1270 unit table: pure-logic decision for the watermark-after-output-
+    // regression policy. No file I/O — pins down the
+    // (stored_mtime, current_mtime, observed_eof) → new_watermark mapping
+    // so it can't drift without these tests catching it.
     #[test]
-    fn stale_relay_watermark_resets_when_output_offset_regresses() {
-        let shared = super::super::make_shared_data_for_tests();
-        let channel_id = ChannelId::new(1485506232256168125);
-        let relay_coord = shared.tmux_relay_coord(channel_id);
-        relay_coord
-            .confirmed_end_offset
-            .store(1_548_758, Ordering::Release);
-        relay_coord.last_relay_ts_ms.store(12345, Ordering::Release);
-
-        // The capture file was rotated: confirmed=1.5MB but the on-disk file
-        // only has 438_675 bytes. The reset must move the watermark to the
-        // current end, NOT to 0 — otherwise the watcher would re-relay every
-        // byte still in the rotated file as "new" output and flood the
-        // channel with stale assistant content.
-        assert!(reset_stale_relay_watermark_if_output_regressed(
-            shared.as_ref(),
-            channel_id,
-            "AgentDesk-claude-adk-cc-t1494846231539613809",
-            438_675,
-            "unit-test",
-        ));
+    fn watermark_after_output_regression_pins_to_eof_when_generation_mtime_unchanged() {
+        // Same wrapper instance: jsonl was rotated by truncate_jsonl_head_safe.
+        // Pinning to current EOF avoids re-relaying surviving content
+        // (PR #1256 intent).
         assert_eq!(
-            relay_coord.confirmed_end_offset.load(Ordering::Acquire),
+            super::watermark_after_output_regression(123_456_789, 123_456_789, 438_675),
             438_675
         );
-        assert_eq!(relay_coord.last_relay_ts_ms.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn watermark_after_output_regression_resets_to_zero_for_fresh_generation() {
+        // Cancel→respawn: claude.rs cleanup_session_temp_files deleted the
+        // old `.generation`, then claude.rs wrote a fresh one with a new
+        // mtime. The current jsonl is fully new content, so the watcher
+        // must walk it from offset 0 (#1270).
+        assert_eq!(
+            super::watermark_after_output_regression(123_456_789, 999_999_999, 92_566),
+            0
+        );
+    }
+
+    #[test]
+    fn watermark_after_output_regression_resets_to_zero_when_generation_missing() {
+        // `.generation` file deleted (cancel→respawn mid-stream) — treat as
+        // fresh. read_generation_file_mtime_ns returns 0 in that case.
+        assert_eq!(
+            super::watermark_after_output_regression(123_456_789, 0, 92_566),
+            0
+        );
+    }
+
+    #[test]
+    fn watermark_after_output_regression_resets_to_zero_on_first_observation() {
+        // First time the watermark is being adjusted (stored mtime still 0
+        // from the AtomicI64 default). We have no baseline to claim
+        // "rotation", so default to fresh-file semantics.
+        assert_eq!(
+            super::watermark_after_output_regression(0, 123_456_789, 92_566),
+            0
+        );
     }
 
     #[test]
@@ -8302,22 +8405,63 @@ mod tests {
     }
 
     #[test]
-    fn stale_local_relay_offset_resets_when_output_offset_regresses() {
-        let channel_id = ChannelId::new(1485506232256168127);
-        let mut last_relayed_offset = Some(1_548_758);
+    fn stale_relay_watermark_resets_to_zero_when_generation_file_missing() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1485506232256168125);
+        let relay_coord = shared.tmux_relay_coord(channel_id);
+        relay_coord
+            .confirmed_end_offset
+            .store(1_548_758, Ordering::Release);
+        relay_coord.last_relay_ts_ms.store(12345, Ordering::Release);
+        // Stored mtime is non-zero, simulating a watermark previously
+        // captured against a now-vanished `.generation` file (the cancel→
+        // respawn timing window where claude.rs deleted the marker but has
+        // not yet written the new one).
+        relay_coord
+            .confirmed_end_generation_mtime_ns
+            .store(123_456_789, Ordering::Release);
 
-        // Same fix as the shared watermark: pin the local offset to the
-        // current capture-file end after rotation instead of clearing it,
-        // so the watcher does not re-relay everything in the rotated file
-        // from offset 0.
-        assert!(reset_stale_local_relay_offset_if_output_regressed(
-            &mut last_relayed_offset,
+        // No `.generation` file on disk for this synthetic session — the
+        // helper returns 0 for current_gen_mtime, the stored value differs,
+        // so the regression resolver picks the fresh-file branch and the
+        // watermark drops to 0 instead of pinning to the observed end.
+        // Otherwise the user's response (which lives below the observed end
+        // in the new fresh jsonl) would be silently skipped (#1270).
+        assert!(reset_stale_relay_watermark_if_output_regressed(
+            shared.as_ref(),
             channel_id,
-            "AgentDesk-claude-adk-cc-t1494846231539613809",
+            "AgentDesk-claude-adk-cc-issue-1270-no-genfile",
             438_675,
             "unit-test",
         ));
-        assert_eq!(last_relayed_offset, Some(438_675));
+        assert_eq!(relay_coord.confirmed_end_offset.load(Ordering::Acquire), 0);
+        assert_eq!(relay_coord.last_relay_ts_ms.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn stale_local_relay_offset_clears_to_none_for_fresh_generation() {
+        // #1270: when the wrapper is fresh (mtime changed or file missing),
+        // the local last_relayed_offset must be cleared so the next loop
+        // tick walks the fresh jsonl from offset 0 and relays the new
+        // response. Pinning to the regressed observed_output_end (the old
+        // PR #1256 behavior) drops the entire response body that's already
+        // landed below the EOF.
+        let channel_id = ChannelId::new(1485506232256168127);
+        let mut last_relayed_offset = Some(1_548_758);
+        let mut last_observed_generation_mtime_ns: Option<i64> = Some(123_456_789);
+
+        assert!(reset_stale_local_relay_offset_if_output_regressed(
+            &mut last_relayed_offset,
+            &mut last_observed_generation_mtime_ns,
+            channel_id,
+            "AgentDesk-claude-adk-cc-issue-1270-local-no-genfile",
+            438_675,
+            "unit-test",
+        ));
+        assert_eq!(
+            last_relayed_offset, None,
+            "fresh wrapper must clear local offset so next tick starts at 0"
+        );
     }
 
     #[test]

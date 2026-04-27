@@ -741,6 +741,24 @@ pub(super) struct TmuxRelayCoord {
     /// `watcher-state` observability endpoint (#964). Monotonic is NOT
     /// required — this is a telemetry field only.
     pub(super) last_relay_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// `.generation` marker file mtime (nanos since epoch) snapshotted the
+    /// last time `confirmed_end_offset` was advanced. 0 = never observed.
+    ///
+    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) uses this
+    /// to distinguish two output-regression scenarios that look identical
+    /// at the byte level:
+    ///   - Mid-flight rotation (`truncate_jsonl_head_safe` rename — same
+    ///     wrapper, same `.generation` mtime): pin watermark to current
+    ///     EOF so we don't re-relay surviving content (PR #1256 intent).
+    ///   - Cancel→respawn (`cleanup_session_temp_files` deletes
+    ///     `.generation`, claude.rs writes a fresh one — new wrapper, new
+    ///     mtime): reset watermark to 0 so the genuinely-new response is
+    ///     relayed.
+    ///
+    /// `.generation` is the stable wrapper-identity signal because it's
+    /// written once per spawn and never touched by the live wrapper, so its
+    /// mtime survives jsonl rotation but flips on a fresh spawn.
+    pub(super) confirmed_end_generation_mtime_ns: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl TmuxRelayCoord {
@@ -749,6 +767,7 @@ impl TmuxRelayCoord {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }
     }
 }
