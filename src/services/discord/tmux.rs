@@ -1534,6 +1534,18 @@ fn advance_watcher_confirmed_end(
     let mut cur = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
+    // #1270 codex P2 (round 4): capture the `.generation` mtime BEFORE
+    // the CAS so the stored mtime reflects what was on disk when we
+    // decided to label `committed_end_offset` as delivered. Reading after
+    // the CAS opens a TOCTOU window where a fresh respawn writes a new
+    // `.generation` between our advance and our marker store, then the
+    // new mtime ends up paired with the OLD offset and the next
+    // regression check mis-classifies the next fresh respawn as
+    // same-wrapper rotation.
+    let mtime_at_attempt = {
+        let m = read_generation_file_mtime_ns(tmux_session_name);
+        if m == 0 { None } else { Some(m) }
+    };
     let mut won_advance = false;
     while cur < committed_end_offset {
         match relay_coord.confirmed_end_offset.compare_exchange(
@@ -1549,26 +1561,17 @@ fn advance_watcher_confirmed_end(
             Err(observed) => cur = observed,
         }
     }
-    // #1270: snapshot the current `.generation` mtime alongside the
-    // watermark so a later regression detection can tell whether we're
-    // still watching the same wrapper instance (rotation case → pin to
-    // EOF) or a fresh one (cancel→respawn → reset to 0).
-    //
-    // Codex P2 (PR #1271 round 3): only refresh the mtime when WE actually
-    // moved the offset. If the loop exits because the stored watermark is
-    // already at/past `committed_end_offset` (a stale-high watermark from
-    // an older session is exactly the regression case this PR is trying to
-    // recover from), overwriting the stored mtime with the *current*
-    // wrapper's mtime would associate the OLD offset with the NEW wrapper
-    // — and the next regression check would misclassify the fresh respawn
-    // as same-wrapper rotation and pin to EOF instead of resetting to 0.
-    if won_advance {
-        let current_gen_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
-        if current_gen_mtime_ns != 0 {
-            relay_coord
-                .confirmed_end_generation_mtime_ns
-                .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
-        }
+    // Pair the pre-CAS mtime with the offset only on a real advance. If
+    // the loop exits because the stored watermark is already at/past
+    // `committed_end_offset` (the stale-high watermark from an older
+    // session — exactly the regression case this PR is trying to
+    // recover from), refreshing the mtime would associate the OLD offset
+    // with the NEW wrapper and break the next regression check
+    // (PR #1271 round 3).
+    if won_advance && let Some(mtime) = mtime_at_attempt {
+        relay_coord
+            .confirmed_end_generation_mtime_ns
+            .store(mtime, std::sync::atomic::Ordering::Release);
     }
     let confirmed_end = relay_coord
         .confirmed_end_offset
