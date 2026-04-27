@@ -2122,17 +2122,18 @@ async fn catch_up_missed_messages(
                 &allowed_bot_ids,
                 announce_bot_id,
             );
+            // Codex P2 round 2 on #1301: check the cap BEFORE recording the
+            // recover, otherwise `stats.recovered` would tally a message we
+            // refused to enqueue and the log would lie about the queue
+            // contents. Stopping iteration keeps the checkpoint pinned at
+            // the last actually-queued message — newer entries that we
+            // declined are still > `after_msg` for the next pass.
+            if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
+                break;
+            }
             stats.record(outcome);
             if outcome != CatchUpClassification::Recover {
                 continue;
-            }
-
-            if stats.recovered >= remaining_capacity {
-                // Stopping iteration here keeps the checkpoint pinned at the
-                // last actually-queued message — newer entries that we
-                // declined to enqueue are still > `after_msg` for the next
-                // pass.
-                break;
             }
 
             mailbox_enqueue_intervention(
