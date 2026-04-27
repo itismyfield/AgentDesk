@@ -235,7 +235,7 @@
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 384 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1271 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 629 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 2888 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 2885 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 618 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 4096 | giant-file |
@@ -259,7 +259,7 @@
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 155 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 266 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
-| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 590 |  |
+| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 588 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 525 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1963 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 565 |  |
