@@ -174,7 +174,7 @@
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 938 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
-| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4787 | giant-file |
+| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4797 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 2024 | giant-file |
@@ -182,16 +182,16 @@
 | `server::routes::messages` | `src/server/routes/messages.rs` | 185 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 127 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 547 |  |
-| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4478 | giant-file |
+| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4482 | giant-file |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1370 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 254 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
-| `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2000 | giant-file |
+| `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 2003 | giant-file |
 | `server::routes::review_verdict::review_state_repo` | `src/server/routes/review_verdict/review_state_repo.rs` | 22 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 895 |  |
-| `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 595 |  |
+| `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 598 |  |
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 530 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 371 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 1274 | giant-file |
