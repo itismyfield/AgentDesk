@@ -62,6 +62,7 @@ impl MaintenanceJobRegistry {
             Arc::new(NoopHeartbeatJob),
             Arc::new(AgentQualityRollupJob),
             Arc::new(QualityRegressionAlerterJob),
+            Arc::new(CancelTombstonePruneJob),
         ])
     }
 
@@ -142,6 +143,38 @@ impl MaintenanceJob for QualityRegressionAlerterJob {
                 alerts_dispatched = sent,
                 "agent quality regression alerter completed"
             );
+            Ok(())
+        })
+    }
+}
+
+/// #1309 — sweep expired `cancel_tombstones` rows every 30 minutes so the
+/// table cannot grow without bound when no watcher ever observes the
+/// cancel-induced death. The 10-minute TTL × 3 safety margin is generous so
+/// repeated PG-enabled idle channels do not retain stale rows.
+struct CancelTombstonePruneJob;
+
+impl MaintenanceJob for CancelTombstonePruneJob {
+    fn name(&self) -> &'static str {
+        "storage.cancel_tombstone_prune"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(30 * 60), Duration::from_secs(20))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let deleted = crate::db::cancel_tombstones::prune_expired_cancel_tombstones(pool)
+                .await
+                .map_err(|error| anyhow::anyhow!("cancel_tombstone_prune failed: {error}"))?;
+            if deleted > 0 {
+                tracing::info!(
+                    job = self.name(),
+                    deleted,
+                    "[maintenance] cancel_tombstone_prune removed expired rows"
+                );
+            }
             Ok(())
         })
     }

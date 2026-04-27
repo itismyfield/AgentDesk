@@ -90,6 +90,10 @@ pub fn spawn_storage_maintenance_jobs(pg_pool: Option<PgPool>) {
     );
 
     // Weekly postgres retention sweep (#1093). Postgres-only; skipped if no pool.
+    // The cancel-tombstone pruner (#1309) lives on the static
+    // `MaintenanceJobRegistry` (`server::maintenance::CancelTombstonePruneJob`)
+    // so it runs through the production `worker_registry::MaintenanceScheduler`
+    // path that owns persistent state in PG; no dynamic registration needed.
     match pg_pool {
         Some(pool) => register_db_retention(pool),
         None => {

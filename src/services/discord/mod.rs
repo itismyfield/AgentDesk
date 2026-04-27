@@ -1437,11 +1437,15 @@ async fn mailbox_cancel_active_turn(
     let result = shared.mailbox(channel_id).cancel_active_turn().await;
     #[cfg(unix)]
     if result.token.is_some() {
+        // #1309: in-memory publish is synchronous (instant suppression);
+        // PG mirror is awaited with a 500 ms cap so a quick dcserver
+        // restart cannot drop the durable copy.
         tmux::record_recent_turn_stop(
             channel_id,
             tmux_session_name.as_deref(),
             "mailbox_cancel_active_turn",
-        );
+        )
+        .await;
     }
     result
 }
@@ -1461,16 +1465,16 @@ fn infer_inflight_tmux_session_for_channel(channel_id: ChannelId) -> Option<Stri
 }
 
 #[cfg(unix)]
-pub(crate) fn record_turn_stop_tombstone(
+pub(crate) async fn record_turn_stop_tombstone(
     channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     reason: &str,
 ) {
-    tmux::record_recent_turn_stop(channel_id, tmux_session_name, reason);
+    tmux::record_recent_turn_stop(channel_id, tmux_session_name, reason).await;
 }
 
 #[cfg(not(unix))]
-pub(crate) fn record_turn_stop_tombstone(
+pub(crate) async fn record_turn_stop_tombstone(
     _channel_id: ChannelId,
     _tmux_session_name: Option<&str>,
     _reason: &str,
