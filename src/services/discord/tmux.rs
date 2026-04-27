@@ -345,17 +345,23 @@ async fn cancel_induced_watcher_death_async(
     current_output_offset: Option<u64>,
     pg_pool: Option<&sqlx::PgPool>,
 ) -> bool {
-    if cancel_induced_watcher_death(channel_id, tmux_session_name, current_output_offset) {
-        return true;
-    }
+    let in_memory_hit =
+        cancel_induced_watcher_death(channel_id, tmux_session_name, current_output_offset);
 
     let Some(pool) = pg_pool else {
-        return false;
+        return in_memory_hit;
     };
 
     let channel_id_i64 = channel_id.get() as i64;
     let current_offset_i64 = current_output_offset.and_then(|v| i64::try_from(v).ok());
-    match crate::db::cancel_tombstones::consume_cancel_tombstone(
+
+    // codex round-1 P2 on PR #1310: even when the in-memory store hits, the
+    // PG mirror needs to be consumed so a follow-up watcher death within the
+    // 60s fallback window cannot inherit the stale row and silently swallow
+    // a real lifecycle/restart signal. The fire-and-forget insert from the
+    // record path may even land after the in-memory consume, so we always
+    // try to consume both layers and treat either hit as cancel-induced.
+    let pg_hit = match crate::db::cancel_tombstones::consume_cancel_tombstone(
         pool,
         channel_id_i64,
         tmux_session_name,
@@ -373,7 +379,9 @@ async fn cancel_induced_watcher_death_async(
             );
             false
         }
-    }
+    };
+
+    in_memory_hit || pg_hit
 }
 
 fn recent_turn_stop_for_watcher_range(

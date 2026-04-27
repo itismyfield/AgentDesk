@@ -175,13 +175,42 @@ mod tests {
     use super::*;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
+    /// Per-test PG database wrapper. Holds the lifecycle guard for the
+    /// duration of the test and drops the temporary database in `teardown`
+    /// so repeated PG-enabled runs don't leak `agentdesk_cancel_tombstones_*`
+    /// databases (codex round-1 P3 on PR #1310).
+    struct TestPg {
+        pool: PgPool,
+        admin_url: String,
+        database_name: String,
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    }
+
+    impl TestPg {
+        async fn teardown(self) {
+            let TestPg {
+                pool,
+                admin_url,
+                database_name,
+                _lifecycle,
+            } = self;
+            // Close pool before the admin DROP so PG isn't holding sessions
+            // open against the database we're about to drop.
+            pool.close().await;
+            let _ = crate::db::postgres::drop_test_database(
+                &admin_url,
+                &database_name,
+                "cancel_tombstones tests",
+            )
+            .await;
+        }
+    }
+
     /// Spin up an isolated PG database for this test, run all migrations,
-    /// then return a pool against it. Tests that exercise the
-    /// `cancel_tombstones` schema rely on the migration running before any
-    /// query. Gated on `POSTGRES_TEST_DATABASE_URL_BASE` — without it the
-    /// helper returns `None` and tests no-op so `cargo test` stays green
-    /// on machines without a local PG server.
-    async fn fresh_pg_pool() -> Option<PgPool> {
+    /// then return a `TestPg` guard. Gated on `POSTGRES_TEST_DATABASE_URL_BASE`
+    /// — without it the helper returns `None` and tests no-op so
+    /// `cargo test` stays green on machines without a local PG server.
+    async fn fresh_pg() -> Option<TestPg> {
         use crate::db::postgres;
         let base = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE").ok()?;
         let trimmed = base.trim().trim_end_matches('/');
@@ -197,7 +226,7 @@ mod tests {
             "agentdesk_cancel_tombstones_{}",
             uuid::Uuid::new_v4().simple()
         );
-        let _ = postgres::lock_test_lifecycle();
+        let lifecycle = postgres::lock_test_lifecycle();
         postgres::create_test_database(&admin_url, &database_name, "cancel_tombstones tests")
             .await
             .ok()?;
@@ -210,17 +239,23 @@ mod tests {
             .await
             .ok()?;
         postgres::migrate(&pool).await.ok()?;
-        Some(pool)
+        Some(TestPg {
+            pool,
+            admin_url,
+            database_name,
+            _lifecycle: lifecycle,
+        })
     }
 
     /// A successful insert + matching consume returns true and leaves the
     /// table empty (one-shot consume).
     #[tokio::test]
     async fn insert_then_consume_is_one_shot() {
-        let Some(pool) = fresh_pg_pool().await else {
+        let Some(test_pg) = fresh_pg().await else {
             eprintln!("[cancel_tombstones] PG unavailable; skipping insert_then_consume test");
             return;
         };
+        let pool = test_pg.pool.clone();
 
         insert_cancel_tombstone(
             &pool,
@@ -244,15 +279,18 @@ mod tests {
             .await
             .expect("consume idempotent");
         assert!(!consumed_again, "second consume returns false");
+
+        test_pg.teardown().await;
     }
 
     /// Beyond cancel offset + teardown grace, the death is unrelated and
     /// must NOT consume the tombstone.
     #[tokio::test]
     async fn consume_skips_when_past_cancel_eof() {
-        let Some(pool) = fresh_pg_pool().await else {
+        let Some(test_pg) = fresh_pg().await else {
             return;
         };
+        let pool = test_pg.pool.clone();
 
         let stop_offset: i64 = 1024;
         insert_cancel_tombstone(
@@ -276,15 +314,18 @@ mod tests {
         );
         // Tombstone still present for legitimate later consumer (TTL).
         assert_eq!(count_cancel_tombstones_for_tests(&pool).await.unwrap(), 1);
+
+        test_pg.teardown().await;
     }
 
     /// Mismatched `tmux_session_name` is rejected even when the channel
     /// matches.
     #[tokio::test]
     async fn consume_skips_when_session_name_mismatch() {
-        let Some(pool) = fresh_pg_pool().await else {
+        let Some(test_pg) = fresh_pg().await else {
             return;
         };
+        let pool = test_pg.pool.clone();
 
         insert_cancel_tombstone(&pool, 6262, Some("AgentDesk-codex-A"), None, "user-cancel")
             .await
@@ -295,15 +336,18 @@ mod tests {
             .expect("consume");
         assert!(!consumed);
         assert_eq!(count_cancel_tombstones_for_tests(&pool).await.unwrap(), 1);
+
+        test_pg.teardown().await;
     }
 
     /// `prune_expired_cancel_tombstones` removes rows whose `expires_at`
     /// has passed and leaves the live ones in place.
     #[tokio::test]
     async fn prune_drops_expired_rows() {
-        let Some(pool) = fresh_pg_pool().await else {
+        let Some(test_pg) = fresh_pg().await else {
             return;
         };
+        let pool = test_pg.pool.clone();
 
         // Live row.
         insert_cancel_tombstone(&pool, 7373, Some("live"), None, "user-cancel")
@@ -326,5 +370,7 @@ mod tests {
         let deleted = prune_expired_cancel_tombstones(&pool).await.expect("prune");
         assert_eq!(deleted, 1, "only the expired row should be removed");
         assert_eq!(count_cancel_tombstones_for_tests(&pool).await.unwrap(), 1);
+
+        test_pg.teardown().await;
     }
 }
