@@ -60,6 +60,103 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg_and_dir(pg_pool: sqlx::PgPool, dir: &std::path::Path) -> PolicyEngine {
+        crate::pipeline::ensure_loaded();
+        let mut config = crate::config::Config::default();
+        config.policies.dir = dir.to_path_buf();
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    /// Per-test Postgres database lifecycle for `integration_tests` migrations
+    /// (#1238). Mirrors the `WizardPgDatabase` pattern from
+    /// `agents_setup_e2e.rs` so each migrated test gets an isolated DB.
+    struct IntegrationPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl IntegrationPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_integration_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "integration tests pg",
+            )
+            .await
+            .expect("create integration_tests postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "integration tests pg",
+            )
+            .await
+            .expect("connect + migrate integration_tests postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "integration tests pg",
+            )
+            .await
+            .expect("drop integration_tests postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
     struct WorktreeCommitOverrideGuard;
 
     impl WorktreeCommitOverrideGuard {
@@ -2788,18 +2885,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn implementation_completion_accepts_direct_main_commit_from_baseline_and_triggers_review() {
+    // #1238: migrated to PG fixtures. The complete_dispatch flow now routes
+    // dispatch creation, validation, and review-bookkeeping through PG when
+    // the engine has a pg_pool, so the SQLite-only seed/assert pattern can no
+    // longer observe the post-completion state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn implementation_pg_completion_accepts_direct_main_commit_from_baseline_and_triggers_review()
+     {
         let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_repo(&db, "test/repo");
-        seed_card_with_repo(&db, "card-935-main", "in_progress", "test/repo", 935, None);
+        let engine = test_engine_with_pg(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ($1, 'Test Agent', '111', '222')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind("agent-1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES ($1, $1, true)",
+        )
+        .bind("test/repo")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards \
+             (id, title, status, assigned_agent_id, repo_id, github_issue_number, github_issue_url, created_at, updated_at) \
+             VALUES ($1, 'Codex Card', $2, 'agent-1', $3, $4, $5, NOW(), NOW())",
+        )
+        .bind("card-935-main")
+        .bind("in_progress")
+        .bind("test/repo")
+        .bind(935_i32)
+        .bind("https://github.com/test/repo/issues/935")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let expected_baseline = run_git_output(repo.path(), &["rev-parse", "origin/main"]);
-        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
-            &db,
+        let dispatch_value = dispatch::create_dispatch_pg_only(
+            &pool,
+            &engine,
             "card-935-main",
             "agent-1",
             "implementation",
@@ -2807,25 +2941,21 @@ mod tests {
             &serde_json::json!({
                 "target_repo": repo.path().to_string_lossy(),
             }),
-            dispatch::DispatchCreateOptions::default(),
         )
         .unwrap();
+        let dispatch_id = dispatch_value["id"].as_str().unwrap().to_string();
 
-        {
-            let conn = db.lock().unwrap();
-            let context_json: String = conn
-                .query_row(
-                    "SELECT context FROM task_dispatches WHERE id = ?1",
-                    [&dispatch_id],
-                    |row| row.get(0),
-                )
+        let context_json: String =
+            sqlx::query_scalar("SELECT context::text FROM task_dispatches WHERE id = $1")
+                .bind(&dispatch_id)
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            let context: serde_json::Value = serde_json::from_str(&context_json).unwrap();
-            assert_eq!(
-                context["baseline_commit"].as_str(),
-                Some(expected_baseline.as_str())
-            );
-        }
+        let context: serde_json::Value = serde_json::from_str(&context_json).unwrap();
+        assert_eq!(
+            context["baseline_commit"].as_str(),
+            Some(expected_baseline.as_str())
+        );
 
         run_git(
             repo.path(),
@@ -2840,7 +2970,7 @@ mod tests {
 
         let result = crate::services::discord::build_work_dispatch_completion_result(
             Some(&db),
-            None,
+            Some(&pool),
             &dispatch_id,
             "test_harness",
             false,
@@ -2859,21 +2989,36 @@ mod tests {
             completion.err()
         );
 
-        assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
-        assert_eq!(get_card_status(&db, "card-935-main"), "review");
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(&dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dispatch_status, "completed");
 
-        let conn = db.lock().unwrap();
-        let review_dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches
-                 WHERE kanban_card_id = 'card-935-main'
-                   AND dispatch_type = 'review'
-                   AND status IN ('pending', 'dispatched')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let card_status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind("card-935-main")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(card_status, "review");
+
+        let review_dispatch_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status IN ('pending', 'dispatched')",
+        )
+        .bind("card-935-main")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(review_dispatch_count, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -10666,68 +10811,88 @@ mod tests {
         assert!(metadata["preflight_checked_at"].is_string());
     }
 
-    #[test]
-    fn triage_requested_key_uses_ttl_and_requeues_after_expiry() {
-        let db = test_db();
+    // #1238: migrated to PG fixtures. The OnTick triage policy reads
+    // `kanban_cards` + `kv_meta` and writes `message_outbox` exclusively
+    // through the engine's PG-aware bridge ops, so the legacy SQLite seed +
+    // assertion path can no longer observe state changes.
+    #[tokio::test]
+    async fn triage_pg_requested_key_uses_ttl_and_requeues_after_expiry() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let policy_dir = setup_triage_policy_dir();
-        let engine = test_engine_with_dir(&db, policy_dir.path());
-        set_config_key(&db, "kanban_manager_channel_id", json!("channel-triage"));
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policy_dir.path());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (
-                    id, title, status, metadata, github_issue_url, github_issue_number, created_at, updated_at
-                 ) VALUES (
-                    'card-triage-ttl', 'Needs classification', 'backlog', ?1,
-                    'https://github.com/test/repo/issues/777', 777, datetime('now'), datetime('now')
-                 )",
-                sqlite_params![serde_json::json!({"labels": ""}).to_string()],
-            )
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+            .bind("kanban_manager_channel_id")
+            .bind(json!("channel-triage").to_string())
+            .execute(&pool)
+            .await
             .unwrap();
-        }
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, metadata, github_issue_url, github_issue_number, created_at, updated_at
+             ) VALUES (
+                'card-triage-ttl', 'Needs classification', 'backlog', CAST($1 AS jsonb),
+                'https://github.com/test/repo/issues/777', $2, NOW(), NOW()
+             )",
+        )
+        .bind(serde_json::json!({"labels": ""}).to_string())
+        .bind(777_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         engine
             .try_fire_hook_by_name("OnTick", serde_json::json!({}))
             .unwrap();
-        kanban::drain_hook_side_effects(&db, &engine);
+        kanban::drain_hook_side_effects_with_backends(None, &engine);
 
-        let first_expiry: Option<String> = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT expires_at FROM kv_meta WHERE key = 'triage_requested:card-triage-ttl'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let first_expiry: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT expires_at FROM kv_meta WHERE key = $1")
+                .bind("triage_requested:card-triage-ttl")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(
             first_expiry.is_some(),
             "#654: triage dedup key must use TTL"
         );
-        assert_eq!(message_outbox_rows(&db).len(), 1);
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kv_meta
-                 SET expires_at = datetime('now', '-1 minute')
-                 WHERE key = 'triage_requested:card-triage-ttl'",
-                [],
-            )
-            .unwrap();
-        }
+        let outbox_count_after_first: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outbox_count_after_first, 1);
+
+        sqlx::query(
+            "UPDATE kv_meta
+             SET expires_at = NOW() - INTERVAL '1 minute'
+             WHERE key = $1",
+        )
+        .bind("triage_requested:card-triage-ttl")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         engine
             .try_fire_hook_by_name("OnTick", serde_json::json!({}))
             .unwrap();
-        kanban::drain_hook_side_effects(&db, &engine);
+        kanban::drain_hook_side_effects_with_backends(None, &engine);
 
+        let outbox_count_after_second: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            message_outbox_rows(&db).len(),
-            2,
+            outbox_count_after_second, 2,
             "#654: expired triage dedup key must allow a fresh backlog classification request"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]

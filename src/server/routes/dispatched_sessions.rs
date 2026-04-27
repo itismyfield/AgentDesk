@@ -4426,11 +4426,18 @@ mod tests {
     }
 
     // #1067: sessions_tmux_output tests — watch-agent-turn skill promotion.
+    // #1238: Migrated to PG fixtures. `tmux_output` now requires `pg_pool_ref()`
+    // — without a populated pool the route returns 500 ("postgres pool unavailable")
+    // and the 404 assertion fails.
     #[tokio::test]
-    async fn sessions_tmux_output_returns_404_for_unknown_session_id() {
+    async fn sessions_tmux_output_pg_returns_404_for_unknown_session_id() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db, engine);
+        let mut state = AppState::test_state(db, engine);
+        state.pg_pool = Some(pool.clone());
 
         let (status, body) = tmux_output(
             State(state),
@@ -4448,6 +4455,9 @@ mod tests {
                 .map(|s| s.contains("not found"))
                 .unwrap_or(false)
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
