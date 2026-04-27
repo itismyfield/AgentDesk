@@ -16,6 +16,7 @@ pub mod escalation;
 pub mod github;
 pub mod github_dashboard;
 pub mod health_api;
+pub mod home_metrics;
 pub mod hooks;
 pub mod kanban;
 pub mod kanban_repos;

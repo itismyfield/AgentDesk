@@ -160,6 +160,7 @@ src/
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
 │   │   ├── health_api.rs
+│   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs

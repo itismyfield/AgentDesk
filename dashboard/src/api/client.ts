@@ -662,6 +662,47 @@ export function getCachedTokenAnalytics(
   );
 }
 
+// ── Home KPI sparklines (#1242) ──
+export interface HomeKpiSeries {
+  label: string;
+  unit: string;
+  values: number[];
+}
+
+export interface HomeKpiRateLimitProvider {
+  provider: string;
+  current_pct: number | null;
+  unsupported: boolean;
+  stale: boolean;
+  reason: string | null;
+  values: number[];
+}
+
+export interface HomeKpiRateLimit {
+  label: string;
+  unit: string;
+  providers: HomeKpiRateLimitProvider[];
+}
+
+export interface HomeKpiTrendsResponse {
+  days: number;
+  generated_at: string;
+  dates: string[];
+  tokens: HomeKpiSeries;
+  cost: HomeKpiSeries;
+  in_progress: HomeKpiSeries;
+  rate_limit: HomeKpiRateLimit;
+}
+
+export async function getHomeKpiTrends(
+  days: number = 14,
+  opts?: { signal?: AbortSignal },
+): Promise<HomeKpiTrendsResponse> {
+  return request(`/api/home/kpi-trends?days=${days}`, {
+    signal: opts?.signal,
+  });
+}
+
 // ── Kanban & Dispatches ──
 
 export async function getKanbanCards(): Promise<KanbanCard[]> {
