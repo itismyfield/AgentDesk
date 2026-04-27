@@ -512,10 +512,104 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
     fn test_state() -> AppState {
         let db = test_db();
         let engine = test_engine(&db);
         AppState::test_state(db.clone(), engine)
+    }
+
+    /// Per-test Postgres database lifecycle for the #1238 migration of
+    /// memory_api handler tests, which now require a PG pool.
+    struct MemoryApiPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl MemoryApiPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_memory_api_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "memory_api handler pg",
+            )
+            .await
+            .expect("create memory_api postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "memory_api handler pg",
+            )
+            .await
+            .expect("connect + migrate memory_api postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "memory_api handler pg",
+            )
+            .await
+            .expect("drop memory_api postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
     }
 
     #[tokio::test]
@@ -525,9 +619,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_memory_roundtrip_remember_recall_forget() {
+    async fn local_memory_pg_roundtrip_remember_recall_forget() {
         let _guard = ForceLocalGuard::new();
-        let state = test_state();
+        let pg_db = MemoryApiPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let db = test_db();
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
 
         // remember
         let remember = memory_remember(
@@ -602,6 +703,9 @@ mod tests {
         .await;
         assert_eq!(recall_after.0, StatusCode::OK);
         assert_eq!(recall_after.1.0["fragments"].as_array().unwrap().len(), 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
@@ -637,9 +741,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_local_env_propagates_to_recall_response() {
+    async fn force_local_env_pg_propagates_to_recall_response() {
         let _guard = ForceLocalGuard::new();
-        let state = test_state();
+        let pg_db = MemoryApiPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let db = test_db();
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
         let recall = memory_recall(
             axum::extract::State(state),
             axum::Json(RecallBody::default()),
@@ -648,5 +759,8 @@ mod tests {
         assert_eq!(recall.0, StatusCode::OK);
         assert_eq!(recall.1.0["source"], "local");
         assert_eq!(recall.1.0["detected_backend"], "local");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
