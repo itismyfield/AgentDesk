@@ -856,6 +856,23 @@ pub(super) fn spawn_turn_bridge(
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
+        // #1255 live-turn long-running tool placeholder card.
+        //
+        // `last_assistant_text_line` captures the last non-empty single-line
+        // assistant prose emission so we can surface it as the placeholder
+        // card's `요약` slot (the "⏳ CI 통과 신호 대기" use case from the
+        // issue). It is reset on tool result / completion so a stale line
+        // never leaks into the next tool placeholder.
+        //
+        // `long_running_placeholder_active` is `Some(...)` while a Monitor /
+        // background-Bash call is mid-flight. It records the placeholder key
+        // we are driving so the matching ToolResult / Done event can call
+        // `controller.transition(Completed)`. The cancel / abort paths use
+        // the same handle.
+        let mut last_assistant_text_line: Option<String> = None;
+        let mut long_running_placeholder_active: Option<
+            super::placeholder_controller::PlaceholderKey,
+        > = None;
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
@@ -993,6 +1010,24 @@ pub(super) fn spawn_turn_bridge(
                         }
                         StreamMessage::Text { content } => {
                             full_response.push_str(&content);
+                            // #1255: remember the last non-empty single-line
+                            // assistant prose so we can surface it on a
+                            // long-running tool placeholder card. Mid-stream
+                            // chunks routinely contain newlines, so we walk
+                            // backwards through the lines and pick the most
+                            // recent non-empty one.  `Text` events arrive
+                            // before the immediately-following `ToolUse` event
+                            // in Claude Code's stream ordering, so this
+                            // captures the right hint without buffering.
+                            if let Some(line) = content
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .next_back()
+                                .map(str::trim)
+                                .map(str::to_string)
+                            {
+                                last_assistant_text_line = Some(line);
+                            }
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -1128,9 +1163,46 @@ pub(super) fn spawn_turn_bridge(
                                 prev_for_preserve.as_deref(),
                                 Some(display.as_str()),
                             );
-                            current_tool_line = Some(display);
+                            current_tool_line = Some(display.clone());
                             last_tool_name = Some(name.clone());
-                            last_tool_summary = Some(display_summary);
+                            last_tool_summary = Some(display_summary.clone());
+                            // #1255 live-turn long-running tool detection.
+                            //
+                            // Classifier returns `Some` for Monitor and for
+                            // Bash/Task/Agent calls with explicit
+                            // `run_in_background=true`.  Everything else
+                            // streams its result inline and never touches the
+                            // placeholder card.
+                            if long_running_placeholder_active.is_none() {
+                                if let Some(reason) =
+                                    super::formatting::classify_long_running_tool(&name, &input)
+                                {
+                                    let started_at_unix = chrono::Utc::now().timestamp();
+                                    let key =
+                                        super::placeholder_controller::PlaceholderKey {
+                                            provider: provider.clone(),
+                                            channel_id,
+                                            message_id: current_msg_id,
+                                        };
+                                    let input_payload =
+                                        super::placeholder_controller::PlaceholderActiveInput {
+                                            reason,
+                                            started_at_unix,
+                                            tool_summary: Some(name.clone()),
+                                            command_summary: Some(display_summary.clone()),
+                                            context_line: last_assistant_text_line.clone(),
+                                        };
+                                    let _ = shared_owned
+                                        .placeholder_controller
+                                        .ensure_active(
+                                            gateway.as_ref(),
+                                            key.clone(),
+                                            input_payload,
+                                        )
+                                        .await;
+                                    long_running_placeholder_active = Some(key);
+                                }
+                            }
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -1187,6 +1259,26 @@ pub(super) fn spawn_turn_bridge(
                                 is_error,
                                 &content,
                             );
+                            // #1255: a long-running tool's ToolResult means the
+                            // background card can transition to its terminal
+                            // state.  We still keep the placeholder around for
+                            // the rest of the turn so the user can see the
+                            // status line; the controller's idempotent terminal
+                            // transition keeps duplicate edits free.
+                            if let Some(key) = long_running_placeholder_active.take() {
+                                let target = if is_error {
+                                    super::placeholder_controller::PlaceholderLifecycle::Aborted
+                                } else {
+                                    super::placeholder_controller::PlaceholderLifecycle::Completed
+                                };
+                                let _ = shared_owned
+                                    .placeholder_controller
+                                    .transition(gateway.as_ref(), key, target)
+                                    .await;
+                            }
+                            // Reset the assistant-line summary so the next
+                            // long-running tool call captures its own context.
+                            last_assistant_text_line = None;
                             if let Some(ref tn) = last_tool_name {
                                 let status = if is_error { "✗" } else { "✓" };
                                 let detail = last_tool_summary
@@ -1244,6 +1336,22 @@ pub(super) fn spawn_turn_bridge(
                                 // Discord-history auto-retry path when the
                                 // resumed session dies before completion.
                                 recovery_retry = true;
+                            }
+                            // #1255: turn finished while a long-running
+                            // placeholder is still flagged as Active — close
+                            // it now so the user does not stare at a stale
+                            // 🔄 card forever. Idempotent if a prior
+                            // ToolResult already fired Completed.
+                            if let Some(key) = long_running_placeholder_active.take() {
+                                let target = if result == "__session_died_retry__" {
+                                    super::placeholder_controller::PlaceholderLifecycle::Aborted
+                                } else {
+                                    super::placeholder_controller::PlaceholderLifecycle::Completed
+                                };
+                                let _ = shared_owned
+                                    .placeholder_controller
+                                    .transition(gateway.as_ref(), key, target)
+                                    .await;
                             }
                             if let Some(resolved) = resolve_done_response(
                                 &full_response,
@@ -1834,6 +1942,21 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if cancelled {
+            // #1255: cancelled turn → drive any active long-running placeholder
+            // into Aborted before the rest of the cleanup machinery runs. The
+            // controller's idempotent terminal transition guarantees this is
+            // safe even if the ToolResult event already fired Completed.
+            if let Some(key) = long_running_placeholder_active.take() {
+                let _ = shared_owned
+                    .placeholder_controller
+                    .transition(
+                        gateway.as_ref(),
+                        key,
+                        super::placeholder_controller::PlaceholderLifecycle::Aborted,
+                    )
+                    .await;
+            }
+
             if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
                 crate::services::process::kill_pid_tree(pid);
             }
@@ -1963,18 +2086,50 @@ pub(super) fn spawn_turn_bridge(
             // <t:UNIX:R> for client-side relative-time rendering (no server
             // refresh needed) and surfaces the last seen tool/command + the
             // handoff reason so the user knows what's still in flight.
+            //
+            // #1255: route through PlaceholderController so this edit
+            // serializes against any concurrent live-turn Monitor placeholder
+            // edit on the same message_id. If the live-turn placeholder
+            // already reached a terminal state, the controller rejects this
+            // re-activation and we fall through to the legacy direct-edit
+            // path so the watcher still surfaces something to the user.
             let started_at_unix = chrono::Utc::now().timestamp()
                 - i64::try_from(turn_start.elapsed().as_secs()).unwrap_or(0);
-            let placeholder_text = super::formatting::build_monitor_handoff_placeholder(
-                super::formatting::MonitorHandoffStatus::Active,
-                super::formatting::MonitorHandoffReason::AsyncDispatch,
+            let key = super::placeholder_controller::PlaceholderKey {
+                provider: provider.clone(),
+                channel_id,
+                message_id: current_msg_id,
+            };
+            let controller_input = super::placeholder_controller::PlaceholderActiveInput {
+                reason: super::formatting::MonitorHandoffReason::AsyncDispatch,
                 started_at_unix,
-                current_tool_line.as_deref(),
-                None,
-            );
-            let handoff_edit = gateway
-                .edit_message(channel_id, current_msg_id, &placeholder_text)
+                tool_summary: current_tool_line.clone(),
+                command_summary: None,
+                context_line: last_assistant_text_line.clone(),
+            };
+            let controller_outcome = shared_owned
+                .placeholder_controller
+                .ensure_active(gateway.as_ref(), key.clone(), controller_input)
                 .await;
+            // Fall back to a direct edit only when the controller refused or
+            // failed — `Edited`/`Coalesced` already cover the happy path.
+            let handoff_edit: Result<(), String> = match controller_outcome {
+                super::placeholder_controller::PlaceholderControllerOutcome::Edited
+                | super::placeholder_controller::PlaceholderControllerOutcome::Coalesced => Ok(()),
+                _ => {
+                    let placeholder_text =
+                        super::formatting::build_monitor_handoff_placeholder(
+                            super::formatting::MonitorHandoffStatus::Active,
+                            super::formatting::MonitorHandoffReason::AsyncDispatch,
+                            started_at_unix,
+                            current_tool_line.as_deref(),
+                            None,
+                        );
+                    gateway
+                        .edit_message(channel_id, current_msg_id, &placeholder_text)
+                        .await
+                }
+            };
             let handoff_operation =
                 super::placeholder_cleanup::PlaceholderCleanupOperation::EditHandoff;
             let handoff_outcome = match handoff_edit {

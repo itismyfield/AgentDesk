@@ -212,7 +212,8 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 mod tests {
     use super::{
         MonitorHandoffReason, MonitorHandoffStatus, ReplaceLongMessageOutcome,
-        build_monitor_handoff_placeholder, build_placeholder_status_block, canonical_tool_name,
+        build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
+        build_placeholder_status_block, canonical_tool_name, classify_long_running_tool,
         convert_markdown_tables, escape_for_code_fence, filter_codex_tool_logs,
         finalize_in_progress_tool_status, normalize_allowed_tools, preserve_previous_tool_status,
         replace_long_message_outcome_to_result,
@@ -1330,6 +1331,78 @@ mod tests {
             "expected truncated output, got {} bytes",
             text.len()
         );
+    }
+
+    // #1255: classifier covers the three trigger sources documented in the
+    // issue body — Monitor (always), Bash{run_in_background=true}, and
+    // Task/Agent{run_in_background=true}.  Foreground Bash and unknown tool
+    // names must NOT trigger the placeholder card.
+    #[test]
+    fn test_classify_long_running_tool_monitor_always_triggers() {
+        assert_eq!(
+            classify_long_running_tool("Monitor", "{\"session\":\"x\"}"),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+        assert_eq!(
+            classify_long_running_tool("monitor", "{}"),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+    }
+
+    #[test]
+    fn test_classify_long_running_tool_bash_background_only() {
+        assert_eq!(
+            classify_long_running_tool(
+                "Bash",
+                "{\"command\":\"sleep 999\",\"run_in_background\":true}"
+            ),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+        // Foreground Bash → no card (would otherwise spam users on every
+        // ls/grep/cat).
+        assert_eq!(
+            classify_long_running_tool("Bash", "{\"command\":\"ls\"}"),
+            None
+        );
+        assert_eq!(
+            classify_long_running_tool("Bash", "{\"command\":\"ls\",\"run_in_background\":false}"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_long_running_tool_unknown_returns_none() {
+        assert_eq!(classify_long_running_tool("ZGrep", "{}"), None);
+        assert_eq!(classify_long_running_tool("", "{}"), None);
+    }
+
+    #[test]
+    fn test_classify_long_running_tool_task_or_agent_background() {
+        assert_eq!(
+            classify_long_running_tool(
+                "Task",
+                "{\"description\":\"x\",\"run_in_background\":true}"
+            ),
+            Some(MonitorHandoffReason::ExplicitCall)
+        );
+        assert_eq!(
+            classify_long_running_tool("Task", "{\"description\":\"x\"}"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_build_monitor_handoff_placeholder_with_context_renders_summary_slot() {
+        let text = build_monitor_handoff_placeholder_with_context(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::ExplicitCall,
+            1_700_000_000,
+            Some("Monitor"),
+            None,
+            Some("⏳ CI 통과 신호 대기"),
+        );
+        assert!(text.contains("**요약**: ⏳ CI 통과 신호 대기"));
+        assert!(text.contains("**도구**: Monitor"));
     }
 }
 
@@ -2581,7 +2654,7 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
 /// before stream end), 명시 호출 (explicit `/monitor`-style invocation).
 /// `InlineTimeout` and `ExplicitCall` are exposed for downstream wiring
 /// (#1113 lifecycle, #1115 sweeper) and are exercised via tests today.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(super) enum MonitorHandoffReason {
     AsyncDispatch,
@@ -2661,6 +2734,31 @@ pub(super) fn build_monitor_handoff_placeholder(
     tool_summary: Option<&str>,
     command_summary: Option<&str>,
 ) -> String {
+    build_monitor_handoff_placeholder_with_context(
+        status,
+        reason,
+        started_at_unix,
+        tool_summary,
+        command_summary,
+        None,
+    )
+}
+
+const MONITOR_HANDOFF_CONTEXT_MAX_BYTES: usize = 200;
+
+/// Variant of `build_monitor_handoff_placeholder` that surfaces an additional
+/// `context_line` slot — typically the last assistant prose line emitted just
+/// before a long-running tool call (e.g. `⏳ CI 통과 신호 대기`). Issue #1255
+/// requires this to give the user a "why is the agent calling this?" hint
+/// without forcing them to scroll back to the streaming body.
+pub(super) fn build_monitor_handoff_placeholder_with_context(
+    status: MonitorHandoffStatus<'_>,
+    reason: MonitorHandoffReason,
+    started_at_unix: i64,
+    tool_summary: Option<&str>,
+    command_summary: Option<&str>,
+    context_line: Option<&str>,
+) -> String {
     let header = monitor_handoff_header(status);
     let footer = monitor_handoff_footer(status);
 
@@ -2687,7 +2785,19 @@ pub(super) fn build_monitor_handoff_placeholder(
         }
     });
 
-    let mut lines = Vec::with_capacity(5);
+    let context_line = context_line.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(truncate_for_status_bytes(
+                trimmed,
+                MONITOR_HANDOFF_CONTEXT_MAX_BYTES,
+            ))
+        }
+    });
+
+    let mut lines = Vec::with_capacity(6);
     lines.push(header);
     lines.push(format!(
         "> **도구**: {tool_field} · **사유**: {reason}",
@@ -2696,10 +2806,49 @@ pub(super) fn build_monitor_handoff_placeholder(
     if let Some(command) = command_line {
         lines.push(format!("> **명령**: `{command}`"));
     }
+    if let Some(context) = context_line {
+        lines.push(format!("> **요약**: {context}"));
+    }
     lines.push(format!("> **시작**: <t:{started_at_unix}:R>"));
     lines.push(footer.to_string());
 
     lines.join("\n")
+}
+
+/// Long-running tool classifier (#1255).
+///
+/// Returns `Some(MonitorHandoffReason::ExplicitCall)` when the streamed
+/// `ToolUse` event refers to a tool that the issue specifies should surface
+/// the live-turn placeholder card — explicitly:
+///   - `Monitor` (any input — long-tail by design),
+///   - `Bash` with `run_in_background=true`,
+///   - `Task` / `Agent` with `run_in_background=true`.
+///
+/// Everything else returns `None` and is treated as a regular tool call that
+/// streams its result back inline.  The tool-name comparison is
+/// case-insensitive via `canonical_tool_name` so that downstream Claude code
+/// providers that lower-case their tool names still trigger the placeholder.
+pub(super) fn classify_long_running_tool(name: &str, input: &str) -> Option<MonitorHandoffReason> {
+    let canonical = canonical_tool_name(name)?;
+    match canonical {
+        "Monitor" => Some(MonitorHandoffReason::ExplicitCall),
+        "Bash" | "Task" | "Agent" => {
+            // Only escalate to the live-turn card when the call is explicitly
+            // marked as background — foreground Bash/Task calls finish inline
+            // and should not trigger the card.
+            let v = serde_json::from_str::<serde_json::Value>(input).ok()?;
+            let bg = v
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if bg {
+                Some(MonitorHandoffReason::ExplicitCall)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Build the spinner/status block shown in Discord placeholders.

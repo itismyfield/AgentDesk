@@ -20,7 +20,7 @@ use super::{
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
-type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub(super) trait TurnGateway: Send + Sync {
     fn send_message<'a>(

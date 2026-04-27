@@ -1976,3 +1976,30 @@ fn done_noop_when_result_empty() {
     let res = resolve_done_response("중간 텍스트\n\n", "", true, false);
     assert_eq!(res, None);
 }
+
+// Issue #1255: confirm SharedData wires up the placeholder controller and
+// that the controller is the shared FSM/coalescer used by both turn_bridge
+// and the existing tmux_handed_off code path. The acceptance contract from
+// the issue body is "신규 placeholder 진입점이 되고, 기존 직접 edit 호출은
+// 모두 controller 경유로 통합" — this test pins the wiring so the SharedData
+// constructor cannot regress to a missing field again.
+#[test]
+fn shared_data_exposes_placeholder_controller() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1_500_000_000_000_000);
+    let message_id = MessageId::new(1_500_000_000_000_001);
+    let key = crate::services::discord::placeholder_controller::PlaceholderKey {
+        provider,
+        channel_id,
+        message_id,
+    };
+    // Round-trip the controller via the shared Arc to confirm the constructor
+    // wired the field correctly.  An un-touched key must report NotCreated.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let lifecycle = rt.block_on(async { shared.placeholder_controller.lifecycle(&key).await });
+    assert_eq!(
+        lifecycle,
+        crate::services::discord::placeholder_controller::PlaceholderLifecycle::NotCreated
+    );
+}

@@ -11,7 +11,7 @@ pub fn tmux_env_suffix() -> &'static str {
     ""
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Claude,
     Codex,

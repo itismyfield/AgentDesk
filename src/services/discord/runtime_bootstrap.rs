@@ -649,6 +649,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         placeholder_cleanup: Arc::new(
             super::placeholder_cleanup::PlaceholderCleanupRegistry::default(),
         ),
+        placeholder_controller: Arc::new(
+            super::placeholder_controller::PlaceholderController::default(),
+        ),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

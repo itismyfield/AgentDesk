@@ -21,6 +21,7 @@ mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
+mod placeholder_controller;
 mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
@@ -845,6 +846,13 @@ pub(super) struct SharedData {
     /// even after the inflight file has already been cleared.
     pub(in crate::services::discord) placeholder_cleanup:
         Arc<placeholder_cleanup::PlaceholderCleanupRegistry>,
+    /// Lifecycle FSM + edit coalescer for live-turn placeholder cards (#1255).
+    /// Both the `tmux_handed_off` async-dispatch path and the new Monitor /
+    /// `Bash run_in_background` live-turn path go through this controller so
+    /// that concurrent edits to the same placeholder message_id serialize
+    /// instead of racing.
+    pub(in crate::services::discord) placeholder_controller:
+        Arc<placeholder_controller::PlaceholderController>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -1351,6 +1359,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         tmux_watchers: TmuxWatcherRegistry::new(),
         tmux_relay_coords: dashmap::DashMap::new(),
         placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
+        placeholder_controller: Arc::new(placeholder_controller::PlaceholderController::default()),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
