@@ -1831,6 +1831,114 @@ pub(super) fn mark_reconcile_complete(shared: &SharedData) {
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 
+/// #1227: page size for catch-up REST fetch. Bumped from 10 → 50 because the
+/// previous size was overrun by bursty bot output and silently dropped buried
+/// user messages.
+const CATCH_UP_FETCH_LIMIT: u8 = 50;
+
+/// Filter outcome categories for the catch-up REST scan. Used both at runtime
+/// (to emit per-channel breakdown logs even when nothing was recovered) and in
+/// unit tests as a pure-function check on the buried-user-message regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum CatchUpClassification {
+    /// Eligible user/allowed-bot message that should be enqueued.
+    Recover,
+    /// System message kind (thread-created / slash-command etc.) — silently dropped.
+    SystemKind,
+    /// Authored by this bot (self) — must not re-enqueue our own output.
+    SelfAuthored,
+    /// Already present in the live mailbox / known set — duplicate.
+    Duplicate,
+    /// Older than the catch-up max-age window — too late to safely replay.
+    TooOld,
+    /// Empty content (whitespace only).
+    Empty,
+    /// Authored by a non-allowed bot or an allowed bot without DISPATCH prefix.
+    NotAllowed,
+}
+
+/// Per-channel running tally of [`CatchUpClassification`] outcomes — fed into
+/// the always-on breakdown log. Keeping this separate from the recovery loop
+/// keeps the filter-stats accounting honest and unit-testable.
+#[derive(Debug, Default, Clone, Copy)]
+pub(in crate::services::discord) struct CatchUpScanStats {
+    pub returned: usize,
+    pub recovered: usize,
+    pub system_kind: usize,
+    pub self_authored: usize,
+    pub duplicate: usize,
+    pub too_old: usize,
+    pub empty: usize,
+    pub not_allowed: usize,
+}
+
+impl CatchUpScanStats {
+    pub(in crate::services::discord) fn record(&mut self, outcome: CatchUpClassification) {
+        match outcome {
+            CatchUpClassification::Recover => self.recovered += 1,
+            CatchUpClassification::SystemKind => self.system_kind += 1,
+            CatchUpClassification::SelfAuthored => self.self_authored += 1,
+            CatchUpClassification::Duplicate => self.duplicate += 1,
+            CatchUpClassification::TooOld => self.too_old += 1,
+            CatchUpClassification::Empty => self.empty += 1,
+            CatchUpClassification::NotAllowed => self.not_allowed += 1,
+        }
+    }
+}
+
+/// Plain inputs to the catch-up filter, decoupled from `serenity::Message` so
+/// we can unit test the regression scenario without a Discord runtime.
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct CatchUpMessageView {
+    pub message_id: u64,
+    pub author_id: u64,
+    pub author_is_bot: bool,
+    pub is_processable_kind: bool,
+    pub age_secs: i64,
+    pub trimmed_text: String,
+}
+
+/// Pure classifier for the catch-up filter pipeline. Mirrors the order of
+/// checks inside the per-message loop in [`catch_up_missed_messages`] so a
+/// regression there is caught here. Critically, this function does NOT apply
+/// any limit/page-size logic — that decision lives at the REST fetch site
+/// (see `CATCH_UP_FETCH_LIMIT`). This means a "buried user message" test must
+/// assert against the full fetched page, not a single classification call.
+pub(in crate::services::discord) fn classify_catch_up_message(
+    msg: &CatchUpMessageView,
+    bot_user_id: Option<u64>,
+    existing_ids: &std::collections::HashSet<u64>,
+    max_age_secs: i64,
+    allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
+) -> CatchUpClassification {
+    if !msg.is_processable_kind {
+        return CatchUpClassification::SystemKind;
+    }
+    if Some(msg.author_id) == bot_user_id {
+        return CatchUpClassification::SelfAuthored;
+    }
+    if existing_ids.contains(&msg.message_id) {
+        return CatchUpClassification::Duplicate;
+    }
+    if msg.age_secs > max_age_secs {
+        return CatchUpClassification::TooOld;
+    }
+    if msg.trimmed_text.is_empty() {
+        return CatchUpClassification::Empty;
+    }
+    if !is_allowed_turn_sender(
+        allowed_bot_ids,
+        announce_bot_id,
+        msg.author_id,
+        msg.author_is_bot,
+        &msg.trimmed_text,
+    ) {
+        return CatchUpClassification::NotAllowed;
+    }
+    CatchUpClassification::Recover
+}
+
 /// Startup catch-up polling: fetch messages that arrived during the restart gap.
 /// Uses saved last_message_ids to query Discord REST API for missed messages,
 /// filters out bot messages and duplicates, and inserts into intervention queue.
@@ -1922,12 +2030,20 @@ async fn catch_up_missed_messages(
         }
 
         // Fetch messages after last_id (Discord returns oldest first with after=)
+        // #1227: limit was 10 — channels with bursty bot activity (streaming
+        // replies + many short turns) routinely fill that window with bot
+        // messages, pushing user messages outside the page entirely. Discord
+        // applies `limit` BEFORE author filtering, so an active channel
+        // (1 user : 9 bots) silently drops the user message. 50 keeps the
+        // single-page contract while giving headroom for the realistic
+        // bot:user ratio. Discord per-channel rate limit (5 req / 5 sec)
+        // has plenty of margin for this 5x cost.
         let messages = match channel_id
             .messages(
                 http,
                 serenity::builder::GetMessages::new()
                     .after(after_msg)
-                    .limit(10),
+                    .limit(CATCH_UP_FETCH_LIMIT),
             )
             .await
         {
@@ -1965,39 +2081,34 @@ async fn catch_up_missed_messages(
         };
         let announce_bot_id = resolve_announce_bot_user_id(shared).await;
 
-        let mut channel_recovered = 0usize;
         let mut max_recovered_id: Option<u64> = None;
+        let mut stats = CatchUpScanStats::default();
+        stats.returned = messages.len();
 
         for msg in &messages {
-            // Skip system messages (thread creation, slash commands, etc.)
-            if !router::should_process_turn_message(msg.kind) {
-                continue;
-            }
-            // Skip own messages
-            if Some(msg.author.id.get()) == bot_user_id {
-                continue;
-            }
-            // Skip if already in queue
-            if existing_ids.contains(&msg.id.get()) {
-                continue;
-            }
-            // Skip messages older than max_age (use message snowflake timestamp)
+            let text = msg.content.trim().to_string();
             let msg_ts = msg.id.created_at();
-            let msg_age = chrono::Utc::now().signed_duration_since(*msg_ts);
-            if msg_age.num_seconds() > max_age.as_secs() as i64 {
-                continue;
-            }
-            let text = msg.content.trim();
-            if text.is_empty() {
-                continue;
-            }
-            if !is_allowed_turn_sender(
+            let age_secs = chrono::Utc::now()
+                .signed_duration_since(*msg_ts)
+                .num_seconds();
+            let view = CatchUpMessageView {
+                message_id: msg.id.get(),
+                author_id: msg.author.id.get(),
+                author_is_bot: msg.author.bot,
+                is_processable_kind: router::should_process_turn_message(msg.kind),
+                age_secs,
+                trimmed_text: text.clone(),
+            };
+            let outcome = classify_catch_up_message(
+                &view,
+                bot_user_id,
+                &existing_ids,
+                max_age.as_secs() as i64,
                 &allowed_bot_ids,
                 announce_bot_id,
-                msg.author.id.get(),
-                msg.author.bot,
-                text,
-            ) {
+            );
+            stats.record(outcome);
+            if outcome != CatchUpClassification::Recover {
                 continue;
             }
 
@@ -2009,7 +2120,7 @@ async fn catch_up_missed_messages(
                     author_id: msg.author.id,
                     message_id: msg.id,
                     source_message_ids: vec![msg.id],
-                    text: text.to_string(),
+                    text: text.clone(),
                     mode: InterventionMode::Soft,
                     created_at: now,
                     reply_context: None,
@@ -2021,7 +2132,6 @@ async fn catch_up_missed_messages(
                 },
             )
             .await;
-            channel_recovered += 1;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
             if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
@@ -2029,13 +2139,37 @@ async fn catch_up_missed_messages(
             }
         }
 
-        if channel_recovered > 0 {
-            total_recovered += channel_recovered;
-            let ts = chrono::Local::now().format("%H:%M:%S");
+        // #1227: emit a breakdown line for EVERY scanned channel — including
+        // 0-recovery — so operator can distinguish "no missed messages" from
+        // "limit too small" / "filter ate them" without re-reading the code.
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        if stats.recovered > 0 {
+            total_recovered += stats.recovered;
             tracing::info!(
-                "  [{ts}] 🔍 CATCH-UP: recovered {} message(s) for channel {}",
-                channel_recovered,
-                channel_id
+                "  [{ts}] 🔍 CATCH-UP: recovered {} message(s) for channel {} \
+                 (returned={} self={} dup={} too_old={} empty={} not_allowed={} system={})",
+                stats.recovered,
+                channel_id,
+                stats.returned,
+                stats.self_authored,
+                stats.duplicate,
+                stats.too_old,
+                stats.empty,
+                stats.not_allowed,
+                stats.system_kind,
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] 🔍 catch-up scan: channel={} returned={} bot={} dup={} \
+                 too_old={} empty={} not_allowed={} system={} recovered=0",
+                channel_id,
+                stats.returned,
+                stats.self_authored,
+                stats.duplicate,
+                stats.too_old,
+                stats.empty,
+                stats.not_allowed,
+                stats.system_kind,
             );
         }
 
@@ -2901,12 +3035,13 @@ fn enrich_role_map_with_channel_ids() {
 #[cfg(test)]
 mod tests {
     use super::runtime_bootstrap::discord_gateway_intents;
-    use super::{ChannelId, MessageId, UserId};
     use super::{
-        DiscordBotSettings, Intervention, InterventionMode, is_allowed_turn_sender,
-        mark_session_disconnected_for_idle_cleanup, queued_message_ids, recovery_known_message_ids,
-        should_phase2_recover_message,
+        CATCH_UP_FETCH_LIMIT, CatchUpClassification, CatchUpMessageView, CatchUpScanStats,
+        DiscordBotSettings, Intervention, InterventionMode, classify_catch_up_message,
+        is_allowed_turn_sender, mark_session_disconnected_for_idle_cleanup, queued_message_ids,
+        recovery_known_message_ids, should_phase2_recover_message,
     };
+    use super::{ChannelId, MessageId, UserId};
     use crate::services::discord::placeholder_cleanup::{
         PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
     };
@@ -3002,6 +3137,132 @@ mod tests {
         assert!(existing.contains(&100));
         assert!(existing.contains(&200));
         assert!(!should_phase2_recover_message(200, None, &existing));
+    }
+
+    /// #1227 regression: in a channel where the last_id checkpoint is followed
+    /// by 10 bot messages and then 1 user message, the OLD `limit=10` window
+    /// would return only the 10 bots and silently drop the user message. With
+    /// the bumped `CATCH_UP_FETCH_LIMIT=50` page size, both ends of that
+    /// pattern (and a second user message even further back-to-back) must be
+    /// recovered.
+    ///
+    /// We exercise the pure classifier directly so the test is hermetic — no
+    /// Discord HTTP, no `serenity::Message` construction. The page-size guard
+    /// itself is a separate `assert!` on the constant, which protects against
+    /// a future drive-by lowering it again.
+    #[test]
+    fn catch_up_recovers_user_message_buried_under_bot_flood() {
+        // Snowflake-ish ascending IDs. Older first (Discord `after=` ordering).
+        let bot_self_id: u64 = 999;
+        let user_a_id: u64 = 1;
+        let user_b_id: u64 = 2;
+        let allowed_bot_ids: Vec<u64> = vec![];
+        let announce_bot_id: Option<u64> = None;
+        let existing: HashSet<u64> = HashSet::new();
+        let max_age_secs: i64 = 300;
+
+        // Build the simulated REST page: USER_A, then 10 bot messages, then USER_B.
+        // This is exactly the topology the issue describes.
+        let mut page: Vec<CatchUpMessageView> = Vec::with_capacity(12);
+        page.push(CatchUpMessageView {
+            message_id: 100,
+            author_id: user_a_id,
+            author_is_bot: false,
+            is_processable_kind: true,
+            age_secs: 60,
+            trimmed_text: "머지상태 확인해봐".to_string(),
+        });
+        for i in 0..10 {
+            page.push(CatchUpMessageView {
+                message_id: 101 + i,
+                author_id: bot_self_id,
+                author_is_bot: true,
+                is_processable_kind: true,
+                age_secs: 50 - i as i64,
+                trimmed_text: format!("CI step {i} done"),
+            });
+        }
+        page.push(CatchUpMessageView {
+            message_id: 200,
+            author_id: user_b_id,
+            author_is_bot: false,
+            is_processable_kind: true,
+            age_secs: 30,
+            trimmed_text: "지금 서버 내려가고 있어".to_string(),
+        });
+
+        // 1) Page-size guard: after the fix the catch-up REST window MUST be
+        //    big enough that an 11-bot run cannot bury a user message inside
+        //    a single page. 50 was chosen deliberately; tighten the bound but
+        //    don't allow a regression below 11.
+        assert!(
+            CATCH_UP_FETCH_LIMIT as usize >= page.len(),
+            "CATCH_UP_FETCH_LIMIT={CATCH_UP_FETCH_LIMIT} too small to survive \
+             10-bot-flood scenario (need >= {})",
+            page.len()
+        );
+
+        // 2) Classification: with the full page surfaced, both user messages
+        //    must be Recover and the 10 bot messages must be SelfAuthored.
+        let mut stats = CatchUpScanStats::default();
+        stats.returned = page.len();
+        let mut recovered_ids: Vec<u64> = Vec::new();
+        for view in &page {
+            let outcome = classify_catch_up_message(
+                view,
+                Some(bot_self_id),
+                &existing,
+                max_age_secs,
+                &allowed_bot_ids,
+                announce_bot_id,
+            );
+            stats.record(outcome);
+            if outcome == CatchUpClassification::Recover {
+                recovered_ids.push(view.message_id);
+            }
+        }
+
+        assert_eq!(
+            recovered_ids,
+            vec![100, 200],
+            "both buried user messages must be recovered (got {:?})",
+            recovered_ids
+        );
+        assert_eq!(stats.recovered, 2);
+        assert_eq!(stats.self_authored, 10);
+        assert_eq!(stats.duplicate, 0);
+        assert_eq!(stats.too_old, 0);
+        assert_eq!(stats.empty, 0);
+        assert_eq!(stats.not_allowed, 0);
+        assert_eq!(stats.system_kind, 0);
+
+        // 3) Regression baseline: simulate the OLD limit=10 contract by
+        //    truncating the page. The first (oldest) user message survives
+        //    because it sits at the head; the SECOND user message (the one
+        //    actually reported in the issue) gets silently dropped — this is
+        //    exactly the bug. The assertion documents the failure mode that
+        //    motivated the fix.
+        let truncated: Vec<&CatchUpMessageView> = page.iter().take(10).collect();
+        let mut old_recovered: Vec<u64> = Vec::new();
+        for view in truncated {
+            if classify_catch_up_message(
+                view,
+                Some(bot_self_id),
+                &existing,
+                max_age_secs,
+                &allowed_bot_ids,
+                announce_bot_id,
+            ) == CatchUpClassification::Recover
+            {
+                old_recovered.push(view.message_id);
+            }
+        }
+        assert!(
+            !old_recovered.contains(&200),
+            "regression baseline: limit=10 SHOULD lose user message 200 \
+             (got {:?})",
+            old_recovered
+        );
     }
 
     #[test]
