@@ -2392,6 +2392,30 @@ async fn handle_tmux_watcher_observed_death(
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
         );
+        // #1283: when the wrapper survives the cancel (preserve-session
+        // stops, or config that keeps the session) the tmux pane is still
+        // live and continues writing to jsonl while no watcher is
+        // attached. The next user message would then trigger a fresh
+        // watcher whose generation-mtime detection forces watermark=0,
+        // bulk-relaying the accumulated gap output in one wall-of-text
+        // message. Spawn a replacement watcher on the same session
+        // immediately so the next reads stay incremental.
+        if tmux_session_has_live_pane(tmux_session_name) {
+            let outcome = trigger_missing_inflight_reattach(
+                http,
+                shared,
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+            );
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ post-cancel immediate watcher re-attach for channel {} on {} → {:?}",
+                channel_id.get(),
+                tmux_session_name,
+                outcome
+            );
+        }
     } else if !is_normal_completion {
         if let Some(reason_text) = tmux_death_lifecycle_notification_reason(reason_short.as_deref())
         {
