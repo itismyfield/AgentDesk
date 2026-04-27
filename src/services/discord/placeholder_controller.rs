@@ -280,6 +280,16 @@ impl PlaceholderController {
             None => PlaceholderLifecycle::NotCreated,
         }
     }
+
+    /// Drop a key from the controller without emitting any Discord PATCH.
+    /// Used by the rollover retarget path on `turn_bridge`: when the old
+    /// `current_msg_id` is overwritten with a frozen response chunk, the
+    /// controller's old entry is no longer referenced and must not survive as
+    /// a non-evictable `Active` row in the cap-bounded map (codex round-4
+    /// #1308 P2).
+    pub(super) fn detach(&self, key: &PlaceholderKey) {
+        self.entries.remove(key);
+    }
 }
 
 #[cfg(test)]
@@ -617,6 +627,32 @@ mod tests {
         assert_eq!(
             controller.lifecycle(&key()).await,
             PlaceholderLifecycle::NotCreated
+        );
+    }
+
+    // codex round-4 #1308 P2: rollover detaches the old `Active` key so the
+    // controller's cap-bounded map does not accumulate non-evictable rows
+    // every time a long-running placeholder rolls over.
+    #[tokio::test]
+    async fn detach_drops_active_key_without_emitting_patch() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let _ = controller
+            .ensure_active(gateway.as_ref(), key(), sample_input())
+            .await;
+        let edits_before_detach = gateway.edits.load(Ordering::SeqCst);
+
+        controller.detach(&key());
+
+        assert_eq!(controller.entries.len(), 0);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::NotCreated
+        );
+        assert_eq!(
+            gateway.edits.load(Ordering::SeqCst),
+            edits_before_detach,
+            "detach must not emit any Discord PATCH"
         );
     }
 

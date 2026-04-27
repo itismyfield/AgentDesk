@@ -1709,9 +1709,15 @@ pub(super) fn spawn_turn_bridge(
                             // codex round-2 P2: drop the active pointer if the
                             // retarget edit fails — otherwise we'd suppress
                             // streaming with no card visible.
-                            if let Some((_, snapshot, close_trigger)) =
+                            // codex round-4 P2: detach the old key first so
+                            // its `Active` controller entry doesn't linger as
+                            // a non-evictable row in the cap-bounded map.
+                            if let Some((old_key, snapshot, close_trigger)) =
                                 long_running_placeholder_active.take()
                             {
+                                shared_owned
+                                    .placeholder_controller
+                                    .detach(&old_key);
                                 let new_key =
                                     super::placeholder_controller::PlaceholderKey {
                                         provider: provider.clone(),
