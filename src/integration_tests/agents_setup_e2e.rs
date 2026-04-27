@@ -242,7 +242,7 @@ async fn post_json(
 /// for #1238 — the SQLite-only ancestor panicked in `/agents/setup` after
 /// PR #1306 made the route PG-only.
 #[tokio::test]
-async fn wizard_creates_agent_and_delivers_to_bound_channel_pg() {
+async fn wizard_pg_creates_agent_and_delivers_to_bound_channel() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -384,7 +384,7 @@ async fn wizard_creates_agent_and_delivers_to_bound_channel_pg() {
 /// HTTP 500, `rolled_back[]` populated, *no* trace of the agent on disk or
 /// in DB. PG-fixture migration of the original SQLite-only test.
 #[tokio::test]
-async fn wizard_failure_injection_rolls_back_to_clean_state_pg() {
+async fn wizard_pg_failure_injection_rolls_back_to_clean_state() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -450,7 +450,7 @@ async fn wizard_failure_injection_rolls_back_to_clean_state_pg() {
 /// `agentdesk.yaml` block byte-for-byte. PG-fixture migration of the
 /// original SQLite-only test.
 #[tokio::test]
-async fn wizard_archive_unarchive_roundtrip_pg() {
+async fn wizard_pg_archive_unarchive_roundtrip() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -530,7 +530,7 @@ async fn wizard_archive_unarchive_roundtrip_pg() {
 /// inherits the source channel or any caller-supplied `system_prompt`.
 /// PG-fixture migration of the original SQLite-only test.
 #[tokio::test]
-async fn wizard_duplicate_strips_sensitive_fields_pg() {
+async fn wizard_pg_duplicate_strips_sensitive_fields() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
