@@ -907,7 +907,46 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/agents/{id}/dispatched-sessions",
             "agents",
-            "List dispatched sessions for agent // TODO: example",
+            "List dispatched sessions for agent. Rows are de-duplicated by \
+             (channel_id, agent_id) so the same agent never appears twice for \
+             the same Discord channel even when stale provider snapshots \
+             linger. Each row carries Discord deeplink fields the dashboard \
+             can drop straight into an anchor `href`: `channel_id`, \
+             `deeplink_url` (web — https://discord.com/channels/{guild}/{channel}), \
+             plus thread aliases `thread_id` and `thread_deeplink_url` \
+             (Discord app — discord://discord.com/channels/{guild}/{channel}). \
+             Legacy fields `thread_channel_id`, `channel_web_url`, \
+             `channel_deeplink_url` are preserved for backwards compatibility \
+             with existing dashboard code paths.",
+        )
+        .with_params([("id", path_param("Agent id"))])
+        .with_example(
+            json!({"path": {"id": "project-agentdesk"}}),
+            json!({
+                "sessions": [
+                    {
+                        "id": 42,
+                        "session_key": "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011",
+                        "agent_id": "project-agentdesk",
+                        "provider": "codex",
+                        "status": "working",
+                        "active_dispatch_id": "dispatch-1",
+                        "model": null,
+                        "tokens": 0,
+                        "cwd": null,
+                        "last_heartbeat": "2026-04-27T12:34:56+00:00",
+                        "thread_channel_id": "1485506232256168011",
+                        "channel_id": "1485506232256168011",
+                        "thread_id": "1485506232256168011",
+                        "guild_id": "1490141479707086938",
+                        "channel_web_url": "https://discord.com/channels/1490141479707086938/1485506232256168011",
+                        "channel_deeplink_url": "discord://discord.com/channels/1490141479707086938/1485506232256168011",
+                        "deeplink_url": "https://discord.com/channels/1490141479707086938/1485506232256168011",
+                        "thread_deeplink_url": "discord://discord.com/channels/1490141479707086938/1485506232256168011",
+                        "kanban_card_id": null
+                    }
+                ]
+            }),
         ),
         ep(
             "GET",

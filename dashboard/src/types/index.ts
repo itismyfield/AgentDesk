@@ -770,6 +770,16 @@ export interface DispatchedSession {
   guild_id?: string | null;
   channel_web_url?: string | null;
   channel_deeplink_url?: string | null;
+  /* Issue #1241: canonical Discord deeplink fields. The dashboard renders
+     these straight into anchor `href`s; the backend already formats them as
+     https://discord.com/channels/{guild}/{channel} (web) and
+     discord://discord.com/channels/{guild}/{channel} (Discord app). For
+     thread-bound sessions `channel_id` === `thread_id` because every
+     dispatched session lives inside its agent thread. */
+  channel_id?: string | null;
+  thread_id?: string | null;
+  deeplink_url?: string | null;
+  thread_deeplink_url?: string | null;
   /* The kanban card this session's active dispatch is bound to. Lets the
      restored "감사 / Audit" panel on the agent drawer deeplink each audit
      row to the most recent Discord turn for the same card without an extra

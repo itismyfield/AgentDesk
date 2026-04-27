@@ -129,6 +129,10 @@ export function describeDispatchedSession(
     | "guild_id"
     | "channel_web_url"
     | "channel_deeplink_url"
+    | "channel_id"
+    | "thread_id"
+    | "deeplink_url"
+    | "thread_deeplink_url"
   >,
   channelInfo?: DiscordChannelInfo | null,
   parentInfo?: DiscordChannelInfo | null,
@@ -137,24 +141,35 @@ export function describeDispatchedSession(
     parseChannelNameFromSessionKey(session.session_key)
     ?? session.name
     ?? session.session_key;
+  // Issue #1241: prefer the canonical channel_id / thread_id aliases the
+  // backend now returns. Fall back to thread_channel_id so older server
+  // builds (or fixtures that only set the legacy field) still resolve.
+  const channelId =
+    session.channel_id
+    ?? session.thread_id
+    ?? session.thread_channel_id
+    ?? null;
   const summary = describeDiscordTarget(
-    session.thread_channel_id ?? null,
+    channelId,
     channelInfo,
     parentInfo,
     fallbackName,
   );
 
-  // Backend agents.rs:849-927 now returns guild_id + channel_*_url directly on
-  // each session row, so we can fall back to those when the per-channel
-  // DiscordChannelInfo lookup hasn't filled in (or before it has resolved).
-  if (!summary.webUrl && session.channel_web_url) {
-    summary.webUrl = session.channel_web_url;
+  // Backend agents.rs now returns canonical deeplink_url + thread_deeplink_url
+  // alongside the legacy channel_web_url / channel_deeplink_url pair. Use the
+  // new names first (issue #1241 contract: dashboard pastes the value into
+  // anchor `href` without rebuilding URLs); fall back to the legacy fields so
+  // older server builds keep working.
+  if (!summary.webUrl) {
+    summary.webUrl = session.deeplink_url ?? session.channel_web_url ?? null;
   }
-  if (!summary.deepLink && session.channel_deeplink_url) {
-    summary.deepLink = session.channel_deeplink_url;
+  if (!summary.deepLink) {
+    summary.deepLink =
+      session.thread_deeplink_url ?? session.channel_deeplink_url ?? null;
   }
-  if (!summary.webUrl && !summary.deepLink && session.thread_channel_id && session.guild_id) {
-    const links = buildDiscordChannelLinks(session.thread_channel_id, session.guild_id);
+  if (!summary.webUrl && !summary.deepLink && channelId && session.guild_id) {
+    const links = buildDiscordChannelLinks(channelId, session.guild_id);
     summary.webUrl = links.webUrl;
     summary.deepLink = links.deepLink;
   }
