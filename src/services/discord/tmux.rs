@@ -4015,6 +4015,15 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     if prev_offset > new_size {
                         current_offset = new_size;
                         last_relayed_offset = Some(new_size);
+                        // #1270 codex P2: snapshot the current `.generation`
+                        // mtime alongside the local offset so a later regression
+                        // check has a real baseline. Without this, the local
+                        // mtime would still be `None` after a normal relay path
+                        // and any subsequent regression would misclassify
+                        // same-wrapper rotation as fresh-respawn and clear the
+                        // local offset to None — re-relaying surviving content.
+                        last_observed_generation_mtime_ns =
+                            Some(read_generation_file_mtime_ns(&tmux_session_name));
                         reset_stale_relay_watermark_if_output_regressed(
                             &shared,
                             channel_id,
@@ -5411,6 +5420,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
             );
             if cleanup_committed {
                 last_relayed_offset = Some(current_offset);
+                // #1270 codex P2: snapshot the current `.generation` mtime so
+                // the local regression check has a real baseline (see the
+                // matching snapshot in the rotation path).
+                last_observed_generation_mtime_ns =
+                    Some(read_generation_file_mtime_ns(&tmux_session_name));
                 advance_watcher_confirmed_end(
                     &shared,
                     &watcher_provider,
@@ -5619,6 +5633,15 @@ pub(super) async fn tmux_output_watcher_with_restore(
             if relay_ok {
                 if direct_send_delivered || !has_current_response {
                     last_relayed_offset = Some(data_start_offset);
+                    // #1270 codex P2: snapshot the current `.generation` mtime
+                    // on every successful relay so the local regression check
+                    // has a real baseline. Without this, normal relay paths
+                    // (which never enter the reset helper) leave the baseline
+                    // at None, and any later regression misclassifies
+                    // same-wrapper rotation as fresh-respawn — clearing the
+                    // local offset and re-relaying surviving bytes.
+                    last_observed_generation_mtime_ns =
+                        Some(read_generation_file_mtime_ns(&tmux_session_name));
                     // #1134: first successful relay for this attach. The
                     // watcher_latency module is idempotent — only the first
                     // call after `record_attach` actually observes a sample,
