@@ -850,12 +850,19 @@ pub async fn agent_dispatched_sessions(
     // both done in application code below using SessionActivityResolver,
     // because raw status='working' can lag behind the resolver's view
     // (Codex review PR #1258, 9th pass).
+    // LEFT JOIN task_dispatches via active_dispatch_id so the response can
+    // expose the kanban_card_id this session is currently working on. The
+    // dashboard's restored "감사 / Audit" panel uses that mapping to
+    // deeplink each audit row to the most recent Discord turn for the same
+    // card without a separate API round-trip.
     let rows = match sqlx::query(
-        "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
-                model, tokens, cwd, last_heartbeat, thread_channel_id
-         FROM sessions
-         WHERE agent_id = $1
-         ORDER BY COALESCE(last_heartbeat, created_at) DESC NULLS LAST, id DESC",
+        "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, s.active_dispatch_id,
+                s.model, s.tokens, s.cwd, s.last_heartbeat, s.thread_channel_id,
+                td.kanban_card_id AS kanban_card_id
+         FROM sessions s
+         LEFT JOIN task_dispatches td ON td.id = s.active_dispatch_id
+         WHERE s.agent_id = $1
+         ORDER BY COALESCE(s.last_heartbeat, s.created_at) DESC NULLS LAST, s.id DESC",
     )
     .bind(&id)
     .fetch_all(pool)
@@ -914,6 +921,10 @@ pub async fn agent_dispatched_sessions(
 
             let (channel_web_url, channel_deeplink_url) =
                 build_channel_deeplinks(thread_channel_id.as_deref(), guild_id.as_deref());
+            let kanban_card_id = row
+                .try_get::<Option<String>, _>("kanban_card_id")
+                .ok()
+                .flatten();
 
             json!({
                 "id": row.try_get::<i64, _>("id").unwrap_or(0),
@@ -930,6 +941,7 @@ pub async fn agent_dispatched_sessions(
                 "guild_id": guild_id.clone(),
                 "channel_web_url": channel_web_url,
                 "channel_deeplink_url": channel_deeplink_url,
+                "kanban_card_id": kanban_card_id,
             })
         })
         .collect();

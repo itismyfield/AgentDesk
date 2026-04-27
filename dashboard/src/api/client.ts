@@ -456,12 +456,13 @@ export async function getAgentOffices(
 
 export async function getAuditLogs(
   limit = 20,
-  filter?: { entityType?: string; entityId?: string },
+  filter?: { entityType?: string; entityId?: string; agentId?: string },
 ): Promise<AuditLogEntry[]> {
   const params = new URLSearchParams();
   params.set("limit", String(limit));
   if (filter?.entityType) params.set("entityType", filter.entityType);
   if (filter?.entityId) params.set("entityId", filter.entityId);
+  if (filter?.agentId) params.set("agentId", filter.agentId);
   const data = await request<{ logs: AuditLogEntry[] }>(
     `/api/audit-logs?${params.toString()}`,
   );

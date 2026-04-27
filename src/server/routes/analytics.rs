@@ -712,7 +712,14 @@ pub async fn activity_heatmap(
     )
 }
 
-/// GET /api/audit-logs?limit=20&entityType=...&entityId=...
+/// GET /api/audit-logs?limit=20&entityType=...&entityId=...&agentId=...
+///
+/// Optional `agentId` filters rows to audit entries on kanban cards whose
+/// `assigned_agent_id` matches the given agent. Combined with the new
+/// kanban_card enrichment fields below, the dashboard's restored
+/// "감사 / Audit" panel on the agent drawer can render human-readable
+/// rows ("#1242 홈 KPI · backlog → requested") instead of the raw
+/// `kanban_card:UUID` strings the previous panel surfaced (#1258).
 #[derive(Debug, Deserialize)]
 pub struct AuditLogsQuery {
     limit: Option<i64>,
@@ -720,6 +727,8 @@ pub struct AuditLogsQuery {
     entity_type: Option<String>,
     #[serde(rename = "entityId")]
     entity_id: Option<String>,
+    #[serde(rename = "agentId")]
+    agent_id: Option<String>,
 }
 
 pub async fn audit_logs(
@@ -740,19 +749,37 @@ pub async fn audit_logs(
         .unwrap_or(0);
 
     let logs = if audit_count > 0 {
+        // Left-join kanban_cards so the response carries the human-readable
+        // title + GitHub issue number when the entity_type is 'kanban_card'.
+        // Other entity types still return null enrichment fields and are
+        // unaffected.
         let mut query = QueryBuilder::new(
-            "SELECT id, entity_type, entity_id, action, timestamp, actor
-             FROM audit_logs
+            "SELECT a.id, a.entity_type, a.entity_id, a.action, a.timestamp, a.actor,
+                    c.title AS card_title,
+                    c.github_issue_number AS card_issue_number,
+                    c.github_issue_url AS card_issue_url,
+                    c.assigned_agent_id AS card_assigned_agent_id
+             FROM audit_logs a
+             LEFT JOIN kanban_cards c
+               ON a.entity_type = 'kanban_card' AND a.entity_id = c.id
              WHERE 1=1",
         );
         if let Some(entity_type) = params.entity_type.as_deref() {
-            query.push(" AND entity_type = ").push_bind(entity_type);
+            query.push(" AND a.entity_type = ").push_bind(entity_type);
         }
         if let Some(entity_id) = params.entity_id.as_deref() {
-            query.push(" AND entity_id = ").push_bind(entity_id);
+            query.push(" AND a.entity_id = ").push_bind(entity_id);
+        }
+        if let Some(agent_id) = params.agent_id.as_deref() {
+            // agentId filter only matches card-scoped audit rows where the
+            // assignee matches; non-card rows are excluded so the agent
+            // drawer doesn't surface unrelated system events.
+            query
+                .push(" AND a.entity_type = 'kanban_card' AND c.assigned_agent_id = ")
+                .push_bind(agent_id);
         }
         query
-            .push(" ORDER BY timestamp DESC LIMIT ")
+            .push(" ORDER BY a.timestamp DESC LIMIT ")
             .push_bind(limit);
 
         query
@@ -786,11 +813,29 @@ pub async fn audit_logs(
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-                let summary = if entity_id.is_empty() {
-                    format!("{entity_type} {action}")
-                } else {
-                    format!("{entity_type}:{entity_id} {action}")
-                };
+                let card_title = row
+                    .try_get::<Option<String>, _>("card_title")
+                    .ok()
+                    .flatten();
+                let card_issue_number = row
+                    .try_get::<Option<i32>, _>("card_issue_number")
+                    .ok()
+                    .flatten();
+                let card_issue_url = row
+                    .try_get::<Option<String>, _>("card_issue_url")
+                    .ok()
+                    .flatten();
+                let card_assigned_agent_id = row
+                    .try_get::<Option<String>, _>("card_assigned_agent_id")
+                    .ok()
+                    .flatten();
+                let summary = build_audit_summary(
+                    &entity_type,
+                    &entity_id,
+                    &action,
+                    card_title.as_deref(),
+                    card_issue_number,
+                );
                 json!({
                     "id": row.try_get::<i64, _>("id").unwrap_or(0).to_string(),
                     "actor": actor,
@@ -799,6 +844,10 @@ pub async fn audit_logs(
                     "entity_id": entity_id,
                     "summary": summary,
                     "created_at": created_at,
+                    "card_title": card_title,
+                    "card_issue_number": card_issue_number,
+                    "card_issue_url": card_issue_url,
+                    "card_assigned_agent_id": card_assigned_agent_id,
                 })
             })
             .collect::<Vec<_>>()
@@ -810,15 +859,25 @@ pub async fn audit_logs(
         }
 
         let mut query = QueryBuilder::new(
-            "SELECT id, card_id, from_status, to_status, source, created_at
-             FROM kanban_audit_logs
+            "SELECT k.id, k.card_id, k.from_status, k.to_status, k.source, k.created_at,
+                    c.title AS card_title,
+                    c.github_issue_number AS card_issue_number,
+                    c.github_issue_url AS card_issue_url,
+                    c.assigned_agent_id AS card_assigned_agent_id
+             FROM kanban_audit_logs k
+             LEFT JOIN kanban_cards c ON k.card_id = c.id
              WHERE 1=1",
         );
         if let Some(card_id) = params.entity_id.as_deref() {
-            query.push(" AND card_id = ").push_bind(card_id);
+            query.push(" AND k.card_id = ").push_bind(card_id);
+        }
+        if let Some(agent_id) = params.agent_id.as_deref() {
+            query
+                .push(" AND c.assigned_agent_id = ")
+                .push_bind(agent_id);
         }
         query
-            .push(" ORDER BY created_at DESC LIMIT ")
+            .push(" ORDER BY k.created_at DESC LIMIT ")
             .push_bind(limit);
 
         query
@@ -848,25 +907,81 @@ pub async fn audit_logs(
                     .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                     .map(|ts| ts.timestamp_millis())
                     .unwrap_or(0);
+                let card_title = row
+                    .try_get::<Option<String>, _>("card_title")
+                    .ok()
+                    .flatten();
+                let card_issue_number = row
+                    .try_get::<Option<i32>, _>("card_issue_number")
+                    .ok()
+                    .flatten();
+                let card_issue_url = row
+                    .try_get::<Option<String>, _>("card_issue_url")
+                    .ok()
+                    .flatten();
+                let card_assigned_agent_id = row
+                    .try_get::<Option<String>, _>("card_assigned_agent_id")
+                    .ok()
+                    .flatten();
+                let action = format!("{from_status}->{to_status}");
+                let summary = build_audit_summary(
+                    "kanban_card",
+                    &card_id,
+                    &action,
+                    card_title.as_deref(),
+                    card_issue_number,
+                );
                 json!({
                     "id": format!("kanban-{}", row.try_get::<i64, _>("id").unwrap_or(0)),
                     "actor": actor.clone(),
-                    "action": format!("{from_status}->{to_status}"),
+                    "action": action,
                     "entity_type": "kanban_card",
                     "entity_id": card_id,
-                    "summary": format!("{from_status} -> {to_status}"),
+                    "summary": summary,
                     "metadata": {
                         "from_status": from_status,
                         "to_status": to_status,
                         "source": actor,
                     },
                     "created_at": created_at,
+                    "card_title": card_title,
+                    "card_issue_number": card_issue_number,
+                    "card_issue_url": card_issue_url,
+                    "card_assigned_agent_id": card_assigned_agent_id,
                 })
             })
             .collect::<Vec<_>>()
     };
 
     (StatusCode::OK, Json(json!({ "logs": logs })))
+}
+
+/// Format a human-readable audit summary, preferring the kanban card title
+/// (with #N issue number when available) over the raw `entity_type:entity_id`
+/// pair the previous response shape exposed.
+fn build_audit_summary(
+    entity_type: &str,
+    entity_id: &str,
+    action: &str,
+    card_title: Option<&str>,
+    card_issue_number: Option<i32>,
+) -> String {
+    if entity_type == "kanban_card" {
+        if let Some(title) = card_title {
+            return match card_issue_number {
+                Some(num) => format!("#{num} {title} · {action}"),
+                None => format!("{title} · {action}"),
+            };
+        }
+        if let Some(num) = card_issue_number {
+            return format!("#{num} · {action}");
+        }
+    }
+    if entity_id.is_empty() {
+        format!("{entity_type} {action}")
+    } else {
+        format!("{entity_type}:{entity_id} {action}")
+    }
 }
 
 fn parse_machine_config(value: &str) -> Option<Vec<(String, String)>> {
