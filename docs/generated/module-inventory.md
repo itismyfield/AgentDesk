@@ -144,7 +144,7 @@
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 966 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 319 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 2039 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 2163 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1938 | giant-file |
@@ -185,7 +185,7 @@
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 127 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 547 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4483 | giant-file |
-| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1388 | giant-file |
+| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1512 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 347 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
