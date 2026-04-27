@@ -6,10 +6,13 @@ use super::super::AppState;
 use crate::services::provider::ProviderKind;
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
+    /* PG-only runtimes don't carry an engine-side legacy SQLite handle.
+    Fall back to AppState's sqlite handle instead of panicking — same
+    fix as kanban.rs::legacy_db. */
     state
         .engine
         .legacy_db()
-        .expect("legacy sqlite db unavailable for review verdict fallback")
+        .unwrap_or_else(|| state.sqlite_db())
 }
 
 /// Write a review-passed marker file for the reviewed commit.

@@ -8,10 +8,13 @@ use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
+    /* PG-only runtimes don't carry an engine-side legacy SQLite handle.
+    Fall back to AppState's sqlite handle instead of panicking — same
+    fix as kanban.rs::legacy_db. */
     state
         .engine
         .legacy_db()
-        .expect("legacy sqlite db unavailable for review fallback")
+        .unwrap_or_else(|| state.sqlite_db())
 }
 
 /// PG-first wrapper around `crate::kanban::transition_status_with_opts`.

@@ -15,10 +15,14 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
 fn legacy_db(state: &AppState) -> &crate::db::Db {
+    /* PG-only runtimes (post-#889) don't carry an engine-side legacy
+    SQLite handle, but onboarding routes still expect a `&Db`. Fall
+    back to the AppState's always-present sqlite handle instead of
+    panicking — same fix as kanban.rs::legacy_db. */
     state
         .engine
         .legacy_db()
-        .expect("legacy sqlite db unavailable for onboarding fallback")
+        .unwrap_or_else(|| state.sqlite_db())
 }
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
