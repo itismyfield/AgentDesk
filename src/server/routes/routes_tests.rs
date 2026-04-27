@@ -7168,7 +7168,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
 }
 
 #[tokio::test]
-async fn agent_setup_dry_run_reports_plan_without_mutation() {
+async fn agent_setup_pg_dry_run_reports_plan_without_mutation() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -7180,9 +7180,17 @@ async fn agent_setup_dry_run_reports_plan_without_mutation() {
     fs::write(&prompt_template, "shared prompt\n").unwrap();
     write_test_skill(runtime_root.path(), "memory-read", "Memory read");
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -7238,24 +7246,22 @@ async fn agent_setup_dry_run_reports_plan_without_mutation() {
             .join("config/agents/setup-agent/IDENTITY.md")
             .exists()
     );
-    let count: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'",
-            [],
-            |row| row.get(0),
-        )
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'")
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(count, 0);
     assert!(
         !crate::runtime_layout::managed_skills_manifest_path(runtime_root.path()).exists(),
         "dry_run must not create skills manifest"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_setup_creates_resources_and_retry_is_idempotent() {
+async fn agent_setup_pg_creates_resources_and_retry_is_idempotent() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -7267,9 +7273,17 @@ async fn agent_setup_creates_resources_and_retry_is_idempotent() {
     fs::write(&prompt_template, "shared prompt\n").unwrap();
     write_test_skill(runtime_root.path(), "memory-read", "Memory read");
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let request_body = json!({
         "agent_id": "setup-agent",
         "channel_id": "1473922824350601297",
@@ -7328,15 +7342,11 @@ async fn agent_setup_creates_resources_and_retry_is_idempotent() {
         "shared prompt\n"
     );
     assert!(runtime_root.path().join("workspaces/setup-agent").is_dir());
-    let db_channel: Option<String> = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT discord_channel_cdx FROM agents WHERE id = 'setup-agent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let db_channel: Option<String> =
+        sqlx::query_scalar("SELECT discord_channel_cdx FROM agents WHERE id = 'setup-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(db_channel.as_deref(), Some("1473922824350601297"));
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(crate::runtime_layout::managed_skills_manifest_path(
@@ -7375,10 +7385,13 @@ async fn agent_setup_creates_resources_and_retry_is_idempotent() {
             .iter()
             .any(|entry| entry["step"] == "db_seed")
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_setup_rolls_back_when_mid_step_fails() {
+async fn agent_setup_pg_rolls_back_when_mid_step_fails() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -7390,9 +7403,17 @@ async fn agent_setup_rolls_back_when_mid_step_fails() {
     fs::create_dir_all(prompt_template.parent().unwrap()).unwrap();
     fs::write(&prompt_template, "shared prompt\n").unwrap();
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
 
     let response = app
         .oneshot(
@@ -7443,20 +7464,18 @@ async fn agent_setup_rolls_back_when_mid_step_fails() {
             .join("config/agents/setup-agent/IDENTITY.md")
             .exists()
     );
-    let count: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'",
-            [],
-            |row| row.get(0),
-        )
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 'setup-agent'")
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(count, 0);
     assert!(runtime_root.path().join("config/.audit").is_dir());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
-async fn seed_setup_agent_for_management_test(
+async fn seed_setup_agent_for_management_test_pg(
     app: axum::Router,
     runtime_root: &std::path::Path,
     agent_id: &str,
@@ -7496,14 +7515,22 @@ async fn seed_setup_agent_for_management_test(
 }
 
 #[tokio::test]
-async fn agent_patch_updates_metadata_and_prompt_content() {
+async fn agent_pg_patch_updates_metadata_and_prompt_content() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-    seed_setup_agent_for_management_test(
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    seed_setup_agent_for_management_test_pg(
         app.clone(),
         runtime_root.path(),
         "managed-agent",
@@ -7548,29 +7575,37 @@ async fn agent_patch_updates_metadata_and_prompt_content() {
         .unwrap(),
         "updated prompt\n"
     );
-    let row: (String, Option<i64>, Option<String>) = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT name, sprite_number, system_prompt FROM agents WHERE id = 'managed-agent'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
+    let row: (String, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT name, sprite_number, system_prompt FROM agents WHERE id = 'managed-agent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0, "Managed Agent");
     assert_eq!(row.1, Some(42));
     assert_eq!(row.2.as_deref(), Some("operational prompt summary"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_archive_and_unarchive_record_state_and_restore_config() {
+async fn agent_pg_archive_and_unarchive_record_state_and_restore_config() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-    seed_setup_agent_for_management_test(
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    seed_setup_agent_for_management_test_pg(
         app.clone(),
         runtime_root.path(),
         "managed-agent",
@@ -7612,15 +7647,11 @@ async fn agent_archive_and_unarchive_record_state_and_restore_config() {
             .iter()
             .all(|agent| agent.id != "managed-agent")
     );
-    let archive_state: String = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let archive_state: String =
+        sqlx::query_scalar("SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(archive_state, "archived");
 
     let unarchived = app
@@ -7644,27 +7675,34 @@ async fn agent_archive_and_unarchive_record_state_and_restore_config() {
             .iter()
             .any(|agent| agent.id == "managed-agent")
     );
-    let archive_state: String = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let archive_state: String =
+        sqlx::query_scalar("SELECT state FROM agent_archive WHERE agent_id = 'managed-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(archive_state, "unarchived");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_duplicate_reuses_setup_and_copies_prompt() {
+async fn agent_pg_duplicate_reuses_setup_and_copies_prompt() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-    seed_setup_agent_for_management_test(
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    seed_setup_agent_for_management_test_pg(
         app.clone(),
         runtime_root.path(),
         "managed-agent",
@@ -7708,27 +7746,34 @@ async fn agent_duplicate_reuses_setup_and_copies_prompt() {
         .unwrap(),
         "source identity prompt\n"
     );
-    let copied_name: String = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT name FROM agents WHERE id = 'managed-copy'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let copied_name: String =
+        sqlx::query_scalar("SELECT name FROM agents WHERE id = 'managed-copy'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(copied_name, "Managed Copy");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_archive_rejects_when_active_turn_present() {
+async fn agent_pg_archive_rejects_when_active_turn_present() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-    seed_setup_agent_for_management_test(
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    seed_setup_agent_for_management_test_pg(
         app.clone(),
         runtime_root.path(),
         "managed-agent",
@@ -7737,14 +7782,13 @@ async fn agent_archive_rejects_when_active_turn_present() {
     .await;
 
     // Seed an active turn for the managed-agent (status='working').
-    db.lock()
-        .unwrap()
-        .execute(
-            "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat)
-             VALUES ('sess-active', 'managed-agent', 'codex', 'working', 'dispatch-1', datetime('now'))",
-            [],
-        )
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat)
+         VALUES ('sess-active', 'managed-agent', 'codex', 'working', 'dispatch-1', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let archived = app
         .oneshot(
@@ -7773,27 +7817,34 @@ async fn agent_archive_rejects_when_active_turn_present() {
     );
 
     // agent_archive row should NOT be written when rejected.
-    let archive_count: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agent_archive WHERE agent_id = 'managed-agent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let archive_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_archive WHERE agent_id = 'managed-agent'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(archive_count, 0);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-async fn agent_duplicate_ignores_sensitive_fields_from_body() {
+async fn agent_pg_duplicate_ignores_sensitive_fields_from_body() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db.clone(), engine, None);
-    seed_setup_agent_for_management_test(
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    seed_setup_agent_for_management_test_pg(
         app.clone(),
         runtime_root.path(),
         "managed-agent",
@@ -7850,26 +7901,14 @@ async fn agent_duplicate_ignores_sensitive_fields_from_body() {
         Option<String>,
         Option<String>,
         Option<String>,
-    ) = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
-                    discord_channel_cdx, system_prompt
-             FROM agents WHERE id = 'managed-copy-2'",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
+    ) = sqlx::query_as(
+        "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
+                discord_channel_cdx, system_prompt
+         FROM agents WHERE id = 'managed-copy-2'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(copied_id, "managed-copy-2");
     let all_channels = [&channel_primary, &channel_alt, &channel_cc, &channel_cdx];
     assert!(
@@ -7890,16 +7929,15 @@ async fn agent_duplicate_ignores_sensitive_fields_from_body() {
     );
 
     // Attacker-override id must not exist as an agent row.
-    let attacker_rows: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let attacker_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(attacker_rows, 0);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
