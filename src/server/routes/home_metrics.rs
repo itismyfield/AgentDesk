@@ -164,6 +164,14 @@ fn day_window(today: NaiveDate, days: i64) -> Vec<String> {
 /// Returns one entry per date in `date_keys` containing the count of
 /// `task_dispatches` rows whose `created_at` falls on that local date.
 /// Rows with a NULL `created_at` are ignored.
+///
+/// Codex P2 on #1298: previous implementation cast `created_at::date` in PG,
+/// which uses the PG session timezone — when that differs from the server's
+/// `chrono::Local`, dispatches near midnight are bucketed under the wrong
+/// day and the in-progress sparkline silently miscounts. Fetch the raw
+/// TIMESTAMPTZ values (filtered by a UTC lower bound derived from the first
+/// local date) and bucket them in Rust using `chrono::Local` so the bucket
+/// boundaries match `date_keys` regardless of PG TZ config.
 async fn collect_in_progress_trend_pg(
     pool: &sqlx::PgPool,
     date_keys: &[String],
@@ -171,22 +179,48 @@ async fn collect_in_progress_trend_pg(
     if date_keys.is_empty() {
         return Vec::new();
     }
-    let first = match date_keys.first() {
-        Some(d) => d.as_str(),
-        None => return vec![json!(0); date_keys.len()],
+    let Some(first_key) = date_keys.first() else {
+        return Vec::new();
     };
+    let Ok(first_local_date) = chrono::NaiveDate::parse_from_str(first_key, "%Y-%m-%d") else {
+        tracing::warn!(
+            day = %first_key,
+            "home_kpi_trends in-progress: first date_key is not a valid YYYY-MM-DD"
+        );
+        return vec![json!(0); date_keys.len()];
+    };
+    let Some(local_start_naive) = first_local_date.and_hms_opt(0, 0, 0) else {
+        return vec![json!(0); date_keys.len()];
+    };
+    let Some(local_start) = Local.from_local_datetime(&local_start_naive).single() else {
+        // Skip ambiguous DST transitions — the upper bound only narrows the
+        // result set, so falling back to "no lower bound" still produces a
+        // correct (just larger) row scan.
+        return collect_in_progress_trend_pg_with_lower_bound(pool, date_keys, None).await;
+    };
+    let utc_lower = local_start.with_timezone(&chrono::Utc);
+    collect_in_progress_trend_pg_with_lower_bound(pool, date_keys, Some(utc_lower)).await
+}
 
-    let rows = match sqlx::query(
-        "SELECT created_at::date::text AS day, COUNT(*)::BIGINT AS count
-         FROM task_dispatches
-         WHERE created_at::date >= $1::date
-         GROUP BY day
-         ORDER BY day",
-    )
-    .bind(first)
-    .fetch_all(pool)
-    .await
-    {
+async fn collect_in_progress_trend_pg_with_lower_bound(
+    pool: &sqlx::PgPool,
+    date_keys: &[String],
+    lower_bound_utc: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<serde_json::Value> {
+    let rows_result = match lower_bound_utc {
+        Some(lower) => {
+            sqlx::query("SELECT created_at FROM task_dispatches WHERE created_at >= $1")
+                .bind(lower)
+                .fetch_all(pool)
+                .await
+        }
+        None => {
+            sqlx::query("SELECT created_at FROM task_dispatches")
+                .fetch_all(pool)
+                .await
+        }
+    };
+    let rows = match rows_result {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(error = %error, "home_kpi_trends in-progress query failed");
@@ -196,9 +230,15 @@ async fn collect_in_progress_trend_pg(
 
     let mut by_day: BTreeMap<String, i64> = BTreeMap::new();
     for row in rows {
-        let day: String = row.try_get("day").unwrap_or_default();
-        let count: i64 = row.try_get("count").unwrap_or(0);
-        by_day.insert(day, count);
+        let Ok(created_at) = row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at") else {
+            continue;
+        };
+        let local_day = created_at
+            .with_timezone(&Local)
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        *by_day.entry(local_day).or_insert(0) += 1;
     }
 
     date_keys
