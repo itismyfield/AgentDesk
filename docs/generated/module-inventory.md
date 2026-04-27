@@ -172,7 +172,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 2205 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 537 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 949 |  |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 959 |  |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 590 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 4796 | giant-file |
@@ -238,7 +238,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2736 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 618 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 4093 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 4107 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 586 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1104 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
