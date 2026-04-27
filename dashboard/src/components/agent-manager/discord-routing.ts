@@ -156,17 +156,23 @@ export function describeDispatchedSession(
     fallbackName,
   );
 
-  // Backend agents.rs now returns canonical deeplink_url + thread_deeplink_url
-  // alongside the legacy channel_web_url / channel_deeplink_url pair. Use the
-  // new names first (issue #1241 contract: dashboard pastes the value into
-  // anchor `href` without rebuilding URLs); fall back to the legacy fields so
-  // older server builds keep working.
-  if (!summary.webUrl) {
-    summary.webUrl = session.deeplink_url ?? session.channel_web_url ?? null;
+  // #1241 contract: agents.rs returns canonical `deeplink_url` and
+  // `thread_deeplink_url` (with legacy `channel_web_url` / `channel_deeplink_url`
+  // kept for older server builds). The dashboard MUST paste these canonical
+  // values into anchor `href` instead of rebuilding URLs from `channelInfo`.
+  // Codex P2 on #1295: previously these guards were `if (!summary.webUrl)`,
+  // which skipped the canonical fields whenever `describeDiscordTarget` had
+  // already populated a rebuilt URL — defeating the contract. Prefer
+  // canonical fields first, fall back to the rebuilt summary only when the
+  // backend didn't supply a value.
+  const canonicalWebUrl = session.deeplink_url ?? session.channel_web_url ?? null;
+  const canonicalDeepLink =
+    session.thread_deeplink_url ?? session.channel_deeplink_url ?? null;
+  if (canonicalWebUrl) {
+    summary.webUrl = canonicalWebUrl;
   }
-  if (!summary.deepLink) {
-    summary.deepLink =
-      session.thread_deeplink_url ?? session.channel_deeplink_url ?? null;
+  if (canonicalDeepLink) {
+    summary.deepLink = canonicalDeepLink;
   }
   if (!summary.webUrl && !summary.deepLink && channelId && session.guild_id) {
     const links = buildDiscordChannelLinks(channelId, session.guild_id);
