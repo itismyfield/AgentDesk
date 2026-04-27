@@ -2354,6 +2354,104 @@ mod tests {
         .unwrap()
     }
 
+    async fn seed_agent_pg(pool: &sqlx::PgPool, agent_id: &str) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ($1, $2, 'codex', $3, NOW(), NOW())",
+        )
+        .bind(agent_id)
+        .bind(format!("Agent {agent_id}"))
+        .bind("123456789012345678")
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, dispatch_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ($1, 'Force Kill Card', $2, $3, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_dispatch_pg(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        agent_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, retry_count, created_at, updated_at)
+             VALUES ($1, $2, $3, 'implementation', 'pending', 'Recover me', '{}', 0, NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_session_pg(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        agent_id: &str,
+        dispatch_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, status, active_dispatch_id, provider, last_heartbeat, created_at)
+             VALUES ($1, $2, 'working', $3, 'codex', NOW(), NOW())",
+        )
+        .bind(session_key)
+        .bind(agent_id)
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_session_without_dispatch_pg(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        agent_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, status, provider, last_heartbeat, created_at)
+             VALUES ($1, $2, 'working', 'codex', NOW(), NOW())",
+        )
+        .bind(session_key)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn count_message_outbox_rows_pg(pool: &sqlx::PgPool) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn count_termination_events_pg(pool: &sqlx::PgPool, session_key: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM session_termination_events WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
     fn postgres_base_database_url() -> String {
         if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
             let trimmed = base.trim();
@@ -2395,73 +2493,6 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", postgres_base_database_url(), admin_db)
-    }
-
-    #[tokio::test]
-    async fn force_kill_session_path_route_retries_active_dispatch() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
-
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-force");
-            seed_card(&conn, "card-force", "dispatch-force", "requested");
-            seed_dispatch(&conn, "dispatch-force", "card-force", "agent-force");
-            seed_session(
-                &conn,
-                "host:codex-agent-force",
-                "agent-force",
-                "dispatch-force",
-            );
-        }
-
-        let (status, body) = force_kill_session(
-            State(state),
-            Path("host:codex-agent-force".to_string()),
-            Json(ForceKillOptions {
-                retry: true,
-                reason: None,
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let body = response_json(body);
-        let retry_dispatch_id = body["retry_dispatch_id"].as_str().unwrap().to_string();
-        assert!(!retry_dispatch_id.is_empty());
-        assert_eq!(body["lifecycle_path"], "direct-fallback");
-        assert_eq!(body["queue_activation_requested"], false);
-
-        let conn = db.lock().unwrap();
-        let session_state: (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, active_dispatch_id FROM sessions WHERE session_key = ?1",
-                ["host:codex-agent-force"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(session_state.0, "disconnected");
-        assert!(session_state.1.is_none());
-
-        let old_dispatch_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                ["dispatch-force"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(old_dispatch_status, "failed");
-
-        let new_dispatch: (String, i64) = conn
-            .query_row(
-                "SELECT status, retry_count FROM task_dispatches WHERE id = ?1",
-                [&retry_dispatch_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(new_dispatch.0, "pending");
-        assert_eq!(new_dispatch.1, 1);
     }
 
     #[tokio::test]
@@ -2597,33 +2628,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_kill_session_legacy_wrapper_uses_same_core_without_retry() {
+    async fn force_kill_session_legacy_wrapper_pg_uses_same_core_without_retry() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-force-legacy");
-            seed_card(
-                &conn,
-                "card-force-legacy",
-                "dispatch-force-legacy",
-                "requested",
-            );
-            seed_dispatch(
-                &conn,
-                "dispatch-force-legacy",
-                "card-force-legacy",
-                "agent-force-legacy",
-            );
-            seed_session(
-                &conn,
-                "host:claude-agent-force-legacy",
-                "agent-force-legacy",
-                "dispatch-force-legacy",
-            );
-        }
+        seed_agent_pg(&pool, "agent-force-legacy").await;
+        seed_card_pg(
+            &pool,
+            "card-force-legacy",
+            "dispatch-force-legacy",
+            "requested",
+        )
+        .await;
+        seed_dispatch_pg(
+            &pool,
+            "dispatch-force-legacy",
+            "card-force-legacy",
+            "agent-force-legacy",
+        )
+        .await;
+        seed_session_pg(
+            &pool,
+            "host:claude-agent-force-legacy",
+            "agent-force-legacy",
+            "dispatch-force-legacy",
+        )
+        .await;
 
         let (status, body) = force_kill_session_legacy(
             State(state),
@@ -2640,19 +2673,20 @@ mod tests {
         assert!(body["retry_dispatch_id"].is_null());
         assert_eq!(body["queue_activation_requested"], true);
 
-        let conn = db.lock().unwrap();
-        let dispatch_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                ["dispatch-force-legacy"],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let dispatch_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-force-legacy")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(dispatch_status, "failed");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn force_kill_session_clears_matching_inflight_and_live_tmux() {
+    async fn force_kill_session_pg_clears_matching_inflight_and_live_tmux() {
         let _env_lock = env_lock();
         if Command::new("tmux").arg("-V").output().is_err() {
             return;
@@ -2704,14 +2738,14 @@ mod tests {
             return;
         }
 
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-force-live");
-            seed_session_without_dispatch(&conn, &session_key, "agent-force-live");
-        }
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
+
+        seed_agent_pg(&pool, "agent-force-live").await;
+        seed_session_without_dispatch_pg(&pool, &session_key, "agent-force-live").await;
 
         let (status, body) = force_kill_session(
             State(state),
@@ -2749,38 +2783,38 @@ mod tests {
             "matching inflight file should be deleted"
         );
 
-        let conn = db.lock().unwrap();
-        let session_status: String = conn
-            .query_row(
-                "SELECT status FROM sessions WHERE session_key = ?1",
-                [&session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let session_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+                .bind(&session_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(session_status, "disconnected");
-        assert_eq!(count_message_outbox_rows(&conn), 1);
-        assert_eq!(count_termination_events(&conn, &session_key), 1);
+        assert_eq!(count_message_outbox_rows_pg(&pool).await, 1);
+        assert_eq!(count_termination_events_pg(&pool, &session_key).await, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn force_kill_session_skips_notify_and_audit_when_tmux_is_already_gone() {
+    async fn force_kill_session_pg_skips_notify_and_audit_when_tmux_is_already_gone() {
         let _env_lock = env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
         let session_key = format!(
             "host:AgentDesk-codex-force-kill-dead-{}",
             std::process::id()
         );
 
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-force-dead");
-            seed_session_without_dispatch(&conn, &session_key, "agent-force-dead");
-        }
+        seed_agent_pg(&pool, "agent-force-dead").await;
+        seed_session_without_dispatch_pg(&pool, &session_key, "agent-force-dead").await;
 
         let (status, body) = force_kill_session(
             State(state),
@@ -2798,42 +2832,48 @@ mod tests {
         assert_eq!(body["inflight_cleared"], false);
         assert_eq!(body["queue_activation_requested"], true);
 
-        let conn = db.lock().unwrap();
-        let session_status: String = conn
-            .query_row(
-                "SELECT status FROM sessions WHERE session_key = ?1",
-                [&session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let session_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+                .bind(&session_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(session_status, "disconnected");
-        assert_eq!(count_message_outbox_rows(&conn), 0);
-        assert_eq!(count_termination_events(&conn, &session_key), 0);
+        assert_eq!(count_message_outbox_rows_pg(&pool).await, 0);
+        assert_eq!(count_termination_events_pg(&pool, &session_key).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn idle_hook_does_not_auto_complete_implementation_dispatch() {
+    async fn idle_hook_pg_does_not_auto_complete_implementation_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
         let card_id = "card-1";
         let dispatch_id = "dispatch-1";
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
-                 VALUES (?1, 'Test Card', 'requested', ?2, datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![card_id, dispatch_id],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-                 VALUES (?1, ?2, 'ch-td', 'implementation', 'pending', 'Test Card', '{}', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![dispatch_id, card_id],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ($1, 'Test Card', 'requested', $2, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ($1, $2, 'ch-td', 'implementation', 'pending', 'Test Card', '{}', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (working_status, _) = hook_session(
             State(state.clone()),
@@ -2877,30 +2917,26 @@ mod tests {
         .await;
         assert_eq!(idle_status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
         // implementation dispatches must NOT be auto-completed on idle —
         // they require explicit completion from turn_bridge
-        let card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let dispatch_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let card_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let dispatch_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let active_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // Card may move to in_progress via kanban-rules policy when session reports working,
         // but must NOT advance to review (which would happen if idle auto-completed the dispatch).
@@ -2917,6 +2953,9 @@ mod tests {
             Some(dispatch_id),
             "idle dispatch sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
@@ -2990,28 +3029,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_does_not_auto_complete_rework_dispatch() {
+    async fn idle_hook_pg_does_not_auto_complete_rework_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
         let card_id = "card-rework";
         let dispatch_id = "dispatch-rework";
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
-                 VALUES (?1, 'Rework Card', 'rework', ?2, datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![card_id, dispatch_id],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-                 VALUES (?1, ?2, 'ch-td', 'rework', 'pending', 'Rework Card', '{}', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![dispatch_id, card_id],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ($1, 'Rework Card', 'rework', $2, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ($1, $2, 'ch-td', 'rework', 'pending', 'Rework Card', '{}', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (working_status, _) = hook_session(
             State(state.clone()),
@@ -3055,30 +3099,26 @@ mod tests {
         .await;
         assert_eq!(idle_status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
         // rework dispatches must NOT be auto-completed on idle —
         // they require explicit completion from turn_bridge
-        let card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let dispatch_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-rework'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let card_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind(card_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let dispatch_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let active_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-rework'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // Card stays in rework — must NOT advance to review (which would happen
         // if idle auto-completed the rework dispatch).
@@ -3092,31 +3132,39 @@ mod tests {
             Some(dispatch_id),
             "idle rework sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn idle_hook_does_not_auto_complete_pending_review_dispatch() {
+    async fn idle_hook_pg_does_not_auto_complete_pending_review_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
         let card_id = "card-review";
         let dispatch_id = "dispatch-review";
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
-                 VALUES (?1, 'Review Card', 'review', ?2, datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![card_id, dispatch_id],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-                 VALUES (?1, ?2, 'project-agentdesk', 'review', 'pending', '[Review R1] Review Card', '{}', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![dispatch_id, card_id],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ($1, 'Review Card', 'review', $2, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ($1, $2, 'project-agentdesk', 'review', 'pending', '[Review R1] Review Card', '{}', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (working_status, _) = hook_session(
             State(state.clone()),
@@ -3160,28 +3208,25 @@ mod tests {
         .await;
         assert_eq!(idle_status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let dispatch_status: String = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let dispatch_result: Option<String> = conn
-            .query_row(
-                "SELECT result FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let dispatch_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let dispatch_result = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT result FROM task_dispatches WHERE id = $1",
+        )
+        .bind(dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let active_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         // review dispatches must stay pending until an explicit review-verdict arrives
         assert_eq!(dispatch_status, "pending");
@@ -3191,6 +3236,9 @@ mod tests {
             Some(dispatch_id),
             "idle review sessions must keep sticky active_dispatch_id for 180-minute TTL cleanup"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
@@ -3287,26 +3335,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_without_dispatch_id_preserves_existing_dispatch_binding() {
+    async fn idle_hook_without_dispatch_id_pg_preserves_existing_dispatch_binding() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
-                 VALUES ('card-sticky', 'Sticky Card', 'in_progress', 'dispatch-sticky', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-                 VALUES ('dispatch-sticky', 'card-sticky', 'project-agentdesk', 'implementation', 'completed', 'Sticky', '{}', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-sticky', 'Sticky Card', 'in_progress', 'dispatch-sticky', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ('dispatch-sticky', 'card-sticky', 'project-agentdesk', 'implementation', 'completed', 'Sticky', '{}', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (working_status, _) = hook_session(
             State(state.clone()),
@@ -3391,38 +3440,40 @@ mod tests {
         .await;
         assert_eq!(idle_refresh_status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-sticky'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let active_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-sticky'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(active_dispatch_id.as_deref(), Some("dispatch-sticky"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn heartbeat_without_dispatch_id_does_not_resurrect_cleared_binding() {
+    async fn heartbeat_without_dispatch_id_pg_does_not_resurrect_cleared_binding() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, provider, status, active_dispatch_id, last_heartbeat, created_at)
-                 VALUES ('session-cleared', 'codex', 'working', 'dispatch-cleared', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE sessions SET active_dispatch_id = NULL WHERE session_key = 'session-cleared'",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES ('session-cleared', 'codex', 'working', 'dispatch-cleared', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE sessions SET active_dispatch_id = NULL WHERE session_key = 'session-cleared'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, _) = hook_session(
             State(state),
@@ -3445,33 +3496,38 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-cleared'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let active_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-cleared'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(active_dispatch_id, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn hook_session_turn_activity_refreshes_last_heartbeat_from_created_at() {
+    async fn hook_session_turn_activity_pg_refreshes_last_heartbeat_from_created_at() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, provider, status, created_at, last_heartbeat)
-                 VALUES ('session-heartbeat', 'codex', 'idle', '2026-04-09 01:02:03', NULL)",
-                [],
-            )
+        let seeded_created_at: chrono::DateTime<chrono::Utc> = "2026-04-09T01:02:03Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, created_at, last_heartbeat)
+             VALUES ('session-heartbeat', 'codex', 'idle', $1, NULL)",
+        )
+        .bind(seeded_created_at)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, _) = hook_session(
             State(state),
@@ -3494,23 +3550,28 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (created_at, last_heartbeat): (String, Option<String>) = conn
-            .query_row(
-                "SELECT created_at, last_heartbeat
-                 FROM sessions
-                 WHERE session_key = 'session-heartbeat'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(created_at, "2026-04-09 01:02:03");
+        let (created_at, last_heartbeat) = sqlx::query_as::<
+            _,
+            (
+                chrono::DateTime<chrono::Utc>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(
+            "SELECT created_at, last_heartbeat
+             FROM sessions
+             WHERE session_key = 'session-heartbeat'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(created_at, seeded_created_at);
         assert!(
-            last_heartbeat
-                .as_deref()
-                .is_some_and(|value| value > created_at.as_str()),
+            last_heartbeat.is_some_and(|value| value > created_at),
             "turn activity must refresh last_heartbeat beyond the original created_at"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -3826,49 +3887,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_thread_sessions_handler_reports_deleted_legacy_thread_rows() {
+    async fn gc_thread_sessions_handler_pg_reports_deleted_legacy_thread_rows() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            insert_gc_candidate_session(
-                &conn,
-                "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120",
-                "idle",
-                None,
-                None,
-                "-2 hours",
-            );
-        }
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, last_heartbeat, created_at)
+             VALUES ($1, 'codex', 'idle', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours')",
+        )
+        .bind("mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, body) = gc_thread_sessions(State(state)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response_json(body)["gc_threads"], 1);
 
-        let conn = db.lock().unwrap();
-        let remaining: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        let remaining = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
             .unwrap();
         assert_eq!(remaining, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn thread_session_resolves_agent_from_parent_channel() {
+    async fn thread_session_pg_resolves_agent_from_parent_channel() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
-                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Post session with thread channel name
         let (status, _) = hook_session(
@@ -3892,33 +3956,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
-                ["mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (agent_id, thread_channel_id) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = $1",
+        )
+        .bind("mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id.as_deref(), Some("1485400795435372796"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn thread_session_resolves_alt_channel_agent_from_session_key_fallback() {
+    async fn thread_session_pg_resolves_alt_channel_agent_from_session_key_fallback() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
-                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let session_key = "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011";
         let (status, _) = hook_session(
@@ -3942,49 +4008,54 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (agent_id, thread_channel_id) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id.as_deref(), Some("1485506232256168011"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn direct_session_resolves_agent_from_dispatch_when_tmux_channel_is_truncated() {
+    async fn direct_session_pg_resolves_agent_from_dispatch_when_tmux_channel_is_truncated() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
         let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
         let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
         let session_key = format!("mac-mini:{tmux_name}");
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_alt)
-                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
-                [long_channel],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-                 VALUES ('card-dispatch-fallback', 'Dispatch Fallback', 'in_progress', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches
-                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
-                 VALUES ('dispatch-dispatch-fallback', 'card-dispatch-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Dispatch fallback', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_alt)
+             VALUES ('project-skillmanager', 'SkillManager', $1)",
+        )
+        .bind(long_channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-dispatch-fallback', 'Dispatch Fallback', 'in_progress', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-dispatch-fallback', 'card-dispatch-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Dispatch fallback', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, _) = hook_session(
             State(state),
@@ -4007,42 +4078,45 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let agent_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT agent_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn direct_session_ignores_missing_agent_from_dispatch_fallback() {
+    async fn direct_session_pg_ignores_missing_agent_from_dispatch_fallback() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
         let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
         let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
         let session_key = format!("mac-mini:{tmux_name}");
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-                 VALUES ('card-missing-dispatch-agent', 'Missing Dispatch Agent', 'in_progress', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches
-                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
-                 VALUES ('dispatch-missing-dispatch-agent', 'card-missing-dispatch-agent', 'project-missing-agent', 'implementation', 'dispatched', 'Dispatch fallback', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-missing-dispatch-agent', 'Missing Dispatch Agent', 'in_progress', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-missing-dispatch-agent', 'card-missing-dispatch-agent', 'project-missing-agent', 'implementation', 'dispatched', 'Dispatch fallback', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, body) = hook_session(
             State(state),
@@ -4065,35 +4139,37 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body:?}");
 
-        let conn = db.lock().unwrap();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let agent_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT agent_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn direct_session_ignores_explicit_agent_id_without_other_resolution_context() {
+    async fn direct_session_pg_ignores_explicit_agent_id_without_other_resolution_context() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
         let tmux_name = ProviderKind::Codex
             .build_tmux_session_name("project-skillmanager-extremely-verbose-channel-cdx");
         let session_key = format!("codex/hash123/mac-mini:{tmux_name}");
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_alt)
-                 VALUES ('project-spoofed', 'Spoofed Agent', 'spoofed-channel')",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_alt)
+             VALUES ('project-spoofed', 'Spoofed Agent', 'spoofed-channel')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, body) = hook_session(
             State(state),
@@ -4116,50 +4192,56 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body:?}");
 
-        let conn = db.lock().unwrap();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let agent_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT agent_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn thread_session_resolves_agent_from_thread_id_when_parent_channel_is_truncated() {
+    async fn thread_session_pg_resolves_agent_from_thread_id_when_parent_channel_is_truncated() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
         let thread_id = "1487044675541012490";
         let long_parent_channel = "project-skillmanager-extremely-verbose-channel-cdx";
         let tmux_name = ProviderKind::Codex
             .build_tmux_session_name(&format!("{long_parent_channel}-t{thread_id}"));
         let session_key = format!("mac-mini:{tmux_name}");
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_alt)
-                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
-                [long_parent_channel],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-                 VALUES ('card-thread-fallback', 'Thread Fallback', 'in_progress', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches
-                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
-                 VALUES ('dispatch-thread-fallback', 'card-thread-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Thread fallback', ?1, datetime('now'), datetime('now'))",
-                [thread_id],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_alt)
+             VALUES ('project-skillmanager', 'SkillManager', $1)",
+        )
+        .bind(long_parent_channel)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-thread-fallback', 'Thread Fallback', 'in_progress', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
+             VALUES ('dispatch-thread-fallback', 'card-thread-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Thread fallback', $1, NOW(), NOW())",
+        )
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, _) = hook_session(
             State(state),
@@ -4182,33 +4264,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (agent_id, stored_thread_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (agent_id, stored_thread_id) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
         assert_eq!(stored_thread_id.as_deref(), Some(thread_id));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn thread_session_accepts_explicit_thread_channel_id_without_thread_name() {
+    async fn thread_session_pg_accepts_explicit_thread_channel_id_without_thread_name() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
-                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let session_key = "mac-mini:AgentDesk-codex-adk-cdx";
         let (status, _) = hook_session(
@@ -4232,33 +4316,35 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (agent_id, thread_channel_id) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id.as_deref(), Some("1485506232256168011"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn direct_channel_session_keeps_agent_mapping_without_thread_id() {
+    async fn direct_channel_session_pg_keeps_agent_mapping_without_thread_id() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
-                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let session_key = "mac-mini:AgentDesk-codex-adk-cdx";
         let (status, _) = hook_session(
@@ -4282,43 +4368,47 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        let (agent_id, thread_channel_id) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn stale_local_tmux_session_is_filtered_from_active_dispatch_list() {
+    async fn stale_local_tmux_session_pg_is_filtered_from_active_dispatch_list() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(db.clone(), engine, pool.clone());
 
         let hostname = crate::services::platform::hostname_short();
         let session_key = format!("{hostname}:AgentDesk-stale-test-{}", std::process::id());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, name_ko, provider, avatar_emoji, status, created_at)
-                 VALUES ('ch-ad', 'AD', 'AD', 'claude', '🤖', 'idle', datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, active_dispatch_id, last_heartbeat)
-                 VALUES (?1, 'ch-ad', 'claude', 'working', 'stale session', 'dispatch-stale', datetime('now'))",
-                libsql_rusqlite::params![session_key],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, name_ko, provider, avatar_emoji, status, created_at)
+             VALUES ('ch-ad', 'AD', 'AD', 'claude', '🤖', 'idle', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, active_dispatch_id, last_heartbeat)
+             VALUES ($1, 'ch-ad', 'claude', 'working', 'stale session', 'dispatch-stale', NOW())",
+        )
+        .bind(&session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, Json(body)) = list_dispatched_sessions(
             State(state),
@@ -4330,6 +4420,9 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["sessions"].as_array().unwrap().len(), 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // #1067: sessions_tmux_output tests — watch-agent-turn skill promotion.
@@ -4358,31 +4451,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_tmux_output_shape_for_seeded_session_without_live_tmux() {
+    async fn sessions_tmux_output_pg_shape_for_seeded_session_without_live_tmux() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let session_id: i64;
         let tmux_name = format!("AgentDesk-codex-1067-output-{}", std::process::id());
         let session_key = format!("mac-mini:{tmux_name}");
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-1067");
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1067', 'codex', 'working', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![session_key.clone()],
-            )
-            .unwrap();
-            session_id = conn
-                .query_row(
-                    "SELECT id FROM sessions WHERE session_key = ?1",
-                    [&session_key],
-                    |row| row.get::<_, i64>(0),
-                )
+
+        seed_agent_pg(&pool, "agent-1067").await;
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES ($1, 'agent-1067', 'codex', 'working', NOW(), NOW())",
+        )
+        .bind(&session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session_id =
+            sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
+                .bind(&session_key)
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-        }
-        let state = AppState::test_state(db, engine);
+        let state = AppState::test_state_with_pg(db, engine, pool.clone());
 
         let (status, body) = tmux_output(
             State(state),
@@ -4405,33 +4498,36 @@ mod tests {
         assert_eq!(body["tmux_alive"], false);
         assert_eq!(body["recent_output"], "");
         assert!(body["captured_at_ms"].as_i64().unwrap() > 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn sessions_tmux_output_clamps_lines_to_allowed_range() {
+    async fn sessions_tmux_output_pg_clamps_lines_to_allowed_range() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let session_id: i64;
         let session_key = format!("mac-mini:AgentDesk-codex-1067-clamp-{}", std::process::id());
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-1067-clamp");
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1067-clamp', 'codex', 'idle', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![session_key.clone()],
-            )
-            .unwrap();
-            session_id = conn
-                .query_row(
-                    "SELECT id FROM sessions WHERE session_key = ?1",
-                    [&session_key],
-                    |row| row.get::<_, i64>(0),
-                )
+
+        seed_agent_pg(&pool, "agent-1067-clamp").await;
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES ($1, 'agent-1067-clamp', 'codex', 'idle', NOW(), NOW())",
+        )
+        .bind(&session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session_id =
+            sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
+                .bind(&session_key)
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-        }
-        let state = AppState::test_state(db, engine);
+        let state = AppState::test_state_with_pg(db, engine, pool.clone());
 
         let (status_hi, body_hi) = tmux_output(
             State(state.clone()),
@@ -4454,34 +4550,37 @@ mod tests {
         let body_lo: Value = response_json(body_lo);
         assert_eq!(body_lo["lines_requested"], -42);
         assert_eq!(body_lo["lines_effective"], 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn sessions_tmux_output_rejects_malformed_session_key() {
+    async fn sessions_tmux_output_pg_rejects_malformed_session_key() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
         let engine = test_engine(&db);
-        let session_id: i64;
         // session_key without ":" — conflicts with hostname:tmux_name format.
         let bad_session_key = "no-colon-here".to_string();
-        {
-            let conn = db.lock().unwrap();
-            seed_agent(&conn, "agent-1067-bad");
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1067-bad', 'codex', 'idle', datetime('now'), datetime('now'))",
-                libsql_rusqlite::params![bad_session_key.clone()],
-            )
-            .unwrap();
-            session_id = conn
-                .query_row(
-                    "SELECT id FROM sessions WHERE session_key = ?1",
-                    [&bad_session_key],
-                    |row| row.get::<_, i64>(0),
-                )
+
+        seed_agent_pg(&pool, "agent-1067-bad").await;
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES ($1, 'agent-1067-bad', 'codex', 'idle', NOW(), NOW())",
+        )
+        .bind(&bad_session_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session_id =
+            sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
+                .bind(&bad_session_key)
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-        }
-        let state = AppState::test_state(db, engine);
+        let state = AppState::test_state_with_pg(db, engine, pool.clone());
 
         let (status, body) = tmux_output(
             State(state),
@@ -4494,5 +4593,8 @@ mod tests {
         let body: Value = response_json(body);
         assert_eq!(body["session_id"], session_id);
         assert_eq!(body["session_key"], bad_session_key);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
