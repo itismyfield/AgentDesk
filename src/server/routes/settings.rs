@@ -752,10 +752,168 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    /// Per-test Postgres database lifecycle for the #1238 migration of the
+    /// settings handler tests, which now require a PG pool because the
+    /// runtime-config and kv_meta surfaces are PG-only after PR #1306.
+    struct SettingsPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl SettingsPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_settings_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "settings handler pg",
+            )
+            .await
+            .expect("create settings postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "settings handler pg",
+            )
+            .await
+            .expect("connect + migrate settings postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "settings handler pg",
+            )
+            .await
+            .expect("drop settings postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
+    /// Build a [`AppState`] backed by both an in-memory libsql DB *and* a real
+    /// PG pool, mirroring `meetings.rs` but additionally honoring the YAML
+    /// baseline used by some settings tests.
+    fn pg_app_state(
+        db: db::Db,
+        pool: sqlx::PgPool,
+        config: Option<crate::config::Config>,
+    ) -> AppState {
+        let mut state =
+            AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool);
+        if let Some(cfg) = config {
+            state.config = std::sync::Arc::new(cfg);
+        }
+        state
+    }
+
+    /// Apply the same kv_meta seed actions the runtime invokes for
+    /// `seed_config_defaults`, but routed at PG. Used by tests that need the
+    /// CONFIG_KEYS baseline staged in PG kv_meta before exercising handlers.
+    async fn pg_apply_config_default_seed_actions(
+        pool: &sqlx::PgPool,
+        config: &crate::config::Config,
+    ) {
+        for action in config_default_seed_actions(config) {
+            match action {
+                KvSeedAction::Put { key, value } => {
+                    sqlx::query(
+                        "INSERT INTO kv_meta (key, value)
+                         VALUES ($1, $2)
+                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .execute(pool)
+                    .await
+                    .expect("pg seed kv_meta put");
+                }
+                KvSeedAction::PutIfAbsent { key, value } => {
+                    sqlx::query(
+                        "INSERT INTO kv_meta (key, value)
+                         VALUES ($1, $2)
+                         ON CONFLICT (key) DO NOTHING",
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .execute(pool)
+                    .await
+                    .expect("pg seed kv_meta put_if_absent");
+                }
+                KvSeedAction::Delete { key } => {
+                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                        .bind(&key)
+                        .execute(pool)
+                        .await
+                        .expect("pg seed kv_meta delete");
+                }
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn get_config_entries_includes_merge_automation_and_omits_retired_keys() {
+    async fn get_config_entries_pg_includes_merge_automation_and_omits_retired_keys() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = pg_app_state(db.clone(), pool.clone(), None);
 
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -775,36 +933,39 @@ mod tests {
         assert!(!keys.contains("max_chain_depth"));
         assert!(!keys.contains("context_clear_percent"));
         assert!(!keys.contains("context_clear_idle_minutes"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn get_config_entries_reports_baseline_override_and_restart_metadata() {
+    async fn get_config_entries_pg_reports_baseline_override_and_restart_metadata() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
         let mut config = crate::config::Config::default();
         config.automation.strategy = Some("rebase".to_string());
         let expected_port = config.server.port.to_string();
 
-        {
-            let conn = db.lock().unwrap();
-            seed_config_defaults(&conn, &config);
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_strategy', 'merge')",
-                [],
+        pg_apply_config_default_seed_actions(&pool, &config).await;
+        for (key, value) in [
+            ("merge_strategy", "merge"),
+            ("max_review_rounds", "7"),
+            ("server_port", "9999"),
+        ] {
+            sqlx::query(
+                "INSERT INTO kv_meta (key, value)
+                 VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
             )
-            .unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('max_review_rounds', '7')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', '9999')",
-                [],
-            )
+            .bind(key)
+            .bind(value)
+            .execute(&pool)
+            .await
             .unwrap();
         }
 
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = pg_app_state(db.clone(), pool.clone(), Some(config));
         let (status, Json(body)) = get_config_entries(State(state)).await;
         assert_eq!(status, StatusCode::OK);
 
@@ -855,12 +1016,17 @@ mod tests {
         assert_eq!(server_port["override_active"], json!(false));
         assert_eq!(server_port["editable"], json!(false));
         assert_eq!(server_port["restart_behavior"], json!("config-only"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn patch_config_entries_accepts_merge_automation_and_provider_specific_keys() {
+    async fn patch_config_entries_pg_accepts_merge_automation_and_provider_specific_keys() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = pg_app_state(db.clone(), pool.clone(), None);
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state.clone()),
@@ -902,12 +1068,17 @@ mod tests {
             values.get("merge_allowed_authors"),
             Some(&Some("itismyfield,octocat"))
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn patch_config_entries_rejects_read_only_server_port() {
+    async fn patch_config_entries_pg_rejects_read_only_server_port() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = pg_app_state(db.clone(), pool.clone(), None);
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state),
@@ -921,15 +1092,16 @@ mod tests {
         assert_eq!(patch_body["updated"], json!(1));
         assert_eq!(patch_body["rejected"], json!(["server_port"]));
 
-        let conn = db.lock().unwrap();
-        let server_port_override_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM kv_meta WHERE key = 'server_port' AND value = '9999'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let server_port_override_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM kv_meta WHERE key = 'server_port' AND value = '9999'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(server_port_override_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -1134,7 +1306,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_runtime_config_uses_yaml_baseline_from_app_state() {
+    async fn get_runtime_config_pg_uses_yaml_baseline_from_app_state() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
         let mut config = crate::config::Config::default();
         config.runtime.dispatch_poll_sec = Some(45);
@@ -1145,7 +1319,7 @@ mod tests {
             Some("cancelled,failed,expired".to_string());
         config.runtime.stale_dispatched_recover_null_dispatch = Some(false);
         config.runtime.stale_dispatched_recover_missing_dispatch = Some(false);
-        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let state = pg_app_state(db.clone(), pool.clone(), Some(config));
 
         let (status, Json(body)) = get_runtime_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -1173,12 +1347,17 @@ mod tests {
             body["current"]["staleDispatchedRecoverMissingDispatch"],
             json!(false)
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn put_runtime_config_mirrors_scalar_keys_for_runtime_consumers() {
+    async fn put_runtime_config_pg_mirrors_scalar_keys_for_runtime_consumers() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = pg_app_state(db.clone(), pool.clone(), None);
 
         let (status, _) = put_runtime_config(
             State(state),
@@ -1195,53 +1374,49 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let conn = db.lock().unwrap();
-        let stale_sec: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let stale_sec: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(stale_sec, "900");
-        let max_entry_retries: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'maxEntryRetries'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let max_entry_retries: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'maxEntryRetries'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(max_entry_retries, "4");
-        let stale_grace_min: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedGraceMin'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let stale_grace_min: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'staleDispatchedGraceMin'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(stale_grace_min, "5");
-        let stale_terminal_statuses: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedTerminalStatuses'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let stale_terminal_statuses: String = sqlx::query_scalar(
+            "SELECT value FROM kv_meta WHERE key = 'staleDispatchedTerminalStatuses'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(stale_terminal_statuses, "cancelled,failed,expired");
-        let stale_recover_null_dispatch: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'staleDispatchedRecoverNullDispatch'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let stale_recover_null_dispatch: String = sqlx::query_scalar(
+            "SELECT value FROM kv_meta WHERE key = 'staleDispatchedRecoverNullDispatch'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(stale_recover_null_dispatch, "false");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
-    async fn put_settings_is_full_replace_and_strips_retired_company_keys() {
+    async fn put_settings_pg_is_full_replace_and_strips_retired_company_keys() {
+        let pg_db = SettingsPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let state = AppState::test_state(db.clone(), test_engine(&db));
+        let state = pg_app_state(db.clone(), pool.clone(), None);
 
         let (first_status, _) = put_settings(
             State(state.clone()),
@@ -1270,5 +1445,8 @@ mod tests {
 
         let (_, Json(second_body)) = get_settings(State(state)).await;
         assert_eq!(second_body, json!({"theme": "light"}));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
