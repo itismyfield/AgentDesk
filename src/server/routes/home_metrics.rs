@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_kpi_trends_clamps_invalid_days_and_returns_full_envelope() {
+    async fn home_kpi_pg_trends_clamps_invalid_days_and_returns_full_envelope() {
         let pg = TestPg::create().await;
         let pool = pg.pool().await;
 
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_kpi_in_progress_groups_dispatches_by_local_date() {
+    async fn home_kpi_pg_in_progress_groups_dispatches_by_local_date() {
         let pg = TestPg::create().await;
         let pool = pg.pool().await;
 
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_kpi_rate_limit_payload_uses_cached_provider_data() {
+    async fn home_kpi_pg_rate_limit_payload_uses_cached_provider_data() {
         let pg = TestPg::create().await;
         let pool = pg.pool().await;
 
