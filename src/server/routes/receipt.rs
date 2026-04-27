@@ -76,6 +76,46 @@ fn write_cached_token_analytics(period: &str, data: Arc<receipt::TokenAnalyticsD
     }
 }
 
+/// Shared cache-or-compute helper for the token-analytics filesystem scan.
+/// Used by both `/api/token-analytics` and `/api/home/kpi-trends` so the
+/// dashboard's first paint pays at most one ~9 s scan per period instead of
+/// one per endpoint (#1303).
+///
+/// Returns `None` only when the blocking task panics; the caller is expected
+/// to surface a graceful fallback (empty arrays + warn log) rather than 5xx.
+pub(crate) async fn cached_or_collect_token_analytics(
+    period_id: &str,
+    days: i64,
+    label: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Arc<receipt::TokenAnalyticsData>> {
+    if let Some(cached) = read_cached_token_analytics(period_id) {
+        return Some(cached);
+    }
+    let local_now = now.with_timezone(&Local);
+    let start_date = local_now.date_naive() - chrono::Duration::days(days.saturating_sub(1));
+    let start = Local
+        .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|| now - chrono::Duration::days(days));
+    let label_owned = label.to_string();
+    let period_owned = period_id.to_string();
+    let data = match tokio::task::spawn_blocking(move || {
+        receipt::collect_token_analytics(start, now, &label_owned, &period_owned)
+    })
+    .await
+    {
+        Ok(data) => Arc::new(data),
+        Err(error) => {
+            tracing::warn!(period = period_id, error = %error, "token-analytics scan failed");
+            return None;
+        }
+    };
+    write_cached_token_analytics(period_id, Arc::clone(&data));
+    Some(data)
+}
+
 /// Pre-warm the token-analytics in-process cache for every period the
 /// dashboard requests on first paint. The first home/stats visit on a fresh
 /// dcserver previously paid the ~9s filesystem scan synchronously while the

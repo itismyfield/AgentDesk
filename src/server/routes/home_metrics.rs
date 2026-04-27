@@ -71,28 +71,16 @@ pub async fn home_kpi_trends(
     let local_today = now.with_timezone(&Local).date_naive();
     let date_keys = day_window(local_today, days);
 
-    // ── Tokens + cost (filesystem scan, off the blocking pool) ────────────
-    let start_date = local_today - Duration::days(days.saturating_sub(1));
-    let start = Local
-        .from_local_datetime(&start_date.and_hms_opt(0, 0, 0).unwrap())
-        .single()
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| now - Duration::days(days));
+    // ── Tokens + cost ─────────────────────────────────────────────────────
+    // Reuse the shared receipt::token-analytics 30 s in-process cache (#1303)
+    // so cold dashboard loads don't pay two ~9 s filesystem scans (one here,
+    // one for /api/token-analytics).
     let label = format!("Last {days} Days");
-    let period = format!("{days}d");
-    let analytics_data = match tokio::task::spawn_blocking(move || {
-        crate::receipt::collect_token_analytics(start, now, &label, &period)
-    })
-    .await
-    {
-        Ok(data) => Some(data),
-        Err(error) => {
-            tracing::warn!(error = %error, "home_kpi_trends token-analytics scan failed");
-            None
-        }
-    };
+    let period_id = format!("{days}d");
+    let analytics_data =
+        super::receipt::cached_or_collect_token_analytics(&period_id, days, &label, now).await;
 
-    let (tokens_values, cost_values) = match analytics_data.as_ref() {
+    let (tokens_values, cost_values) = match analytics_data.as_deref() {
         Some(data) => {
             let mut by_day: BTreeMap<String, (u64, f64)> = BTreeMap::new();
             for day in &data.daily {
