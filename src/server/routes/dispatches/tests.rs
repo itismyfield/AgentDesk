@@ -35,6 +35,101 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
 }
 
+fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+    let mut config = crate::config::Config::default();
+    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.hot_reload = false;
+    PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+}
+
+/// Per-test Postgres database lifecycle for the #1238 migration of
+/// dispatches handler tests, which now require a PG pool.
+struct DispatchesPgDatabase {
+    _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    admin_url: String,
+    database_name: String,
+    database_url: String,
+}
+
+impl DispatchesPgDatabase {
+    async fn create() -> Self {
+        let lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let admin_url = pg_test_admin_database_url();
+        let database_name = format!("agentdesk_dispatches_{}", uuid::Uuid::new_v4().simple());
+        let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+        crate::db::postgres::create_test_database(
+            &admin_url,
+            &database_name,
+            "dispatches handler pg",
+        )
+        .await
+        .expect("create dispatches postgres test db");
+
+        Self {
+            _lifecycle: lifecycle,
+            admin_url,
+            database_name,
+            database_url,
+        }
+    }
+
+    async fn migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(
+            &self.database_url,
+            "dispatches handler pg",
+        )
+        .await
+        .expect("connect + migrate dispatches postgres test db")
+    }
+
+    async fn drop(self) {
+        crate::db::postgres::drop_test_database(
+            &self.admin_url,
+            &self.database_name,
+            "dispatches handler pg",
+        )
+        .await
+        .expect("drop dispatches postgres test db");
+    }
+}
+
+fn pg_test_base_database_url() -> String {
+    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    let user = std::env::var("PGUSER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "postgres".to_string());
+    let password = std::env::var("PGPASSWORD")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let host = std::env::var("PGHOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = std::env::var("PGPORT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "5432".to_string());
+    match password {
+        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+        None => format!("postgresql://{user}@{host}:{port}"),
+    }
+}
+
+fn pg_test_admin_database_url() -> String {
+    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "postgres".to_string());
+    format!("{}/{}", pg_test_base_database_url(), admin_db)
+}
+
 #[derive(Default)]
 struct MockDispatchSummaryState {
     archived: bool,
@@ -1362,25 +1457,37 @@ async fn pending_dispatch_lookup_ignores_legacy_auto_queue_run_unified_thread_id
 }
 
 #[tokio::test]
-async fn pending_dispatch_lookup_finds_review_thread_dispatch() {
+async fn pending_dispatch_lookup_pg_finds_review_thread_dispatch() {
+    let pg_db = DispatchesPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, active_thread_id, created_at, updated_at)
-             VALUES ('card-review', 'Review card', 'review', '999888777', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
-             VALUES ('dispatch-review', 'card-review', 'review', 'pending', '[Review R1] card-review', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
+    let state =
+        AppState::test_state_with_pg(db.clone(), test_engine_with_pg(pool.clone()), pool.clone());
 
-    let state = AppState::test_state(db.clone(), test_engine(&db));
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, active_thread_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())",
+    )
+    .bind("card-review")
+    .bind("Review card")
+    .bind("review")
+    .bind("999888777")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+    )
+    .bind("dispatch-review")
+    .bind("card-review")
+    .bind("review")
+    .bind("pending")
+    .bind("[Review R1] card-review")
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let (status, body) = super::get_pending_dispatch_for_thread(
         State(state),
         Query(std::collections::HashMap::from([(
@@ -1392,6 +1499,9 @@ async fn pending_dispatch_lookup_finds_review_thread_dispatch() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.0["dispatch_id"], "dispatch-review");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]

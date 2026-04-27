@@ -1214,10 +1214,7 @@ fn find_current_stage(
 mod tests {
     use super::*;
     use crate::db::Db;
-    use crate::db::session_transcripts::{
-        PersistSessionTranscript, SessionTranscriptEvent, SessionTranscriptEventKind,
-        persist_turn_on_conn,
-    };
+    use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
     use crate::engine::PolicyEngine;
 
     fn test_db() -> Db {
@@ -1232,61 +1229,177 @@ mod tests {
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
     }
 
-    #[tokio::test]
-    async fn get_card_transcripts_returns_linked_turns() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
 
-        {
-            let mut conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('agent-card-transcript', 'Card Transcript Agent', 'codex', 'idle', 0)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, github_issue_number, created_at, updated_at)
-                 VALUES ('card-transcript-1', 'Transcript Card', 'in_progress', 525, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
-                 ) VALUES (
-                    'dispatch-card-transcript-1', 'card-transcript-1', 'agent-card-transcript',
-                    'implementation', 'completed', 'Transcript Dispatch', datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
+    /// Per-test Postgres database lifecycle for the #1238 migration of
+    /// pipeline handler tests, which now require a PG pool.
+    struct PipelinePgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
 
-            let events = vec![SessionTranscriptEvent {
-                kind: SessionTranscriptEventKind::Result,
-                tool_name: None,
-                summary: Some("done".to_string()),
-                content: "viewer wired".to_string(),
-                status: Some("success".to_string()),
-                is_error: false,
-            }];
-            persist_turn_on_conn(
-                &mut conn,
-                PersistSessionTranscript {
-                    turn_id: "discord:card-transcript:1",
-                    session_key: Some("host:card-transcript"),
-                    channel_id: Some("chan-card"),
-                    agent_id: Some("agent-card-transcript"),
-                    provider: Some("codex"),
-                    dispatch_id: Some("dispatch-card-transcript-1"),
-                    user_message: "wire transcript viewer",
-                    assistant_message: "wired",
-                    events: &events,
-                    duration_ms: Some(6100),
-                },
+    impl PipelinePgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_pipeline_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "pipeline handler pg",
             )
-            .unwrap();
+            .await
+            .expect("create pipeline postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
         }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "pipeline handler pg",
+            )
+            .await
+            .expect("connect + migrate pipeline postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "pipeline handler pg",
+            )
+            .await
+            .expect("drop pipeline postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
+    #[tokio::test]
+    async fn get_card_transcripts_pg_returns_linked_turns() {
+        let pg_db = PipelinePgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let db = test_db();
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, status, xp) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("agent-card-transcript")
+        .bind("Card Transcript Agent")
+        .bind("codex")
+        .bind("idle")
+        .bind(0_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, github_issue_number, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-transcript-1")
+        .bind("Transcript Card")
+        .bind("in_progress")
+        .bind(525_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-card-transcript-1")
+        .bind("card-transcript-1")
+        .bind("agent-card-transcript")
+        .bind("implementation")
+        .bind("completed")
+        .bind("Transcript Dispatch")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let events = vec![SessionTranscriptEvent {
+            kind: SessionTranscriptEventKind::Result,
+            tool_name: None,
+            summary: Some("done".to_string()),
+            content: "viewer wired".to_string(),
+            status: Some("success".to_string()),
+            is_error: false,
+        }];
+        let events_json = serde_json::to_string(&events).unwrap();
+        sqlx::query(
+            "INSERT INTO session_transcripts (
+                turn_id, session_key, channel_id, agent_id, provider, dispatch_id,
+                user_message, assistant_message, events_json, duration_ms
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CAST($9 AS jsonb), $10)",
+        )
+        .bind("discord:card-transcript:1")
+        .bind("host:card-transcript")
+        .bind("chan-card")
+        .bind("agent-card-transcript")
+        .bind("codex")
+        .bind("dispatch-card-transcript-1")
+        .bind("wire transcript viewer")
+        .bind("wired")
+        .bind(events_json)
+        .bind(6100_i32)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let (status, Json(body)) = get_card_transcripts(
             State(state),
@@ -1312,17 +1425,25 @@ mod tests {
         assert_eq!(body["transcripts"][0]["github_issue_number"], 525);
         assert_eq!(body["transcripts"][0]["events"][0]["kind"], "result");
         assert_eq!(body["transcripts"][0]["duration_ms"], 6100);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// #1097 (910-3): pipeline_stages is file-canonical, so PUT/DELETE
     /// must be rejected with HTTP 405.
     #[tokio::test]
-    async fn put_stages_rejected_when_db_source_of_truth_is_file() {
+    async fn put_stages_pg_rejected_when_db_source_of_truth_is_file() {
+        let pg_db = PipelinePgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
+        let state = AppState::test_state_with_pg(
+            db.clone(),
+            test_engine_with_pg(pool.clone()),
+            pool.clone(),
+        );
 
-        // pipeline_stages is seeded as file-canonical by the schema migrator.
+        // pipeline_stages is seeded as file-canonical by migration 0019.
         let body = PutStagesBody {
             repo: "owner/repo".to_string(),
             stages: vec![PutStageItem {
@@ -1362,6 +1483,9 @@ mod tests {
         .await;
         assert_eq!(status2, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(json2["table"], "pipeline_stages");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // ── #1082 validator tests ──────────────────────────────────
