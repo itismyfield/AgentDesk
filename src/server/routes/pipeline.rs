@@ -637,6 +637,11 @@ pub async fn set_repo_pipeline(
                     .bind(&id)
                     .execute(pool)
                     .await;
+                // #1230 (codex P2) — refresh after rollback too, so a repo that
+                // previously had override warnings doesn't keep reporting them
+                // through /api/health and the kv_meta mirror after the override
+                // is cleared by the rollback.
+                crate::pipeline::refresh_override_health_report(&state.db, Some(pool)).await;
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
@@ -729,6 +734,11 @@ pub async fn set_agent_pipeline(
                     .bind(&agent_id)
                     .execute(pool)
                     .await;
+                // #1230 (codex P2) — refresh after rollback too, so an agent
+                // that previously had override warnings doesn't keep
+                // reporting them through /api/health and the kv_meta mirror
+                // after the override is cleared by the rollback.
+                crate::pipeline::refresh_override_health_report(&state.db, Some(pool)).await;
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
