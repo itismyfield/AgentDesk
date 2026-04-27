@@ -121,3 +121,14 @@ Backups and migration residues (`*.pre-*`, `*.bak`, `*.migrated`, plus the one-s
 
 - `docs/architecture.md` is retained for historical architecture context and is marked deprecated. Its migration-era `role_map.json` references and old policy filenames such as `review-policy.js`, `timeout-policy.js`, and `reward-policy.js` are not canonical write targets.
 - `~/.adk/release/config/bot_settings.json.migrated` was archived into `~/.adk/release/config/.backups/2026-04-24/` by `scripts/archive-config-backups.sh` on 2026-04-24 (#1098). The canonical surface is `agentdesk.yaml`; do not reintroduce legacy snapshot files beside canonical config.
+
+## Code-Side Companion
+
+This document answers "which file do I edit?" for runtime/config/operator
+surfaces. The code-side companion that answers "which Rust module do I edit?"
+for in-flight migrations and known-legacy paths lives under
+[`docs/agent-maintenance/`](agent-maintenance/index.md) (#1279):
+
+- [`agent-maintenance/change-surfaces.md`](agent-maintenance/change-surfaces.md) — canonical modules, giant-file flags, `do_not_edit_without_migration_plan` list.
+- [`agent-maintenance/discord-outbound-migration.md`](agent-maintenance/discord-outbound-migration.md) — per-callsite coverage map (#1006, #1175, #1280).
+- [`agent-maintenance/known-legacy.md`](agent-maintenance/known-legacy.md) — intentionally-legacy modules with cleanup-owner issue numbers.
