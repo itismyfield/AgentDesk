@@ -313,6 +313,7 @@ fn advance_tmux_relay_confirmed_end(
     let mut current = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
+    let mut won_advance = false;
 
     while current < target_end {
         match relay_coord.confirmed_end_offset.compare_exchange(
@@ -321,7 +322,10 @@ fn advance_tmux_relay_confirmed_end(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
         ) {
-            Ok(_) => break,
+            Ok(_) => {
+                won_advance = true;
+                break;
+            }
             Err(observed) => current = observed,
         }
     }
@@ -339,12 +343,18 @@ fn advance_tmux_relay_confirmed_end(
     // advance so a later output-regression check can tell apart same-wrapper
     // rotation (`truncate_jsonl_head_safe` rename) from cancel→respawn (new
     // `.generation` mtime). Mirrors the same snapshot in
-    // `tmux::advance_watcher_confirmed_end`; without it, deliveries that
-    // advance the watermark via this turn_bridge path would leave the
-    // stored mtime stale, and the next regression detection would
-    // misclassify a same-wrapper rotation as fresh and reset the
-    // already-delivered output back to 0.
-    if let Some(session) = tmux_session_name {
+    // `tmux::advance_watcher_confirmed_end`.
+    //
+    // Codex P2 (PR #1271 round 3): gate the store on actually winning an
+    // advance. If `target_end <= current` (no advance — we either lost the
+    // CAS race or the stored watermark is already at/past the target)
+    // overwriting the stored mtime with the *current* wrapper's mtime
+    // would falsely associate the OLD offset with the NEW wrapper, and a
+    // subsequent regression check would misclassify a fresh respawn as
+    // same-wrapper rotation and pin to EOF — losing the response below
+    // EOF. Only the writer that actually moves the offset is allowed to
+    // refresh the mtime baseline.
+    if won_advance && let Some(session) = tmux_session_name {
         let mtime = super::tmux::read_generation_file_mtime_ns(session);
         if mtime != 0 {
             relay_coord
