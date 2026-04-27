@@ -36,6 +36,12 @@ const UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS: i64 = 30 * 24 * 60 * 60;
 // not gated on this cache — they go straight to PG, and stale reads simply
 // surface within the TTL window.
 const ANALYTICS_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
+/// Hard cap on cached entries across all analytics endpoints. With unique
+/// `provider`/`channelId`/`eventType`/`date`/`limit` keys an unbounded
+/// cache could grow process memory until restart (codex P2 round 2 #1299).
+/// 4096 entries × ~8 KB body × etag overhead ≈ 32 MB worst case, which is
+/// generous yet still bounded.
+const ANALYTICS_CACHE_MAX_ENTRIES: usize = 4096;
 
 #[derive(Clone)]
 struct CachedJson {
@@ -66,9 +72,32 @@ fn write_analytics_cache(key: String, body: serde_json::Value) -> CachedJson {
         etag,
     };
     if let Ok(mut cache) = analytics_response_cache().lock() {
+        // Codex P2 round 2 on #1299: TTL-only check on read leaks expired
+        // entries when query parameters vary. Sweep expired entries on every
+        // write, plus enforce a hard cap so a single hot path with many
+        // distinct keys can't grow process memory unbounded.
+        prune_expired_analytics_cache_entries(&mut cache);
         cache.insert(key, entry.clone());
     }
     entry
+}
+
+/// Drop expired entries; if still over `ANALYTICS_CACHE_MAX_ENTRIES` after
+/// pruning, evict the oldest by `cached_at` until under the cap.
+fn prune_expired_analytics_cache_entries(cache: &mut HashMap<String, CachedJson>) {
+    cache.retain(|_, entry| entry.cached_at.elapsed() <= ANALYTICS_CACHE_TTL);
+    if cache.len() <= ANALYTICS_CACHE_MAX_ENTRIES {
+        return;
+    }
+    let mut by_age: Vec<(String, Instant)> = cache
+        .iter()
+        .map(|(k, v)| (k.clone(), v.cached_at))
+        .collect();
+    by_age.sort_by_key(|(_, t)| *t);
+    let drop_count = cache.len() - ANALYTICS_CACHE_MAX_ENTRIES;
+    for (key, _) in by_age.into_iter().take(drop_count) {
+        cache.remove(&key);
+    }
 }
 
 #[cfg(test)]
