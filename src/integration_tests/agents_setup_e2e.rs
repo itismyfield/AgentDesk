@@ -30,7 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use crate::server::routes::api_router;
+use crate::server::routes::api_router_with_pg;
 
 // Reuse the mock Discord transport from the discord_flow harness instead of
 // instantiating a second copy under this module — keeps the dedup invariants
@@ -83,10 +83,115 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn build_app(db: db::Db, engine: crate::engine::PolicyEngine) -> axum::Router {
+/// PG-backed app builder used by the wizard E2E lane. Wires the router with
+/// a Postgres pool so the `/agents/setup` route — PG-only after #1306 — can
+/// persist its mutations.
+fn build_app_with_pg(
+    db: db::Db,
+    engine: crate::engine::PolicyEngine,
+    pg_pool: sqlx::PgPool,
+) -> axum::Router {
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router(db, engine, crate::config::Config::default(), tx, buf, None)
+    api_router_with_pg(
+        Some(db),
+        engine,
+        crate::config::Config::default(),
+        tx,
+        buf,
+        None,
+        Some(pg_pool),
+    )
+}
+
+/// Per-test Postgres database lifecycle — each migrated wizard E2E test
+/// creates an isolated DB so concurrent runs don't share `agents` /
+/// `agent_archive` rows. Modeled on the `PgRecoveryTestDatabase` pattern in
+/// `integration_tests/tests/high_risk_recovery.rs`.
+struct WizardPgDatabase {
+    _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    admin_url: String,
+    database_name: String,
+    database_url: String,
+}
+
+impl WizardPgDatabase {
+    async fn create() -> Self {
+        let lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let admin_url = pg_test_admin_database_url();
+        let database_name = format!("agentdesk_wizard_e2e_{}", uuid::Uuid::new_v4().simple());
+        let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+        crate::db::postgres::create_test_database(
+            &admin_url,
+            &database_name,
+            "agents_setup_e2e wizard pg",
+        )
+        .await
+        .expect("create wizard postgres test db");
+
+        Self {
+            _lifecycle: lifecycle,
+            admin_url,
+            database_name,
+            database_url,
+        }
+    }
+
+    async fn migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(
+            &self.database_url,
+            "agents_setup_e2e wizard pg",
+        )
+        .await
+        .expect("connect + migrate wizard postgres test db")
+    }
+
+    async fn drop(self) {
+        crate::db::postgres::drop_test_database(
+            &self.admin_url,
+            &self.database_name,
+            "agents_setup_e2e wizard pg",
+        )
+        .await
+        .expect("drop wizard postgres test db");
+    }
+}
+
+fn pg_test_base_database_url() -> String {
+    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    let user = std::env::var("PGUSER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "postgres".to_string());
+    let password = std::env::var("PGPASSWORD")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let host = std::env::var("PGHOST")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = std::env::var("PGPORT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "5432".to_string());
+    match password {
+        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+        None => format!("postgresql://{user}@{host}:{port}"),
+    }
+}
+
+fn pg_test_admin_database_url() -> String {
+    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "postgres".to_string());
+    format!("{}/{}", pg_test_base_database_url(), admin_db)
 }
 
 /// Materializes the runtime-root layout the wizard expects: empty
@@ -133,18 +238,22 @@ async fn post_json(
 
 /// DoD scenario 1: dashboard wizard happy path (dry-run + execute) ends with
 /// the agent on disk + in DB, **and** a relayed message reaches the mock
-/// Discord transport for the bound channel.
+/// Discord transport for the bound channel. Migrated to a Postgres fixture
+/// for #1238 — the SQLite-only ancestor panicked in `/agents/setup` after
+/// PR #1306 made the route PG-only.
 #[tokio::test]
-async fn wizard_creates_agent_and_delivers_to_bound_channel() {
+async fn wizard_creates_agent_and_delivers_to_bound_channel_pg() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
 
     seed_runtime_root(runtime_root.path());
 
+    let pg_db = WizardPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = build_app(db.clone(), engine);
+    let engine = test_engine_with_pg(pool.clone());
+    let app = build_app_with_pg(db.clone(), engine, pool.clone());
     let agent_id = "wiz-agent";
     let channel_id = "1473922824350601301";
 
@@ -236,15 +345,12 @@ async fn wizard_creates_agent_and_delivers_to_bound_channel() {
             .is_file()
     );
 
-    let db_channel: Option<String> = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT discord_channel_cdx FROM agents WHERE id = ?1",
-            [agent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let db_channel: Option<String> =
+        sqlx::query_scalar("SELECT discord_channel_cdx FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(db_channel.as_deref(), Some(channel_id));
 
     let manifest_path = crate::runtime_layout::managed_skills_manifest_path(runtime_root.path());
@@ -269,22 +375,27 @@ async fn wizard_creates_agent_and_delivers_to_bound_channel() {
         "exactly one POST recorded for the bound channel"
     );
     assert_eq!(mock.call_count(), 1);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// DoD scenario 2: forcing a step to fail must produce a clean rollback —
 /// HTTP 500, `rolled_back[]` populated, *no* trace of the agent on disk or
-/// in DB.
+/// in DB. PG-fixture migration of the original SQLite-only test.
 #[tokio::test]
-async fn wizard_failure_injection_rolls_back_to_clean_state() {
+async fn wizard_failure_injection_rolls_back_to_clean_state_pg() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
     let _fail_env = EnvVarGuard::set("AGENTDESK_TEST_AGENT_SETUP_FAIL_AFTER", "prompt_file");
     seed_runtime_root(runtime_root.path());
 
+    let pg_db = WizardPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = build_app(db.clone(), engine);
+    let engine = test_engine_with_pg(pool.clone());
+    let app = build_app_with_pg(db.clone(), engine, pool.clone());
     let agent_id = "wiz-rollback";
     let body = serde_json::json!({
         "agent_id": agent_id,
@@ -324,30 +435,32 @@ async fn wizard_failure_injection_rolls_back_to_clean_state() {
             .join("IDENTITY.md")
             .exists()
     );
-    let count: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = ?1",
-            [agent_id],
-            |row| row.get(0),
-        )
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(count, 0, "rolled-back DB row must be absent");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// DoD scenario 3: archive then unarchive must round-trip the
-/// `agentdesk.yaml` block byte-for-byte.
+/// `agentdesk.yaml` block byte-for-byte. PG-fixture migration of the
+/// original SQLite-only test.
 #[tokio::test]
-async fn wizard_archive_unarchive_roundtrip() {
+async fn wizard_archive_unarchive_roundtrip_pg() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
     seed_runtime_root(runtime_root.path());
 
+    let pg_db = WizardPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = build_app(db.clone(), engine);
+    let engine = test_engine_with_pg(pool.clone());
+    let app = build_app_with_pg(db.clone(), engine, pool.clone());
     let agent_id = "wiz-archive";
     let channel_id = "1473922824350601303";
 
@@ -400,31 +513,34 @@ async fn wizard_archive_unarchive_roundtrip() {
         post_unarchive_yaml, snapshot_yaml,
         "unarchive must restore agentdesk.yaml byte-for-byte"
     );
-    let archive_state: String = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT state FROM agent_archive WHERE agent_id = ?1",
-            [agent_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let archive_state: String =
+        sqlx::query_scalar("SELECT state FROM agent_archive WHERE agent_id = $1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(archive_state, "unarchived");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// DoD scenario 4: duplicate must strip every sensitive field caller might
 /// try to inject; the new agent gets the new id + new channel and never
 /// inherits the source channel or any caller-supplied `system_prompt`.
+/// PG-fixture migration of the original SQLite-only test.
 #[tokio::test]
-async fn wizard_duplicate_strips_sensitive_fields() {
+async fn wizard_duplicate_strips_sensitive_fields_pg() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
     seed_runtime_root(runtime_root.path());
 
+    let pg_db = WizardPgDatabase::create().await;
+    let pool = pg_db.migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    let app = build_app(db.clone(), engine);
+    let engine = test_engine_with_pg(pool.clone());
+    let app = build_app_with_pg(db.clone(), engine, pool.clone());
     let source_id = "wiz-source";
     let source_channel = "1473922824350601304";
     let new_id = "wiz-source-copy";
@@ -484,26 +600,15 @@ async fn wizard_duplicate_strips_sensitive_fields() {
         Option<String>,
         Option<String>,
         Option<String>,
-    ) = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
-                    discord_channel_cdx, system_prompt
-             FROM agents WHERE id = ?1",
-            [new_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
+    ) = sqlx::query_as(
+        "SELECT id, discord_channel_id, discord_channel_alt, discord_channel_cc,
+                discord_channel_cdx, system_prompt
+         FROM agents WHERE id = $1",
+    )
+    .bind(new_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(copied_id, new_id);
     let all_channels = [&ch_primary, &ch_alt, &ch_cc, &ch_cdx];
     assert!(
@@ -524,15 +629,11 @@ async fn wizard_duplicate_strips_sensitive_fields() {
     );
 
     // Attacker-override id must not have created a row.
-    let attacker_rows: i64 = db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let attacker_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 'attacker-override'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(attacker_rows, 0);
 
     // Prompt was copied from the source's IDENTITY.md — not the body's
@@ -546,4 +647,7 @@ async fn wizard_duplicate_strips_sensitive_fields() {
     )
     .unwrap();
     assert_eq!(copied_prompt, "source identity body\n");
+
+    pool.close().await;
+    pg_db.drop().await;
 }

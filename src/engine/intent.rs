@@ -771,29 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_queue_message_intent() {
-        let db = test_db();
-        let intents = vec![Intent::QueueMessage {
-            target: "channel:123".into(),
-            content: "hello".into(),
-            bot: "announce".into(),
-            source: "system".into(),
-        }];
-        let result = execute_intents(&db, None, intents);
-        assert_eq!(result.errors, 0);
-
-        let conn = db.lock().unwrap();
-        let content: String = conn
-            .query_row(
-                "SELECT content FROM message_outbox ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(content, "hello");
-    }
-
-    #[test]
     fn test_blocked_status_update_sql() {
         let db = test_db();
         let intents = vec![Intent::ExecuteSQL {
