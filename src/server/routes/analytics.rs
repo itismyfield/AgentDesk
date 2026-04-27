@@ -809,12 +809,17 @@ pub async fn activity_heatmap(
     // and is backed by the new idx_task_dispatches_created_at index from
     // migration 0023. The result is ~24× fewer round trips and ~5–10× faster
     // wall-clock time on representative datasets.
+    // Codex P2 on #1299: `created_at::date = $1` casts the column and
+    // disables the plain `(created_at)` btree from migration 0023. Switch
+    // to a half-open range so the planner can use the index on large
+    // task_dispatches tables.
     let rows = match sqlx::query(
         "SELECT EXTRACT(HOUR FROM td.created_at)::BIGINT AS hour,
                 td.to_agent_id,
                 COUNT(*)::BIGINT AS cnt
            FROM task_dispatches td
-          WHERE td.created_at::date = $1::date
+          WHERE td.created_at >= $1::date
+            AND td.created_at < $1::date + INTERVAL '1 day'
             AND td.to_agent_id IS NOT NULL
           GROUP BY hour, td.to_agent_id",
     )
