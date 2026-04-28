@@ -1362,6 +1362,158 @@ mod tests {
         }
     }
 
+    fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    fn test_engine_with_pg_and_config(config: Config, pg_pool: sqlx::PgPool) -> PolicyEngine {
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    struct TestPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+        cleanup_armed: bool,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_engine_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(&admin_url, &database_name, "engine tests")
+                .await
+                .unwrap();
+
+            Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+                cleanup_armed: true,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, "engine tests")
+                .await
+                .unwrap()
+        }
+
+        async fn drop(mut self) {
+            let drop_result = crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "engine tests",
+            )
+            .await;
+            if drop_result.is_ok() {
+                self.cleanup_armed = false;
+            }
+            drop_result.expect("drop postgres test db");
+        }
+    }
+
+    impl Drop for TestPostgresDb {
+        fn drop(&mut self) {
+            if !self.cleanup_armed {
+                return;
+            }
+
+            cleanup_test_postgres_db_from_drop(self.admin_url.clone(), self.database_name.clone());
+        }
+    }
+
+    fn cleanup_test_postgres_db_from_drop(admin_url: String, database_name: String) {
+        let cleanup_database_name = database_name.clone();
+        let thread_name = format!("engine tests cleanup {cleanup_database_name}");
+        let spawn_result = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!(
+                            "engine tests cleanup runtime failed for {database_name}: {error}"
+                        );
+                        return;
+                    }
+                };
+
+                if let Err(error) = runtime.block_on(crate::db::postgres::drop_test_database(
+                    &admin_url,
+                    &database_name,
+                    "engine tests",
+                )) {
+                    eprintln!("engine tests cleanup failed for {database_name}: {error}");
+                }
+            });
+
+        match spawn_result {
+            Ok(handle) => {
+                if handle.join().is_err() {
+                    eprintln!("engine tests cleanup thread panicked for {cleanup_database_name}");
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "engine tests cleanup thread spawn failed for {cleanup_database_name}: {error}"
+                );
+            }
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
+    }
+
     #[test]
     fn test_engine_creates_runtime() {
         let db = test_db();
@@ -1871,9 +2023,8 @@ mod tests {
         assert_eq!(context_json["reset_reason"], "repeated_findings");
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. JS bridge cards.*/db.*/kanban.* now require PG. Migrate to PG fixture — tracked in #1342."]
-    fn queued_review_enter_replays_terminal_transition_hooks() {
+    #[tokio::test]
+    async fn queued_review_enter_replays_terminal_transition_hooks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("deferred-review-terminal.js"),
@@ -1896,19 +2047,23 @@ mod tests {
         )
         .unwrap();
 
-        let db = test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, priority) \
-                 VALUES ('card-deferred-review', 'Deferred review', 'review', 'medium')",
-                [],
-            )
-            .unwrap();
-        }
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, priority) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind("card-deferred-review")
+        .bind("Deferred review")
+        .bind("review")
+        .bind("medium")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let config = test_config_with_dir(dir.path());
-        let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
+        let engine = test_engine_with_pg_and_config(config, pool.clone());
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1932,10 +2087,9 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let deferred_count: i64 = db
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM deferred_hooks", [], |row| row.get(0))
+        let deferred_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deferred_hooks")
+            .fetch_one(&pool)
+            .await
             .expect("deferred_hooks table should be readable");
         assert_eq!(
             deferred_count, 0,
@@ -1945,24 +2099,23 @@ mod tests {
         blocker.join().unwrap();
         queued.join().unwrap();
 
-        let conn = db.lock().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = 'card-deferred-review'",
-                [],
-                |row| row.get(0),
-            )
+        let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind("card-deferred-review")
+            .fetch_one(&pool)
+            .await
             .expect("queued review hook should still move the card to done");
         assert_eq!(status, "done");
 
-        let terminal_marker: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'terminal_fired'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("terminal follow-up hook must fire for queued review transitions");
+        let terminal_marker: String =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("terminal_fired")
+                .fetch_one(&pool)
+                .await
+                .expect("terminal follow-up hook must fire for queued review transitions");
         assert_eq!(terminal_marker, "card-deferred-review");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // ── Hook orchestration determinism (#1079) ──────────────────────────
