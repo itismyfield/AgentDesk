@@ -10,12 +10,9 @@ pub mod session_transcripts;
 pub mod table_metadata;
 pub mod turns;
 
-use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use crate::config::Config;
 
 /// Thread-safe SQLite handle keyed by DB path.
 /// A lightweight mutex serializes write openings while readers and separate
@@ -151,28 +148,6 @@ pub fn wrap_conn(conn: Connection) -> Db {
         path,
         write_gate: Mutex::new(()),
     })
-}
-
-pub fn init(config: &Config) -> Result<Db> {
-    let db_path = config.data.dir.join(&config.data.db_name);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(&db_path)?;
-
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-    )?;
-    schema::migrate(&conn)?;
-
-    tracing::info!(
-        "Legacy SQLite compatibility DB initialized at {}",
-        db_path.display()
-    );
-    Ok(Arc::new(DbPool {
-        path: db_path,
-        write_gate: Mutex::new(()),
-    }))
 }
 
 #[cfg(test)]
