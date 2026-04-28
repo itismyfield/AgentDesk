@@ -1858,7 +1858,19 @@ function HomeOverviewPage({
         .slice(0, 6),
     [agents, stats?.top_agents],
   );
-  const doneCards = kanbanCards.filter((card) => card.status === "done").length;
+  /* Home kanban snapshot is meant for "what shipped today" rather than the
+     full archive: the cumulative `done` count crosses 800+ on long-running
+     workspaces and floods the column. Keep only the cards completed within
+     the last 24h, sorted by completion time so the three preview rows show
+     the most recent shipments. */
+  const KANBAN_DONE_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const recentDoneCards = useMemo(() => {
+    const cutoff = Date.now() - KANBAN_DONE_RECENT_WINDOW_MS;
+    return kanbanCards
+      .filter((card) => card.status === "done" && (card.completed_at ?? 0) >= cutoff)
+      .sort((a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0));
+  }, [kanbanCards]);
+  const recentDoneCount = recentDoneCards.length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
   const totalActionableCards = requestedCards + inProgressCards + blockedCards;
   const totalMeetings = meetings.length;
@@ -2471,12 +2483,26 @@ function HomeOverviewPage({
           >
             <div className="grid gap-3 lg:grid-cols-4">
               {kanbanColumns.map((column) => {
-                const cards = kanbanCards.filter((card) => card.status === column.id).slice(0, 3);
+                /* The done column shows only the last 24h of shipments
+                   (count + preview cards) so the snapshot stays focused
+                   on today's throughput rather than the full archive. */
+                const cards =
+                  column.id === "done"
+                    ? recentDoneCards.slice(0, 3)
+                    : kanbanCards.filter((card) => card.status === column.id).slice(0, 3);
                 return (
                   <div key={column.id} className="rounded-[1.5rem] border p-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
                         {column.label}
+                        {column.id === "done" ? (
+                          <span
+                            className="ml-1.5 align-middle text-[10px] font-medium uppercase tracking-[0.06em]"
+                            style={{ color: "var(--th-text-muted)" }}
+                          >
+                            {tr("· 최근 24h", "· last 24h")}
+                          </span>
+                        ) : null}
                       </div>
                       <span className="rounded-full px-2 py-1 text-[11px] font-semibold" style={{ background: "var(--th-overlay-medium)", color: column.accent }}>
                         {column.id === "requested"
@@ -2485,7 +2511,7 @@ function HomeOverviewPage({
                             ? kanbanCards.filter((card) => card.status === "in_progress").length
                             : column.id === "review"
                               ? kanbanCards.filter((card) => card.status === "review").length
-                              : doneCards}
+                              : recentDoneCount}
                       </span>
                     </div>
                     <div className="mt-3 space-y-2">
@@ -2525,7 +2551,8 @@ function HomeOverviewPage({
       blockedCards,
       costTrend,
       currentOfficeLabel,
-      doneCards,
+      recentDoneCards,
+      recentDoneCount,
       fallbackActivity,
       inProgressCards,
       inProgressTrend,
