@@ -816,58 +816,35 @@ async fn prepare_dispute_review_entry_pg_first(
     state: &AppState,
     card_id: &str,
 ) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool_ref() {
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|error| format!("begin dispute review-entry tx for {card_id}: {error}"))?;
-        let dispute_intents = [
-            crate::engine::transition::TransitionIntent::SetReviewStatus {
-                card_id: card_id.to_string(),
-                review_status: Some("reviewing".to_string()),
-            },
-            crate::engine::transition::TransitionIntent::SyncReviewState {
-                card_id: card_id.to_string(),
-                state: "reviewing".to_string(),
-            },
-        ];
-        for intent in &dispute_intents {
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
-                .await?;
-        }
-        sqlx::query("UPDATE kanban_cards SET review_entered_at = NOW() WHERE id = $1")
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("set review_entered_at for {card_id}: {error}"))?;
-        tx.commit()
-            .await
-            .map_err(|error| format!("commit dispute review-entry tx for {card_id}: {error}"))?;
-        return Ok(());
-    }
-
-    let conn = legacy_db(state)
-        .lock()
-        .map_err(|error| format!("database lock poisoned: {error}"))?;
-    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for dispute review-entry".to_string())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin dispute review-entry tx for {card_id}: {error}"))?;
     let dispute_intents = [
-        TransitionIntent::SetReviewStatus {
+        crate::engine::transition::TransitionIntent::SetReviewStatus {
             card_id: card_id.to_string(),
             review_status: Some("reviewing".to_string()),
         },
-        TransitionIntent::SyncReviewState {
+        crate::engine::transition::TransitionIntent::SyncReviewState {
             card_id: card_id.to_string(),
             state: "reviewing".to_string(),
         },
     ];
     for intent in &dispute_intents {
-        execute_intent_on_conn(&conn, intent).map_err(|error| error.to_string())?;
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
+            .await?;
     }
-    conn.execute(
-        "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
-        [card_id],
-    )
-    .map_err(|error| error.to_string())?;
+    sqlx::query("UPDATE kanban_cards SET review_entered_at = NOW() WHERE id = $1")
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("set review_entered_at for {card_id}: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit dispute review-entry tx for {card_id}: {error}"))?;
     Ok(())
 }
 
@@ -876,50 +853,31 @@ async fn finalize_accept_cleanup_pg_first(
     card_id: &str,
     clear_review_status: bool,
 ) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool_ref() {
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|error| format!("begin accept cleanup tx for {card_id}: {error}"))?;
-        if clear_review_status {
-            crate::engine::transition_executor_pg::execute_pg_transition_intent(
-                &mut tx,
-                &crate::engine::transition::TransitionIntent::SetReviewStatus {
-                    card_id: card_id.to_string(),
-                    review_status: None,
-                },
-            )
-            .await?;
-        }
-        sqlx::query("UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = $1")
-            .bind(card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("clear suggestion_pending_at for {card_id}: {error}"))?;
-        tx.commit()
-            .await
-            .map_err(|error| format!("commit accept cleanup tx for {card_id}: {error}"))?;
-        return Ok(());
-    }
-
-    if let Ok(c) = legacy_db(state).lock() {
-        if clear_review_status {
-            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-            execute_intent_on_conn(
-                &c,
-                &TransitionIntent::SetReviewStatus {
-                    card_id: card_id.to_string(),
-                    review_status: None,
-                },
-            )
-            .ok();
-        }
-        c.execute(
-            "UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = ?1",
-            [card_id],
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for accept cleanup".to_string())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin accept cleanup tx for {card_id}: {error}"))?;
+    if clear_review_status {
+        crate::engine::transition_executor_pg::execute_pg_transition_intent(
+            &mut tx,
+            &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                card_id: card_id.to_string(),
+                review_status: None,
+            },
         )
-        .ok();
+        .await?;
     }
+    sqlx::query("UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = $1")
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("clear suggestion_pending_at for {card_id}: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit accept cleanup tx for {card_id}: {error}"))?;
     Ok(())
 }
 
@@ -969,99 +927,54 @@ async fn cancel_dispatch_pg_first(
 }
 
 async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Result<(), String> {
-    if let Some(pool) = state.pg_pool_ref() {
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|error| format!("begin dismiss cleanup tx for {card_id}: {error}"))?;
-
-        let dispatch_ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM task_dispatches
-             WHERE kanban_card_id = $1
-               AND status IN ('pending', 'dispatched')
-               AND dispatch_type IN ('review', 'review-decision')",
-        )
-        .bind(card_id)
-        .fetch_all(&mut *tx)
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for dismiss cleanup".to_string())?;
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|error| format!("load dismiss cleanup dispatches for {card_id}: {error}"))?;
+        .map_err(|error| format!("begin dismiss cleanup tx for {card_id}: {error}"))?;
 
-        for dispatch_id in &dispatch_ids {
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
-                &mut tx,
-                dispatch_id,
-                None,
-            )
-            .await?;
-        }
+    let dispatch_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')
+           AND dispatch_type IN ('review', 'review-decision')",
+    )
+    .bind(card_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("load dismiss cleanup dispatches for {card_id}: {error}"))?;
 
-        let clear_review_status = crate::engine::transition::TransitionIntent::SetReviewStatus {
-            card_id: card_id.to_string(),
-            review_status: None,
-        };
-        crate::engine::transition_executor_pg::execute_pg_transition_intent(
-            &mut tx,
-            &clear_review_status,
-        )
-        .await?;
-
-        sqlx::query(
-            "UPDATE kanban_cards
-             SET channel_thread_map = NULL,
-                 active_thread_id = NULL
-             WHERE id = $1",
-        )
-        .bind(card_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("clear dismiss thread mappings for {card_id}: {error}"))?;
-
-        tx.commit()
-            .await
-            .map_err(|error| format!("commit dismiss cleanup tx for {card_id}: {error}"))?;
-        return Ok(());
-    }
-
-    let conn = legacy_db(state)
-        .lock()
-        .map_err(|error| format!("database lock poisoned: {error}"))?;
-    let dispatch_ids: Vec<String> = conn
-        .prepare(
-            "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
-             AND dispatch_type IN ('review', 'review-decision')",
-        )
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([card_id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        })
-        .unwrap_or_default();
-    conn.execute_batch("BEGIN")
-        .map_err(|error| format!("begin sqlite dismiss cleanup tx for {card_id}: {error}"))?;
     for dispatch_id in &dispatch_ids {
-        if let Err(error) =
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, None)
-        {
-            conn.execute_batch("ROLLBACK").ok();
-            return Err(error.to_string());
-        }
+        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(&mut tx, dispatch_id, None)
+            .await?;
     }
-    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-    if let Err(error) = execute_intent_on_conn(
-        &conn,
-        &TransitionIntent::SetReviewStatus {
-            card_id: card_id.to_string(),
-            review_status: None,
-        },
-    ) {
-        conn.execute_batch("ROLLBACK").ok();
-        return Err(error.to_string());
-    }
-    super::super::dispatches::clear_all_threads(&conn, card_id);
-    conn.execute_batch("COMMIT")
-        .map_err(|error| format!("commit sqlite dismiss cleanup tx for {card_id}: {error}"))?;
+
+    let clear_review_status = crate::engine::transition::TransitionIntent::SetReviewStatus {
+        card_id: card_id.to_string(),
+        review_status: None,
+    };
+    crate::engine::transition_executor_pg::execute_pg_transition_intent(
+        &mut tx,
+        &clear_review_status,
+    )
+    .await?;
+
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET channel_thread_map = NULL,
+             active_thread_id = NULL
+         WHERE id = $1",
+    )
+    .bind(card_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("clear dismiss thread mappings for {card_id}: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit dismiss cleanup tx for {card_id}: {error}"))?;
     Ok(())
 }
 
