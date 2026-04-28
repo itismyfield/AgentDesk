@@ -3002,39 +3002,29 @@ fn update_entry_status_prefer_pg(
     trigger_source: &str,
     options: &crate::db::auto_queue::EntryStatusUpdateOptions,
 ) -> Result<crate::db::auto_queue::EntryStatusUpdateResult, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let entry_id = entry_id.to_string();
-        let new_status = new_status.to_string();
-        let trigger_source = trigger_source.to_string();
-        let options = options.clone();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::db::auto_queue::update_entry_status_on_pg(
-                    &bridge_pool,
-                    &entry_id,
-                    &new_status,
-                    &trigger_source,
-                    &options,
-                )
-                .await
-            },
-            |error| error,
-        );
-    }
-
-    let conn = deps
-        .db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite auto-queue entry DB for {entry_id}: {error}"))?;
-    crate::db::auto_queue::update_entry_status_on_conn(
-        &conn,
-        entry_id,
-        new_status,
-        trigger_source,
-        options,
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return Err(format!(
+            "{entry_id}: postgres backend is required to update auto-queue entry"
+        ));
+    };
+    let entry_id_owned = entry_id.to_string();
+    let new_status = new_status.to_string();
+    let trigger_source = trigger_source.to_string();
+    let options = options.clone();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            crate::db::auto_queue::update_entry_status_on_pg(
+                &bridge_pool,
+                &entry_id_owned,
+                &new_status,
+                &trigger_source,
+                &options,
+            )
+            .await
+        },
+        |error| error,
     )
-    .map_err(|error| format!("update sqlite auto-queue entry {entry_id}: {error}"))
 }
 
 fn allocate_slot_for_group_agent_prefer_pg(
@@ -3246,42 +3236,31 @@ fn record_consultation_dispatch_prefer_pg(
     trigger_source: &str,
     base_metadata_json: &str,
 ) -> Result<crate::db::auto_queue::ConsultationDispatchRecordResult, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let entry_id = entry_id.to_string();
-        let card_id = card_id.to_string();
-        let dispatch_id = dispatch_id.to_string();
-        let trigger_source = trigger_source.to_string();
-        let base_metadata_json = base_metadata_json.to_string();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::db::auto_queue::record_consultation_dispatch_on_pg(
-                    &bridge_pool,
-                    &entry_id,
-                    &card_id,
-                    &dispatch_id,
-                    &trigger_source,
-                    &base_metadata_json,
-                )
-                .await
-            },
-            |error| error,
-        );
-    }
-
-    let mut conn = deps
-        .db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite consultation dispatch DB for {entry_id}: {error}"))?;
-    crate::db::auto_queue::record_consultation_dispatch_on_conn(
-        &mut conn,
-        entry_id,
-        card_id,
-        dispatch_id,
-        trigger_source,
-        base_metadata_json,
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return Err(format!(
+            "{entry_id}: postgres backend is required to record consultation dispatch"
+        ));
+    };
+    let entry_id_owned = entry_id.to_string();
+    let card_id = card_id.to_string();
+    let dispatch_id = dispatch_id.to_string();
+    let trigger_source = trigger_source.to_string();
+    let base_metadata_json = base_metadata_json.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            crate::db::auto_queue::record_consultation_dispatch_on_pg(
+                &bridge_pool,
+                &entry_id_owned,
+                &card_id,
+                &dispatch_id,
+                &trigger_source,
+                &base_metadata_json,
+            )
+            .await
+        },
+        |error| error,
     )
-    .map_err(|error| format!("record sqlite consultation dispatch for {entry_id}: {error}"))
 }
 
 fn create_activate_dispatch_prefer_pg(
@@ -3560,113 +3539,55 @@ fn record_entry_dispatch_failure(
     cause: &str,
     log_ctx: &AutoQueueLogContext<'_>,
 ) -> Result<crate::db::auto_queue::EntryDispatchFailureResult, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let retry_limit = effective_max_entry_retries(deps, None);
-        let entry_id_text = entry_id.to_string();
-        let trigger_source_text = trigger_source.to_string();
-        let result = crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
-                    &bridge_pool,
-                    &entry_id_text,
-                    retry_limit,
-                    &trigger_source_text,
-                )
-                .await
-            },
-            |error| error,
-        )
-        .map_err(|error| format!("{entry_id}: dispatch failure state update failed: {error}"))?;
-
-        if result.changed {
-            if let Some(assigned_slot) = slot_index {
-                let run_id_text = run_id.to_string();
-                let agent_id_text = agent_id.to_string();
-                let entry_id_text = entry_id.to_string();
-                let release_result = crate::utils::async_bridge::block_on_pg_result(
-                    pool,
-                    move |bridge_pool| async move {
-                        crate::db::auto_queue::release_slot_for_group_agent_pg(
-                            &bridge_pool,
-                            &run_id_text,
-                            thread_group,
-                            &agent_id_text,
-                            assigned_slot,
-                        )
-                        .await
-                        .map_err(|error| {
-                            format!(
-                                "release postgres slot {} for failed entry {}: {}",
-                                assigned_slot, entry_id_text, error
-                            )
-                        })
-                    },
-                    |error| error,
-                );
-                if let Err(error) = release_result {
-                    crate::auto_queue_log!(
-                        warn,
-                        "entry_dispatch_failure_release_slot_failed",
-                        log_ctx.clone().slot_index(assigned_slot),
-                        "[auto-queue] failed to release slot {} for entry {} after dispatch failure: {}",
-                        assigned_slot,
-                        entry_id,
-                        error
-                    );
-                }
-            }
-        }
-
-        if result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
-            if let Err(error) = queue_failed_entry_escalation(
-                deps,
-                None,
-                run_id,
-                entry_id,
-                card_id,
-                agent_id,
-                thread_group,
-                result.retry_count,
-                result.retry_limit,
-                cause,
-            ) {
-                crate::auto_queue_log!(
-                    warn,
-                    "entry_dispatch_failure_escalation_failed",
-                    log_ctx.clone(),
-                    "[auto-queue] failed to queue escalation for failed entry {}: {}",
-                    entry_id,
-                    error
-                );
-            }
-        }
-
-        return Ok(result);
-    }
-
-    let conn = deps
-        .db
-        .separate_conn()
-        .map_err(|error| format!("{entry_id}: dispatch failure DB open failed: {error}"))?;
-    let retry_limit = effective_max_entry_retries(deps, Some(&conn));
-    let result = crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
-        &conn,
-        entry_id,
-        retry_limit,
-        trigger_source,
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return Err(format!(
+            "{entry_id}: postgres backend is required to record dispatch failure"
+        ));
+    };
+    let retry_limit = effective_max_entry_retries(deps, None);
+    let entry_id_text = entry_id.to_string();
+    let trigger_source_text = trigger_source.to_string();
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+                &bridge_pool,
+                &entry_id_text,
+                retry_limit,
+                &trigger_source_text,
+            )
+            .await
+        },
+        |error| error,
     )
     .map_err(|error| format!("{entry_id}: dispatch failure state update failed: {error}"))?;
 
     if result.changed {
         if let Some(assigned_slot) = slot_index {
-            if let Err(error) = crate::db::auto_queue::release_slot_for_group_agent(
-                &conn,
-                run_id,
-                thread_group,
-                agent_id,
-                assigned_slot,
-            ) {
+            let run_id_text = run_id.to_string();
+            let agent_id_text = agent_id.to_string();
+            let entry_id_text = entry_id.to_string();
+            let release_result = crate::utils::async_bridge::block_on_pg_result(
+                pool,
+                move |bridge_pool| async move {
+                    crate::db::auto_queue::release_slot_for_group_agent_pg(
+                        &bridge_pool,
+                        &run_id_text,
+                        thread_group,
+                        &agent_id_text,
+                        assigned_slot,
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "release postgres slot {} for failed entry {}: {}",
+                            assigned_slot, entry_id_text, error
+                        )
+                    })
+                },
+                |error| error,
+            );
+            if let Err(error) = release_result {
                 crate::auto_queue_log!(
                     warn,
                     "entry_dispatch_failure_release_slot_failed",
@@ -3683,7 +3604,7 @@ fn record_entry_dispatch_failure(
     if result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_FAILED {
         if let Err(error) = queue_failed_entry_escalation(
             deps,
-            Some(&conn),
+            None,
             run_id,
             entry_id,
             card_id,

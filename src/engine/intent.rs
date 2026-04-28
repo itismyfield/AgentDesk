@@ -504,44 +504,24 @@ fn execute_activate_auto_queue(
     let engine =
         engine.ok_or_else(|| anyhow::anyhow!("auto-queue activation intent requires engine"))?;
     let body: crate::server::routes::auto_queue::ActivateBody = serde_json::from_value(body)?;
-    if pg_pool.is_some() || engine.pg_pool().is_some() {
-        let pool = pg_pool
-            .or_else(|| engine.pg_pool())
-            .ok_or_else(|| anyhow::anyhow!("postgres pool is not configured"))?;
-        let (_status, response) =
-            crate::utils::async_bridge::block_on_pg_result(
-                pool,
-                {
-                    let db = db.cloned();
-                    let engine = engine.clone();
-                    let body = body;
-                    move |_bridge_pool| async move {
-                        Ok(crate::server::routes::auto_queue::activate_with_bridge_pg(
-                            db, engine, body,
-                        )
-                        .await)
-                    }
-                },
-                |error| anyhow::anyhow!(error),
-            )?;
-        if response.0.get("error").is_some() {
-            return Err(anyhow::anyhow!(
-                "{}",
-                response.0["error"]
-                    .as_str()
-                    .unwrap_or("auto-queue activation failed")
-            ));
-        }
-        return Ok(());
-    }
-    let Some(db) = db else {
-        anyhow::bail!("sqlite backend is unavailable");
-    };
-    let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
-        db.clone(),
-        engine.clone(),
-    );
-    let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
+    let pool = pg_pool.or_else(|| engine.pg_pool()).ok_or_else(|| {
+        anyhow::anyhow!("postgres backend is required for auto-queue activation intent")
+    })?;
+    let (_status, response) = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        {
+            let db = db.cloned();
+            let engine = engine.clone();
+            let body = body;
+            move |_bridge_pool| async move {
+                Ok(
+                    crate::server::routes::auto_queue::activate_with_bridge_pg(db, engine, body)
+                        .await,
+                )
+            }
+        },
+        |error| anyhow::anyhow!(error),
+    )?;
     if response.0.get("error").is_some() {
         return Err(anyhow::anyhow!(
             "{}",

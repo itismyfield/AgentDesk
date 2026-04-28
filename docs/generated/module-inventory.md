@@ -71,7 +71,7 @@
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 248 |  |
 | `db::agents` | `src/db/agents.rs` | 1039 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 5940 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 5799 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
@@ -88,11 +88,11 @@
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1877 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2364 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
-| `engine::intent` | `src/engine/intent.rs` | 995 |  |
+| `engine::intent` | `src/engine/intent.rs` | 975 |  |
 | `engine::loader` | `src/engine/loader.rs` | 731 |  |
 | `engine::ops` | `src/engine/ops.rs` | 353 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 362 |  |
-| `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 868 |  |
+| `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 665 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 505 |  |
 | `engine::ops::ci_recovery_ops` | `src/engine/ops/ci_recovery_ops.rs` | 286 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 81 |  |
@@ -149,7 +149,7 @@
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1938 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10262 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10183 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 200 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 212 |  |

@@ -6,126 +6,79 @@ use sqlx::PgPool;
 
 pub(super) fn register_auto_queue_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    _db: Option<Db>,
     pg_pool: Option<PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let auto_queue_obj = Object::new(ctx.clone())?;
 
-    let db_update = db.clone();
     let pg_update = pg_pool.clone();
     auto_queue_obj.set(
         "__updateEntryStatusRaw",
         Function::new(
             ctx.clone(),
             move |entry_id: String, status: String, source: String, opts_json: String| -> String {
-                update_entry_status_raw(
-                    db_update.as_ref(),
-                    pg_update.as_ref(),
-                    &entry_id,
-                    &status,
-                    &source,
-                    &opts_json,
-                )
+                update_entry_status_raw(pg_update.as_ref(), &entry_id, &status, &source, &opts_json)
             },
         )?,
     )?;
 
-    let db_activate = db.clone();
     let pg_activate = pg_pool.clone();
     let bridge_activate = bridge.clone();
     auto_queue_obj.set(
         "__activateRaw",
         Function::new(ctx.clone(), move |body_json: String| -> String {
-            activate_raw(
-                db_activate.as_ref(),
-                pg_activate.as_ref(),
-                &bridge_activate,
-                &body_json,
-            )
+            activate_raw(pg_activate.as_ref(), &bridge_activate, &body_json)
         })?,
     )?;
-    let db_pause_run = db.clone();
     let pg_pause_run = pg_pool.clone();
     auto_queue_obj.set(
         "__pauseRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                pause_run_raw(
-                    db_pause_run.as_ref(),
-                    pg_pause_run.as_ref(),
-                    &run_id,
-                    &source,
-                )
+                pause_run_raw(pg_pause_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
-    let db_resume_run = db.clone();
     let pg_resume_run = pg_pool.clone();
     auto_queue_obj.set(
         "__resumeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                resume_run_raw(
-                    db_resume_run.as_ref(),
-                    pg_resume_run.as_ref(),
-                    &run_id,
-                    &source,
-                )
+                resume_run_raw(pg_resume_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
-    let db_complete_run = db.clone();
     let pg_complete_run = pg_pool.clone();
     auto_queue_obj.set(
         "__completeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String, opts_json: String| -> String {
-                complete_run_raw(
-                    db_complete_run.as_ref(),
-                    pg_complete_run.as_ref(),
-                    &run_id,
-                    &source,
-                    &opts_json,
-                )
+                complete_run_raw(pg_complete_run.as_ref(), &run_id, &source, &opts_json)
             },
         )?,
     )?;
-    let db_save_phase_gate = db.clone();
     let pg_save_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__savePhaseGateStateRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, phase: i64, state_json: String| -> String {
-                save_phase_gate_state_raw(
-                    db_save_phase_gate.as_ref(),
-                    pg_save_phase_gate.as_ref(),
-                    &run_id,
-                    phase,
-                    &state_json,
-                )
+                save_phase_gate_state_raw(pg_save_phase_gate.as_ref(), &run_id, phase, &state_json)
             },
         )?,
     )?;
-    let db_clear_phase_gate = db.clone();
     let pg_clear_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__clearPhaseGateStateRaw",
         Function::new(ctx.clone(), move |run_id: String, phase: i64| -> String {
-            clear_phase_gate_state_raw(
-                db_clear_phase_gate.as_ref(),
-                pg_clear_phase_gate.as_ref(),
-                &run_id,
-                phase,
-            )
+            clear_phase_gate_state_raw(pg_clear_phase_gate.as_ref(), &run_id, phase)
         })?,
     )?;
-    let db_record_consultation = db.clone();
     let pg_record_consultation = pg_pool.clone();
     auto_queue_obj.set(
         "__recordConsultationDispatchRaw",
@@ -138,7 +91,6 @@ pub(super) fn register_auto_queue_ops<'js>(
                   metadata_json: String|
                   -> String {
                 record_consultation_dispatch_raw(
-                    db_record_consultation.as_ref(),
                     pg_record_consultation.as_ref(),
                     &entry_id,
                     &card_id,
@@ -149,7 +101,6 @@ pub(super) fn register_auto_queue_ops<'js>(
             },
         )?,
     )?;
-    let db_record_dispatch_failure = db.clone();
     let pg_record_dispatch_failure = pg_pool.clone();
     auto_queue_obj.set(
         "__recordEntryDispatchFailureRaw",
@@ -157,7 +108,6 @@ pub(super) fn register_auto_queue_ops<'js>(
             ctx.clone(),
             move |entry_id: String, max_retries: i64, source: String| -> String {
                 record_entry_dispatch_failure_raw(
-                    db_record_dispatch_failure.as_ref(),
                     pg_record_dispatch_failure.as_ref(),
                     &entry_id,
                     max_retries,
@@ -297,12 +247,7 @@ pub(super) fn register_auto_queue_ops<'js>(
     Ok(())
 }
 
-fn activate_raw(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
-    bridge: &BridgeHandle,
-    body_json: &str,
-) -> String {
+fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str) -> String {
     let body: crate::server::routes::auto_queue::ActivateBody =
         match serde_json::from_str(body_json) {
             Ok(body) => body,
@@ -324,42 +269,29 @@ fn activate_raw(
         }
     };
 
-    if pg_pool.is_some() || engine.pg_pool().is_some() {
-        let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) else {
-            return serde_json::json!({"error": "postgres pool is not configured"}).to_string();
-        };
-        return match crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            {
-                let db = db.cloned();
-                let body = body;
-                let engine = engine.clone();
-                move |_bridge_pool| async move {
-                    let (_status, response) =
-                        crate::server::routes::auto_queue::activate_with_bridge_pg(
-                            db, engine, body,
-                        )
-                        .await;
-                    Ok(response.0.to_string())
-                }
-            },
-            |error| serde_json::json!({ "error": error }).to_string(),
-        ) {
-            Ok(json) => json,
-            Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-        };
-    }
-
-    let Some(db) = db else {
+    let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) else {
         return serde_json::json!({
-            "error": "sqlite backend is unavailable"
+            "error": "postgres backend is required for autoQueue.activate"
         })
         .to_string();
     };
-    let deps =
-        crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(db.clone(), engine);
-    let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
-    response.0.to_string()
+    match crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        {
+            let body = body;
+            let engine = engine.clone();
+            move |_bridge_pool| async move {
+                let (_status, response) =
+                    crate::server::routes::auto_queue::activate_with_bridge_pg(None, engine, body)
+                        .await;
+                Ok(response.0.to_string())
+            }
+        },
+        |error| serde_json::json!({ "error": error }).to_string(),
+    ) {
+        Ok(json) => json,
+        Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
 }
 
 fn should_defer_activate(bridge: &BridgeHandle) -> bool {
@@ -369,31 +301,18 @@ fn should_defer_activate(bridge: &BridgeHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn pause_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+fn pause_run_raw(pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
 
-    let result = if let Some(pool) = pg_pool {
-        let run_id = run_id.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::pause_run_on_pg(&pool, &run_id).await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-        crate::db::auto_queue::pause_run_on_conn(&conn, run_id).map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.pauseRun"}"#.to_string();
     };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::pause_run_on_pg(&pool, &run_id_owned).await
+    });
 
     match result {
         Ok(changed) => serde_json::json!({
@@ -408,31 +327,18 @@ fn pause_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, source
     }
 }
 
-fn resume_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
+fn resume_run_raw(pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
 
-    let result = if let Some(pool) = pg_pool {
-        let run_id = run_id.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::resume_run_on_pg(&pool, &run_id).await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-        crate::db::auto_queue::resume_run_on_conn(&conn, run_id).map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.resumeRun"}"#.to_string();
     };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::resume_run_on_pg(&pool, &run_id_owned).await
+    });
 
     match result {
         Ok(changed) => serde_json::json!({
@@ -448,7 +354,6 @@ fn resume_run_raw(db: Option<&Db>, pg_pool: Option<&PgPool>, run_id: &str, sourc
 }
 
 fn complete_run_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     source: &str,
@@ -472,41 +377,18 @@ fn complete_run_raw(
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
 
-    let result = if let Some(pool) = pg_pool {
-        let run_id = run_id.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            if release_slots {
-                crate::db::auto_queue::release_run_slots_pg(&pool, &run_id)
-                    .await
-                    .map_err(|error| format!("release postgres auto-queue slots: {error}"))?;
-            }
-            crate::db::auto_queue::complete_run_on_pg(&pool, &run_id).await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-
-        if release_slots && let Err(error) = crate::db::auto_queue::release_run_slots(&conn, run_id)
-        {
-            return serde_json::json!({
-                "error": format!("release auto-queue slots: {error}")
-            })
-            .to_string();
-        }
-
-        crate::db::auto_queue::complete_run_on_conn(&conn, run_id)
-            .map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.completeRun"}"#.to_string();
     };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        if release_slots {
+            crate::db::auto_queue::release_run_slots_pg(&pool, &run_id_owned)
+                .await
+                .map_err(|error| format!("release postgres auto-queue slots: {error}"))?;
+        }
+        crate::db::auto_queue::complete_run_on_pg(&pool, &run_id_owned).await
+    });
 
     match result {
         Ok(changed) => serde_json::json!({
@@ -544,7 +426,6 @@ struct PhaseGateStatePayload {
 }
 
 fn save_phase_gate_state_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     phase: i64,
@@ -574,27 +455,15 @@ fn save_phase_gate_state_raw(
         created_at: payload.created_at,
     };
 
-    let result = if let Some(pool) = pg_pool {
-        let run_id = run_id.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::save_phase_gate_state_on_pg(&pool, &run_id, phase, &write).await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-        crate::db::auto_queue::save_phase_gate_state_on_conn(&conn, run_id, phase, &write)
-            .map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.savePhaseGateState"}"#
+            .to_string();
     };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::save_phase_gate_state_on_pg(&pool, &run_id_owned, phase, &write)
+            .await
+    });
 
     match result {
         Ok(result) => serde_json::json!({
@@ -610,33 +479,15 @@ fn save_phase_gate_state_raw(
     }
 }
 
-fn clear_phase_gate_state_raw(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
-    run_id: &str,
-    phase: i64,
-) -> String {
-    let result = if let Some(pool) = pg_pool {
-        let run_id = run_id.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::clear_phase_gate_state_on_pg(&pool, &run_id, phase).await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-        crate::db::auto_queue::clear_phase_gate_state_on_conn(&conn, run_id, phase)
-            .map_err(|error| error.to_string())
+fn clear_phase_gate_state_raw(pg_pool: Option<&PgPool>, run_id: &str, phase: i64) -> String {
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.clearPhaseGateState"}"#
+            .to_string();
     };
+    let run_id_owned = run_id.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::clear_phase_gate_state_on_pg(&pool, &run_id_owned, phase).await
+    });
 
     match result {
         Ok(changed) => serde_json::json!({
@@ -652,7 +503,6 @@ fn clear_phase_gate_state_raw(
 }
 
 fn record_consultation_dispatch_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     card_id: &str,
@@ -660,47 +510,26 @@ fn record_consultation_dispatch_raw(
     source: &str,
     metadata_json: &str,
 ) -> String {
-    let result = if let Some(pool) = pg_pool {
-        let entry_id = entry_id.to_string();
-        let card_id = card_id.to_string();
-        let dispatch_id = dispatch_id.to_string();
-        let source = source.to_string();
-        let metadata_json = metadata_json.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::record_consultation_dispatch_on_pg(
-                &pool,
-                &entry_id,
-                &card_id,
-                &dispatch_id,
-                &source,
-                &metadata_json,
-            )
-            .await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let mut conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-
-        crate::db::auto_queue::record_consultation_dispatch_on_conn(
-            &mut conn,
-            entry_id,
-            card_id,
-            dispatch_id,
-            source,
-            metadata_json,
-        )
-        .map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.recordConsultationDispatch"}"#
+            .to_string();
     };
+    let entry_id_owned = entry_id.to_string();
+    let card_id_owned = card_id.to_string();
+    let dispatch_id_owned = dispatch_id.to_string();
+    let source_owned = source.to_string();
+    let metadata_json_owned = metadata_json.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::record_consultation_dispatch_on_pg(
+            &pool,
+            &entry_id_owned,
+            &card_id_owned,
+            &dispatch_id_owned,
+            &source_owned,
+            &metadata_json_owned,
+        )
+        .await
+    });
 
     match result {
         Ok(result) => serde_json::json!({
@@ -718,7 +547,6 @@ fn record_consultation_dispatch_raw(
 }
 
 fn record_entry_dispatch_failure_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     max_retries: i64,
@@ -728,40 +556,21 @@ fn record_entry_dispatch_failure_raw(
         return r#"{"error":"source is required"}"#.to_string();
     }
 
-    let result = if let Some(pool) = pg_pool {
-        let entry_id = entry_id.to_string();
-        let source = source.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
-                &pool,
-                &entry_id,
-                max_retries,
-                &source,
-            )
-            .await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-
-        crate::db::auto_queue::record_entry_dispatch_failure_on_conn(
-            &conn,
-            entry_id,
-            max_retries,
-            source,
-        )
-        .map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.recordDispatchFailure"}"#
+            .to_string();
     };
+    let entry_id_owned = entry_id.to_string();
+    let source_owned = source.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::record_entry_dispatch_failure_on_pg(
+            &pool,
+            &entry_id_owned,
+            max_retries,
+            &source_owned,
+        )
+        .await
+    });
 
     match result {
         Ok(result) => serde_json::json!({
@@ -782,7 +591,6 @@ fn record_entry_dispatch_failure_raw(
 }
 
 fn update_entry_status_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry_id: &str,
     status: &str,
@@ -811,34 +619,23 @@ fn update_entry_status_raw(
         slot_index: opts_value.get("slotIndex").and_then(|value| value.as_i64()),
     };
 
-    let result = if let Some(pool) = pg_pool {
-        let entry_id = entry_id.to_string();
-        let status = status.to_string();
-        let source = source.to_string();
-        run_async_bridge_pg(pool, move |pool| async move {
-            crate::db::auto_queue::update_entry_status_on_pg(
-                &pool, &entry_id, &status, &source, &options,
-            )
-            .await
-        })
-    } else {
-        let Some(db) = db else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let conn = match db.separate_conn() {
-            Ok(conn) => conn,
-            Err(error) => {
-                return serde_json::json!({
-                    "error": format!("DB: {error}")
-                })
-                .to_string();
-            }
-        };
-        crate::db::auto_queue::update_entry_status_on_conn(
-            &conn, entry_id, status, source, &options,
-        )
-        .map_err(|error| error.to_string())
+    let Some(pool) = pg_pool else {
+        return r#"{"error":"postgres backend is required for autoQueue.updateEntryStatus"}"#
+            .to_string();
     };
+    let entry_id_owned = entry_id.to_string();
+    let status_owned = status.to_string();
+    let source_owned = source.to_string();
+    let result = run_async_bridge_pg(pool, move |pool| async move {
+        crate::db::auto_queue::update_entry_status_on_pg(
+            &pool,
+            &entry_id_owned,
+            &status_owned,
+            &source_owned,
+            &options,
+        )
+        .await
+    });
 
     match result {
         Ok(result) => serde_json::json!({
