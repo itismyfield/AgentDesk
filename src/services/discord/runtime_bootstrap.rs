@@ -9,7 +9,6 @@ pub(crate) struct RunBotContext {
     pub(crate) startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) health_registry: Arc<health::HealthRegistry>,
     pub(crate) api_port: u16,
-    pub(crate) sqlite: Option<crate::db::Db>,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
 }
@@ -712,7 +711,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         startup_doctor_started,
         health_registry,
         api_port,
-        sqlite,
         pg_pool,
         engine,
     } = context;
@@ -911,7 +909,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         token_hash: token_hash.clone(),
         provider: provider.clone(),
         api_port,
-        sqlite,
+        sqlite: None,
         pg_pool,
         engine,
         health_registry: Arc::downgrade(&health_registry),
