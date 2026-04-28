@@ -28,39 +28,7 @@ fn normalize_register_args(
     Ok((source_agent.to_string(), user_id.to_string(), channel_id))
 }
 
-pub(crate) fn register_pending_dm_reply(
-    sqlite: &Db,
-    source_agent: &str,
-    user_id: &str,
-    channel_id: Option<&str>,
-    context_json: &str,
-    ttl_seconds: i64,
-) -> Result<i64, String> {
-    let (source_agent, user_id, channel_id) =
-        normalize_register_args(source_agent, user_id, channel_id)?;
-
-    let conn = sqlite
-        .separate_conn()
-        .map_err(|e| format!("db connection: {e}"))?;
-    let expires_at = if ttl_seconds > 0 {
-        format!("datetime('now', '+{ttl_seconds} seconds')")
-    } else {
-        "NULL".to_string()
-    };
-    let sql = format!(
-        "INSERT INTO pending_dm_replies (source_agent, user_id, channel_id, context, expires_at) \
-         VALUES (?1, ?2, ?3, ?4, {expires_at})"
-    );
-    conn.execute(
-        &sql,
-        libsql_rusqlite::params![source_agent, user_id, channel_id, context_json],
-    )
-    .map_err(|e| format!("insert failed: {e}"))?;
-    Ok(conn.last_insert_rowid())
-}
-
 pub(crate) async fn register_pending_dm_reply_db(
-    sqlite: &Db,
     pg_pool: Option<&PgPool>,
     source_agent: &str,
     user_id: &str,
@@ -71,18 +39,8 @@ pub(crate) async fn register_pending_dm_reply_db(
     let (source_agent, user_id, channel_id) =
         normalize_register_args(source_agent, user_id, channel_id)?;
 
-    // PG pending_dm_replies rows are authoritative in mixed mode. The DM
-    // intake/consume paths query PG when a pool exists, so mirroring writes to
-    // SQLite would only create unread legacy rows.
     let Some(pool) = pg_pool else {
-        return register_pending_dm_reply(
-            sqlite,
-            &source_agent,
-            &user_id,
-            channel_id.as_deref(),
-            context_json,
-            ttl_seconds,
-        );
+        return Err("postgres pool unavailable for dm_reply.register".to_string());
     };
 
     let id = if ttl_seconds > 0 {
@@ -396,32 +354,5 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
-    }
-
-    #[test]
-    fn register_pending_dm_reply_inserts_expected_row() {
-        let db = test_db();
-        let reply_id = register_pending_dm_reply(
-            &db,
-            "family-counsel",
-            "12345",
-            Some("1473922824350601297"),
-            r#"{"topicKey":"obujang.health_checkup","question":"건강검진 요즘 했어?"}"#,
-            86_400,
-        )
-        .expect("insert should succeed");
-
-        let conn = db.separate_conn().unwrap();
-        let row: (String, String, Option<String>, String) = conn
-            .query_row(
-                "SELECT source_agent, user_id, channel_id, context FROM pending_dm_replies WHERE id = ?1",
-                libsql_rusqlite::params![reply_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(row.0, "family-counsel");
-        assert_eq!(row.1, "12345");
-        assert_eq!(row.2.as_deref(), Some("1473922824350601297"));
-        assert!(row.3.contains("health_checkup"));
     }
 }

@@ -581,49 +581,4 @@ mod tests {
         assert_eq!(lines.next(), Some("context={}"));
         assert!(lines.next().is_none());
     }
-
-    #[tokio::test]
-    async fn consume_pending_dm_reply_stores_answer_but_returns_original_context() {
-        let db = crate::db::test_db();
-        let reply_id = crate::services::discord_dm_reply_store::register_pending_dm_reply(
-            &db,
-            "family-counsel",
-            "12345",
-            Some("1473922824350601297"),
-            r#"{"topicKey":"obujang.health_checkup","question":"건강검진 했어?"}"#,
-            3_600,
-        )
-        .expect("insert should succeed");
-
-        let consumed = consume_pending_dm_reply(Some(&db), None, "12345", "지난주에 했어")
-            .await
-            .expect("reply should consume");
-
-        assert_eq!(consumed.id, reply_id);
-        assert_eq!(consumed.source_agent, "family-counsel");
-        assert_eq!(consumed.answer, "지난주에 했어");
-        assert_eq!(consumed.channel_id.as_deref(), Some("1473922824350601297"));
-        assert_eq!(
-            consumed.context,
-            json!({
-                "topicKey": "obujang.health_checkup",
-                "question": "건강검진 했어?",
-            })
-        );
-
-        let stored_context: String = db
-            .separate_conn()
-            .expect("db connection")
-            .query_row(
-                "SELECT context FROM pending_dm_replies WHERE id = ?1",
-                libsql_rusqlite::params![reply_id],
-                |row| row.get(0),
-            )
-            .expect("stored context should exist");
-        let stored_context: serde_json::Value =
-            serde_json::from_str(&stored_context).expect("stored context should be json");
-        assert_eq!(stored_context["topicKey"], "obujang.health_checkup");
-        assert_eq!(stored_context["question"], "건강검진 했어?");
-        assert_eq!(stored_context["_answer"], "지난주에 했어");
-    }
 }
