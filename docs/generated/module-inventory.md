@@ -81,11 +81,11 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 853 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 387 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 4899 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 4897 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3802 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3778 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2517 | giant-file |
-| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1877 | giant-file |
+| `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1823 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2364 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 975 |  |
@@ -306,7 +306,7 @@
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1252 | giant-file |
 | `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 427 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
-| `services::dispatches` | `src/services/dispatches.rs` | 596 |  |
+| `services::dispatches` | `src/services/dispatches.rs` | 434 |  |
 | `services::dispatches_followup` | `src/services/dispatches_followup.rs` | 143 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2546 | giant-file |
 | `services::kanban` | `src/services/kanban.rs` | 177 |  |
