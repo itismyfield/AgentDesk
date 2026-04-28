@@ -2890,6 +2890,24 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 placeholder_msg_id
             );
+        } else if !enqueued && want_queued_card && reused_existing_mapping {
+            // codex review round-6 P2 (finding 1): when this race-loss
+            // call REUSED an existing queued mapping (round-5 finding 2)
+            // but the enqueue was rejected as a duplicate (the prior
+            // race-loss already published the same intervention), the
+            // `📬` card on Discord belongs to the EARLIER live enqueue —
+            // not to this call. The earlier owner's lifecycle (dispatch
+            // hand-off, queue-exit drain) will clean up its placeholder
+            // and mapping when its intervention finishes. Deleting the
+            // card here would erase a Discord message the queued-turn
+            // handoff is still going to transition/stream through. Leave
+            // the mapping AND the Discord message intact.
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ♻ RACE: re-queue duplicate dedup, preserving reused 📬 card owned by prior enqueue (channel {}, msg {})",
+                channel_id,
+                placeholder_msg_id
+            );
         } else {
             let _ = channel_id
                 .delete_message(&ctx.http, placeholder_msg_id)

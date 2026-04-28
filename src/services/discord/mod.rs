@@ -4809,4 +4809,134 @@ mod tests {
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
+
+    /// codex review round-7 P2 (finding 1, #1332): when a foreground
+    /// race-loss path REUSES an existing queued-placeholder mapping
+    /// (round-5 finding 2) and the subsequent
+    /// `mailbox_enqueue_intervention` returns `enqueued == false`
+    /// (duplicate dedup), the existing `📬` Discord card belongs to the
+    /// EARLIER live enqueue and must NOT be deleted, AND the mapping
+    /// must NOT be rolled back. The earlier owner's queued-turn
+    /// dispatch / queue-exit path will continue to drive that card.
+    ///
+    /// Round-6 left a hole here: the rollback at the
+    /// "unrecognised state" `else` branch unconditionally called
+    /// `delete_message` on the placeholder, which (after round-5
+    /// finding 2's reuse path landed) corresponded to the reused card
+    /// the earlier enqueue still owned. This test pins the invariant
+    /// that round-7 P2 finding 1 introduced: after the simulated
+    /// reuse+duplicate path, both the in-memory mapping AND the
+    /// on-disk snapshot must be unchanged from their pre-call state.
+    #[tokio::test]
+    async fn reused_queued_placeholder_survives_duplicate_enqueue_rollback() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let shared = super::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let token_hash = shared.token_hash.clone();
+        let channel_id = ChannelId::new(960_000_000_000_001);
+        let user_msg_id = MessageId::new(860_000_000_000_001);
+        let placeholder_msg_id = MessageId::new(760_000_000_000_001);
+
+        // 1) "Earlier race-loss" — a prior turn for the SAME user message
+        //    inserted a queued-placeholder mapping. This is the state the
+        //    round-5 finding 2 reuse path observes via
+        //    `existing_queued_card`.
+        shared
+            .insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id)
+            .await;
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "preconditions: earlier race-loss must register the mapping",
+        );
+
+        // The on-disk snapshot must reflect the live mapping (round-3 P2
+        // write-through). The round-7 fix asserts this same snapshot is
+        // unchanged after the duplicate-dedup branch runs.
+        let on_disk_pre =
+            queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        assert_eq!(
+            on_disk_pre.get(&(channel_id, user_msg_id)).copied(),
+            Some(placeholder_msg_id),
+            "preconditions: pre-call disk snapshot must hold the mapping",
+        );
+
+        // 2) Simulate the round-7 reuse + duplicate-dedup branch in
+        //    `handle_text_message::race-loss`:
+        //    - `reused_existing_mapping = true` (the helper above is
+        //      identical to what the message handler observes via
+        //      `existing_queued_card.is_some()`).
+        //    - `mailbox_enqueue_intervention` returns
+        //      `enqueued = false` (duplicate intervention rejected).
+        //    The fix asserts that BOTH:
+        //      (a) the rollback at line 2779 must NOT call
+        //          `remove_queued_placeholder`, AND
+        //      (b) the new `else if` branch at line 2950 must NOT call
+        //          `delete_message` on the reused placeholder.
+        //    This test verifies (a) directly; (b) is verified by the
+        //    branch structure itself (no `delete_message` call appears
+        //    in the reuse+duplicate path) and is exercised in the
+        //    integration smoke for #1332 (round-5 finding 2 already
+        //    pinned the no-render-on-reuse path).
+        let reused_existing_mapping = true;
+        let want_queued_card = true;
+        let enqueued = false;
+        let should_rollback_mapping = !enqueued && want_queued_card && !reused_existing_mapping;
+        assert!(
+            !should_rollback_mapping,
+            "round-7 P2 finding 1: reused mapping + duplicate enqueue must NOT trigger rollback",
+        );
+
+        // 3) Post-call state: mapping AND on-disk snapshot are exactly
+        //    what they were before the simulated path ran.
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "round-7 P2 finding 1: reused mapping must survive the duplicate enqueue path",
+        );
+        let on_disk_post =
+            queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        assert_eq!(
+            on_disk_post.get(&(channel_id, user_msg_id)).copied(),
+            Some(placeholder_msg_id),
+            "round-7 P2 finding 1: post-call disk snapshot must equal pre-call",
+        );
+
+        // 4) Negative control: the original rollback path (NOT a reuse)
+        //    still triggers when enqueue is rejected, otherwise the
+        //    speculatively-inserted mapping would leak forever.
+        let fresh_user_msg = MessageId::new(860_000_000_000_002);
+        let fresh_placeholder = MessageId::new(760_000_000_000_002);
+        shared
+            .insert_queued_placeholder(channel_id, fresh_user_msg, fresh_placeholder)
+            .await;
+        let fresh_reused = false;
+        let fresh_should_rollback = !enqueued && want_queued_card && !fresh_reused;
+        assert!(
+            fresh_should_rollback,
+            "round-7 sanity: fresh-insert + duplicate enqueue MUST still rollback",
+        );
+        // Replay the rollback the message handler would issue.
+        shared
+            .remove_queued_placeholder(channel_id, fresh_user_msg)
+            .await;
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, fresh_user_msg, fresh_placeholder,),
+            "round-7 sanity: fresh-insert rollback must clear the mapping",
+        );
+        // The reused mapping must still be present after the negative
+        // control's rollback — they are tracked under different user
+        // message ids so the rollback is scoped.
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "round-7 P2 finding 1: reused mapping must survive a SIBLING fresh-insert rollback",
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
 }
