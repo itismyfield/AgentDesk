@@ -449,7 +449,6 @@ pub(crate) fn load_pending_queues(
         if !interventions.is_empty() {
             result.insert(ChannelId::new(channel_id), interventions);
         }
-        let _ = fs::remove_file(&path);
     }
     (result, restored_overrides)
 }
