@@ -1599,6 +1599,7 @@ pub async fn assign_issue(
 
 // ── Helpers ────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub(super) fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
     let repo_id = row.get::<_, Option<String>>(1)?;
     let assigned_agent_id = row.get::<_, Option<String>>(5)?;
@@ -2361,6 +2362,7 @@ pub struct RereviewBody {
     pub reason: Option<String>,
 }
 
+#[cfg(test)]
 fn find_active_review_dispatch_id(conn: &rusqlite::Connection, card_id: &str) -> Option<String> {
     conn.query_row(
         "SELECT id FROM task_dispatches
@@ -2437,6 +2439,7 @@ pub(super) fn require_explicit_bearer_token(
     Ok(())
 }
 
+#[cfg(test)]
 fn resolve_agent_id_from_channel_id_on_conn(
     conn: &rusqlite::Connection,
     channel_id: &str,
@@ -2474,6 +2477,7 @@ async fn resolve_agent_id_from_channel_id_with_pg(
     .and_then(|row| row.try_get::<String, _>("id").ok())
 }
 
+#[cfg(test)]
 pub(super) fn resolve_requesting_agent_id_on_conn(
     conn: &rusqlite::Connection,
     headers: &HeaderMap,
@@ -3424,6 +3428,7 @@ fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option
     matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
 }
 
+#[cfg(test)]
 fn count_live_auto_queue_entries_for_card_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3444,6 +3449,7 @@ fn count_live_auto_queue_entries_for_card_on_conn(
     Ok(count.max(0) as usize)
 }
 
+#[cfg(test)]
 fn clear_force_transition_terminalized_links_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3470,6 +3476,7 @@ fn clear_force_transition_terminalized_links_on_conn(
     Ok(())
 }
 
+#[cfg(test)]
 fn cleanup_force_transition_revert_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3491,6 +3498,7 @@ fn cleanup_force_transition_revert_on_conn(
     Ok((cancelled_dispatches, skipped_auto_queue_entries))
 }
 
+#[cfg(test)]
 fn skip_live_auto_queue_entries_for_card_legacy(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3524,6 +3532,7 @@ fn skip_live_auto_queue_entries_for_card_legacy(
     Ok(changed)
 }
 
+#[cfg(test)]
 fn move_auto_queue_entry_to_dispatched_on_conn(
     conn: &rusqlite::Connection,
     entry_id: &str,
@@ -3587,6 +3596,7 @@ async fn reactivate_done_auto_queue_entries_pg(
     Ok(())
 }
 
+#[cfg(test)]
 fn load_card_metadata_map_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3628,6 +3638,7 @@ async fn load_card_metadata_map_pg(
     }
 }
 
+#[cfg(test)]
 fn save_card_metadata_map_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3679,6 +3690,7 @@ async fn save_card_metadata_map_pg(
     Ok(())
 }
 
+#[cfg(test)]
 fn mark_api_reopen_skip_preflight_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3703,6 +3715,7 @@ async fn mark_api_reopen_skip_preflight_on_pg(
     save_card_metadata_map_pg(pool, card_id, &metadata).await
 }
 
+#[cfg(test)]
 fn clear_api_reopen_skip_preflight_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3721,6 +3734,7 @@ async fn clear_api_reopen_skip_preflight_on_pg(
     save_card_metadata_map_pg(pool, card_id, &metadata).await
 }
 
+#[cfg(test)]
 fn consume_api_reopen_preflight_skip_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -3779,6 +3793,7 @@ async fn consume_api_reopen_preflight_skip_on_pg(
     Ok(())
 }
 
+#[cfg(test)]
 fn clear_reopen_preflight_cache_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,

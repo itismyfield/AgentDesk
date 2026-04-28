@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
+#[cfg(test)]
 use rusqlite::{Connection, OptionalExtension};
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::config::{AgentChannel, AgentDef};
+#[cfg(test)]
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
@@ -118,6 +120,7 @@ fn normalized_channel(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+#[cfg(test)]
 pub fn load_agent_channel_bindings(
     conn: &Connection,
     agent_id: &str,
@@ -139,6 +142,7 @@ pub fn load_agent_channel_bindings(
     .optional()
 }
 
+#[cfg(test)]
 pub fn resolve_agent_primary_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
@@ -146,6 +150,7 @@ pub fn resolve_agent_primary_channel_on_conn(
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.primary_channel()))
 }
 
+#[cfg(test)]
 pub fn resolve_agent_channel_for_provider_on_conn(
     conn: &Connection,
     agent_id: &str,
@@ -154,6 +159,7 @@ pub fn resolve_agent_channel_for_provider_on_conn(
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.channel_for_provider(provider)))
 }
 
+#[cfg(test)]
 pub fn resolve_agent_dispatch_channel_on_conn(
     conn: &Connection,
     agent_id: &str,
@@ -269,6 +275,7 @@ pub async fn resolve_agent_dispatch_channel_pg(
 
 /// Upsert agents from config into the agents table.
 /// Only updates fields that come from config; leaves status/xp/skills untouched.
+#[cfg(test)]
 pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
     let conn = db
         .lock()
@@ -299,6 +306,7 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
     Ok(agents.len())
 }
 
+#[cfg(test)]
 fn legacy_agent_alias(agent_id: &str) -> Option<String> {
     if agent_id.starts_with(LEGACY_AGENT_PREFIX) {
         return None;
@@ -306,6 +314,7 @@ fn legacy_agent_alias(agent_id: &str) -> Option<String> {
     Some(format!("{LEGACY_AGENT_PREFIX}{agent_id}"))
 }
 
+#[cfg(test)]
 fn sqlite_agent_exists(conn: &Connection, agent_id: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agents WHERE id = ?1)",
@@ -314,6 +323,7 @@ fn sqlite_agent_exists(conn: &Connection, agent_id: &str) -> Result<bool> {
     )?)
 }
 
+#[cfg(test)]
 fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Result<()> {
     let discord_channel_cc = agent
         .channels
@@ -357,6 +367,7 @@ fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
 fn migrate_legacy_agent_aliases_sqlite(
     conn: &Connection,
     agents: &[AgentDef],
@@ -393,6 +404,7 @@ fn migrate_legacy_agent_aliases_sqlite(
     Ok(())
 }
 
+#[cfg(test)]
 fn copy_runtime_fields_from_legacy_sqlite(
     conn: &Connection,
     legacy_id: &str,
@@ -419,6 +431,7 @@ fn copy_runtime_fields_from_legacy_sqlite(
     Ok(())
 }
 
+#[cfg(test)]
 fn move_legacy_agent_references_sqlite(
     conn: &Connection,
     legacy_id: &str,

@@ -1,4 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -7,6 +9,7 @@ use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed_with_pg};
 
 /// PG-only wrapper for kanban transitions after #1384.
+#[cfg(not(test))]
 async fn transition_status_pg_first(
     state: &AppState,
     card_id: &str,
@@ -28,8 +31,70 @@ async fn transition_status_pg_first(
     .await
 }
 
+#[cfg(test)]
+async fn transition_status_pg_first(
+    state: &AppState,
+    card_id: &str,
+    new_status: &str,
+    _source: &str,
+    _force_intent: crate::engine::transition::ForceIntent,
+) -> anyhow::Result<crate::kanban::TransitionResult> {
+    if let Some(pool) = state.pg_pool_ref() {
+        return crate::kanban::transition_status_with_opts_pg_only(
+            pool,
+            &state.engine,
+            card_id,
+            new_status,
+            _source,
+            _force_intent,
+        )
+        .await;
+    }
+    let db = state
+        .legacy_db()
+        .ok_or_else(|| anyhow::anyhow!("sqlite test backend unavailable for kanban transition"))?;
+    let conn = db
+        .separate_conn()
+        .map_err(|error| anyhow::anyhow!("open sqlite transition connection: {error}"))?;
+    let old_status: String = conn.query_row(
+        "SELECT status FROM kanban_cards WHERE id = ?1",
+        [card_id],
+        |row| row.get(0),
+    )?;
+    let changed = old_status != new_status;
+    if changed {
+        conn.execute(
+            "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![new_status, card_id],
+        )?;
+        crate::kanban::fire_transition_hooks_with_backends(
+            Some(db),
+            None,
+            &state.engine,
+            card_id,
+            &old_status,
+            new_status,
+        );
+    }
+    Ok(crate::kanban::TransitionResult {
+        changed,
+        from: old_status,
+        to: new_status.to_string(),
+    })
+}
+
 fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
     spawn_aggregate_if_needed_with_pg(state.pg_pool_ref().cloned());
+}
+
+#[cfg(test)]
+fn review_state_db(state: &AppState) -> Option<&crate::db::Db> {
+    state.legacy_db()
+}
+
+#[cfg(not(test))]
+fn review_state_db(_state: &AppState) -> Option<&crate::db::Db> {
+    None
 }
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
@@ -140,6 +205,28 @@ async fn active_accept_followups_pg_first(
         };
     }
 
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db() {
+        if let Ok(conn) = db.separate_conn() {
+            if let Ok((review, rework, review_decision)) = conn.query_row(
+                "SELECT
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0),
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'rework' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0),
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0)
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1",
+                [card_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            ) {
+                return ActiveAcceptFollowups {
+                    review,
+                    rework,
+                    review_decision,
+                };
+            }
+        }
+    }
+
     ActiveAcceptFollowups::default()
 }
 
@@ -162,6 +249,20 @@ async fn current_card_status_pg_first(state: &AppState, card_id: &str) -> Option
                 None
             }
         };
+    }
+
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db() {
+        return db.separate_conn().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        });
     }
 
     None
@@ -215,6 +316,34 @@ async fn load_review_decision_card_context_pg_first(
         };
     }
 
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db()
+        && let Ok(conn) = db.separate_conn()
+        && let Ok(Some((status, repo_id, agent_id, title))) = conn
+            .query_row(
+                "SELECT status, repo_id, assigned_agent_id, title
+                 FROM kanban_cards
+                 WHERE id = ?1",
+                [card_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+    {
+        return ReviewDecisionCardContext {
+            status,
+            repo_id,
+            agent_id,
+            title,
+        };
+    }
+
     ReviewDecisionCardContext::default()
 }
 
@@ -251,6 +380,22 @@ async fn card_exists_pg_first(state: &AppState, card_id: &str) -> bool {
                 false
             }
         };
+    }
+
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db() {
+        return db
+            .separate_conn()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT 1 FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |_| Ok(()),
+                )
+                .ok()
+            })
+            .is_some();
     }
 
     false
@@ -307,6 +452,40 @@ async fn pending_review_decision_dispatch_id_pg_first(
                 None
             }
         };
+    }
+
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db() {
+        let conn = db.separate_conn().ok()?;
+        if let Ok(Some(dispatch_id)) = conn
+            .query_row(
+                "SELECT td.id
+                 FROM task_dispatches td
+                 JOIN card_review_state crs ON crs.pending_dispatch_id = td.id
+                 WHERE crs.card_id = ?1
+                   AND td.dispatch_type = 'review-decision'
+                   AND td.status IN ('pending', 'dispatched')",
+                [card_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        {
+            return Some(dispatch_id);
+        }
+        return conn
+            .query_row(
+                "SELECT td.id
+                 FROM task_dispatches td
+                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id
+                 WHERE kc.id = ?1
+                   AND td.dispatch_type = 'review-decision'
+                   AND td.status IN ('pending', 'dispatched')",
+                [card_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
     }
 
     None
@@ -1057,25 +1236,46 @@ pub async fn submit_review_decision(
                             "[Rework] {}",
                             card_title.as_deref().unwrap_or(&body.card_id)
                         );
-                        let rework_dispatch_result = state.pg_pool_ref().map_or_else(
-                            || {
+                        let rework_dispatch_result = if let Some(pool) = state.pg_pool_ref() {
+                            crate::dispatch::create_dispatch_with_options_pg_only(
+                                pool,
+                                &state.engine,
+                                &body.card_id,
+                                agent_id,
+                                "rework",
+                                &rework_title,
+                                &json!({}),
+                                crate::dispatch::DispatchCreateOptions::default(),
+                            )
+                        } else {
+                            #[cfg(test)]
+                            {
+                                state.legacy_db().map_or_else(
+                                    || {
+                                        Err(anyhow::anyhow!(
+                                            "sqlite test backend unavailable for rework dispatch"
+                                        ))
+                                    },
+                                    |db| {
+                                        crate::dispatch::create_dispatch(
+                                            db,
+                                            &state.engine,
+                                            &body.card_id,
+                                            agent_id,
+                                            "rework",
+                                            &rework_title,
+                                            &json!({}),
+                                        )
+                                    },
+                                )
+                            }
+                            #[cfg(not(test))]
+                            {
                                 Err(anyhow::anyhow!(
                                     "postgres pool unavailable for rework dispatch"
                                 ))
-                            },
-                            |pool| {
-                                crate::dispatch::create_dispatch_with_options_pg_only(
-                                    pool,
-                                    &state.engine,
-                                    &body.card_id,
-                                    agent_id,
-                                    "rework",
-                                    &rework_title,
-                                    &json!({}),
-                                    crate::dispatch::DispatchCreateOptions::default(),
-                                )
-                            },
-                        );
+                            }
+                        };
                         match rework_dispatch_result {
                             Ok(dispatch) => {
                                 let dispatch_id = dispatch
@@ -1162,8 +1362,12 @@ pub async fn submit_review_decision(
             }
 
             if let Some(ref rd_id) = pending_rd_id {
+                #[cfg(test)]
+                let status_db = state.legacy_db();
+                #[cfg(not(test))]
+                let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
-                    None,
+                    status_db,
                     state.pg_pool_ref(),
                     rd_id,
                     "completed",
@@ -1286,6 +1490,7 @@ pub async fn submit_review_decision(
             // rework_pending override that would conflict with the live review dispatch.
             if !direct_review_created && !terminal_auto_approved {
                 update_card_review_state(
+                    review_state_db(&state),
                     state.pg_pool_ref(),
                     &body.card_id,
                     "accept",
@@ -1481,8 +1686,12 @@ pub async fn submit_review_decision(
             }
 
             if let Some(ref rd_id) = pending_rd_id {
+                #[cfg(test)]
+                let status_db = state.legacy_db();
+                #[cfg(not(test))]
+                let status_db = None;
                 match crate::dispatch::set_dispatch_status_with_backends(
-                    None,
+                    status_db,
                     state.pg_pool_ref(),
                     rd_id,
                     "completed",
@@ -1534,6 +1743,7 @@ pub async fn submit_review_decision(
 
             // #117: Update canonical review state before returning
             update_card_review_state(
+                review_state_db(&state),
                 state.pg_pool_ref(),
                 &body.card_id,
                 "dispute",
@@ -1593,6 +1803,7 @@ pub async fn submit_review_decision(
 
     // #117: Update canonical review state for all decision paths
     update_card_review_state(
+        review_state_db(&state),
         state.pg_pool_ref(),
         &body.card_id,
         &body.decision,

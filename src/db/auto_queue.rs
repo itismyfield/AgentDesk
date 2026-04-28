@@ -1589,7 +1589,7 @@ pub async fn record_consultation_dispatch_on_pg(
 
     let updated = sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = $1,
+         SET metadata = $1::jsonb,
              updated_at = NOW()
          WHERE id = $2",
     )
@@ -1609,6 +1609,10 @@ pub async fn record_consultation_dispatch_on_pg(
         .to_string());
     }
 
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres consultation metadata update: {error}"))?;
+
     let entry_result = update_entry_status_on_pg(
         pool,
         entry_id,
@@ -1620,10 +1624,6 @@ pub async fn record_consultation_dispatch_on_pg(
         },
     )
     .await?;
-
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres consultation dispatch transaction: {error}"))?;
 
     Ok(ConsultationDispatchRecordResult {
         metadata_json,
@@ -1807,6 +1807,15 @@ pub async fn save_phase_gate_state_on_pg(
         })?;
     } else {
         for dispatch_id in &dispatch_ids {
+            sqlx::query("DELETE FROM auto_queue_phase_gates WHERE dispatch_id = $1")
+                .bind(dispatch_id)
+                .execute(pool)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "delete existing postgres phase-gate row for dispatch {dispatch_id}: {error}"
+                    )
+                })?;
             sqlx::query(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
@@ -1814,18 +1823,7 @@ pub async fn save_phase_gate_state_on_pg(
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     COALESCE($11::timestamptz, NOW()), NOW()
-                 )
-                 ON CONFLICT(dispatch_id) DO UPDATE SET
-                    run_id = EXCLUDED.run_id,
-                    phase = EXCLUDED.phase,
-                    status = EXCLUDED.status,
-                    verdict = EXCLUDED.verdict,
-                    pass_verdict = EXCLUDED.pass_verdict,
-                    next_phase = EXCLUDED.next_phase,
-                    final_phase = EXCLUDED.final_phase,
-                    anchor_card_id = EXCLUDED.anchor_card_id,
-                    failure_reason = EXCLUDED.failure_reason,
-                    updated_at = NOW()",
+                 )",
             )
             .bind(run_id)
             .bind(phase)
@@ -3008,10 +3006,13 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed run");
-        sqlx::query("INSERT INTO agents (id, discord_channel_id) VALUES ('agent-1', '123')")
-            .execute(&pool)
-            .await
-            .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-1', 'Agent 1', 'claude', '123')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
         sqlx::query(
             "INSERT INTO auto_queue_slots
                 (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)

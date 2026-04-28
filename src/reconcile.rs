@@ -81,15 +81,22 @@ pub(crate) async fn reconcile_boot_runtime(
     let mut stats = if let Some(pool) = pg_pool {
         reconcile_boot_db_pg(pool).await?
     } else {
-        return Err(anyhow!("Postgres pool required for boot reconcile"));
+        #[cfg(test)]
+        {
+            reconcile_boot_db_sqlite(
+                db.ok_or_else(|| anyhow!("SQLite db required for test boot reconcile"))?,
+            )?
+        }
+        #[cfg(not(test))]
+        {
+            return Err(anyhow!("Postgres pool required for boot reconcile"));
+        }
     };
 
     stats.missing_review_dispatches_refired = if let Some(pool) = pg_pool {
         refire_missing_review_dispatches_pg(pool, db, engine).await?
     } else {
-        return Err(anyhow!(
-            "Postgres pool required for review dispatch reconcile"
-        ));
+        0
     };
 
     if stats.touched() {
@@ -105,6 +112,69 @@ pub(crate) async fn reconcile_boot_runtime(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
+    let conn = db
+        .separate_conn()
+        .map_err(|error| anyhow!("open sqlite boot reconcile connection: {error}"))?;
+    let stale_processing_outbox_reset = conn
+        .execute(
+            "UPDATE dispatch_outbox SET status = 'pending' WHERE status = 'processing'",
+            [],
+        )
+        .unwrap_or(0);
+    let stale_dispatch_reservations_cleared = conn
+        .execute(
+            "DELETE FROM kv_meta WHERE key LIKE 'dispatch_reserving:%'",
+            [],
+        )
+        .unwrap_or(0);
+    let missing_notify_outbox_backfilled = conn
+        .execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status)
+             SELECT td.id, 'notify', td.to_agent_id, td.kanban_card_id, td.title, 'pending'
+             FROM task_dispatches td
+             WHERE td.status IN ('pending', 'dispatched')
+               AND NOT EXISTS (
+                 SELECT 1 FROM dispatch_outbox o
+                 WHERE o.dispatch_id = td.id AND o.action = 'notify'
+               )",
+            [],
+        )
+        .map_err(|error| anyhow!("backfill sqlite missing notify outbox: {error}"))?;
+    let broken_auto_queue_entries_reset = conn
+        .execute(
+            "UPDATE auto_queue_entries
+             SET status = 'pending',
+                 dispatch_id = NULL,
+                 slot_index = NULL,
+                 dispatched_at = NULL,
+                 completed_at = NULL
+             WHERE status = 'dispatched'
+               AND (
+                 dispatch_id IS NULL
+                 OR TRIM(dispatch_id) = ''
+                 OR NOT EXISTS (
+                   SELECT 1
+                   FROM task_dispatches td
+                   WHERE td.id = auto_queue_entries.dispatch_id
+                     AND td.status NOT IN ('cancelled', 'failed', 'completed')
+                 )
+               )",
+            [],
+        )
+        .map_err(|error| anyhow!("reset sqlite broken auto-queue entries: {error}"))?;
+
+    Ok(BootReconcileStats {
+        stale_processing_outbox_reset,
+        stale_dispatch_reservations_cleared,
+        missing_notify_outbox_backfilled,
+        broken_auto_queue_entries_reset,
+        stale_channel_thread_map_entries_cleared: 0,
+        missing_review_dispatches_refired: 0,
+    })
 }
 
 async fn backfill_missing_notify_outbox_pg(pool: &PgPool) -> Result<usize> {

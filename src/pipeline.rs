@@ -613,22 +613,6 @@ pub fn resolve_for_card(
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
 
-/// Legacy SQLite signature retained for out-of-scope callers while runtime
-/// pipeline override resolution is PG-only.
-#[cfg(not(test))]
-pub fn resolve_for_card(
-    _conn: &rusqlite::Connection,
-    repo_id: Option<&str>,
-    agent_id: Option<&str>,
-) -> PipelineConfig {
-    if repo_id.is_some() || agent_id.is_some() {
-        tracing::warn!(
-            "[pipeline] ignoring sqlite pipeline override lookup; postgres pool required"
-        );
-    }
-    resolve(None, None)
-}
-
 pub async fn resolve_for_card_pg(
     pool: &PgPool,
     repo_id: Option<&str>,

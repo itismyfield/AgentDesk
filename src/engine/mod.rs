@@ -335,6 +335,17 @@ impl PolicyEngine {
 
         // Register bridge ops (agentdesk.*)
         context.with(|ctx| {
+            #[cfg(test)]
+            {
+                return ops::register_globals_with_supervisor_and_test_backends(
+                    &ctx,
+                    runtime_deps.legacy_db.clone(),
+                    runtime_deps.pg_pool.clone(),
+                    supervisor_bridge.clone(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"));
+            }
+            #[cfg(not(test))]
             ops::register_globals_with_supervisor_and_pg(
                 &ctx,
                 runtime_deps.pg_pool.clone(),
@@ -358,6 +369,19 @@ impl PolicyEngine {
 
             // Register bridge ops in the reload context too
             reload_ctx.with(|ctx| {
+                #[cfg(test)]
+                {
+                    return ops::register_globals_with_supervisor_and_test_backends(
+                        &ctx,
+                        runtime_deps.legacy_db.clone(),
+                        runtime_deps.pg_pool.clone(),
+                        supervisor_bridge.clone(),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
+                    });
+                }
+                #[cfg(not(test))]
                 ops::register_globals_with_supervisor_and_pg(
                     &ctx,
                     runtime_deps.pg_pool.clone(),

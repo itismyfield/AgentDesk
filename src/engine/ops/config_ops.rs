@@ -1,13 +1,20 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use sqlx::PgPool;
 
 // ── Config ops ───────────────────────────────────────────────────
 
-pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+pub(super) fn register_config_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Option<crate::db::Db>,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let config_obj = Object::new(ctx.clone())?;
 
     // __config_get_raw(key) → JSON string: "null" or "\"value\""
+    let db_c = db;
     let pg_c = pg_pool;
     config_obj.set(
         "__get_raw",
@@ -17,6 +24,11 @@ pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) 
                 if let Some(pool) = pg_c.as_ref() {
                     return config_get_raw_pg(pool, &key);
                 }
+                #[cfg(test)]
+                if let Some(db) = db_c.as_ref() {
+                    return config_get_raw_sqlite(db, &key);
+                }
+                let _ = &db_c;
                 "null".to_string()
             }),
         )?,
@@ -37,6 +49,25 @@ pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) 
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+fn config_get_raw_sqlite(db: &crate::db::Db, key: &str) -> String {
+    let value = db
+        .read_conn()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten();
+    value
+        .and_then(|value| serde_json::to_string(&value).ok())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn config_get_raw_pg(pool: &PgPool, key: &str) -> String {

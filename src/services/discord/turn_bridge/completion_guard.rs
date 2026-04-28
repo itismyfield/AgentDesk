@@ -716,6 +716,7 @@ pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
         return true;
     }
 
+    #[cfg(test)]
     if let Some(db) = db {
         match db.separate_conn() {
             Ok(conn) => {
@@ -737,6 +738,9 @@ pub(in crate::services::discord) async fn store_reconcile_marker_with_handles(
             }
         }
     }
+
+    #[cfg(not(test))]
+    let _ = db;
 
     false
 }

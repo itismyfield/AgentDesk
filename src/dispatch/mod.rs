@@ -43,17 +43,19 @@ pub(crate) use dispatch_create::{
     create_dispatch_record_sqlite_test, create_dispatch_record_with_id_sqlite_test,
 };
 #[allow(unused_imports)]
+pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_backends;
+#[allow(unused_imports)]
 pub use dispatch_status::{
     complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
     load_dispatch_row_pg_first, load_dispatch_row_with_backends, mark_dispatch_completed_pg_first,
     set_dispatch_status_pg_first, set_dispatch_status_with_backends,
 };
+#[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use dispatch_status::{
     ensure_dispatch_notify_outbox_on_conn, ensure_dispatch_status_reaction_outbox_on_conn,
     record_dispatch_status_event_on_conn, set_dispatch_status_on_conn,
     set_dispatch_status_without_queue_sync_on_conn,
-    set_dispatch_status_without_queue_sync_with_backends,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -193,19 +195,6 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
     }
 
     Ok(cancelled)
-}
-
-#[cfg(not(test))]
-pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
-    _conn: &rusqlite::Connection,
-    dispatch_id: &str,
-    _reason: Option<&str>,
-) -> rusqlite::Result<usize> {
-    Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-        std::io::Error::other(format!(
-            "Postgres pool required to cancel dispatch {dispatch_id}"
-        )),
-    )))
 }
 
 pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
@@ -467,19 +456,6 @@ pub fn cancel_active_dispatches_for_card_on_conn(
         };
     }
     Ok(cancelled)
-}
-
-#[cfg(not(test))]
-pub fn cancel_active_dispatches_for_card_on_conn(
-    _conn: &rusqlite::Connection,
-    card_id: &str,
-    _reason: Option<&str>,
-) -> rusqlite::Result<usize> {
-    Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-        std::io::Error::other(format!(
-            "Postgres pool required to cancel active dispatches for card {card_id}"
-        )),
-    )))
 }
 
 const MAX_DISPATCH_SUMMARY_CHARS: usize = 160;
@@ -768,16 +744,6 @@ pub fn query_dispatch_row(
         },
     )
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
-}
-
-#[cfg(not(test))]
-pub fn query_dispatch_row(
-    _conn: &rusqlite::Connection,
-    dispatch_id: &str,
-) -> Result<serde_json::Value> {
-    Err(anyhow::anyhow!(
-        "Postgres pool required to query dispatch row {dispatch_id}"
-    ))
 }
 
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {

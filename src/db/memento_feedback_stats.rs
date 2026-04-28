@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+#[cfg(test)]
 use rusqlite::{Connection, params};
 
 use crate::db::Db;
@@ -32,6 +33,7 @@ pub struct MementoFeedbackDailyStat {
     pub coverage_rate: f64,
 }
 
+#[cfg(test)]
 pub fn upsert_turn_stat(db: &Db, stat: &MementoFeedbackTurnStat) -> Result<()> {
     let mut conn = db.lock().map_err(|error| {
         anyhow!("db lock failed while recording memento feedback stats: {error}")
@@ -39,6 +41,14 @@ pub fn upsert_turn_stat(db: &Db, stat: &MementoFeedbackTurnStat) -> Result<()> {
     upsert_turn_stat_on_conn(&mut conn, stat)
 }
 
+#[cfg(not(test))]
+pub fn upsert_turn_stat(_db: &Db, _stat: &MementoFeedbackTurnStat) -> Result<()> {
+    Err(anyhow!(
+        "sqlite memento feedback stats backend is unavailable in production"
+    ))
+}
+
+#[cfg(test)]
 pub fn upsert_turn_stat_on_conn(
     conn: &mut Connection,
     stat: &MementoFeedbackTurnStat,

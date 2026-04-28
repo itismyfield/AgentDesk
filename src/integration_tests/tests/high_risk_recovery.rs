@@ -488,6 +488,44 @@ mod failure_recovery {
                     .execute(&startup_pool)
                     .await
                     .expect("seed postgres review card");
+                    let reviewed_commit =
+                        crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
+                            .unwrap_or_else(|| {
+                                "0000000000000000000000000000000000000000".to_string()
+                            });
+                    sqlx::query(
+                        "INSERT INTO task_dispatches (
+                            id,
+                            kanban_card_id,
+                            to_agent_id,
+                            dispatch_type,
+                            status,
+                            title,
+                            context,
+                            created_at,
+                            updated_at,
+                            completed_at
+                         ) VALUES (
+                            'dispatch-969-work',
+                            'card-969-review',
+                            'agent-1',
+                            'implementation',
+                            'completed',
+                            'Completed implementation',
+                            $1::jsonb,
+                            NOW() - INTERVAL '2 minutes',
+                            NOW() - INTERVAL '1 minute',
+                            NOW() - INTERVAL '1 minute'
+                         )
+                         ON CONFLICT (id) DO NOTHING",
+                    )
+                    .bind(serde_json::json!({
+                        "reviewed_commit": reviewed_commit,
+                        "branch": "test-review-target"
+                    }))
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed postgres completed work dispatch");
                     sqlx::query(
                         "INSERT INTO dispatch_outbox (dispatch_id, action, status)
                          VALUES ('dispatch-969', 'notify', 'processing')

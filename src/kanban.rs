@@ -18,6 +18,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::Row as SqlxRow;
 
+#[cfg(test)]
 fn clear_escalation_alert_state_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -32,6 +33,7 @@ fn clear_escalation_alert_state_on_conn(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -89,6 +91,7 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
 /// blobs (titles, prompts, completion evidence like `completed_commit`) are
 /// preserved so audit history remains intact. Rows whose JSON is malformed or
 /// already lacks the keys are left untouched.
+#[cfg(test)]
 fn strip_stale_worktree_metadata_from_dispatches_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -508,6 +511,7 @@ async fn cleanup_force_transition_revert_fields_on_pg_tx(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn log_audit_on_conn(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -1141,46 +1145,55 @@ fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
 }
 
 fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
-    let Ok(conn) = db.lock() else {
+    #[cfg(not(test))]
+    {
+        let _ = (db, card_id, cancel_implementation);
         return;
-    };
-
-    let dispatch_types = if cancel_implementation {
-        "'implementation', 'review-decision', 'rework'"
-    } else {
-        "'review-decision', 'rework'"
-    };
-
-    let pending_followups: Vec<String> = conn
-        .prepare(&format!(
-            "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
-             AND status IN ('pending', 'dispatched')"
-        ))
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([card_id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        })
-        .unwrap_or_default();
-
-    let mut cancelled = 0usize;
-    for dispatch_id in pending_followups {
-        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-            &conn,
-            &dispatch_id,
-            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-        )
-        .unwrap_or(0);
     }
 
-    if cancelled > 0 {
-        tracing::info!(
-            "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
-            cancelled,
-            card_id
-        );
+    #[cfg(test)]
+    {
+        let Ok(conn) = db.lock() else {
+            return;
+        };
+
+        let dispatch_types = if cancel_implementation {
+            "'implementation', 'review-decision', 'rework'"
+        } else {
+            "'review-decision', 'rework'"
+        };
+
+        let pending_followups: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
+             AND status IN ('pending', 'dispatched')"
+            ))
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([card_id], |row| row.get::<_, String>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default();
+
+        let mut cancelled = 0usize;
+        for dispatch_id in pending_followups {
+            cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                &dispatch_id,
+                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+            )
+            .unwrap_or(0);
+        }
+
+        if cancelled > 0 {
+            tracing::info!(
+                "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
+                cancelled,
+                card_id
+            );
+        }
     }
 }
 
@@ -1316,29 +1329,37 @@ fn resolve_effective_pipeline_for_hooks(
         };
     }
 
-    let Some(db) = db else {
-        return None;
-    };
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return None;
+        };
 
-    db.lock().ok().map(|conn| {
-        let repo_id: Option<String> = conn
-            .query_row(
-                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    })
+        db.lock().ok().map(|conn| {
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = db;
+        None
+    }
 }
 
 pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
@@ -1415,72 +1436,83 @@ pub fn fire_transition_hooks_with_backends(
         fire_transition_hooks_pg(db, pg_pool, engine, card_id, from, to);
         return;
     }
-    let Some(db) = db else {
+
+    #[cfg(not(test))]
+    {
+        let _ = (db, engine, card_id, from, to);
         return;
-    };
-
-    // Audit log
-    if let Ok(conn) = db.lock() {
-        log_audit(&conn, card_id, from, to, "hook", "OK");
     }
 
-    // Resolve effective pipeline for this card (#135)
-    crate::pipeline::ensure_loaded();
-    let effective = db.lock().ok().map(|conn| {
-        let repo_id: Option<String> = conn
-            .query_row(
-                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    });
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return;
+        };
 
-    if let Some(ref pipeline) = effective {
-        // Sync auto_queue_entries + GitHub on terminal status
-        if pipeline.is_terminal(to) {
-            sync_terminal_transition_followups(db, card_id);
+        // Audit log
+        if let Ok(conn) = db.lock() {
+            log_audit(&conn, card_id, from, to, "hook", "OK");
         }
 
-        github_sync_on_transition(db, pipeline, card_id, to);
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+        // Resolve effective pipeline for this card (#135)
+        crate::pipeline::ensure_loaded();
+        let effective = db.lock().ok().map(|conn| {
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+        });
 
-        // #119: Record true_negative for cards that passed review and reached terminal state
-        if pipeline.is_terminal(to) && record_true_negative_if_pass(db, engine.pg_pool(), card_id) {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-                engine.pg_pool().cloned(),
-            );
+        if let Some(ref pipeline) = effective {
+            // Sync auto_queue_entries + GitHub on terminal status
+            if pipeline.is_terminal(to) {
+                sync_terminal_transition_followups(db, card_id);
+            }
+
+            github_sync_on_transition(db, pipeline, card_id, to);
+            fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+
+            // #119: Record true_negative for cards that passed review and reached terminal state
+            if pipeline.is_terminal(to)
+                && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
+            {
+                crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+                    engine.pg_pool().cloned(),
+                );
+            }
         }
+
+        drain_hook_side_effects(db, engine);
     }
 
-    drain_hook_side_effects(db, engine);
-}
-
-fn fire_transition_hooks_pg(
-    db: Option<&Db>,
-    pg_pool: &sqlx::PgPool,
-    engine: &PolicyEngine,
-    card_id: &str,
-    from: &str,
-    to: &str,
-) {
-    let card_id_owned = card_id.to_string();
-    let from_owned = from.to_string();
-    let to_owned = to.to_string();
-    let effective = match crate::utils::async_bridge::block_on_pg_result(
-        pg_pool,
-        move |bridge_pool| async move {
-            sqlx::query(
+    fn fire_transition_hooks_pg(
+        db: Option<&Db>,
+        pg_pool: &sqlx::PgPool,
+        engine: &PolicyEngine,
+        card_id: &str,
+        from: &str,
+        to: &str,
+    ) {
+        let card_id_owned = card_id.to_string();
+        let from_owned = from.to_string();
+        let to_owned = to.to_string();
+        let effective = match crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |bridge_pool| async move {
+                sqlx::query(
                 "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
                  VALUES ($1, $2, $3, 'hook', 'OK')",
             )
@@ -1492,75 +1524,80 @@ fn fire_transition_hooks_pg(
             .map_err(|error| {
                 format!("insert postgres kanban audit for {card_id_owned}: {error}")
             })?;
-            sqlx::query(
-                "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+                sqlx::query(
+                    "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
                  VALUES ('kanban_card', $1, $2, 'hook')",
-            )
-            .bind(&card_id_owned)
-            .bind(format!("{from_owned}->{to_owned} (OK)"))
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("insert postgres audit log for {card_id_owned}: {error}"))?;
+                )
+                .bind(&card_id_owned)
+                .bind(format!("{from_owned}->{to_owned} (OK)"))
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("insert postgres audit log for {card_id_owned}: {error}")
+                })?;
 
-            crate::pipeline::ensure_loaded();
-            let row = sqlx::query(
-                "SELECT repo_id, assigned_agent_id
+                crate::pipeline::ensure_loaded();
+                let row = sqlx::query(
+                    "SELECT repo_id, assigned_agent_id
                  FROM kanban_cards
                  WHERE id = $1",
-            )
-            .bind(&card_id_owned)
-            .fetch_optional(&bridge_pool)
-            .await
-            .map_err(|error| {
-                format!("load postgres card transition context {card_id_owned}: {error}")
-            })?;
-            let (repo_id, agent_id) = if let Some(row) = row {
-                (
-                    row.try_get::<Option<String>, _>("repo_id")
-                        .map_err(|error| {
-                            format!("decode postgres repo_id for {card_id_owned}: {error}")
-                        })?,
-                    row.try_get::<Option<String>, _>("assigned_agent_id")
-                        .map_err(|error| {
-                            format!(
-                                "decode postgres assigned_agent_id for {card_id_owned}: {error}"
-                            )
-                        })?,
                 )
-            } else {
-                (None, None)
-            };
-            Ok(Some(
-                crate::pipeline::resolve_for_card_pg(
-                    &bridge_pool,
-                    repo_id.as_deref(),
-                    agent_id.as_deref(),
-                )
-                .await,
-            ))
-        },
-        |error| error,
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!("failed to fire postgres transition hooks for {card_id}: {error}");
-            None
-        }
-    };
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres card transition context {card_id_owned}: {error}")
+                })?;
+                let (repo_id, agent_id) = if let Some(row) = row {
+                    (
+                        row.try_get::<Option<String>, _>("repo_id")
+                            .map_err(|error| {
+                                format!("decode postgres repo_id for {card_id_owned}: {error}")
+                            })?,
+                        row.try_get::<Option<String>, _>("assigned_agent_id")
+                            .map_err(|error| {
+                                format!(
+                                    "decode postgres assigned_agent_id for {card_id_owned}: {error}"
+                                )
+                            })?,
+                    )
+                } else {
+                    (None, None)
+                };
+                Ok(Some(
+                    crate::pipeline::resolve_for_card_pg(
+                        &bridge_pool,
+                        repo_id.as_deref(),
+                        agent_id.as_deref(),
+                    )
+                    .await,
+                ))
+            },
+            |error| error,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("failed to fire postgres transition hooks for {card_id}: {error}");
+                None
+            }
+        };
 
-    if let Some(ref pipeline) = effective {
-        if pipeline.is_terminal(to) {
-            let card_id_owned = card_id.to_string();
-            let terminal_followup = crate::utils::async_bridge::block_on_pg_result(
-                pg_pool,
-                move |bridge_pool| async move {
-                    let mut tx = bridge_pool.begin().await.map_err(|error| {
-                        format!("begin postgres terminal follow-up tx: {error}")
-                    })?;
-                    crate::github::sync::sync_auto_queue_terminal_on_pg(&mut tx, &card_id_owned)
+        if let Some(ref pipeline) = effective {
+            if pipeline.is_terminal(to) {
+                let card_id_owned = card_id.to_string();
+                let terminal_followup = crate::utils::async_bridge::block_on_pg_result(
+                    pg_pool,
+                    move |bridge_pool| async move {
+                        let mut tx = bridge_pool.begin().await.map_err(|error| {
+                            format!("begin postgres terminal follow-up tx: {error}")
+                        })?;
+                        crate::github::sync::sync_auto_queue_terminal_on_pg(
+                            &mut tx,
+                            &card_id_owned,
+                        )
                         .await
                         .map_err(|error| format!("{error}"))?;
-                    let dispatch_ids = sqlx::query_scalar::<_, String>(
+                        let dispatch_ids = sqlx::query_scalar::<_, String>(
                         "SELECT id
                          FROM task_dispatches
                          WHERE kanban_card_id = $1
@@ -1575,63 +1612,65 @@ fn fire_transition_hooks_pg(
                             "load postgres terminal follow-up dispatches {card_id_owned}: {error}"
                         )
                     })?;
-                    for dispatch_id in dispatch_ids {
-                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
-                            &mut tx,
-                            &dispatch_id,
-                            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-                        )
-                        .await
-                        .map_err(|error| format!("{error}"))?;
-                    }
-                    tx.commit().await.map_err(|error| {
-                        format!("commit postgres terminal follow-up tx: {error}")
-                    })?;
+                        for dispatch_id in dispatch_ids {
+                            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                                &mut tx,
+                                &dispatch_id,
+                                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+                            )
+                            .await
+                            .map_err(|error| format!("{error}"))?;
+                        }
+                        tx.commit().await.map_err(|error| {
+                            format!("commit postgres terminal follow-up tx: {error}")
+                        })?;
+                        Ok(())
+                    },
+                    |error| error,
+                );
+                if let Err(error) = terminal_followup {
+                    tracing::warn!(
+                        "[kanban] failed postgres terminal follow-up sync for {}: {}",
+                        card_id,
+                        error
+                    );
+                }
+            }
+
+            let pg_pool_owned = pg_pool.clone();
+            let pipeline_owned = pipeline.clone();
+            let card_id_owned = card_id.to_string();
+            let to_owned = to.to_string();
+            let _ = crate::utils::async_bridge::block_on_pg_result(
+                pg_pool,
+                move |_bridge_pool| async move {
+                    github_sync_on_transition_pg(
+                        &pg_pool_owned,
+                        &pipeline_owned,
+                        &card_id_owned,
+                        &to_owned,
+                    )
+                    .await;
                     Ok(())
                 },
-                |error| error,
+                |_error| (),
             );
-            if let Err(error) = terminal_followup {
-                tracing::warn!(
-                    "[kanban] failed postgres terminal follow-up sync for {}: {}",
-                    card_id,
-                    error
-                );
+            fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+
+            if pipeline.is_terminal(to)
+                && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
+            {
+                crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
+                    pg_pool.clone(),
+                ));
             }
-        }
-
-        let pg_pool_owned = pg_pool.clone();
-        let pipeline_owned = pipeline.clone();
-        let card_id_owned = card_id.to_string();
-        let to_owned = to.to_string();
-        let _ = crate::utils::async_bridge::block_on_pg_result(
-            pg_pool,
-            move |_bridge_pool| async move {
-                github_sync_on_transition_pg(
-                    &pg_pool_owned,
-                    &pipeline_owned,
-                    &card_id_owned,
-                    &to_owned,
-                )
-                .await;
-                Ok(())
-            },
-            |_error| (),
-        );
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
-
-        if pipeline.is_terminal(to)
-            && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
-        {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
-                pg_pool.clone(),
-            ));
         }
     }
 }
 
 /// Sync GitHub issue state when kanban card transitions (pipeline-driven).
 /// Terminal states → close issue. States with OnReviewEnter hook → comment.
+#[cfg(test)]
 fn github_sync_on_transition(
     db: &Db,
     pipeline: &crate::pipeline::PipelineConfig,
@@ -1663,6 +1702,7 @@ fn github_sync_on_transition(
     }
 }
 
+#[cfg(test)]
 fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(String, i64)> {
     let info: Option<(String, String, Option<i64>)> = db
         .lock()
@@ -1720,6 +1760,7 @@ fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(String, i64)> 
 }
 
 /// Log a kanban state transition to audit_logs table.
+#[cfg(test)]
 fn log_audit(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -1878,68 +1919,70 @@ fn record_true_negative_if_pass_with_backends(
         .unwrap_or(false);
     }
 
-    if let Some(db) = db
-        && let Ok(conn) = db.lock()
+    #[cfg(test)]
     {
-        // Check if the card's last review verdict was "pass" or "approved"
-        let last_verdict: Option<String> = conn
-            .query_row(
-                "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
+        if let Some(db) = db
+            && let Ok(conn) = db.lock()
+        {
+            // Check if the card's last review verdict was "pass" or "approved"
+            let last_verdict: Option<String> = conn
+                .query_row(
+                    "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
 
-        match last_verdict.as_deref() {
-            Some("pass") | Some("approved") => {
-                let review_round: Option<i64> = conn
-                    .query_row(
-                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .ok();
+            match last_verdict.as_deref() {
+                Some("pass") | Some("approved") => {
+                    let review_round: Option<i64> = conn
+                        .query_row(
+                            "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                            [card_id],
+                            |row| row.get(0),
+                        )
+                        .ok();
 
-                // Carry forward finding_categories from the review dispatch that found issues.
-                // The most recent review dispatch is typically the pass/approved one with
-                // empty items, so we walk backwards to find one with actual findings.
-                // This ensures that if TN is later corrected to FN on reopen, categories
-                // are already present.
-                let finding_cats: Option<String> = conn
-                    .prepare(
-                        "SELECT td.result FROM task_dispatches td \
+                    // Carry forward finding_categories from the review dispatch that found issues.
+                    // The most recent review dispatch is typically the pass/approved one with
+                    // empty items, so we walk backwards to find one with actual findings.
+                    // This ensures that if TN is later corrected to FN on reopen, categories
+                    // are already present.
+                    let finding_cats: Option<String> = conn
+                        .prepare(
+                            "SELECT td.result FROM task_dispatches td \
                          WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
                          AND td.status = 'completed' ORDER BY td.rowid DESC",
-                    )
-                    .ok()
-                    .and_then(|mut stmt| {
-                        let rows = stmt
-                            .query_map([card_id], |row| row.get::<_, Option<String>>(0))
-                            .ok()?;
-                        for row_result in rows {
-                            if let Ok(Some(result_str)) = row_result {
-                                if let Ok(v) =
-                                    serde_json::from_str::<serde_json::Value>(&result_str)
-                                {
-                                    if let Some(items) = v["items"].as_array() {
-                                        let cats: Vec<String> = items
-                                            .iter()
-                                            .filter_map(|it| {
-                                                it["category"].as_str().map(|s| s.to_string())
-                                            })
-                                            .collect();
-                                        if !cats.is_empty() {
-                                            return serde_json::to_string(&cats).ok();
+                        )
+                        .ok()
+                        .and_then(|mut stmt| {
+                            let rows = stmt
+                                .query_map([card_id], |row| row.get::<_, Option<String>>(0))
+                                .ok()?;
+                            for row_result in rows {
+                                if let Ok(Some(result_str)) = row_result {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(&result_str)
+                                    {
+                                        if let Some(items) = v["items"].as_array() {
+                                            let cats: Vec<String> = items
+                                                .iter()
+                                                .filter_map(|it| {
+                                                    it["category"].as_str().map(|s| s.to_string())
+                                                })
+                                                .collect();
+                                            if !cats.is_empty() {
+                                                return serde_json::to_string(&cats).ok();
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
 
-                let inserted = conn.execute(
+                    let inserted = conn.execute(
                     "INSERT INTO review_tuning_outcomes \
                      (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
                      VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', ?4)",
@@ -1947,14 +1990,15 @@ fn record_true_negative_if_pass_with_backends(
                 )
                 .map(|n| n > 0)
                 .unwrap_or(false);
-                if inserted {
-                    tracing::info!(
-                        "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
-                    );
+                    if inserted {
+                        tracing::info!(
+                            "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
+                        );
+                    }
+                    return inserted;
                 }
-                return inserted;
+                _ => {} // No review or non-pass verdict — nothing to record
             }
-            _ => {} // No review or non-pass verdict — nothing to record
         }
     }
     false
@@ -2089,14 +2133,16 @@ pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool
         return;
     }
 
-    let Some(db) = db else {
-        return;
-    };
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return;
+        };
 
-    if let Ok(conn) = db.lock() {
-        // Only correct the most recent TN (latest review_round) to avoid
-        // corrupting historical TN records from earlier rounds
-        let updated = conn
+        if let Ok(conn) = db.lock() {
+            // Only correct the most recent TN (latest review_round) to avoid
+            // corrupting historical TN records from earlier rounds
+            let updated = conn
             .execute(
                 "UPDATE review_tuning_outcomes SET outcome = 'false_negative' \
                  WHERE card_id = ?1 AND outcome = 'true_negative' \
@@ -2104,15 +2150,15 @@ pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool
                 [card_id],
             )
             .unwrap_or(0);
-        if updated > 0 {
-            tracing::info!(
-                "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen, latest round only)"
-            );
+            if updated > 0 {
+                tracing::info!(
+                    "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen, latest round only)"
+                );
 
-            // Backfill finding_categories if empty. The TN was recorded using the
-            // last review dispatch (the pass/approved one with empty items). Look
-            // for an earlier review dispatch that actually found issues.
-            let needs_backfill: bool = conn
+                // Backfill finding_categories if empty. The TN was recorded using the
+                // last review dispatch (the pass/approved one with empty items). Look
+                // for an earlier review dispatch that actually found issues.
+                let needs_backfill: bool = conn
                 .query_row(
                     "SELECT finding_categories IS NULL OR finding_categories = '' OR finding_categories = '[]' \
                      FROM review_tuning_outcomes \
@@ -2123,47 +2169,49 @@ pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool
                 )
                 .unwrap_or(false);
 
-            if needs_backfill {
-                // Walk through review dispatches (most recent first) to find
-                // one with a non-empty items array containing categories
-                let finding_cats: Option<String> = conn
-                    .prepare(
-                        "SELECT td.result FROM task_dispatches td \
+                if needs_backfill {
+                    // Walk through review dispatches (most recent first) to find
+                    // one with a non-empty items array containing categories
+                    let finding_cats: Option<String> = conn
+                        .prepare(
+                            "SELECT td.result FROM task_dispatches td \
                          WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
                          AND td.status = 'completed' \
                          ORDER BY td.rowid DESC",
-                    )
-                    .ok()
-                    .and_then(|mut stmt| {
-                        let rows = stmt
-                            .query_map([card_id], |row| row.get::<_, Option<String>>(0))
-                            .ok()?;
-                        for row_result in rows {
-                            if let Ok(Some(result_str)) = row_result {
-                                if let Ok(v) =
-                                    serde_json::from_str::<serde_json::Value>(&result_str)
-                                {
-                                    if let Some(items) = v["items"].as_array() {
-                                        if !items.is_empty() {
-                                            let cats: Vec<String> = items
-                                                .iter()
-                                                .filter_map(|it| {
-                                                    it["category"].as_str().map(|s| s.to_string())
-                                                })
-                                                .collect();
-                                            if !cats.is_empty() {
-                                                return serde_json::to_string(&cats).ok();
+                        )
+                        .ok()
+                        .and_then(|mut stmt| {
+                            let rows = stmt
+                                .query_map([card_id], |row| row.get::<_, Option<String>>(0))
+                                .ok()?;
+                            for row_result in rows {
+                                if let Ok(Some(result_str)) = row_result {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(&result_str)
+                                    {
+                                        if let Some(items) = v["items"].as_array() {
+                                            if !items.is_empty() {
+                                                let cats: Vec<String> = items
+                                                    .iter()
+                                                    .filter_map(|it| {
+                                                        it["category"]
+                                                            .as_str()
+                                                            .map(|s| s.to_string())
+                                                    })
+                                                    .collect();
+                                                if !cats.is_empty() {
+                                                    return serde_json::to_string(&cats).ok();
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
 
-                if let Some(ref cats) = finding_cats {
-                    let backfilled = conn
+                    if let Some(ref cats) = finding_cats {
+                        let backfilled = conn
                         .execute(
                             "UPDATE review_tuning_outcomes SET finding_categories = ?1 \
                              WHERE card_id = ?2 AND outcome = 'false_negative' \
@@ -2171,10 +2219,11 @@ pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool
                             rusqlite::params![cats, card_id],
                         )
                         .unwrap_or(0);
-                    if backfilled > 0 {
-                        tracing::info!(
-                            "[review-tuning] #119 backfilled {backfilled} FN finding_categories: card={card_id} categories={cats}"
-                        );
+                        if backfilled > 0 {
+                            tracing::info!(
+                                "[review-tuning] #119 backfilled {backfilled} FN finding_categories: card={card_id} categories={cats}"
+                            );
+                        }
                     }
                 }
             }

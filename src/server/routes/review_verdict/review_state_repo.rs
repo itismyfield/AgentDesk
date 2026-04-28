@@ -1,6 +1,7 @@
 /// #117: Update the canonical card_review_state record after a review-decision action.
 /// #158: Routes through the unified review_state_sync entrypoint.
 pub(super) fn update_card_review_state(
+    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     decision: &str,
@@ -17,5 +18,5 @@ pub(super) fn update_card_review_state(
         "state": state,
         "last_decision": decision,
     });
-    crate::engine::ops::review_state_sync_with_backends(None, pg_pool, &payload.to_string());
+    crate::engine::ops::review_state_sync_with_backends(db, pg_pool, &payload.to_string());
 }

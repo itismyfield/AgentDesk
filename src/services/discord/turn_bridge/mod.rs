@@ -2203,26 +2203,29 @@ pub(super) fn spawn_turn_bridge(
                             error
                         );
                     }
-                } else if let Some(db) = shared_owned.legacy_sqlite() {
-                    if let Ok(conn) = db.lock() {
-                        if let Err(error) =
-                            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                                &conn,
-                                dispatch_id,
-                                Some("turn_bridge_cancelled"),
-                            )
-                        {
+                } else {
+                    #[cfg(test)]
+                    if let Some(db) = shared_owned.legacy_sqlite() {
+                        if let Ok(conn) = db.lock() {
+                            if let Err(error) =
+                                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                                    &conn,
+                                    dispatch_id,
+                                    Some("turn_bridge_cancelled"),
+                                )
+                            {
+                                tracing::warn!(
+                                    "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
+                                    dispatch_id,
+                                    error
+                                );
+                            }
+                        } else {
                             tracing::warn!(
-                                "[turn_bridge] failed to cancel dispatch {} during cancelled turn cleanup: {}",
-                                dispatch_id,
-                                error
+                                "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
+                                dispatch_id
                             );
                         }
-                    } else {
-                        tracing::warn!(
-                            "[turn_bridge] failed to lock DB for cancelled turn cleanup on dispatch {}",
-                            dispatch_id
-                        );
                     }
                 }
             }

@@ -1,5 +1,7 @@
 use anyhow::anyhow;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
@@ -24,10 +26,15 @@ struct CardListFilter {
     limit: Option<usize>,
 }
 
-pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+pub(super) fn register_card_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Option<crate::db::Db>,
+    pg_pool: Option<PgPool>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let cards_obj = Object::new(ctx.clone())?;
 
+    let db_get = db.clone();
     let pg_get = pg_pool.clone();
     cards_obj.set(
         "__getRaw",
@@ -35,12 +42,17 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
             if let Some(pool) = pg_get.as_ref() {
                 return card_get_raw_pg(pool, &card_id);
             }
+            #[cfg(test)]
+            if let Some(db) = db_get.as_ref() {
+                return card_get_raw_sqlite(db, &card_id);
+            }
             json_result(Err::<Value, _>(anyhow!(
                 "postgres backend is required for cards.get"
             )))
         })?,
     )?;
 
+    let db_list = db.clone();
     let pg_list = pg_pool.clone();
     cards_obj.set(
         "__listRaw",
@@ -48,12 +60,17 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
             if let Some(pool) = pg_list.as_ref() {
                 return card_list_raw_pg(pool, &filter_json);
             }
+            #[cfg(test)]
+            if let Some(db) = db_list.as_ref() {
+                return card_list_raw_sqlite(db, &filter_json);
+            }
             json_result(Err::<Value, _>(anyhow!(
                 "postgres backend is required for cards.list"
             )))
         })?,
     )?;
 
+    let db_assign = db.clone();
     let pg_assign = pg_pool.clone();
     cards_obj.set(
         "__assignRaw",
@@ -63,6 +80,10 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
                 if let Some(pool) = pg_assign.as_ref() {
                     return card_assign_raw_pg(pool, &card_id, &agent_id);
                 }
+                #[cfg(test)]
+                if let Some(db) = db_assign.as_ref() {
+                    return card_assign_raw_sqlite(db, &card_id, &agent_id);
+                }
                 json_result(Err::<Value, _>(anyhow!(
                     "postgres backend is required for cards.assign"
                 )))
@@ -70,6 +91,7 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
         )?,
     )?;
 
+    let db_priority = db;
     let pg_priority = pg_pool;
     cards_obj.set(
         "__setPriorityRaw",
@@ -78,6 +100,10 @@ pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
             move |card_id: String, priority: String| -> String {
                 if let Some(pool) = pg_priority.as_ref() {
                     return card_set_priority_raw_pg(pool, &card_id, &priority);
+                }
+                #[cfg(test)]
+                if let Some(db) = db_priority.as_ref() {
+                    return card_set_priority_raw_sqlite(db, &card_id, &priority);
                 }
                 json_result(Err::<Value, _>(anyhow!(
                     "postgres backend is required for cards.setPriority"
@@ -143,6 +169,203 @@ fn card_select_sql_pg() -> &'static str {
         kc.started_at::text AS started_at, \
         kc.completed_at::text AS completed_at \
      FROM kanban_cards kc"
+}
+
+#[cfg(test)]
+fn card_select_sql_sqlite() -> &'static str {
+    "SELECT \
+        id, repo_id, title, status, priority, assigned_agent_id, \
+        github_issue_url, github_issue_number, latest_dispatch_id, review_round, \
+        metadata, created_at, updated_at, description, blocked_reason, \
+        pipeline_stage_id, review_notes, review_status, requested_at, \
+        owner_agent_id, requester_agent_id, parent_card_id, depth, sort_order, \
+        active_thread_id, channel_thread_map, suggestion_pending_at, review_entered_at, \
+        awaiting_dod_at, deferred_dod_json, started_at, completed_at \
+     FROM kanban_cards"
+}
+
+#[cfg(test)]
+fn card_get_raw_sqlite(db: &crate::db::Db, card_id: &str) -> String {
+    json_result((|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| anyhow!("open sqlite cards.get connection: {error}"))?;
+        let sql = format!("{} WHERE id = ?1", card_select_sql_sqlite());
+        let card = conn
+            .query_row(&sql, [card_id], card_row_to_json_sqlite)
+            .optional()
+            .map_err(|error| anyhow!("load sqlite card {card_id}: {error}"))?;
+        Ok(json!({ "card": card }))
+    })())
+}
+
+#[cfg(test)]
+fn card_list_raw_sqlite(db: &crate::db::Db, filter_json: &str) -> String {
+    json_result((|| {
+        let filter = if filter_json.trim().is_empty() {
+            CardListFilter::default()
+        } else {
+            serde_json::from_str::<CardListFilter>(filter_json)
+                .map_err(|error| anyhow!("invalid cards.list filter: {error}"))?
+        };
+        let conn = db
+            .separate_conn()
+            .map_err(|error| anyhow!("open sqlite cards.list connection: {error}"))?;
+        let mut stmt = conn
+            .prepare(card_select_sql_sqlite())
+            .map_err(|error| anyhow!("prepare sqlite cards.list: {error}"))?;
+        let cards = stmt
+            .query_map([], card_row_to_json_sqlite)
+            .map_err(|error| anyhow!("query sqlite cards.list: {error}"))?
+            .filter_map(Result::ok)
+            .filter(|card| card_matches_filter(card, &filter))
+            .take(filter.limit.unwrap_or(usize::MAX))
+            .collect::<Vec<_>>();
+        Ok(json!({ "cards": cards }))
+    })())
+}
+
+#[cfg(test)]
+fn card_assign_raw_sqlite(db: &crate::db::Db, card_id: &str, agent_id: &str) -> String {
+    json_result((|| {
+        if card_id.trim().is_empty() {
+            return Err(anyhow!("cards.assign requires card_id"));
+        }
+        let conn = db
+            .separate_conn()
+            .map_err(|error| anyhow!("open sqlite cards.assign connection: {error}"))?;
+        let changed = conn
+            .execute(
+                "UPDATE kanban_cards SET assigned_agent_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![agent_id, card_id],
+            )
+            .map_err(|error| anyhow!("update sqlite card assignee {card_id}: {error}"))?;
+        if changed == 0 {
+            return Err(anyhow!("unknown card: {card_id}"));
+        }
+        let sql = format!("{} WHERE id = ?1", card_select_sql_sqlite());
+        let card = conn
+            .query_row(&sql, [card_id], card_row_to_json_sqlite)
+            .map_err(|error| anyhow!("reload sqlite card {card_id}: {error}"))?;
+        Ok(json!({ "ok": true, "changed": true, "card": card }))
+    })())
+}
+
+#[cfg(test)]
+fn card_set_priority_raw_sqlite(db: &crate::db::Db, card_id: &str, priority: &str) -> String {
+    json_result((|| {
+        if card_id.trim().is_empty() {
+            return Err(anyhow!("cards.setPriority requires card_id"));
+        }
+        let normalized = priority.trim().to_lowercase();
+        if !matches!(normalized.as_str(), "urgent" | "high" | "medium" | "low") {
+            return Err(anyhow!(
+                "invalid priority '{priority}' (expected urgent|high|medium|low)"
+            ));
+        }
+        let conn = db
+            .separate_conn()
+            .map_err(|error| anyhow!("open sqlite cards.setPriority connection: {error}"))?;
+        let changed = conn
+            .execute(
+                "UPDATE kanban_cards SET priority = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![normalized, card_id],
+            )
+            .map_err(|error| anyhow!("update sqlite card priority {card_id}: {error}"))?;
+        if changed == 0 {
+            return Err(anyhow!("unknown card: {card_id}"));
+        }
+        let sql = format!("{} WHERE id = ?1", card_select_sql_sqlite());
+        let card = conn
+            .query_row(&sql, [card_id], card_row_to_json_sqlite)
+            .map_err(|error| anyhow!("reload sqlite card {card_id}: {error}"))?;
+        Ok(json!({ "ok": true, "changed": true, "card": card }))
+    })())
+}
+
+#[cfg(test)]
+fn card_row_to_json_sqlite(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "repo_id": row.get::<_, Option<String>>(1)?,
+        "title": row.get::<_, String>(2)?,
+        "status": row.get::<_, String>(3)?,
+        "priority": row.get::<_, Option<String>>(4)?,
+        "assigned_agent_id": row.get::<_, Option<String>>(5)?,
+        "github_issue_url": row.get::<_, Option<String>>(6)?,
+        "github_issue_number": row.get::<_, Option<i64>>(7)?,
+        "latest_dispatch_id": row.get::<_, Option<String>>(8)?,
+        "review_round": row.get::<_, Option<i64>>(9)?,
+        "metadata": parse_json_value(row.get::<_, Option<String>>(10)?, "metadata"),
+        "created_at": row.get::<_, Option<String>>(11)?,
+        "updated_at": row.get::<_, Option<String>>(12)?,
+        "description": row.get::<_, Option<String>>(13)?,
+        "blocked_reason": row.get::<_, Option<String>>(14)?,
+        "pipeline_stage_id": row.get::<_, Option<String>>(15)?,
+        "review_notes": row.get::<_, Option<String>>(16)?,
+        "review_status": row.get::<_, Option<String>>(17)?,
+        "requested_at": row.get::<_, Option<String>>(18)?,
+        "owner_agent_id": row.get::<_, Option<String>>(19)?,
+        "requester_agent_id": row.get::<_, Option<String>>(20)?,
+        "parent_card_id": row.get::<_, Option<String>>(21)?,
+        "depth": row.get::<_, Option<i64>>(22)?,
+        "sort_order": row.get::<_, Option<i64>>(23)?,
+        "active_thread_id": row.get::<_, Option<String>>(24)?,
+        "channel_thread_map": parse_json_value(row.get::<_, Option<String>>(25)?, "channel_thread_map"),
+        "suggestion_pending_at": row.get::<_, Option<String>>(26)?,
+        "review_entered_at": row.get::<_, Option<String>>(27)?,
+        "awaiting_dod_at": row.get::<_, Option<String>>(28)?,
+        "deferred_dod_json": parse_json_value(row.get::<_, Option<String>>(29)?, "deferred_dod_json"),
+        "started_at": row.get::<_, Option<String>>(30)?,
+        "completed_at": row.get::<_, Option<String>>(31)?,
+    }))
+}
+
+#[cfg(test)]
+fn card_matches_filter(card: &Value, filter: &CardListFilter) -> bool {
+    if let Some(repo_id) = filter.repo_id.as_deref()
+        && card.get("repo_id").and_then(Value::as_str) != Some(repo_id)
+    {
+        return false;
+    }
+    if let Some(agent_id) = filter.assigned_agent_id.as_deref()
+        && card.get("assigned_agent_id").and_then(Value::as_str) != Some(agent_id)
+    {
+        return false;
+    }
+    if let Some(issue_number) = filter.github_issue_number
+        && card.get("github_issue_number").and_then(Value::as_i64) != Some(issue_number)
+    {
+        return false;
+    }
+    if let Some(status) = filter.status.as_deref()
+        && card.get("status").and_then(Value::as_str) != Some(status)
+    {
+        return false;
+    }
+    if let Some(statuses) = filter.statuses.as_ref().filter(|items| !items.is_empty())
+        && !card
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| statuses.iter().any(|candidate| candidate == status))
+    {
+        return false;
+    }
+    if let Some(unassigned) = filter.unassigned {
+        let is_unassigned = card
+            .get("assigned_agent_id")
+            .is_none_or(|value| value.is_null());
+        if is_unassigned != unassigned {
+            return false;
+        }
+    }
+    if let Some(metadata_present) = filter.metadata_present {
+        let has_metadata = card.get("metadata").is_some_and(|value| !value.is_null());
+        if has_metadata != metadata_present {
+            return false;
+        }
+    }
+    true
 }
 
 fn card_get_raw_pg(pool: &PgPool, card_id: &str) -> String {

@@ -792,6 +792,16 @@ fn latest_completed_work_dispatch_target(
                 .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
         .map(str::to_string);
     let target_repo = context_json
         .as_ref()
@@ -1990,7 +2000,7 @@ async fn latest_completed_work_dispatch_target_pg(
     kanban_card_id: &str,
 ) -> Option<DispatchExecutionTarget> {
     let (result_raw, context_raw): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT result, context
+        "SELECT result::text, context::text
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type IN ('implementation', 'rework')
@@ -2069,6 +2079,16 @@ async fn latest_completed_work_dispatch_target_pg(
         .and_then(|v| json_string_field(v, "completed_commit"))
         .or_else(|| {
             result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
                 .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })

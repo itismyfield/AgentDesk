@@ -197,6 +197,7 @@ fn pg_unavailable_response() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+#[cfg(test)]
 fn slot_thread_map_has_bindings(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -228,6 +229,7 @@ fn slot_thread_map_has_bindings(
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn slot_has_dispatch_thread_history(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -250,6 +252,7 @@ fn slot_has_dispatch_thread_history(
     .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn slot_requires_thread_reset_before_reuse(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -1615,6 +1618,7 @@ impl ActivateCardState {
             )
     }
 
+    #[cfg(test)]
     fn is_terminal(&self, conn: &rusqlite::Connection) -> bool {
         crate::pipeline::ensure_loaded();
         crate::pipeline::resolve_for_card(
@@ -1668,6 +1672,7 @@ struct RestoreDispatchAttemptResult {
     unbound_dispatch: bool,
 }
 
+#[cfg(test)]
 fn load_activate_card_state(
     conn: &rusqlite::Connection,
     card_id: &str,

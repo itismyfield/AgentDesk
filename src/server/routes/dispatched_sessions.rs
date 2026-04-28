@@ -10,6 +10,8 @@ use sqlx::{PgPool, Row};
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
 use crate::db::agents::resolve_agent_channel_for_provider_pg;
+#[cfg(test)]
+use crate::db::session_agent_resolution::resolve_agent_id_for_session;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
     parse_thread_channel_name, resolve_agent_id_for_session_pg,
@@ -28,6 +30,22 @@ async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<
     .ok()
     .flatten()
     .flatten();
+    normalize_thread_channel_id(thread_id.as_deref())
+}
+
+#[cfg(test)]
+fn load_dispatch_thread_id_sqlite(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> Option<String> {
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
     normalize_thread_channel_id(thread_id.as_deref())
 }
 
@@ -941,10 +959,144 @@ pub async fn hook_session(
         return hook_session_pg(&state, pool, body).await;
     }
 
+    #[cfg(test)]
+    if let Some(db) = state.legacy_db().cloned() {
+        return hook_session_sqlite_for_tests(&state, db, body).await;
+    }
+
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": "postgres pool unavailable"})),
     )
+}
+
+#[cfg(test)]
+async fn hook_session_sqlite_for_tests(
+    state: &AppState,
+    db: crate::db::Db,
+    body: HookSessionBody,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match db.lock() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{error}")})),
+            );
+        }
+    };
+
+    let thread_channel_id = normalize_thread_channel_id(body.thread_channel_id.as_deref())
+        .or_else(|| {
+            body.name
+                .as_deref()
+                .and_then(parse_thread_channel_name)
+                .map(|(_, tid)| tid.to_string())
+        })
+        .or_else(|| parse_thread_channel_id_from_session_key(&body.session_key))
+        .or_else(|| {
+            body.dispatch_id
+                .as_deref()
+                .and_then(|dispatch_id| load_dispatch_thread_id_sqlite(&conn, dispatch_id))
+        });
+
+    let agent_id = resolve_agent_id_for_session(
+        &conn,
+        None,
+        Some(&body.session_key),
+        body.name.as_deref(),
+        thread_channel_id.as_deref(),
+        body.dispatch_id.as_deref(),
+    );
+
+    let status = body.status.as_deref().unwrap_or("working");
+    let provider = body.provider.as_deref().unwrap_or("claude");
+    let tokens = body.tokens.unwrap_or(0) as i64;
+    let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
+    let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
+    let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
+
+    let result = conn.execute(
+        "INSERT INTO sessions (
+            session_key,
+            agent_id,
+            provider,
+            status,
+            session_info,
+            model,
+            tokens,
+            cwd,
+            active_dispatch_id,
+            thread_channel_id,
+            claude_session_id,
+            raw_provider_session_id,
+            last_heartbeat
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'))
+         ON CONFLICT(session_key) DO UPDATE SET
+            status = excluded.status,
+            provider = excluded.provider,
+            session_info = COALESCE(excluded.session_info, sessions.session_info),
+            model = COALESCE(excluded.model, sessions.model),
+            tokens = excluded.tokens,
+            cwd = COALESCE(excluded.cwd, sessions.cwd),
+            active_dispatch_id = CASE
+              WHEN lower(excluded.status) = 'disconnected' THEN NULL
+              WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
+              ELSE sessions.active_dispatch_id
+            END,
+            agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
+            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
+            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
+            raw_provider_session_id = COALESCE(excluded.raw_provider_session_id, sessions.raw_provider_session_id),
+            last_heartbeat = datetime('now')",
+        rusqlite::params![
+            body.session_key,
+            agent_id,
+            provider,
+            status,
+            body.session_info,
+            body.model,
+            tokens,
+            body.cwd,
+            active_dispatch_id,
+            thread_channel_id,
+            claude_session_id,
+            raw_provider_session_id,
+        ],
+    );
+
+    match result {
+        Ok(_) => {
+            let dispatch_id = body.dispatch_id.clone();
+            drop(conn);
+
+            crate::kanban::fire_event_hooks(
+                &db,
+                &state.engine,
+                "on_session_status_change",
+                "OnSessionStatusChange",
+                json!({
+                    "session_key": body.session_key,
+                    "status": status,
+                    "agent_id": agent_id,
+                    "dispatch_id": dispatch_id,
+                    "provider": provider,
+                }),
+            );
+
+            if status == "idle" {
+                if let Some(aid) = agent_id {
+                    spawn_auto_queue_activate_for_agent(state.clone(), aid);
+                }
+            }
+
+            (StatusCode::OK, Json(json!({"ok": true})))
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error}")})),
+        ),
+    }
 }
 
 /// DELETE /api/dispatched-sessions/cleanup — manual: delete disconnected sessions

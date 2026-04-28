@@ -383,18 +383,26 @@ fn execute_create_dispatch(
             )
             .ok()
             .flatten()
-        } else if let Some(db) = db {
-            db.separate_conn().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten()
-            })
         } else {
-            None
+            #[cfg(test)]
+            {
+                db.and_then(|db| {
+                    db.separate_conn().ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+                            [card_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                })
+            }
+            #[cfg(not(test))]
+            {
+                let _ = db;
+                None
+            }
         };
 
     Ok(CreatedDispatch {
