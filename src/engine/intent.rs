@@ -242,129 +242,40 @@ fn execute_transition(
     pg_pool: Option<&sqlx::PgPool>,
     engine: Option<&crate::engine::PolicyEngine>,
     card_id: &str,
-    expected_from: &str,
+    _expected_from: &str,
     to: &str,
 ) -> anyhow::Result<()> {
-    if let (Some(pool), Some(engine)) = (pg_pool, engine) {
-        let result = crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            {
-                let db = db.cloned();
-                let pool = pool.clone();
-                let engine = engine.clone();
-                let card_id = card_id.to_string();
-                let to = to.to_string();
-                move |_bridge_pool| async move {
-                    crate::kanban::transition_status_with_opts_pg(
-                        db.as_ref(),
-                        &pool,
-                        &engine,
-                        &card_id,
-                        &to,
-                        "intent_transition",
-                        crate::engine::transition::ForceIntent::None,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-                }
-            },
-            |error| error,
-        );
-        return result.map_err(anyhow::Error::msg);
-    }
-    let Some(db) = db else {
-        anyhow::bail!("sqlite backend is unavailable");
-    };
-    let transition_span =
-        crate::logging::dispatch_span("execute_transition", None, Some(card_id), None);
-    let _guard = transition_span.enter();
-    let conn = db.separate_conn()?;
-
-    // Verify current status matches expected
-    let current: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
-
-    if current != expected_from {
-        // Status changed between intent push and execution — skip
-        tracing::info!(
-            expected_from,
-            current,
-            to,
-            "skipping transition intent due to stale source status"
-        );
-        return Ok(());
-    }
-
-    if current == to {
-        return Ok(()); // no-op
-    }
-
-    // Pipeline-driven validation and clock fields
-    crate::pipeline::ensure_loaded();
-    let pipeline =
-        crate::pipeline::try_get().ok_or_else(|| anyhow::anyhow!("pipeline not loaded"))?;
-
-    // Terminal guard
-    if pipeline.is_terminal(&current) {
-        return Err(anyhow::anyhow!(
-            "cannot revert terminal card {card_id} from {current} to {to}"
-        ));
-    }
-
-    // Clock fields
-    let clock_extra = match pipeline.clock_for_state(to) {
-        Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
-            format!(", {} = COALESCE({}, datetime('now'))", clock.set, clock.set)
-        }
-        Some(clock) => format!(", {} = datetime('now')", clock.set),
-        None => String::new(),
-    };
-
-    // Terminal cleanup
-    let terminal_cleanup = if pipeline.is_terminal(to) {
-        ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, review_round = NULL, deferred_dod_json = NULL"
-    } else {
-        ""
-    };
-
-    let extra = format!("{clock_extra}{terminal_cleanup}");
-    let sql = format!(
-        "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now'){extra} WHERE id = ?2"
+    let pool = pg_pool
+        .or_else(|| engine.and_then(|engine| engine.pg_pool()))
+        .ok_or_else(|| anyhow::anyhow!("postgres backend is required for transition intent"))?;
+    let engine =
+        engine.ok_or_else(|| anyhow::anyhow!("transition intent requires a policy engine"))?;
+    let result = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        {
+            let db = db.cloned();
+            let pool = pool.clone();
+            let engine = engine.clone();
+            let card_id = card_id.to_string();
+            let to = to.to_string();
+            move |_bridge_pool| async move {
+                crate::kanban::transition_status_with_opts_pg(
+                    db.as_ref(),
+                    &pool,
+                    &engine,
+                    &card_id,
+                    &to,
+                    "intent_transition",
+                    crate::engine::transition::ForceIntent::None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }
+        },
+        |error| error,
     );
-    conn.execute(&sql, libsql_rusqlite::params![to, card_id])?;
-
-    // Auto-queue sync for terminal states
-    if pipeline.is_terminal(to) {
-        crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
-    }
-
-    // #117/#158: Sync canonical review state via unified entrypoint
-    let has_hooks = pipeline
-        .hooks_for_state(to)
-        .map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
-    let is_review_enter = pipeline
-        .hooks_for_state(to)
-        .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
-    if pipeline.is_terminal(to) || !has_hooks {
-        crate::engine::ops::review_state_sync_on_conn(
-            &conn,
-            &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string(),
-        );
-    } else if is_review_enter {
-        crate::engine::ops::review_state_sync_on_conn(
-            &conn,
-            &serde_json::json!({"card_id": card_id, "state": "reviewing"}).to_string(),
-        );
-    }
-
-    tracing::info!(from = expected_from, to, "applied transition intent");
-    Ok(())
+    result.map_err(anyhow::Error::msg)
 }
 
 fn execute_create_dispatch(
@@ -590,105 +501,79 @@ fn execute_emit_supervisor_signal(
 }
 
 fn execute_set_kv(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     key: &str,
     value: &str,
     ttl_seconds: i64,
 ) -> anyhow::Result<()> {
-    if let Some(pool) = pg_pool {
-        crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            {
-                let key = key.to_string();
-                let value = value.to_string();
-                move |bridge_pool| async move {
-                    let query = if ttl_seconds > 0 {
-                        sqlx::query(
-                            "INSERT INTO kv_meta (key, value, expires_at)
-                             VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))
-                             ON CONFLICT (key) DO UPDATE
-                             SET value = EXCLUDED.value,
-                                 expires_at = EXCLUDED.expires_at",
-                        )
-                        .bind(&key)
-                        .bind(&value)
-                        .bind(ttl_seconds)
-                        .execute(&bridge_pool)
-                        .await
-                    } else {
-                        sqlx::query(
-                            "INSERT INTO kv_meta (key, value, expires_at)
-                             VALUES ($1, $2, NULL)
-                             ON CONFLICT (key) DO UPDATE
-                             SET value = EXCLUDED.value,
-                                 expires_at = EXCLUDED.expires_at",
-                        )
-                        .bind(&key)
-                        .bind(&value)
-                        .execute(&bridge_pool)
-                        .await
-                    };
-                    query
-                        .map(|_| ())
-                        .map_err(|error| format!("upsert postgres kv_meta {key}: {error}"))
-                }
-            },
-            |error| error,
-        )
-        .map_err(anyhow::Error::msg)?;
-        return Ok(());
-    }
-    let Some(db) = db else {
-        anyhow::bail!("sqlite backend is unavailable");
-    };
-    let conn = db.separate_conn()?;
-    if ttl_seconds > 0 {
-        conn.execute(
-            &format!(
-                "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{ttl_seconds} seconds'))"
-            ),
-            libsql_rusqlite::params![key, value],
-        )?;
-    } else {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
-            libsql_rusqlite::params![key, value],
-        )?;
-    }
-    Ok(())
+    let pool =
+        pg_pool.ok_or_else(|| anyhow::anyhow!("postgres backend is required for set_kv intent"))?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        {
+            let key = key.to_string();
+            let value = value.to_string();
+            move |bridge_pool| async move {
+                let query = if ttl_seconds > 0 {
+                    sqlx::query(
+                        "INSERT INTO kv_meta (key, value, expires_at)
+                         VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))
+                         ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value,
+                             expires_at = EXCLUDED.expires_at",
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .bind(ttl_seconds)
+                    .execute(&bridge_pool)
+                    .await
+                } else {
+                    sqlx::query(
+                        "INSERT INTO kv_meta (key, value, expires_at)
+                         VALUES ($1, $2, NULL)
+                         ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value,
+                             expires_at = EXCLUDED.expires_at",
+                    )
+                    .bind(&key)
+                    .bind(&value)
+                    .execute(&bridge_pool)
+                    .await
+                };
+                query
+                    .map(|_| ())
+                    .map_err(|error| format!("upsert postgres kv_meta {key}: {error}"))
+            }
+        },
+        |error| error,
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 fn execute_delete_kv(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     key: &str,
 ) -> anyhow::Result<()> {
-    if let Some(pool) = pg_pool {
-        crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            {
-                let key = key.to_string();
-                move |bridge_pool| async move {
-                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                        .bind(&key)
-                        .execute(&bridge_pool)
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| format!("delete postgres kv_meta {key}: {error}"))
-                }
-            },
-            |error| error,
-        )
-        .map_err(anyhow::Error::msg)?;
-        return Ok(());
-    }
-    let Some(db) = db else {
-        anyhow::bail!("sqlite backend is unavailable");
-    };
-    let conn = db.separate_conn()?;
-    conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])?;
-    Ok(())
+    let pool = pg_pool
+        .ok_or_else(|| anyhow::anyhow!("postgres backend is required for delete_kv intent"))?;
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        {
+            let key = key.to_string();
+            move |bridge_pool| async move {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(&key)
+                    .execute(&bridge_pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("delete postgres kv_meta {key}: {error}"))
+            }
+        },
+        |error| error,
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
@@ -730,25 +615,9 @@ mod tests {
         assert_eq!(val, "hello");
     }
 
-    #[test]
-    fn test_execute_set_kv_intent() {
-        let db = test_db();
-        let intents = vec![Intent::SetKV {
-            key: "mykey".into(),
-            value: "myval".into(),
-            ttl_seconds: 0,
-        }];
-        let result = execute_intents(&db, None, intents);
-        assert_eq!(result.errors, 0);
-
-        let conn = db.lock().unwrap();
-        let val: String = conn
-            .query_row("SELECT value FROM kv_meta WHERE key = 'mykey'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(val, "myval");
-    }
+    // Removed: `test_execute_set_kv_intent` (SQLite-fallback test).
+    // PG-only after #1239: `execute_set_kv` now requires a `pg_pool`. PG-backed
+    // coverage lives in the integration test suite that boots a Postgres pool.
 
     #[test]
     fn test_blocked_status_update_sql() {
