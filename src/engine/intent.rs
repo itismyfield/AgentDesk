@@ -482,7 +482,7 @@ fn execute_queue_message(
 }
 
 fn execute_emit_supervisor_signal(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     engine: Option<&crate::engine::PolicyEngine>,
     signal_name: &str,
@@ -492,8 +492,7 @@ fn execute_emit_supervisor_signal(
         engine.ok_or_else(|| anyhow::anyhow!("supervisor signal intent requires engine"))?;
     let signal =
         crate::supervisor::SupervisorSignal::try_from(signal_name).map_err(anyhow::Error::msg)?;
-    let supervisor =
-        crate::supervisor::RuntimeSupervisor::new(db.cloned(), pg_pool.cloned(), engine.clone());
+    let supervisor = crate::supervisor::RuntimeSupervisor::new(pg_pool.cloned(), engine.clone());
     supervisor
         .emit_signal(signal, evidence)
         .map(|_| ())

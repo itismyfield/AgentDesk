@@ -1968,7 +1968,7 @@ fn record_true_negative_if_pass_with_backends(
 /// which is the pass/approved dispatch with empty items. On reopen we look for the
 /// most recent review dispatch that actually reported findings (non-empty items array)
 /// to carry those categories forward into the FN record.
-pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
+pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
     if let Some(pool) = pg_pool {
         let card_id = card_id.to_string();
         let log_card_id = card_id.clone();
@@ -2088,6 +2088,10 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_
         }
         return;
     }
+
+    let Some(db) = db else {
+        return;
+    };
 
     if let Ok(conn) = db.lock() {
         // Only correct the most recent TN (latest review_round) to avoid

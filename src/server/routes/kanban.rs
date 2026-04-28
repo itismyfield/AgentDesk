@@ -13,14 +13,6 @@ use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
-fn legacy_db(state: &AppState) -> &crate::db::Db {
-    state
-        .engine
-        .legacy_db()
-        .or_else(|| state.legacy_db())
-        .expect("legacy SQLite DB is only available in no-PG tests")
-}
-
 /// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.
 pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
     kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
@@ -2722,7 +2714,7 @@ pub async fn rereview_card(
         );
     };
 
-    crate::kanban::correct_tn_to_fn_on_reopen(legacy_db(&state), state.pg_pool_ref(), &id);
+    crate::kanban::correct_tn_to_fn_on_reopen(None, state.pg_pool_ref(), &id);
 
     if let Err(error) = sqlx::query(
         "UPDATE kanban_cards
@@ -2847,44 +2839,34 @@ pub async fn batch_rereview(
     }
 
     let reason = body.reason.clone();
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_pool_required_error();
+    };
     let mut results = Vec::new();
 
     for issue_number in &body.issues {
-        let mut card_id: Option<String> = None;
-        if let Some(pool) = state.pg_pool_ref() {
-            match sqlx::query_scalar::<_, String>(
-                "SELECT id FROM kanban_cards WHERE github_issue_number = $1",
-            )
-            .bind(*issue_number)
-            .fetch_optional(pool)
-            .await
-            {
-                Ok(value) => card_id = value,
-                Err(error) => {
-                    tracing::warn!(
-                        %issue_number,
-                        %error,
-                        "[batch_rereview] postgres lookup failed"
-                    );
-                    results.push(json!({
-                        "issue": issue_number,
-                        "ok": false,
-                        "error": format!("postgres lookup failed: {error}"),
-                    }));
-                    continue;
-                }
+        let card_id = match sqlx::query_scalar::<_, String>(
+            "SELECT id FROM kanban_cards WHERE github_issue_number = $1",
+        )
+        .bind(*issue_number)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    %issue_number,
+                    %error,
+                    "[batch_rereview] postgres lookup failed"
+                );
+                results.push(json!({
+                    "issue": issue_number,
+                    "ok": false,
+                    "error": format!("postgres lookup failed: {error}"),
+                }));
+                continue;
             }
-        }
-        if card_id.is_none() && state.pg_pool_ref().is_none() {
-            card_id = legacy_db(&state).lock().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT id FROM kanban_cards WHERE github_issue_number = ?1",
-                    [issue_number],
-                    |row| row.get(0),
-                )
-                .ok()
-            });
-        }
+        };
 
         let card_id = match card_id {
             Some(id) => id,
@@ -2962,25 +2944,15 @@ pub async fn reopen_card(
         return response;
     }
 
-    let caller_source = if let Some(pool) = state.pg_pool_ref() {
-        resolve_requesting_agent_id_with_pg(pool, &headers)
-            .await
-            .unwrap_or_else(|| "api".to_string())
-    } else {
-        let conn = match legacy_db(&state).lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        resolve_requesting_agent_id_on_conn(&conn, &headers).unwrap_or_else(|| "api".to_string())
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_pool_required_error();
     };
+    let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
+        .await
+        .unwrap_or_else(|| "api".to_string());
 
     // ── Pre-check: card must be in done state ──
-    let current_status: String = if let Some(pool) = state.pg_pool_ref() {
+    let current_status: String =
         match sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
             .bind(&id)
             .fetch_optional(pool)
@@ -2999,31 +2971,7 @@ pub async fn reopen_card(
                     Json(json!({"error": format!("{error}")})),
                 );
             }
-        }
-    } else {
-        let conn = match legacy_db(&state).lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
         };
-        match conn.query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [&id],
-            |row| row.get(0),
-        ) {
-            Ok(status) => status,
-            Err(_) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("card not found: {id}")})),
-                );
-            }
-        }
-    };
 
     // Pipeline-driven: reopen only applies to terminal states
     crate::pipeline::ensure_loaded();
@@ -3096,11 +3044,7 @@ pub async fn reopen_card(
 
         match transition_result {
             Ok((from_status, to_status, cleanup_counts)) => {
-                crate::kanban::correct_tn_to_fn_on_reopen(
-                    legacy_db(&state),
-                    state.pg_pool_ref(),
-                    &id,
-                );
+                crate::kanban::correct_tn_to_fn_on_reopen(None, state.pg_pool_ref(), &id);
 
                 if reset_full {
                     if let Err(error) = clear_all_threads_pg(pool, &id).await {
@@ -3270,23 +3214,12 @@ pub async fn batch_transition(
         );
     }
 
-    let pg_pool = state.pg_pool_ref();
-    let caller_source = if let Some(pool) = pg_pool {
-        resolve_requesting_agent_id_with_pg(pool, &headers)
-            .await
-            .unwrap_or_else(|| "api".to_string())
-    } else {
-        let conn = match legacy_db(&state).lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        resolve_requesting_agent_id_on_conn(&conn, &headers).unwrap_or_else(|| "api".to_string())
+    let Some(pg_pool) = state.pg_pool_ref() else {
+        return pg_pool_required_error();
     };
+    let caller_source = resolve_requesting_agent_id_with_pg(pg_pool, &headers)
+        .await
+        .unwrap_or_else(|| "api".to_string());
     let batch_transition_source = format!("{caller_source}:batch-transition");
     let mut targets: Vec<(String, Option<i64>)> = Vec::new();
     let mut results = Vec::new();
@@ -3299,50 +3232,23 @@ pub async fn batch_transition(
 
     if let Some(issue_numbers) = body.issue_numbers.as_ref() {
         for issue_number in issue_numbers {
-            let card_ids: Vec<String> = if let Some(pool) = pg_pool {
-                match sqlx::query_scalar::<_, String>(
-                    "SELECT id
-                     FROM kanban_cards
-                     WHERE github_issue_number = $1
-                     ORDER BY id ASC",
-                )
-                .bind(issue_number)
-                .fetch_all(pool)
-                .await
-                {
-                    Ok(ids) => ids,
-                    Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
-                        );
-                    }
+            let card_ids: Vec<String> = match sqlx::query_scalar::<_, String>(
+                "SELECT id
+                 FROM kanban_cards
+                 WHERE github_issue_number = $1
+                 ORDER BY id ASC",
+            )
+            .bind(issue_number)
+            .fetch_all(pg_pool)
+            .await
+            {
+                Ok(ids) => ids,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
                 }
-            } else {
-                let conn = match legacy_db(&state).lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{e}")})),
-                        );
-                    }
-                };
-                let mut stmt = match conn.prepare(
-                    "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 ORDER BY id ASC",
-                ) {
-                    Ok(stmt) => stmt,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{e}")})),
-                        );
-                    }
-                };
-                stmt.query_map([issue_number], |row| row.get(0))
-                    .ok()
-                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
-                    .unwrap_or_default()
             };
             if card_ids.is_empty() {
                 results.push(json!({
@@ -3359,13 +3265,12 @@ pub async fn batch_transition(
     }
 
     for (card_id, issue_number) in targets {
-        let transition_result = if let Some(pool) = pg_pool {
-            let terminal_cleanup = match sqlx::query(
-                "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1",
-            )
-            .bind(&card_id)
-            .fetch_optional(pool)
-            .await
+        let pool = pg_pool;
+        let terminal_cleanup =
+            match sqlx::query("SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1")
+                .bind(&card_id)
+                .fetch_optional(pool)
+                .await
             {
                 Ok(Some(row)) => {
                     let card_repo_id: Option<String> = row.try_get("repo_id").unwrap_or_default();
@@ -3405,6 +3310,7 @@ pub async fn batch_transition(
                 }
             };
 
+        let transition_result =
             if force_transition_needs_cleanup(&body.status, body.cancel_dispatches) {
                 crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
                     pool,
@@ -3456,39 +3362,30 @@ pub async fn batch_transition(
                 )
                 .await
                 .map(|result| (result, (0, 0)))
-            }
-        } else {
-            Err(anyhow::anyhow!(
-                "postgres backend required for kanban transition (#1384)"
-            ))
-        };
+            };
 
         match transition_result {
             Ok(result) => {
-                let card = if let Some(pool) = pg_pool {
-                    crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-                    match load_card_json_pg(pool, &card_id).await {
-                        Ok(Some(card)) => {
-                            crate::server::ws::emit_event(
-                                &state.broadcast_tx,
-                                "kanban_card_updated",
-                                card.clone(),
-                            );
-                            Some(card)
-                        }
-                        Ok(None) => None,
-                        Err(error) => {
-                            results.push(json!({
-                                "card_id": card_id,
-                                "issue_number": issue_number,
-                                "ok": false,
-                                "error": error,
-                            }));
-                            continue;
-                        }
+                crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+                let card = match load_card_json_pg(pg_pool, &card_id).await {
+                    Ok(Some(card)) => {
+                        crate::server::ws::emit_event(
+                            &state.broadcast_tx,
+                            "kanban_card_updated",
+                            card.clone(),
+                        );
+                        Some(card)
                     }
-                } else {
-                    None
+                    Ok(None) => None,
+                    Err(error) => {
+                        results.push(json!({
+                            "card_id": card_id,
+                            "issue_number": issue_number,
+                            "ok": false,
+                            "error": error,
+                        }));
+                        continue;
+                    }
                 };
                 results.push(json!({
                     "card_id": card_id,

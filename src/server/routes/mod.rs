@@ -72,19 +72,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Returns the optional legacy SQLite handle for test fixtures and
-    /// legacy policy-engine compatibility.
+    /// Returns the optional legacy SQLite handle for test fixtures.
+    #[cfg(test)]
     pub fn legacy_db(&self) -> Option<&crate::db::Db> {
-        #[cfg(test)]
-        {
-            self.legacy_db_override
-                .as_ref()
-                .or_else(|| self.engine.legacy_db())
-        }
-        #[cfg(not(test))]
-        {
-            self.engine.legacy_db()
-        }
+        self.legacy_db_override
+            .as_ref()
+            .or_else(|| self.engine.legacy_db())
     }
 
     pub fn pg_pool_ref(&self) -> Option<&sqlx::PgPool> {

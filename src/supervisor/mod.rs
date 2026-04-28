@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::db::Db;
 use crate::engine::{PolicyEngine, PolicyEngineHandle};
 use crate::error::{AppError, ErrorCode};
 
@@ -70,17 +69,12 @@ impl BridgeHandle {
 
     fn runtime_supervisor(&self) -> Result<RuntimeSupervisor, String> {
         let engine = self.upgrade_engine()?;
-        Ok(RuntimeSupervisor::new(
-            engine.legacy_db().cloned(),
-            engine.pg_pool().cloned(),
-            engine,
-        ))
+        Ok(RuntimeSupervisor::new(engine.pg_pool().cloned(), engine))
     }
 }
 
 #[derive(Clone)]
 pub struct RuntimeSupervisor {
-    _db: Option<Db>,
     pg_pool: Option<PgPool>,
     engine: PolicyEngine,
 }
@@ -102,12 +96,8 @@ struct OrphanConfirmMarker {
 }
 
 impl RuntimeSupervisor {
-    pub fn new(db: Option<Db>, pg_pool: Option<PgPool>, engine: PolicyEngine) -> Self {
-        Self {
-            _db: db,
-            pg_pool,
-            engine,
-        }
+    pub fn new(pg_pool: Option<PgPool>, engine: PolicyEngine) -> Self {
+        Self { pg_pool, engine }
     }
 
     fn kv_get(&self, key: &str) -> Result<Option<String>, String> {

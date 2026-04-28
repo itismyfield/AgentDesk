@@ -14,6 +14,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
 #[cfg(test)]
+#[cfg(test)]
 fn legacy_db(state: &AppState) -> &crate::db::Db {
     state
         .engine

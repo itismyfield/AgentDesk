@@ -33,18 +33,7 @@ async fn read_kv_str(state: &AppState, key: &str) -> String {
         }
     }
 
-    state
-        .legacy_db()
-        .and_then(|db| db.lock().ok())
-        .and_then(|conn| {
-            conn.query_row::<String, _, _>(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+    "unknown".to_string()
 }
 
 /// Build cron job list — 3-tier tick jobs (#127) + legacy per-policy entries.

@@ -458,11 +458,6 @@ impl PolicyEngine {
         self.runtime_deps.legacy_db.as_ref()
     }
 
-    #[cfg(not(test))]
-    pub(crate) fn legacy_db(&self) -> Option<&crate::db::Db> {
-        None
-    }
-
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
         let (reply_tx, reply_rx) = mpsc::channel();
         // Approximate queue depth is bumped before the send. The actor drops it
@@ -837,7 +832,10 @@ impl PolicyEngine {
 
             for (card_id, old_status, new_status) in &transitions {
                 crate::kanban::fire_transition_hooks_with_backends(
+                    #[cfg(test)]
                     self.legacy_db(),
+                    #[cfg(not(test))]
+                    None,
                     self.pg_pool(),
                     self,
                     card_id,
@@ -1212,7 +1210,10 @@ impl PolicyEngine {
             Self::empty_intent_result()
         } else {
             intent::execute_intents_with_backends(
+                #[cfg(test)]
                 self.legacy_db(),
+                #[cfg(not(test))]
+                None,
                 self.pg_pool(),
                 Some(self),
                 intents,
