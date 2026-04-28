@@ -109,7 +109,7 @@
 | `engine::ops::quality_ops` | `src/engine/ops/quality_ops.rs` | 95 |  |
 | `engine::ops::queue_ops` | `src/engine/ops/queue_ops.rs` | 199 |  |
 | `engine::ops::review_automation_ops` | `src/engine/ops/review_automation_ops.rs` | 2142 | giant-file |
-| `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 703 |  |
+| `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 446 |  |
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 260 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
 | `engine::transition` | `src/engine/transition.rs` | 1757 | giant-file |
