@@ -1,10 +1,7 @@
 use crate::db::Db;
-use crate::services::discord_dm_reply_store::{
-    PendingDmReplyRecord, load_most_recent_consumed_dm_reply_db, load_oldest_pending_dm_reply_db,
-    mark_pending_dm_reply_consumed_db, register_pending_dm_reply, register_pending_dm_reply_db,
-};
+use crate::services::discord_dm_reply_store::PendingDmReplyRecord;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::future::Future;
 
 // ── DM reply tracking ops ────────────────────────────────────────
@@ -14,14 +11,13 @@ use std::future::Future;
 
 pub(super) fn register_dm_reply_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    _db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dm_obj = Object::new(ctx.clone())?;
 
     // __register_raw(source_agent, user_id, channel_id, context, ttl_seconds) → json
-    let db_reg = db.clone();
     let pg_reg = pg_pool.clone();
     dm_obj.set(
         "__register_raw",
@@ -35,7 +31,6 @@ pub(super) fn register_dm_reply_ops<'js>(
                       ttl_seconds: i64|
                       -> String {
                     dm_reply_register_raw(
-                        db_reg.as_ref(),
                         pg_reg.clone(),
                         &source_agent,
                         &user_id,
@@ -49,40 +44,37 @@ pub(super) fn register_dm_reply_ops<'js>(
     )?;
 
     // __consume_raw(user_id) → json
-    let db_con = db.clone();
     let pg_con = pg_pool.clone();
     dm_obj.set(
         "__consume_raw",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(move |user_id: String| -> String {
-                dm_reply_consume_raw(db_con.as_ref(), pg_con.clone(), &user_id)
+                dm_reply_consume_raw(pg_con.clone(), &user_id)
             }),
         )?,
     )?;
 
     // __pending_raw(user_id) → json
-    let db_pend = db.clone();
     let pg_pend = pg_pool.clone();
     dm_obj.set(
         "__pending_raw",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(move |user_id: String| -> String {
-                dm_reply_pending_raw(db_pend.as_ref(), pg_pend.clone(), &user_id)
+                dm_reply_pending_raw(pg_pend.clone(), &user_id)
             }),
         )?,
     )?;
 
     // __read_consumed_raw(user_id) → json (most recent consumed entry with _answer)
-    let db_read = db.clone();
     let pg_read = pg_pool.clone();
     dm_obj.set(
         "__read_consumed_raw",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(move |user_id: String| -> String {
-                dm_reply_read_consumed_raw(db_read.as_ref(), pg_read.clone(), &user_id)
+                dm_reply_read_consumed_raw(pg_read.clone(), &user_id)
             }),
         )?,
     )?;
@@ -117,7 +109,6 @@ pub(super) fn register_dm_reply_ops<'js>(
 }
 
 fn dm_reply_register_raw(
-    db: Option<&Db>,
     pg_pool: Option<PgPool>,
     source_agent: &str,
     user_id: &str,
@@ -125,40 +116,40 @@ fn dm_reply_register_raw(
     context: &str,
     ttl_seconds: i64,
 ) -> String {
-    let ch = (!channel_id.is_empty()).then_some(channel_id);
-    let result = if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
-        let source_agent = source_agent.trim().to_string();
-        let user_id = user_id.trim().to_string();
-        let channel_id = ch.map(str::to_string);
-        let context = context.to_string();
-        run_async_bridge_pg(&pg_pool, move |pool| async move {
-            register_pending_dm_reply_db(
-                &db,
-                Some(&pool),
-                &source_agent,
-                &user_id,
-                channel_id.as_deref(),
-                &context,
-                ttl_seconds,
-            )
-            .await
-        })
-    } else if let Some(db) = db {
-        register_pending_dm_reply(db, source_agent, user_id, ch, context, ttl_seconds)
-    } else {
-        Err("sqlite backend is unavailable".to_string())
+    let Some(pg_pool) = pg_pool else {
+        return r#"{"error":"postgres backend is unavailable"}"#.to_string();
     };
+
+    let source_agent_trimmed = source_agent.trim().to_string();
+    let user_id_trimmed = user_id.trim().to_string();
+    if source_agent_trimmed.is_empty() || user_id_trimmed.is_empty() {
+        return r#"{"error":"source_agent and user_id are required"}"#.to_string();
+    }
+    let channel_id_owned: Option<String> =
+        (!channel_id.trim().is_empty()).then(|| channel_id.trim().to_string());
+    let context_owned = context.to_string();
+    let log_source_agent = source_agent_trimmed.clone();
+    let log_user_id = user_id_trimmed.clone();
+    let log_channel_id = channel_id_owned.clone();
+
+    let result = run_async_bridge_pg(&pg_pool, move |pool| async move {
+        register_pending_dm_reply_pg(
+            &pool,
+            &source_agent_trimmed,
+            &user_id_trimmed,
+            channel_id_owned.as_deref(),
+            &context_owned,
+            ttl_seconds,
+        )
+        .await
+    });
 
     match result {
         Ok(id) => {
             tracing::info!(
-                user_id,
-                agent_id = source_agent,
-                channel_id = ?ch,
+                user_id = log_user_id.as_str(),
+                agent_id = log_source_agent.as_str(),
+                channel_id = ?log_channel_id.as_deref(),
                 reply_id = id,
                 "registered pending DM reply"
             );
@@ -168,196 +159,63 @@ fn dm_reply_register_raw(
     }
 }
 
-fn dm_reply_consume_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
-    if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
-        let user_id = user_id.to_string();
-        let log_user_id = user_id.clone();
-        return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            consume_pending_dm_reply_db(&db, Some(&pool), &user_id).await
-        }) {
-            Ok(ConsumePendingDmReplyResult::Consumed(record)) => {
-                tracing::info!(
-                    user_id = log_user_id.as_str(),
-                    agent_id = record.source_agent.as_str(),
-                    channel_id = ?record.channel_id.as_deref(),
-                    reply_id = record.id,
-                    "consumed pending DM reply"
-                );
-                dm_reply_record_json(record, true)
-            }
-            Ok(ConsumePendingDmReplyResult::AlreadyConsumed) => {
-                r#"{"ok":false,"reason":"already_consumed"}"#.to_string()
-            }
-            Ok(ConsumePendingDmReplyResult::NoPending) => {
-                r#"{"ok":false,"reason":"no_pending"}"#.to_string()
-            }
-            Err(error) => format!(r#"{{"error":"{error}"}}"#),
-        };
-    }
+fn dm_reply_consume_raw(pg_pool: Option<PgPool>, user_id: &str) -> String {
+    let Some(pg_pool) = pg_pool else {
+        return r#"{"error":"postgres backend is unavailable"}"#.to_string();
+    };
 
-    let Some(db) = db else {
-        return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-    };
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
-    };
-    // FIFO: consume the oldest pending entry for this user that hasn't expired
-    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
-        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-         WHERE user_id = ?1 AND status = 'pending' \
-         AND (expires_at IS NULL OR expires_at > datetime('now')) \
-         ORDER BY created_at ASC LIMIT 1",
-        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    match result {
-        Ok((id, source_agent, context, channel_id)) => {
-            // CAS: only mark consumed if still pending (guards against race)
-            let updated = conn.execute(
-                "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now') \
-                 WHERE id = ?1 AND status = 'pending'",
-                libsql_rusqlite::params![id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            );
-            match updated {
-                Ok(0) => {
-                    return r#"{"ok":false,"reason":"already_consumed"}"#.to_string();
-                }
-                Err(e) => {
-                    return format!(r#"{{"error":"update failed: {e}"}}"#);
-                }
-                _ => {}
-            }
+    let user_id_owned = user_id.to_string();
+    let log_user_id = user_id_owned.clone();
+    match run_async_bridge_pg(&pg_pool, move |pool| async move {
+        consume_pending_dm_reply_pg(&pool, &user_id_owned).await
+    }) {
+        Ok(ConsumePendingDmReplyResult::Consumed(record)) => {
             tracing::info!(
-                user_id,
-                agent_id = source_agent,
-                channel_id = ?channel_id,
-                reply_id = id,
+                user_id = log_user_id.as_str(),
+                agent_id = record.source_agent.as_str(),
+                channel_id = ?record.channel_id.as_deref(),
+                reply_id = record.id,
                 "consumed pending DM reply"
             );
-            let ctx: serde_json::Value =
-                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
-            let mut resp = serde_json::json!({
-                "ok": true,
-                "id": id,
-                "sourceAgent": source_agent,
-                "context": ctx,
-            });
-            if let Some(ch) = channel_id {
-                resp["channelId"] = serde_json::Value::String(ch);
-            }
-            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
+            dm_reply_record_json(record, true)
         }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => {
-            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        Ok(ConsumePendingDmReplyResult::AlreadyConsumed) => {
+            r#"{"ok":false,"reason":"already_consumed"}"#.to_string()
+        }
+        Ok(ConsumePendingDmReplyResult::NoPending) => {
             r#"{"ok":false,"reason":"no_pending"}"#.to_string()
         }
-        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+        Err(error) => format!(r#"{{"error":"{error}"}}"#),
     }
 }
 
-fn dm_reply_pending_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
-    if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
-        let user_id = user_id.to_string();
-        return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            load_oldest_pending_dm_reply_db(Some(&db), Some(&pool), &user_id).await
-        }) {
-            Ok(Some(record)) => dm_reply_record_json(record, true),
-            Ok(None) => r#"{"ok":false}"#.to_string(),
-            Err(error) => format!(r#"{{"error":"{error}"}}"#),
-        };
-    }
+fn dm_reply_pending_raw(pg_pool: Option<PgPool>, user_id: &str) -> String {
+    let Some(pg_pool) = pg_pool else {
+        return r#"{"error":"postgres backend is unavailable"}"#.to_string();
+    };
 
-    let Some(db) = db else {
-        return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-    };
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
-    };
-    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
-        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-         WHERE user_id = ?1 AND status = 'pending' \
-         AND (expires_at IS NULL OR expires_at > datetime('now')) \
-         ORDER BY created_at ASC LIMIT 1",
-        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    match result {
-        Ok((id, source_agent, context, channel_id)) => {
-            let ctx: serde_json::Value =
-                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
-            let mut resp = serde_json::json!({
-                "ok": true,
-                "id": id,
-                "sourceAgent": source_agent,
-                "context": ctx,
-            });
-            if let Some(ch) = channel_id {
-                resp["channelId"] = serde_json::Value::String(ch);
-            }
-            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
-        }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    let user_id_owned = user_id.to_string();
+    match run_async_bridge_pg(&pg_pool, move |pool| async move {
+        load_oldest_pending_dm_reply_pg(&pool, &user_id_owned).await
+    }) {
+        Ok(Some(record)) => dm_reply_record_json(record, true),
+        Ok(None) => r#"{"ok":false}"#.to_string(),
+        Err(error) => format!(r#"{{"error":"{error}"}}"#),
     }
 }
 
-fn dm_reply_read_consumed_raw(db: Option<&Db>, pg_pool: Option<PgPool>, user_id: &str) -> String {
-    if let Some(pg_pool) = pg_pool {
-        let Some(db) = db.cloned() else {
-            return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-        };
-        let db = db.clone();
-        let user_id = user_id.to_string();
-        return match run_async_bridge_pg(&pg_pool, move |pool| async move {
-            load_most_recent_consumed_dm_reply_db(&db, Some(&pool), &user_id).await
-        }) {
-            Ok(Some(record)) => dm_reply_record_json(record, true),
-            Ok(None) => r#"{"ok":false}"#.to_string(),
-            Err(error) => format!(r#"{{"error":"{error}"}}"#),
-        };
-    }
+fn dm_reply_read_consumed_raw(pg_pool: Option<PgPool>, user_id: &str) -> String {
+    let Some(pg_pool) = pg_pool else {
+        return r#"{"error":"postgres backend is unavailable"}"#.to_string();
+    };
 
-    let Some(db) = db else {
-        return r#"{"error":"sqlite backend is unavailable"}"#.to_string();
-    };
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
-    };
-    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
-        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-         WHERE user_id = ?1 AND status = 'consumed' \
-         ORDER BY consumed_at DESC LIMIT 1",
-        libsql_rusqlite::params![user_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    match result {
-        Ok((id, source_agent, context, channel_id)) => {
-            let ctx: serde_json::Value =
-                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
-            let mut resp = serde_json::json!({
-                "ok": true,
-                "id": id,
-                "sourceAgent": source_agent,
-                "context": ctx,
-            });
-            if let Some(ch) = channel_id {
-                resp["channelId"] = serde_json::Value::String(ch);
-            }
-            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
-        }
-        Err(libsql_rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    let user_id_owned = user_id.to_string();
+    match run_async_bridge_pg(&pg_pool, move |pool| async move {
+        load_most_recent_consumed_dm_reply_pg(&pool, &user_id_owned).await
+    }) {
+        Ok(Some(record)) => dm_reply_record_json(record, true),
+        Ok(None) => r#"{"ok":false}"#.to_string(),
+        Err(error) => format!(r#"{{"error":"{error}"}}"#),
     }
 }
 
@@ -367,18 +225,128 @@ enum ConsumePendingDmReplyResult {
     AlreadyConsumed,
 }
 
-async fn consume_pending_dm_reply_db(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
+async fn register_pending_dm_reply_pg(
+    pool: &PgPool,
+    source_agent: &str,
+    user_id: &str,
+    channel_id: Option<&str>,
+    context_json: &str,
+    ttl_seconds: i64,
+) -> Result<i64, String> {
+    let id = if ttl_seconds > 0 {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO pending_dm_replies (
+                source_agent, user_id, channel_id, context, expires_at
+             )
+             VALUES ($1, $2, $3, CAST($4 AS jsonb), NOW() + ($5 * INTERVAL '1 second'))
+             RETURNING id",
+        )
+        .bind(source_agent)
+        .bind(user_id)
+        .bind(channel_id)
+        .bind(context_json)
+        .bind(ttl_seconds)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("insert failed: {error}"))?
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO pending_dm_replies (
+                source_agent, user_id, channel_id, context, expires_at
+             )
+             VALUES ($1, $2, $3, CAST($4 AS jsonb), NULL)
+             RETURNING id",
+        )
+        .bind(source_agent)
+        .bind(user_id)
+        .bind(channel_id)
+        .bind(context_json)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("insert failed: {error}"))?
+    };
+    Ok(id)
+}
+
+async fn load_oldest_pending_dm_reply_pg(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Option<PendingDmReplyRecord>, String> {
+    let row = sqlx::query(
+        "SELECT id, source_agent, context::text AS context_json, channel_id
+         FROM pending_dm_replies
+         WHERE user_id = $1
+           AND status = 'pending'
+           AND (expires_at IS NULL OR expires_at > NOW())
+         ORDER BY created_at ASC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("query failed: {error}"))?;
+    Ok(row.map(|row| PendingDmReplyRecord {
+        id: row.get("id"),
+        source_agent: row.get("source_agent"),
+        context_json: row.get("context_json"),
+        channel_id: row.get("channel_id"),
+    }))
+}
+
+async fn load_most_recent_consumed_dm_reply_pg(
+    pool: &PgPool,
+    user_id: &str,
+) -> Result<Option<PendingDmReplyRecord>, String> {
+    let row = sqlx::query(
+        "SELECT id, source_agent, context::text AS context_json, channel_id
+         FROM pending_dm_replies
+         WHERE user_id = $1
+           AND status = 'consumed'
+         ORDER BY consumed_at DESC NULLS LAST, id DESC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("query failed: {error}"))?;
+    Ok(row.map(|row| PendingDmReplyRecord {
+        id: row.get("id"),
+        source_agent: row.get("source_agent"),
+        context_json: row.get("context_json"),
+        channel_id: row.get("channel_id"),
+    }))
+}
+
+async fn mark_pending_dm_reply_consumed_pg(
+    pool: &PgPool,
+    reply_id: i64,
+    updated_context_json: &str,
+) -> Result<bool, String> {
+    let updated = sqlx::query(
+        "UPDATE pending_dm_replies
+         SET status = 'consumed',
+             consumed_at = NOW(),
+             context = CAST($1 AS jsonb)
+         WHERE id = $2
+           AND status = 'pending'",
+    )
+    .bind(updated_context_json)
+    .bind(reply_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("update failed: {error}"))?;
+    Ok(updated.rows_affected() > 0)
+}
+
+async fn consume_pending_dm_reply_pg(
+    pool: &PgPool,
     user_id: &str,
 ) -> Result<ConsumePendingDmReplyResult, String> {
-    let Some(record) = load_oldest_pending_dm_reply_db(Some(db), pg_pool, user_id).await? else {
+    let Some(record) = load_oldest_pending_dm_reply_pg(pool, user_id).await? else {
         return Ok(ConsumePendingDmReplyResult::NoPending);
     };
 
-    let updated =
-        mark_pending_dm_reply_consumed_db(Some(db), pg_pool, record.id, &record.context_json)
-            .await?;
+    let updated = mark_pending_dm_reply_consumed_pg(pool, record.id, &record.context_json).await?;
     if !updated {
         return Ok(ConsumePendingDmReplyResult::AlreadyConsumed);
     }
@@ -399,14 +367,6 @@ fn dm_reply_record_json(record: PendingDmReplyRecord, ok: bool) -> String {
         resp["channelId"] = serde_json::Value::String(channel_id);
     }
     serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
-}
-
-fn run_async_bridge<F, T>(future: F) -> Result<T, String>
-where
-    F: Future<Output = Result<T, String>> + Send + 'static,
-    T: Send + 'static,
-{
-    crate::utils::async_bridge::block_on_result(future, |error| error)
 }
 
 fn run_async_bridge_pg<F, T>(
@@ -517,7 +477,6 @@ mod tests {
     async fn dm_reply_bridge_pg_round_trip() {
         let test_db = TestDatabase::create().await;
         let pg_pool = test_db.migrate().await;
-        let sqlite_db = crate::db::test_db();
         let rt = rquickjs::Runtime::new().expect("quickjs runtime");
         let ctx = rquickjs::Context::full(&rt).expect("quickjs context");
 
@@ -525,8 +484,7 @@ mod tests {
             let globals = ctx.globals();
             let ad = Object::new(ctx.clone()).expect("agentdesk object");
             globals.set("agentdesk", ad).expect("install agentdesk");
-            register_dm_reply_ops(&ctx, Some(sqlite_db.clone()), Some(pg_pool.clone()))
-                .expect("register dmReply ops");
+            register_dm_reply_ops(&ctx, None, Some(pg_pool.clone())).expect("register dmReply ops");
 
             let raw: String = ctx
                 .eval(
