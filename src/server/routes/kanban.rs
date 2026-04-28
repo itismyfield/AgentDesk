@@ -139,29 +139,6 @@ fn is_allowed_manual_transition(from: &str, to: &str) -> bool {
     (from == "backlog" && to == "ready") || (from != to && to == "backlog")
 }
 
-fn load_active_turn_targets_for_card(
-    db: &crate::db::Db,
-    card_id: &str,
-) -> anyhow::Result<Vec<ActiveTurnTarget>> {
-    let conn = db.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT session_key, provider, thread_channel_id
-         FROM sessions
-         WHERE active_dispatch_id IN (
-             SELECT id FROM task_dispatches
-             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')
-         )",
-    )?;
-    let rows = stmt.query_map([card_id], |row| {
-        Ok(ActiveTurnTarget {
-            session_key: row.get(0)?,
-            provider: row.get(1)?,
-            thread_channel_id: row.get(2)?,
-        })
-    })?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
 async fn load_active_turn_targets_for_card_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -242,16 +219,11 @@ async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], rea
             .execute(pool)
             .await
             .ok();
-        }
-
-        if let Ok(conn) = legacy_db(state).lock() {
-            conn.execute(
-                "UPDATE sessions
-                 SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
-                 WHERE session_key = ?1",
-                [&target.session_key],
-            )
-            .ok();
+        } else {
+            tracing::warn!(
+                target = %target.session_key,
+                "[kanban] cancel_turn_targets skipped session-clear: postgres pool unavailable (#1239)"
+            );
         }
     }
 }
@@ -261,39 +233,21 @@ async fn transition_card_to_backlog_with_cleanup(
     card_id: &str,
     source: &str,
 ) -> anyhow::Result<crate::kanban::TransitionResult> {
-    let turn_targets = if let Some(pool) = state.pg_pool_ref() {
-        load_active_turn_targets_for_card_pg(pool, card_id).await?
-    } else {
-        load_active_turn_targets_for_card(legacy_db(state), card_id)?
-    };
-    let result = if let Some(pool) = state.pg_pool_ref() {
-        crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
-            pool,
-            &state.engine,
-            card_id,
-            "backlog",
-            source,
-            crate::engine::transition::ForceIntent::SystemRecovery,
-            crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
-        )
-        .await
-        .map(|(result, _)| result)?
-    } else {
-        crate::kanban::transition_status_with_opts_and_on_conn(
-            legacy_db(state),
-            &state.engine,
-            card_id,
-            "backlog",
-            source,
-            crate::engine::transition::ForceIntent::SystemRecovery,
-            // allowed: backlog rewind must clear review/dispatch residue atomically.
-            crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
-            |conn| {
-                cleanup_force_transition_revert_on_conn(conn, card_id, "backlog")?;
-                Ok(())
-            },
-        )?
-    };
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        anyhow::anyhow!("transition_card_to_backlog_with_cleanup requires postgres pool (#1239)")
+    })?;
+    let turn_targets = load_active_turn_targets_for_card_pg(pool, card_id).await?;
+    let result = crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
+        pool,
+        &state.engine,
+        card_id,
+        "backlog",
+        source,
+        crate::engine::transition::ForceIntent::SystemRecovery,
+        crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
+    )
+    .await
+    .map(|(result, _)| result)?;
     cancel_turn_targets(state, &turn_targets, "kanban backlog revert").await;
     Ok(result)
 }
@@ -4110,28 +4064,6 @@ fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option
     matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
 }
 
-fn cleanup_force_transition_terminal_on_conn(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    target_status: &str,
-) -> anyhow::Result<usize> {
-    let reason = format!("force-transition to {target_status}");
-    let cancelled_dispatches =
-        crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
-
-    if cancelled_dispatches > 0 {
-        crate::engine::transition::execute_intent_on_conn(
-            conn,
-            &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
-                card_id: card_id.to_string(),
-                dispatch_id: None,
-            },
-        )?;
-    }
-
-    Ok(cancelled_dispatches)
-}
-
 fn count_live_auto_queue_entries_for_card_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
@@ -4533,23 +4465,19 @@ pub async fn force_transition(
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
     let target_status = body.status;
     let mut cleanup_counts = (0, 0);
-    let caller_source = if let Some(pool) = state.pg_pool_ref() {
-        resolve_requesting_agent_id_with_pg(pool, &headers)
-            .await
-            .unwrap_or_else(|| "api".to_string())
-    } else {
-        let conn = match legacy_db(&state).lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
-        };
-        resolve_requesting_agent_id_on_conn(&conn, &headers).unwrap_or_else(|| "api".to_string())
+    let pool = match state.pg_pool_ref() {
+        Some(pool) => pool,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "force-transition requires postgres pool (#1239)"})),
+            );
+        }
     };
-    let terminal_cleanup = if let Some(pool) = state.pg_pool_ref() {
+    let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
+        .await
+        .unwrap_or_else(|| "api".to_string());
+    let terminal_cleanup =
         match sqlx::query("SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1")
             .bind(&id)
             .fetch_optional(pool)
@@ -4585,151 +4513,67 @@ pub async fn force_transition(
                     Json(json!({"error": format!("{error}")})),
                 );
             }
-        }
-    } else {
-        let conn = match legacy_db(&state).lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
-            }
         };
-        crate::pipeline::ensure_loaded();
-        let (card_repo_id, card_agent_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap_or_default();
-        let effective = crate::pipeline::resolve_for_card(
-            &conn,
-            card_repo_id.as_deref(),
-            card_agent_id.as_deref(),
-        );
-        effective.is_terminal(&target_status) && body.cancel_dispatches.unwrap_or(true)
-    };
 
-    let transition_result = if let Some(pool) = state.pg_pool_ref() {
-        if needs_cleanup {
-            crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
-                pool,
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-                crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
-            )
-            .await
-            .map(|(result, counts)| {
-                cleanup_counts = (
-                    counts.cancelled_dispatches,
-                    counts.skipped_auto_queue_entries,
-                );
-                result
-            })
-        } else if terminal_cleanup {
-            crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
-                pool,
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-                crate::kanban::AllowedOnConnMutation::ForceTransitionTerminalCleanup,
-            )
-            .await
-            .map(|(result, counts)| {
-                cleanup_counts = (
-                    counts.cancelled_dispatches,
-                    counts.skipped_auto_queue_entries,
-                );
-                result
-            })
-        } else {
-            crate::kanban::transition_status_with_opts_pg_only(
-                pool,
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-            )
-            .await
-        }
+    let transition_result = if needs_cleanup {
+        crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
+            pool,
+            &state.engine,
+            &id,
+            &target_status,
+            &caller_source,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+            crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
+        )
+        .await
+        .map(|(result, counts)| {
+            cleanup_counts = (
+                counts.cancelled_dispatches,
+                counts.skipped_auto_queue_entries,
+            );
+            result
+        })
+    } else if terminal_cleanup {
+        crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
+            pool,
+            &state.engine,
+            &id,
+            &target_status,
+            &caller_source,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+            crate::kanban::AllowedOnConnMutation::ForceTransitionTerminalCleanup,
+        )
+        .await
+        .map(|(result, counts)| {
+            cleanup_counts = (
+                counts.cancelled_dispatches,
+                counts.skipped_auto_queue_entries,
+            );
+            result
+        })
     } else {
-        if needs_cleanup {
-            crate::kanban::transition_status_with_opts_and_on_conn(
-                legacy_db(&state),
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-                // allowed: forced rewind must scrub stale review/dispatch state atomically.
-                crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
-                |conn| {
-                    cleanup_counts =
-                        cleanup_force_transition_revert_on_conn(conn, &id, &target_status)?;
-                    Ok(())
-                },
-            )
-        } else if terminal_cleanup {
-            crate::kanban::transition_status_with_opts_and_on_conn(
-                legacy_db(&state),
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-                // allowed: terminal force path must cancel stale dispatches before commit.
-                crate::kanban::AllowedOnConnMutation::ForceTransitionTerminalCleanup,
-                |conn| {
-                    cleanup_counts.0 =
-                        cleanup_force_transition_terminal_on_conn(conn, &id, &target_status)?;
-                    Ok(())
-                },
-            )
-        } else {
-            crate::kanban::transition_status_with_opts(
-                legacy_db(&state),
-                &state.engine,
-                &id,
-                &target_status,
-                &caller_source,
-                crate::engine::transition::ForceIntent::OperatorOverride,
-            )
-        }
+        crate::kanban::transition_status_with_opts_pg_only(
+            pool,
+            &state.engine,
+            &id,
+            &target_status,
+            &caller_source,
+            crate::engine::transition::ForceIntent::OperatorOverride,
+        )
+        .await
     };
 
     match transition_result {
         Ok(result) => {
             let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
-            if state.pg_pool_ref().is_some() {
-                crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-            } else {
-                crate::kanban::drain_hook_side_effects(legacy_db(&state), &state.engine);
-            }
+            crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
 
-            let card = if let Some(pool) = state.pg_pool_ref() {
-                load_card_json_pg(pool, &id)
-                    .await
-                    .map_err(|error| format!("{error}"))
-                    .and_then(|card| {
-                        card.ok_or_else(|| "card not found after force-transition".to_string())
-                    })
-            } else {
-                let conn = legacy_db(&state).lock().unwrap();
-                let card =
-                    conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
-                        card_row_to_json(row)
-                    });
-                drop(conn);
-                card.map_err(|error| format!("{error}"))
-            };
+            let card = load_card_json_pg(pool, &id)
+                .await
+                .map_err(|error| format!("{error}"))
+                .and_then(|card| {
+                    card.ok_or_else(|| "card not found after force-transition".to_string())
+                });
             match card {
                 Ok(c) => {
                     crate::server::ws::emit_event(
