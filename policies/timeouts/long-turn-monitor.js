@@ -29,9 +29,10 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
   timeouts._section_L = function() {
       // ─── [L] Inflight 장시간 턴 감지 (#130) ──────────────────
       // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
-      // Notify at every 30-minute multiple while storing the last alerted
-      // threshold minute to avoid repeating the same bucket.
-      var ALERT_INTERVAL_MINUTES = 30;
+      // Notify at every configured-minute multiple while storing the last
+      // alerted threshold minute to avoid repeating the same bucket.
+      var configuredAlertInterval = parseInt(agentdesk.config.get("long_turn_alert_interval_min"), 10);
+      var ALERT_INTERVAL_MINUTES = configuredAlertInterval > 0 ? configuredAlertInterval : 30;
       var WATCHDOG_EXTENSION_MINUTES = 60;
       var WATCHDOG_EXTENSION_COOLDOWN_MINUTES = 20;
       var WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES = 5;

@@ -265,6 +265,38 @@ test("timeouts long turn monitor module skips repeated 30-minute threshold", () 
   assert.equal(state.deadlockAlerts.length, 0);
 });
 
+test("timeouts long turn monitor module uses configured alert interval", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { long_turn_alert_interval_min: 40 },
+    inflights: [
+      {
+        provider: "codex",
+        channel_id: "channel-1",
+        channel_name: "project-agentdesk",
+        session_key: "provider:AgentDesk-codex-project-agentdesk",
+        tmux_session_name: "AgentDesk-codex-project-agentdesk",
+        started_at: timestampMinutesAgo(91),
+        dispatch_id: null
+      }
+    ],
+    dbQuery: createSqlRouter([
+      { match: "SELECT value FROM kv_meta WHERE key = ?", result: [] },
+      {
+        match: "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? OR discord_channel_cc = ? OR discord_channel_cdx = ? LIMIT 1",
+        result: []
+      },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_alert:%'", result: [] }
+    ])
+  });
+
+  policy._section_L();
+
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.match(state.deadlockAlerts[0].message, /80분 단계/);
+  assert.deepEqual(toPlain(state.executions[0].params), ["long_turn_tier:codex:channel-1", "80"]);
+});
+
 test("timeouts workspace branch guard module recovers wt branches", () => {
   const workspace = "/tmp/agentdesk-main";
   const { policy, state } = loadPolicy("policies/timeouts.js", {

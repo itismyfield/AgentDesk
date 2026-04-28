@@ -222,6 +222,13 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         Some("120"),
     ),
     (
+        "long_turn_alert_interval_min",
+        "timeout",
+        "장시간 턴 알림 주기 (분)",
+        "Long-Turn Alert Interval (min)",
+        Some("30"),
+    ),
+    (
         "context_compact_percent",
         "context",
         "컨텍스트 compact 임계값 (%)",
@@ -267,6 +274,9 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "merge_allowed_authors" => config.automation.allowed_authors.clone(),
         "requested_timeout_min" => stringified_number(config.runtime.requested_timeout_min),
         "in_progress_stale_min" => stringified_number(config.runtime.in_progress_stale_min),
+        "long_turn_alert_interval_min" => {
+            stringified_number(config.runtime.long_turn_alert_interval_min)
+        }
         "context_compact_percent" => stringified_number(config.runtime.context_compact_percent),
         "context_compact_percent_codex" => {
             stringified_number(config.runtime.context_compact_percent_codex)
@@ -1178,6 +1188,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.automation.strategy = Some("rebase".to_string());
         config.runtime.requested_timeout_min = Some(55);
+        config.runtime.long_turn_alert_interval_min = Some(35);
         config.runtime.dispatch_poll_sec = Some(45);
         config.runtime.max_entry_retries = Some(6);
         config.runtime.stale_dispatched_grace_min = Some(4);
@@ -1205,6 +1216,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(timeout_min, "55");
+
+        let long_turn_interval_min: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'long_turn_alert_interval_min'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(long_turn_interval_min, "35");
 
         let max_review_rounds: String = conn
             .query_row(

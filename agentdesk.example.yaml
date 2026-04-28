@@ -91,6 +91,7 @@ review:
 runtime:
   requested_timeout_min: 45
   in_progress_stale_min: 120
+  long_turn_alert_interval_min: 30
   context_compact_percent: 60
   context_compact_percent_codex: 75
   context_compact_percent_claude: 70
