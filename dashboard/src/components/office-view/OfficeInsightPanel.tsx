@@ -475,9 +475,21 @@ const RL_ICONS: Record<string, string> = {
    the office `오피스 운영신호` panel uses. The previous home tile rendered
    only a single max-utilization percentage with a sparkline, which the
    user reported as low-density compared to the per-provider/per-bucket
-   bars on the office page. */
-export function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
+   bars on the office page.
+
+   `density` lets the home tile request a more spacious layout so its
+   visual height aligns with the sibling HomeMetricTile cards (오늘 토큰 /
+   API 비용 / 진행 중) on the same row. Office signals keep the original
+   compact layout. */
+export function MiniRateLimitBar({
+  isKo,
+  density = "compact",
+}: {
+  isKo: boolean;
+  density?: "compact" | "comfortable";
+}) {
   const [providers, setProviders] = useState<RLProvider[]>([]);
+  const isComfy = density === "comfortable";
 
   useEffect(() => {
     let mounted = true;
@@ -497,16 +509,23 @@ export function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
   if (providers.length === 0) return null;
 
   return (
-    <div className="mt-2 space-y-1">
+    <div className={isComfy ? "mt-3 space-y-3" : "mt-2 space-y-1"}>
       {providers.map((p) => {
         const providerMeta = getProviderMeta(p.provider);
         const visible = p.buckets;
         return (
           <div key={p.provider} className="flex items-center gap-0">
             {/* Fixed-width left: provider + stale placeholder */}
-            <div className="flex items-center gap-1 shrink-0" style={{ width: 96 }}>
+            <div
+              className="flex items-center gap-1 shrink-0"
+              style={{ width: isComfy ? 108 : 96 }}
+            >
               <span
-                className="text-xs font-bold uppercase truncate"
+                className={
+                  isComfy
+                    ? "text-sm font-bold uppercase truncate"
+                    : "text-xs font-bold uppercase truncate"
+                }
                 style={{ color: providerMeta.color }}
               >
                 {(RL_ICONS[p.provider] ?? "•")} {p.provider}
@@ -550,44 +569,63 @@ export function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
               </div>
             ) : (
               <div className="flex-1 grid grid-cols-2 gap-x-2">
-                {visible.map((b) => (
-                  <div key={b.id} className="flex items-center gap-1">
-                    <span
-                      className="text-xs font-bold shrink-0 w-[14px]"
-                      style={{ color: getProviderLevelColors(p.provider, b.level).text }}
-                    >
-                      {b.label}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className="relative h-[3px] rounded-full overflow-hidden"
-                        style={{ background: "var(--line-soft)" }}
+                {visible.map((b) => {
+                  /* Use the level `bar` color (= pure provider accent for
+                     normal, --warn / --err for warning / danger) instead of
+                     the lightened `text` mix so the Claude row reads as the
+                     same orange as the CLAUDE label, and warning / danger
+                     states still pop. The mixed-with-fg variant we used
+                     before drifted toward yellow on the dark surface. */
+                  const accentText = getProviderLevelColors(p.provider, b.level).bar;
+                  return (
+                    <div key={b.id} className="flex items-center gap-1">
+                      <span
+                        className={
+                          isComfy
+                            ? "text-sm font-bold shrink-0 w-[18px]"
+                            : "text-xs font-bold shrink-0 w-[14px]"
+                        }
+                        style={{ color: accentText }}
                       >
+                        {b.label}
+                      </span>
+                      <div className="flex-1 min-w-0">
                         <div
-                          className="absolute inset-y-0 left-0 rounded-full"
-                          style={{
-                            width: b.utilization === null ? "0%" : `${Math.min(b.utilization, 100)}%`,
-                            background:
-                              b.utilization === null
-                                ? "transparent"
-                                : getProviderLevelColors(p.provider, b.level).bar,
-                          }}
-                        />
+                          className={
+                            isComfy
+                              ? "relative h-1.5 rounded-full overflow-hidden"
+                              : "relative h-[3px] rounded-full overflow-hidden"
+                          }
+                          style={{ background: "var(--line-soft)" }}
+                        >
+                          <div
+                            className="absolute inset-y-0 left-0 rounded-full"
+                            style={{
+                              width: b.utilization === null ? "0%" : `${Math.min(b.utilization, 100)}%`,
+                              background:
+                                b.utilization === null
+                                  ? "transparent"
+                                  : getProviderLevelColors(p.provider, b.level).bar,
+                            }}
+                          />
+                        </div>
                       </div>
+                      <span
+                        className={
+                          isComfy
+                            ? "text-sm font-mono font-bold shrink-0 w-[34px] text-right"
+                            : "text-xs font-mono font-bold shrink-0 w-[28px] text-right"
+                        }
+                        style={{
+                          color:
+                            b.utilization === null ? "var(--th-text-muted)" : accentText,
+                        }}
+                      >
+                        {b.utilization === null ? "N/A" : `${b.utilization}%`}
+                      </span>
                     </div>
-                    <span
-                      className="text-xs font-mono font-bold shrink-0 w-[28px] text-right"
-                      style={{
-                        color:
-                          b.utilization === null
-                            ? "var(--th-text-muted)"
-                            : getProviderLevelColors(p.provider, b.level).text,
-                      }}
-                    >
-                      {b.utilization === null ? "N/A" : `${b.utilization}%`}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
