@@ -1610,6 +1610,48 @@ fn queue_exit_feedback_emoji(kind: QueueExitKind) -> char {
     }
 }
 
+/// codex review P2 (#1332 follow-up): replacement card body for a queued
+/// placeholder when its intervention exits the queue without ever being
+/// dispatched. Replaces the `📬 메시지 대기 중` promise with a concise
+/// terminal notice, so the user is not left wondering when the turn will
+/// run.
+fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
+    match kind {
+        QueueExitKind::Cancelled => "🚫 **큐에서 제거됨** — 사용자 취소로 처리되지 않습니다.",
+        QueueExitKind::Expired => "⌛ **큐에서 제거됨** — 대기 시간 초과로 처리되지 않습니다.",
+        QueueExitKind::Superseded => {
+            "⏏ **큐에서 제거됨** — 후속 메시지로 대체되어 처리되지 않습니다."
+        }
+    }
+}
+
+/// codex review P2 (#1332 follow-up): drain the in-memory `queued_placeholders`
+/// + `placeholder_controller` rows for every queue-exit event and return the
+/// visible Discord card ids the caller should edit/delete. Split out from
+/// `apply_queue_exit_feedback` so the bookkeeping is testable without a
+/// serenity HTTP client.
+fn queue_exit_drain_queued_placeholders(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    queue_exit_events: &[&QueueExitEvent],
+) -> Vec<(MessageId, QueueExitKind)> {
+    let mut visible_cards_to_clear: Vec<(MessageId, QueueExitKind)> = Vec::new();
+    for event in queue_exit_events {
+        for message_id in &event.intervention.source_message_ids {
+            if let Some((_, placeholder_msg_id)) = shared
+                .queued_placeholders
+                .remove(&(channel_id, *message_id))
+            {
+                shared
+                    .placeholder_controller
+                    .detach_by_message(channel_id, placeholder_msg_id);
+                visible_cards_to_clear.push((placeholder_msg_id, event.kind));
+            }
+        }
+    }
+    visible_cards_to_clear
+}
+
 async fn apply_queue_exit_feedback(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -1628,31 +1670,53 @@ async fn apply_queue_exit_feedback(
     // that belongs to a cancelled/expired intervention. Also detach the
     // controller entry so the cap-bounded `placeholder_controller.entries`
     // map does not retain a stale Queued row (Queued is not in the standard
-    // eviction sweep — it is meant to live until dispatch). Runs regardless
-    // of whether the cached serenity ctx is available so a missing ctx never
-    // silently misroutes the next turn.
-    for event in &queue_exit_events {
-        for message_id in &event.intervention.source_message_ids {
-            if let Some((_, placeholder_msg_id)) = shared
-                .queued_placeholders
-                .remove(&(channel_id, *message_id))
-            {
-                shared
-                    .placeholder_controller
-                    .detach_by_message(channel_id, placeholder_msg_id);
-            }
-        }
-    }
+    // eviction sweep — it is meant to live until dispatch). The mapping/
+    // controller bookkeeping runs regardless of whether the cached serenity
+    // ctx is available so a missing ctx never silently misroutes the next
+    // turn.
+    //
+    // codex review P2 (#1332 follow-up): the visible Discord card edited to
+    // `📬 메시지 대기 중` must ALSO be cleaned up — leaving it behind would
+    // promise a turn that has been cancelled/expired/superseded. Collect the
+    // placeholder ids here and rewrite/delete them once we have a serenity
+    // ctx (best-effort: log on cache miss and leave the bookkeeping in place
+    // so a future ctx can still reach the same rows via `detach_by_message`).
+    let visible_cards_to_clear =
+        queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events);
 
     let Some(ctx) = shared.cached_serenity_ctx.get() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing)",
+            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing); also skipped clearing {} visible queued card(s)",
             queue_exit_events.len(),
-            channel_id
+            channel_id,
+            visible_cards_to_clear.len(),
         );
         return;
     };
+
+    // codex review P2: rewrite each leftover queued card to a brief
+    // exit-state notice so the user is not left looking at a `📬` promise
+    // for a turn that will never run. Edit-on-failure falls back to delete
+    // — either way the stale `📬 메시지 대기 중` text is removed. We use
+    // the bare serenity HTTP edit instead of the placeholder controller
+    // because the controller entry was just detached (and the public
+    // `transition` API only renders terminal monitor-handoff cards).
+    for (placeholder_msg_id, kind) in &visible_cards_to_clear {
+        let body = queue_exit_card_body(*kind);
+        let edit_result = channel_id
+            .edit_message(
+                &ctx.http,
+                *placeholder_msg_id,
+                serenity::EditMessage::new().content(body),
+            )
+            .await;
+        if edit_result.is_err() {
+            let _ = channel_id
+                .delete_message(&ctx.http, *placeholder_msg_id)
+                .await;
+        }
+    }
 
     for event in queue_exit_events {
         // Clean up the queue-pending reactions on EVERY message that contributed
@@ -3767,6 +3831,143 @@ mod tests {
             shared.queued_placeholders.len(),
             0,
             "queue-exit feedback must drop the queued placeholder mapping"
+        );
+    }
+
+    // codex review P2 (#1332 follow-up): the queue-exit drain must report the
+    // (placeholder_msg_id, kind) pair for each cleared mapping so the caller
+    // can edit/delete the leftover Discord card. Without this signal,
+    // `apply_queue_exit_feedback` cannot rewrite the visible `📬 메시지 대기 중`
+    // text and the user is left looking at a promise for a turn that has
+    // been cancelled.
+    #[tokio::test]
+    async fn queue_exit_drain_reports_visible_cards_for_each_kind() {
+        use super::QueueExitEvent;
+        use super::QueueExitKind;
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(910_000_000_000_001);
+        let cancelled_msg = MessageId::new(810_000_000_000_001);
+        let cancelled_card = MessageId::new(710_000_000_000_001);
+        let expired_msg = MessageId::new(810_000_000_000_002);
+        let expired_card = MessageId::new(710_000_000_000_002);
+        let superseded_msg = MessageId::new(810_000_000_000_003);
+        let superseded_card = MessageId::new(710_000_000_000_003);
+
+        shared
+            .queued_placeholders
+            .insert((channel_id, cancelled_msg), cancelled_card);
+        shared
+            .queued_placeholders
+            .insert((channel_id, expired_msg), expired_card);
+        shared
+            .queued_placeholders
+            .insert((channel_id, superseded_msg), superseded_card);
+
+        let mk_event = |msg_id: MessageId, kind: QueueExitKind| QueueExitEvent {
+            intervention: Intervention {
+                author_id: UserId::new(99),
+                message_id: msg_id,
+                source_message_ids: vec![msg_id],
+                text: "ignored".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+            kind,
+        };
+        let events = vec![
+            mk_event(cancelled_msg, QueueExitKind::Cancelled),
+            mk_event(expired_msg, QueueExitKind::Expired),
+            mk_event(superseded_msg, QueueExitKind::Superseded),
+        ];
+        let event_refs: Vec<&QueueExitEvent> = events.iter().collect();
+
+        let cards = super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs);
+
+        assert_eq!(cards.len(), 3);
+        assert!(
+            cards.contains(&(cancelled_card, QueueExitKind::Cancelled)),
+            "cancelled card should surface for visible-card cleanup"
+        );
+        assert!(
+            cards.contains(&(expired_card, QueueExitKind::Expired)),
+            "expired card should surface for visible-card cleanup"
+        );
+        assert!(
+            cards.contains(&(superseded_card, QueueExitKind::Superseded)),
+            "superseded card should surface for visible-card cleanup"
+        );
+        assert!(
+            shared.queued_placeholders.is_empty(),
+            "every mapping must be drained"
+        );
+
+        // The replacement body must exist for every queue-exit kind.
+        assert!(super::queue_exit_card_body(QueueExitKind::Cancelled).contains("큐에서 제거됨"));
+        assert!(super::queue_exit_card_body(QueueExitKind::Expired).contains("큐에서 제거됨"));
+        assert!(super::queue_exit_card_body(QueueExitKind::Superseded).contains("큐에서 제거됨"));
+    }
+
+    // codex review P2 (#1332 follow-up): merged interventions accumulate
+    // multiple `source_message_ids`; each had registered its own queued
+    // placeholder. When the merged intervention later exits the queue, the
+    // drain must clear EVERY source id's mapping in one pass — not just the
+    // head id.
+    #[tokio::test]
+    async fn queue_exit_drain_handles_merged_source_ids() {
+        use super::QueueExitEvent;
+        use super::QueueExitKind;
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(920_000_000_000_001);
+        let head_msg = MessageId::new(820_000_000_000_001);
+        let head_card = MessageId::new(720_000_000_000_001);
+        let merged_msg_a = MessageId::new(820_000_000_000_002);
+        let merged_card_a = MessageId::new(720_000_000_000_002);
+        let merged_msg_b = MessageId::new(820_000_000_000_003);
+        let merged_card_b = MessageId::new(720_000_000_000_003);
+
+        shared
+            .queued_placeholders
+            .insert((channel_id, head_msg), head_card);
+        shared
+            .queued_placeholders
+            .insert((channel_id, merged_msg_a), merged_card_a);
+        shared
+            .queued_placeholders
+            .insert((channel_id, merged_msg_b), merged_card_b);
+
+        let event = QueueExitEvent {
+            intervention: Intervention {
+                author_id: UserId::new(50),
+                message_id: head_msg,
+                source_message_ids: vec![merged_msg_a, merged_msg_b, head_msg],
+                text: "merged".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: true,
+            },
+            kind: QueueExitKind::Superseded,
+        };
+        let event_refs: Vec<&QueueExitEvent> = vec![&event];
+
+        let cards = super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs);
+
+        assert_eq!(
+            cards.len(),
+            3,
+            "all three source-id placeholders should be drained"
+        );
+        let ids: std::collections::HashSet<MessageId> = cards.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&head_card));
+        assert!(ids.contains(&merged_card_a));
+        assert!(ids.contains(&merged_card_b));
+        assert!(
+            shared.queued_placeholders.is_empty(),
+            "every merged source id must be drained from queued_placeholders"
         );
     }
 }

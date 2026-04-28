@@ -830,6 +830,58 @@ mod tests {
         );
     }
 
+    // codex review P2 (#1332 follow-up): the dispatch hand-off transitions a
+    // queued placeholder Queued → Active and then must `detach_by_message`
+    // immediately, because the streaming path takes over the Discord card
+    // directly and never calls `transition`/`detach` on the controller.
+    // `Active` rows are deliberately excluded from `evict_terminal_entries`,
+    // so without this detach every queued foreground turn would leave a
+    // permanent controller row in the cap-bounded `entries` map.
+    #[tokio::test]
+    async fn dispatch_handoff_active_then_detach_leaves_no_controller_row() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let queued_input = PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        // Stage 1: race-loss path renders the Queued card.
+        let outcome = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
+        assert_eq!(controller.entries.len(), 1);
+
+        // Stage 2: dispatch hand-off transitions Queued → Active.
+        let active_outcome = controller
+            .ensure_active(gateway.as_ref(), key(), sample_input())
+            .await;
+        assert_eq!(active_outcome, PlaceholderControllerOutcome::Edited);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::Active
+        );
+        assert_eq!(controller.entries.len(), 1);
+
+        // Stage 3: hand off to streaming. Without this detach the Active row
+        // would survive forever (Active is not evictable).
+        controller.detach_by_message(key().channel_id, key().message_id);
+        assert_eq!(
+            controller.entries.len(),
+            0,
+            "detach_by_message must drop the Active row so streaming hand-off does not leak entries"
+        );
+        // After detach, lifecycle reports NotCreated (no row). A subsequent
+        // sweep is a no-op.
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::NotCreated
+        );
+    }
+
     // #1332: provider-agnostic detach drops every entry sharing the
     // (channel, message) pair so the queue-exit feedback path can clear a
     // stale Queued row without re-tracking which provider owned the card.

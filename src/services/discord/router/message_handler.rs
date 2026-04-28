@@ -2559,6 +2559,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // #1332 dispatch hand-off: if this turn was previously enqueued and is now
     // being dispatched, reuse the Queued placeholder card so the user sees a
     // single message transition `📬 → 🔄` instead of two distinct placeholders.
+    //
+    // codex review P2 (round-after-#1332): merged interventions accumulate
+    // multiple `source_message_ids`; each lost a separate race and registered
+    // its own queued placeholder. Drain mappings for ALL of them — the head
+    // (intervention.message_id) becomes the live Active card, and any
+    // additional source ids' Discord cards must be tidied up so the user does
+    // not see duplicate `📬` cards left behind for the merged tail.
     let queued_placeholder_handoff = if started {
         shared
             .queued_placeholders
@@ -2568,47 +2575,16 @@ pub(in crate::services::discord) async fn handle_text_message(
         None
     };
 
-    let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
-        // Drive the controller from Queued → Active so the user sees the
-        // existing `📬 메시지 대기 중` card morph into `🔄 백그라운드 처리 중`
-        // at the exact moment the queued turn starts. The streaming path will
-        // overwrite this Active card with response text shortly after; the
-        // brief Active beat is the visible "we picked your queued message up"
-        // signal. If the controller rejects (e.g. the entry is already
-        // terminal because of a race), we still reuse the message id so the
-        // streaming path edits the same Discord card and the user does not
-        // see a duplicate placeholder.
-        let key = super::super::placeholder_controller::PlaceholderKey {
-            provider: super::super::resolve_discord_bot_provider(token),
-            channel_id,
-            message_id: existing,
-        };
-        let active_input = super::super::placeholder_controller::PlaceholderActiveInput {
-            reason: super::super::formatting::MonitorHandoffReason::Queued,
-            started_at_unix: chrono::Utc::now().timestamp(),
-            tool_summary: None,
-            command_summary: None,
-            context_line: None,
-        };
-        let gateway = super::super::gateway::DiscordGateway::new(
-            ctx.http.clone(),
-            shared.clone(),
-            super::super::resolve_discord_bot_provider(token),
-            None,
-        );
-        let _ = shared
-            .placeholder_controller
-            .ensure_active(&gateway, key, active_input)
-            .await;
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 📬➡️🔄 DISPATCH: queued placeholder transitioned to Active (channel {}, msg {})",
-            channel_id,
-            existing
-        );
-        existing
-    } else {
-        send_intake_placeholder(
+    // codex review P1/P2: when this turn lost the race, drive the entire
+    // race-loss path (placeholder POST, mapping insert, enqueue, idle-drain
+    // safety net, queued-card edit) here and return. Splitting into a
+    // dedicated `if !started` block — instead of folding it into the
+    // `placeholder_msg_id` let-binding below — keeps the started==true
+    // path linear and lets us bail out without the post-let main flow ever
+    // running on a non-active turn.
+    if !started {
+        let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+        let post_result = send_intake_placeholder(
             ctx.http.clone(),
             shared.clone(),
             channel_id,
@@ -2618,12 +2594,46 @@ pub(in crate::services::discord) async fn handle_text_message(
                 None
             },
         )
-        .await
-        .map_err(|error| -> Error { error.into() })?
-    };
+        .await;
 
-    if !started {
-        let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+        let placeholder_msg_id = match post_result {
+            Ok(msg_id) => msg_id,
+            Err(error) => {
+                // POST failed — finish the race-loss path WITHOUT enqueuing.
+                // Without a placeholder there is no Discord card to wire up,
+                // and enqueuing without a mapping would risk the dispatch
+                // path posting a duplicate placeholder when the active turn
+                // eventually finishes. Surface the failure via the regular
+                // ⏳ cleanup and return.
+                super::super::formatting::remove_reaction_raw(
+                    &ctx.http,
+                    channel_id,
+                    user_msg_id,
+                    '⏳',
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ RACE: placeholder POST failed for race-lost message, dropping (channel {}, error={})",
+                    channel_id,
+                    error
+                );
+                return Ok(());
+            }
+        };
+
+        let is_thread_routed = channel_id != original_channel_id;
+        let want_queued_card = !turn_kind.is_background_trigger() && !is_thread_routed;
+        // codex review P2: register the placeholder mapping BEFORE enqueue so
+        // a fast dequeue (active turn finishing concurrently) always sees a
+        // valid mapping when it picks the intervention up. If the subsequent
+        // `ensure_queued` edit fails we roll back the mapping below.
+        if want_queued_card {
+            shared
+                .queued_placeholders
+                .insert((channel_id, user_msg_id), placeholder_msg_id);
+        }
+
         let enqueue_outcome = super::super::mailbox_enqueue_intervention(
             shared,
             &bot_owner_provider,
@@ -2639,6 +2649,32 @@ pub(in crate::services::discord) async fn handle_text_message(
         )
         .await;
         let enqueued = enqueue_outcome.enqueued;
+
+        // codex review P1: cover the residual race window where the active
+        // turn finished between `mailbox_try_start_turn` and the enqueue
+        // above. In that case `mailbox_finish_turn` saw an empty queue and
+        // skipped the dequeue chain — schedule a deferred drain so the
+        // intervention we just enqueued does not strand. Cheap no-op when the
+        // active turn is still running.
+        if enqueued && !super::super::mailbox_has_active_turn(shared, channel_id).await {
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                bot_owner_provider.clone(),
+                channel_id,
+                "race-loss enqueue idle drain",
+            );
+        }
+
+        // If the enqueue was rejected (dedup / duplicate) the mapping must
+        // not remain — there is no intervention for the dispatch path to
+        // pick up. Drop the speculatively-inserted entry to keep
+        // `queued_placeholders` consistent.
+        if !enqueued && want_queued_card {
+            shared
+                .queued_placeholders
+                .remove(&(channel_id, user_msg_id));
+        }
+
         // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
         // ✅ done. Restore 📬 on race-loss only after the intervention is
         // actually published to the mailbox; pre-enqueue add was rejected
@@ -2652,28 +2688,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         // on a turn that has already started — strictly less severe than
         // the pre-PR regression of never showing 📬 at all, and benign in
         // the user-reported scenario (long-running tool-call hang, where
-        // the active turn does not finish for many seconds). Resolving the
-        // residual race requires moving the reaction add into the enqueue
-        // path itself or making the dequeue cleanup robust to a late add;
-        // tracked as follow-up.
-        //
-        // Restrict the 📬 add to non-thread dispatch routing: when
-        // `channel_id` was shadowed to a dispatch thread (line 1848),
-        // `user_msg_id` still references the parent-channel message and the
-        // intervention is queued under the thread mailbox — neither the
-        // thread channel nor the parent channel can host a 📬 that gets
-        // both rendered correctly *and* cleaned up by the dequeue/cancel
-        // paths. The user-reported regression scenario (parent channel,
-        // hung tool call, no dispatch routing) is handled here; the
-        // dispatch-thread case keeps the pre-PR behavior (no 📬) until the
-        // mailbox/reaction-channel mismatch is resolved as a separate
-        // follow-up (codex plugin review P2).
-        //
-        // The dedup/duplicate path inside `enqueue_intervention` returns
-        // `enqueued=false`; in that case the message is intentionally not
-        // queued, so showing 📬 would be a false promise (chatgpt-codex
-        // connector review P2).
-        let is_thread_routed = channel_id != original_channel_id;
+        // the active turn does not finish for many seconds).
         if enqueued
             && !is_thread_routed
             && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
@@ -2690,16 +2705,13 @@ pub(in crate::services::discord) async fn handle_text_message(
         // #796: Background-trigger turns (notify-bot driven, info-only) must
         // NOT have their placeholder deleted on race-loss. The placeholder is
         // the user-visible breadcrumb of the background notification (e.g.
-        // a `Bash run_in_background` completion message). Deleting it
-        // silently destroys information the user has no way to recover from.
+        // a `Bash run_in_background` completion message).
         //
-        // #1332: Foreground turns also preserve the placeholder, but instead
-        // of leaving the bare `...` we EDIT it into a `📬 메시지 대기 중`
-        // card via the placeholder controller and store a `(channel,
-        // user_msg_id) → placeholder_msg_id` mapping so the dispatch path can
-        // later transition the same Discord message into `🔄 Active`. If the
-        // edit fails (e.g. Discord API hiccup), fall back to the legacy delete
-        // so users never see a stale `...` placeholder.
+        // #1332: Foreground turns EDIT the bare `...` into a `📬 메시지 대기
+        // 중` card via the placeholder controller. Mapping was already
+        // inserted before enqueue (codex review P2); on edit failure we roll
+        // back the mapping AND delete the Discord message so users never see
+        // a stale `...` placeholder.
         if turn_kind.is_background_trigger() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -2707,7 +2719,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 placeholder_msg_id
             );
-        } else if enqueued && !is_thread_routed {
+        } else if enqueued && want_queued_card {
             let gateway = DiscordGateway::new(
                 ctx.http.clone(),
                 shared.clone(),
@@ -2733,9 +2745,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
             match outcome {
                 Edited | Coalesced => {
-                    shared
-                        .queued_placeholders
-                        .insert((channel_id, user_msg_id), placeholder_msg_id);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
                         "  [{ts}] 📬 RACE: queued placeholder rendered (channel {}, msg {})",
@@ -2744,6 +2753,12 @@ pub(in crate::services::discord) async fn handle_text_message(
                     );
                 }
                 _ => {
+                    // Edit failed — roll back the mapping and delete the
+                    // raw `...` so the dispatch path never matches a Discord
+                    // message that no longer exists.
+                    shared
+                        .queued_placeholders
+                        .remove(&(channel_id, user_msg_id));
                     let _ = channel_id
                         .delete_message(&ctx.http, placeholder_msg_id)
                         .await;
@@ -2769,6 +2784,89 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
         return Ok(());
     }
+
+    let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
+        // Drive the controller from Queued → Active so the user sees the
+        // existing `📬 메시지 대기 중` card morph into `🔄 백그라운드 처리 중`
+        // at the exact moment the queued turn starts. The streaming path will
+        // overwrite this Active card with response text shortly after; the
+        // brief Active beat is the visible "we picked your queued message up"
+        // signal. If the controller rejects (e.g. the entry is already
+        // terminal because of a race), we still reuse the message id so the
+        // streaming path edits the same Discord card and the user does not
+        // see a duplicate placeholder.
+        let provider_for_handoff = super::super::resolve_discord_bot_provider(token);
+        let key = super::super::placeholder_controller::PlaceholderKey {
+            provider: provider_for_handoff.clone(),
+            channel_id,
+            message_id: existing,
+        };
+        let active_input = super::super::placeholder_controller::PlaceholderActiveInput {
+            reason: super::super::formatting::MonitorHandoffReason::Queued,
+            started_at_unix: chrono::Utc::now().timestamp(),
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let gateway = super::super::gateway::DiscordGateway::new(
+            ctx.http.clone(),
+            shared.clone(),
+            provider_for_handoff,
+            None,
+        );
+        let _ = shared
+            .placeholder_controller
+            .ensure_active(&gateway, key, active_input)
+            .await;
+        // codex review P2: streaming overwrites this Discord message directly
+        // and never calls `transition`/`detach` on the controller. `Active`
+        // entries are excluded from `evict_terminal_entries` so without a
+        // detach here every queued foreground turn would leave a permanent
+        // controller row. Drop the entry now — streaming owns the card past
+        // this point and the controller is no longer the source of truth.
+        shared
+            .placeholder_controller
+            .detach_by_message(channel_id, existing);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 📬➡️🔄 DISPATCH: queued placeholder transitioned to Active (channel {}, msg {})",
+            channel_id,
+            existing
+        );
+        existing
+    } else {
+        // Active turn started cleanly — POST a fresh placeholder. If the POST
+        // fails we MUST release the mailbox slot we just acquired, otherwise
+        // the channel is stuck with `current_msg_id == 0` until the cancel
+        // token times out (codex review P1).
+        match send_intake_placeholder(
+            ctx.http.clone(),
+            shared.clone(),
+            channel_id,
+            if reply_to_user_message && dispatch_id_for_thread.is_none() {
+                Some((channel_id, user_msg_id))
+            } else {
+                None
+            },
+        )
+        .await
+        {
+            Ok(msg_id) => msg_id,
+            Err(error) => {
+                let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+                let _ = super::super::mailbox_finish_turn(shared, &bot_owner_provider, channel_id)
+                    .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot",
+                    channel_id,
+                    error
+                );
+                return Err::<(), Error>(error.into());
+            }
+        }
+    };
+
     shared
         .global_active
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -275,6 +275,38 @@ fn dispatch_post_error(
     crate::server::routes::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
 }
 
+/// codex review P2 (#1332 follow-up): drain the `queued_placeholders` /
+/// `placeholder_controller` bookkeeping for every non-head source message id
+/// of a merged intervention. The dispatch path uses `intervention.message_id`
+/// (the merged tail) as the Active card, so the head id's mapping must be
+/// preserved here — only the *other* source ids leak. Returns the placeholder
+/// Discord message ids whose visible cards the caller should delete (kept as
+/// a return value to keep the helper independent of `serenity::Http` so the
+/// test harness can invoke it without a real Discord client).
+pub(super) fn drain_merged_queued_placeholders(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    head_message_id: MessageId,
+    source_message_ids: &[MessageId],
+) -> Vec<MessageId> {
+    let mut to_delete = Vec::new();
+    for message_id in source_message_ids {
+        if *message_id == head_message_id {
+            continue;
+        }
+        if let Some((_, placeholder_msg_id)) = shared
+            .queued_placeholders
+            .remove(&(channel_id, *message_id))
+        {
+            shared
+                .placeholder_controller
+                .detach_by_message(channel_id, placeholder_msg_id);
+            to_delete.push(placeholder_msg_id);
+        }
+    }
+    to_delete
+}
+
 pub(super) async fn send_intake_placeholder(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
@@ -439,6 +471,29 @@ impl TurnGateway for DiscordGateway {
                 formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '📬').await;
                 formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '➕').await;
             }
+
+            // codex review P2 (#1332 follow-up): merged interventions can carry
+            // several `source_message_ids`, each of which had registered its own
+            // `📬 메시지 대기 중` placeholder when it lost the start-turn race.
+            // `handle_text_message` only consumes `queued_placeholders` for the
+            // intervention's HEAD message id (the last merged id, used as the
+            // Active card). The remaining source ids would otherwise leak both
+            // a `queued_placeholders` mapping and a stale `📬` Discord card for
+            // a turn that is now actively running. Drain them here, before
+            // dispatch enters `handle_text_message`. The head id is excluded
+            // because the dispatch hand-off path will own its transition.
+            let drained = drain_merged_queued_placeholders(
+                &self.shared,
+                channel_id,
+                intervention.message_id,
+                &intervention.source_message_ids,
+            );
+            for placeholder_msg_id in drained {
+                let _ = channel_id
+                    .delete_message(&self.http, placeholder_msg_id)
+                    .await;
+            }
+
             handle_text_message(
                 &live_turn.ctx,
                 channel_id,
@@ -596,10 +651,11 @@ impl TurnGateway for HeadlessGateway {
 
 #[cfg(test)]
 mod tests {
-    use super::{live_bot_owner_provider, outbound_policy};
+    use super::{drain_merged_queued_placeholders, live_bot_owner_provider, outbound_policy};
     use crate::services::discord::outbound::{
         DISCORD_HARD_LIMIT_CHARS, SplitStrategy, ThreadFallback,
     };
+    use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
     fn live_bot_owner_provider_requires_live_turn_context() {
@@ -614,5 +670,75 @@ mod tests {
         assert_eq!(policy.split_strategy, SplitStrategy::RejectOverLimit);
         assert_eq!(policy.thread_fallback, ThreadFallback::None);
         assert!(policy.minimal_fallback.is_none());
+    }
+
+    // codex review P2 (#1332 follow-up): when a merged intervention is
+    // dispatched, the queued placeholders for every NON-head source id must
+    // be drained and returned for visible-card cleanup. The head id is left
+    // in place because the dispatch hand-off path consumes it directly.
+    #[tokio::test]
+    async fn drain_merged_queued_placeholders_drops_non_head_source_ids() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(940_000_000_000_001);
+        let head_msg = MessageId::new(840_000_000_000_001);
+        let head_card = MessageId::new(740_000_000_000_001);
+        let merged_a_msg = MessageId::new(840_000_000_000_002);
+        let merged_a_card = MessageId::new(740_000_000_000_002);
+        let merged_b_msg = MessageId::new(840_000_000_000_003);
+        let merged_b_card = MessageId::new(740_000_000_000_003);
+
+        shared
+            .queued_placeholders
+            .insert((channel_id, head_msg), head_card);
+        shared
+            .queued_placeholders
+            .insert((channel_id, merged_a_msg), merged_a_card);
+        shared
+            .queued_placeholders
+            .insert((channel_id, merged_b_msg), merged_b_card);
+
+        let drained = drain_merged_queued_placeholders(
+            &shared,
+            channel_id,
+            head_msg,
+            &[merged_a_msg, merged_b_msg, head_msg],
+        );
+
+        // Head id must remain in queued_placeholders so the dispatch hand-off
+        // path can consume it; the two merged ids must be drained AND
+        // returned so the caller can delete their stale Discord cards.
+        assert_eq!(drained.len(), 2);
+        let drained_set: std::collections::HashSet<MessageId> = drained.into_iter().collect();
+        assert!(drained_set.contains(&merged_a_card));
+        assert!(drained_set.contains(&merged_b_card));
+        assert!(!drained_set.contains(&head_card));
+        assert_eq!(shared.queued_placeholders.len(), 1);
+        assert_eq!(
+            shared
+                .queued_placeholders
+                .get(&(channel_id, head_msg))
+                .map(|entry| *entry.value()),
+            Some(head_card),
+            "head id mapping must survive the drain"
+        );
+    }
+
+    // codex review P2: a non-merged intervention (single source id == head)
+    // should produce an empty drain — there is nothing to clean up.
+    #[tokio::test]
+    async fn drain_merged_queued_placeholders_noop_for_non_merged_intervention() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(950_000_000_000_001);
+        let head_msg = MessageId::new(850_000_000_000_001);
+        let head_card = MessageId::new(750_000_000_000_001);
+
+        shared
+            .queued_placeholders
+            .insert((channel_id, head_msg), head_card);
+
+        let drained = drain_merged_queued_placeholders(&shared, channel_id, head_msg, &[head_msg]);
+
+        assert!(drained.is_empty());
+        assert_eq!(shared.queued_placeholders.len(), 1);
     }
 }
