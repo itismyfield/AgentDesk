@@ -1039,6 +1039,29 @@ fn state_is_at_or_past(current: &MigrationState, next: &MigrationState) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ROOT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RootEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl RootEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let guard = ROOT_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for RootEnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        }
+    }
 
     fn test_channel(path: &str) -> crate::services::provider_cli::ProviderCliChannel {
         crate::services::provider_cli::ProviderCliChannel {
@@ -1057,9 +1080,8 @@ mod tests {
         // cmd_plan prints to stdout; just verify it doesn't error for a known provider.
         // Use a temp dir so runtime_root doesn't fail.
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
         let result = cmd_plan("codex");
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         assert!(result.is_ok());
     }
 
@@ -1112,9 +1134,8 @@ mod tests {
     #[test]
     fn status_empty_when_no_registry() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
         let result = cmd_status(None, false);
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         assert!(result.is_ok());
     }
 
@@ -1135,7 +1156,7 @@ mod tests {
     #[test]
     fn rollback_transitions_to_rolled_back() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{MigrationState, ProviderCliMigrationState};
         use chrono::Utc;
@@ -1154,14 +1175,13 @@ mod tests {
         save_migration_state(dir.path(), &ms).unwrap();
 
         let result = cmd_rollback("codex", Some("test rollback"));
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         assert!(result.is_ok());
     }
 
     #[test]
     fn canary_rejects_non_canary_ready_state_without_registry_override() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{
             MigrationState, ProviderChannels, ProviderCliMigrationState, ProviderCliRegistry,
@@ -1193,7 +1213,6 @@ mod tests {
 
         let result = cmd_canary("codex", Some("codex-agent"));
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
         assert!(result.is_err());
         assert!(
@@ -1209,7 +1228,7 @@ mod tests {
     #[test]
     fn promote_transitions_to_provider_agents_migrated_and_clears_canary_override() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{
             LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
@@ -1263,7 +1282,6 @@ mod tests {
         let result = cmd_promote("codex", Some("operator approval"));
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
         assert!(result.is_ok());
         assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
         let channels = registry.providers.get("codex").unwrap();
@@ -1274,7 +1292,7 @@ mod tests {
     #[test]
     fn promote_guard_failure_clears_canary_override() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{
             LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
@@ -1331,7 +1349,6 @@ mod tests {
         let result = cmd_promote("codex", Some("operator approval"));
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
         // Promote succeeds even with an active old-channel session.
         assert!(result.is_ok());
@@ -1349,7 +1366,7 @@ mod tests {
     #[test]
     fn promote_from_canary_active_warns_when_candidate_launch_missing() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{
             LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
@@ -1405,7 +1422,6 @@ mod tests {
         let result = cmd_promote("codex", Some("operator approval"));
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
         assert!(result.is_ok());
         assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
@@ -1416,7 +1432,7 @@ mod tests {
     #[test]
     fn promote_from_canary_active_accepts_verified_candidate_launch() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::registry::{
             LaunchArtifact, MigrationState, ProviderChannels, ProviderCliMigrationState,
@@ -1470,7 +1486,6 @@ mod tests {
         let result = cmd_promote("codex", Some("operator approval"));
         let state = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
         assert!(result.is_ok());
         assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
@@ -1483,7 +1498,7 @@ mod tests {
     #[test]
     fn promote_does_not_update_registry_when_state_save_fails() {
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+        let _root = RootEnvGuard::set(dir.path());
 
         use crate::services::provider_cli::paths::migration_state_path;
         use crate::services::provider_cli::registry::{
@@ -1529,7 +1544,6 @@ mod tests {
         writable.set_mode(0o644);
         std::fs::set_permissions(&state_path, writable).unwrap();
         let registry = load_registry(dir.path()).unwrap().unwrap();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
         assert!(result.is_err());
         let channels = registry.providers.get("codex").unwrap();
