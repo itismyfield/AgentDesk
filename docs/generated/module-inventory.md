@@ -4,7 +4,7 @@
 
 - Production Rust modules: `318`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `84`
+- Giant files: `83`
 
 ## Namespace Summary
 
@@ -143,12 +143,12 @@
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 916 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 319 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 2079 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 2060 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1743 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1938 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10183 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10113 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 195 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 212 |  |
@@ -210,7 +210,7 @@
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
 | `services::api_friction` | `src/services/api_friction.rs` | 1808 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1050 | giant-file |
-| `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1697 | giant-file |
+| `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 987 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 510 |  |
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1679 | giant-file |
@@ -322,7 +322,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 506 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 3647 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 3413 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
