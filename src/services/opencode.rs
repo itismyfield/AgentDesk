@@ -659,7 +659,7 @@ fn consume_sse(
         }
     }
 
-    if !idle_seen && state.accumulated_text.trim().is_empty() {
+    if !idle_seen {
         return Err("OpenCode stream ended without a terminal event".to_string());
     }
 
@@ -1237,6 +1237,35 @@ mod tests {
         assert!(
             !msgs.iter().any(|m| matches!(m, StreamMessage::Done { .. })),
             "OpenCode error terminal events must not be converted into Done"
+        );
+    }
+
+    #[test]
+    fn test_text_without_terminal_event_fails() {
+        let data =
+            br#"data: {"type":"part","properties":{"sessionID":"s1","part":{"type":"text","text":"partial"}}}
+
+"#
+            .to_vec();
+        let reader: BufReader<Box<dyn std::io::Read + Send>> =
+            BufReader::new(Box::new(std::io::Cursor::new(data)));
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+
+        let result = consume_sse(reader, "s1", &tx, None, "http://127.0.0.1:9", "");
+        drop(tx);
+        let msgs = rx.try_iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            result.unwrap_err(),
+            "OpenCode stream ended without a terminal event"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "partial"))
+        );
+        assert!(
+            !msgs.iter().any(|m| matches!(m, StreamMessage::Done { .. })),
+            "partial OpenCode text without a terminal event must not emit Done"
         );
     }
 
