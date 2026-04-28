@@ -2780,42 +2780,88 @@ pub(in crate::services::discord) async fn handle_text_message(
         // insert so a concurrent `dispatch_queued_turn` cannot take our
         // entry between the recheck and the write.
         //
-        // Round-9 dispatch-already-consumed check: between our enqueue and
-        // this point, the active turn could have finished AND turn_bridge
-        // could have picked up our intervention from the queue, started
-        // its own turn for us, and POSTed its own fresh card via the
-        // dispatch fallback (no mapping → `send_intake_placeholder`). The
-        // mailbox snapshot here detects that case: if `active_user_message_id
-        // == user_msg_id`, the dispatch path is already running the turn
-        // for our message, our `placeholder_msg_id` is an orphan, and
-        // inserting a mapping would point at a stale `...` card. Delete
-        // the orphan and skip the mapping insert. Background-trigger /
-        // thread-routed turns + reused mappings stay out of the
-        // `queued_placeholders` map by design.
-        let dispatch_already_running_for_our_msg = if want_queued_card && !reused_existing_mapping {
-            let snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
-            snapshot.active_user_message_id == Some(user_msg_id)
-        } else {
-            false
-        };
-        if want_queued_card && !reused_existing_mapping && !dispatch_already_running_for_our_msg {
+        // Round-10 dispatch-state recheck: between our enqueue and this
+        // point, the active turn could have finished AND turn_bridge could
+        // have picked up our intervention from the queue, started its own
+        // turn for us, and POSTed its own fresh card via the dispatch
+        // fallback (no mapping → `send_intake_placeholder`). We must detect
+        // that case BEFORE inserting our mapping; if dispatch already
+        // promoted us into an active turn, our `placeholder_msg_id` is an
+        // orphan and inserting a mapping would point at a stale `...` card
+        // (and the subsequent `ensure_queued` PATCH would render `📬` on a
+        // turn that is already running).
+        //
+        // Round-9 placed the snapshot BEFORE the per-channel persist lock;
+        // codex round-10 P2 flagged the residual window: if the active
+        // turn finishes between the snapshot and the lock acquire, the
+        // dispatch path can still slip in (take the lock, see no mapping,
+        // post fresh Active placeholder, release the lock) — and THIS
+        // branch then takes the lock, observes the (now-stale) snapshot
+        // result, inserts a Queued mapping for a turn that is already
+        // running, and renders a stale `📬` card + sidecar entry that no
+        // future event will reference.
+        //
+        // Fix: take the per-channel persist lock FIRST, then snapshot the
+        // mailbox under the lock, then insert. Atomicity invariant:
+        // "ownership check + insert + ensure_queued PATCH all happen under
+        // one held lock guard." `dispatch_queued_turn`'s
+        // `remove_queued_placeholder` mutator also serializes through this
+        // same per-channel mutex (see `SharedData::remove_queued_placeholder`
+        // at mod.rs:1151), so once we hold the lock the dispatch path
+        // cannot promote our intervention to active until we release.
+        //
+        // Background-trigger / thread-routed turns + reused mappings stay
+        // out of the `queued_placeholders` map by design and skip the
+        // dispatch-state recheck entirely.
+        let persist_guard_for_render = if want_queued_card && !reused_existing_mapping {
+            // Use `lock_owned()` so the guard owns the `Arc` and can outlive
+            // the local `persist_lock` binding when we hand it off to the
+            // queued-card render branch below (round-10: single critical
+            // section spanning the dispatch-state recheck, the mapping
+            // insert, and the `ensure_queued` PATCH).
             let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
-            let _persist_guard = persist_lock.lock().await;
+            let persist_guard = persist_lock.lock_owned().await;
+            // Snapshot UNDER the lock so a concurrent dispatch path cannot
+            // promote our intervention to active between this read and the
+            // mapping insert below. `dispatch_queued_turn` removes the
+            // queued mapping via `remove_queued_placeholder`, which itself
+            // acquires this same per-channel persist mutex; while we hold
+            // the guard, no dispatch path can advance from "queued" to
+            // "active for our user_msg_id".
+            let snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
+            if snapshot.active_user_message_id == Some(user_msg_id) {
+                // Dispatch already consumed our queued entry and started a
+                // turn for our message; our POST is an orphan. Drop the
+                // lock before deleting the Discord message so we never
+                // hold the persist mutex across an HTTP DELETE await.
+                drop(persist_guard);
+                let _ = channel_id
+                    .delete_message(&ctx.http, placeholder_msg_id)
+                    .await;
+                super::super::formatting::remove_reaction_raw(
+                    &ctx.http,
+                    channel_id,
+                    user_msg_id,
+                    '⏳',
+                )
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST",
+                    channel_id,
+                    user_msg_id
+                );
+                return Ok(());
+            }
             shared.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
-        } else if dispatch_already_running_for_our_msg {
-            let _ = channel_id
-                .delete_message(&ctx.http, placeholder_msg_id)
-                .await;
-            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
-                .await;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST",
-                channel_id,
-                user_msg_id
-            );
-            return Ok(());
-        }
+            // Hand the still-held guard to the `ensure_queued` PATCH branch
+            // below so the entire ownership check + insert + PATCH critical
+            // section runs under one held lock guard (the round-10
+            // atomicity invariant).
+            Some(persist_guard)
+        } else {
+            None
+        };
 
         // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
         // ✅ done. Round-9: enqueue already happened above; the reaction
@@ -2858,9 +2904,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             );
         } else if want_queued_card && !reused_existing_mapping {
             // codex review round-3 P1 + round-5 P2 (finding 1 — atomic
-            // ownership coupling): between `mailbox_enqueue_intervention`
-            // and the `ensure_queued` await below, the active turn can
-            // finish and the dispatch path can already have consumed our
+            // ownership coupling) + round-10 P2 (single critical section):
+            // between `mailbox_enqueue_intervention` and the `ensure_queued`
+            // await below, the active turn can finish and the dispatch
+            // path can already have consumed our
             // `(channel_id, user_msg_id)` mapping — at which point the
             // placeholder we POSTed has been promoted to the live response
             // card. Editing it to `📬 메시지 대기 중` (or deleting it on the
@@ -2871,18 +2918,24 @@ pub(in crate::services::discord) async fn handle_text_message(
             // to consume the mapping concurrently. Round-5 wraps the
             // ownership recheck + `ensure_queued` PATCH + persistence
             // rollback in a single critical section guarded by the
-            // per-channel async persistence mutex. Every other path that
-            // mutates `queued_placeholders` (insert / remove / merged
-            // drain / queue-exit drain) takes the same mutex, so the
-            // mapping cannot change underneath this PATCH once we hold
-            // the lock.
+            // per-channel async persistence mutex. Round-10 extends that
+            // critical section UPSTREAM through the dispatch-state recheck
+            // and the mapping insert: we acquire the persist lock once
+            // (above, where `dispatch_already_running_for_our_msg` is
+            // computed), and pass the SAME held guard through to this
+            // PATCH branch via `persist_guard_for_render`. Every other
+            // path that mutates `queued_placeholders` (insert / remove /
+            // merged drain / queue-exit drain) takes the same mutex, so
+            // the mapping cannot change underneath this PATCH once we
+            // hold the lock.
             //
-            // Invariant: any Discord PATCH that asserts queued ownership
-            // MUST hold this lock across both the ownership recheck AND
-            // the PATCH. Skipping the lock (or acquiring it only around
-            // the persistence write) would reintroduce the round-4 hazard.
-            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
-            let persist_guard = persist_lock.lock().await;
+            // Invariant (round-10): the dispatch-state snapshot, the
+            // mapping insert, the ownership recheck, and the
+            // `ensure_queued` PATCH all share ONE held lock guard. Any
+            // alternative ordering would reopen either the round-4 hazard
+            // or the round-9-residual hazard codex flagged in round-10.
+            let persist_guard = persist_guard_for_render
+                .expect("round-10: persist guard must be held by the matching insert branch");
             if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
                 drop(persist_guard);
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -6649,6 +6702,123 @@ mod tests {
         assert_eq!(
             snapshot.intervention_queue[0].message_id, race_lost_msg_id,
             "queued head must be our race-lost message"
+        );
+    }
+
+    /// codex review round-10 P2 (#1332): the round-9 race-loss path
+    /// snapshotted `mailbox.active_user_message_id` BEFORE acquiring the
+    /// per-channel `queued_placeholders_persist_lock`. The residual race:
+    /// if the active turn finishes between the snapshot and the lock
+    /// acquire, the dispatch path can dequeue our just-enqueued
+    /// intervention, take the lock, see no mapping, post a fresh Active
+    /// placeholder, release the lock — and THIS branch then takes the
+    /// lock with a stale snapshot result, inserts a Queued mapping for a
+    /// turn that is already running, and renders a stale `📬` card +
+    /// sidecar entry that no future event will reference.
+    ///
+    /// Round-10 fix: take the per-channel persist lock FIRST, then
+    /// snapshot the mailbox UNDER the lock. `dispatch_queued_turn`'s
+    /// `remove_queued_placeholder` mutator also serializes through the
+    /// same per-channel mutex, so once we hold the guard the dispatch
+    /// path cannot promote our intervention to active until we release.
+    ///
+    /// This test simulates the "active turn finishes between our former
+    /// snapshot-spot and lock-acquire-spot" timeline by:
+    ///   1. Acquiring the per-channel persist lock first.
+    ///   2. Mutating mailbox state UNDER that held lock to mark the
+    ///      active turn as `our_msg_id` — i.e. the worst-case state the
+    ///      old snapshot would have missed.
+    ///   3. Calling `mailbox_snapshot` while still holding the lock and
+    ///      asserting it observes the updated state.
+    ///   4. Skipping the mapping insert (matching the production round-10
+    ///      bail branch) and asserting `queued_placeholders` stays empty
+    ///      and the on-disk persistence is also empty (no stale `📬` card
+    ///      sidecar entry).
+    ///
+    /// Pre round-10 (snapshot OUTSIDE the lock): step 3 would have used
+    /// the pre-step-2 snapshot value, decided "queued", and inserted a
+    /// stale mapping in step 4.
+    #[tokio::test(flavor = "current_thread")]
+    async fn race_loss_dispatch_state_recheck_under_persist_lock_skips_stale_insert() {
+        use crate::services::provider::CancelToken;
+        use std::sync::Arc;
+
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(123_456_789);
+        let owner = UserId::new(11);
+        let our_msg_id = MessageId::new(7_777);
+        let placeholder_msg_id = MessageId::new(8_888);
+
+        // Acquire the per-channel persist lock FIRST (round-10
+        // ordering). All `queued_placeholders` mutators serialize on this
+        // mutex, so while we hold the guard nothing else can promote our
+        // intervention into the map or out of it.
+        let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+        let persist_guard = persist_lock.lock_owned().await;
+
+        // Mutate mailbox state UNDER the held guard to simulate the
+        // dispatch path advancing from "queued" to "active for our
+        // user_msg_id" during the previous code's snapshot↔lock window.
+        // In production this is the timeline:
+        //   - active turn finishes
+        //   - dispatch dequeues our intervention
+        //   - dispatch starts a turn for our_msg_id
+        //   - dispatch posts a fresh Active placeholder via the
+        //     missing-mapping fallback
+        // For the unit test we directly call `mailbox_try_start_turn` so
+        // the snapshot's `active_user_message_id` equals `our_msg_id`,
+        // which is the precise state the round-9 snapshot would have
+        // missed but the round-10 snapshot must observe.
+        let dispatch_token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            dispatch_token,
+            owner,
+            our_msg_id,
+        )
+        .await;
+        assert!(
+            started,
+            "fresh mailbox must accept the dispatch-promoted turn"
+        );
+
+        // Snapshot UNDER the lock. Round-10: this is the round-9-residual
+        // hazard's exact moment of truth — our path observes the
+        // post-mutation state, not the pre-mutation snapshot.
+        let snapshot = super::super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        let dispatch_already_running_for_our_msg =
+            snapshot.active_user_message_id == Some(our_msg_id);
+        assert!(
+            dispatch_already_running_for_our_msg,
+            "round-10: snapshot under the held persist lock must observe dispatch-already-running"
+        );
+
+        // Bail branch (matching the production code): do NOT call
+        // `insert_queued_placeholder_locked`. The old code would have
+        // inserted here because it snapshotted before the lock and
+        // missed the dispatch promotion.
+        if !dispatch_already_running_for_our_msg {
+            shared.insert_queued_placeholder_locked(channel_id, our_msg_id, placeholder_msg_id);
+        }
+        drop(persist_guard);
+
+        // Round-10 invariant: no stale mapping in memory.
+        assert!(
+            !shared
+                .queued_placeholders
+                .contains_key(&(channel_id, our_msg_id)),
+            "round-10: no stale Queued mapping must be inserted when dispatch is already running for our_msg_id"
+        );
+
+        // And the ownership recheck (round-5 invariant) reports
+        // not-owned, so the production `else if want_queued_card &&
+        // !reused_existing_mapping` PATCH branch's first check would
+        // skip the `ensure_queued` PATCH entirely — no stale `📬` card
+        // gets rendered.
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, our_msg_id, placeholder_msg_id),
+            "queued_placeholder_still_owned must report not-owned so the PATCH branch skips the render"
         );
     }
 }
