@@ -1181,36 +1181,6 @@ pub fn finalize_dispatch_with_backends(
 /// Used by specialized paths (review_verdict, pm-decision) that fire their own
 /// domain-specific hooks instead of the generic OnDispatchCompleted.
 /// Returns the number of rows updated (0 = already completed/cancelled/not found).
-pub fn mark_dispatch_completed(
-    db: &Db,
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> Result<usize> {
-    #[cfg(test)]
-    {
-        let conn = db
-            .separate_conn()
-            .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
-        let changed = set_dispatch_status_on_conn(
-            &conn,
-            dispatch_id,
-            "completed",
-            Some(result),
-            "mark_dispatch_completed",
-            Some(&["pending", "dispatched"]),
-            true,
-        )?;
-        Ok(changed)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = (db, result);
-        Err(anyhow::anyhow!(
-            "Postgres pool required to mark dispatch completed for {dispatch_id}"
-        ))
-    }
-}
-
 pub fn mark_dispatch_completed_pg_first(
     db: &Db,
     pg_pool: Option<&PgPool>,
@@ -1220,23 +1190,6 @@ pub fn mark_dispatch_completed_pg_first(
     set_dispatch_status_pg_first(
         db,
         pg_pool,
-        dispatch_id,
-        "completed",
-        Some(result),
-        "mark_dispatch_completed",
-        Some(&["pending", "dispatched"]),
-        true,
-    )
-}
-
-pub fn mark_dispatch_completed_pg_only(
-    pg_pool: &PgPool,
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> Result<usize> {
-    set_dispatch_status_with_backends(
-        None,
-        Some(pg_pool),
         dispatch_id,
         "completed",
         Some(result),
@@ -1411,13 +1364,6 @@ pub fn load_dispatch_row_pg_first(
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
     load_dispatch_row_with_backends(Some(db), pg_pool, dispatch_id)
-}
-
-pub fn load_dispatch_row_pg_only(
-    pg_pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<Option<serde_json::Value>> {
-    load_dispatch_row_with_backends(None, Some(pg_pool), dispatch_id)
 }
 
 pub fn load_dispatch_row_with_backends(

@@ -913,30 +913,6 @@ pub(super) fn validate_dispatch_completion_evidence_on_conn(
     ))
 }
 
-#[allow(dead_code)]
-#[cfg(test)]
-pub(crate) fn validate_dispatch_completion_evidence(
-    db: &Db,
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> Result<()> {
-    let conn = db
-        .separate_conn()
-        .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
-    validate_dispatch_completion_evidence_on_conn(&conn, db, None, dispatch_id, result)
-}
-
-#[cfg(not(test))]
-pub(crate) fn validate_dispatch_completion_evidence(
-    _db: &Db,
-    dispatch_id: &str,
-    _result: &serde_json::Value,
-) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "Postgres pool required to validate dispatch completion evidence for {dispatch_id}"
-    ))
-}
-
 fn apply_review_target_context(
     target: &DispatchExecutionTarget,
     obj: &mut serde_json::Map<String, serde_json::Value>,

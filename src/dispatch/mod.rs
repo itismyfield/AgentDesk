@@ -23,7 +23,6 @@ pub(crate) use dispatch_context::{
     dispatch_session_strategy_from_context, dispatch_type_force_new_session_default,
     dispatch_type_requires_fresh_worktree, dispatch_type_session_strategy_default,
     dispatch_type_uses_thread_routing, inject_review_dispatch_identifiers, resolve_card_worktree,
-    validate_dispatch_completion_evidence,
 };
 #[cfg(test)]
 use dispatch_context::{
@@ -46,8 +45,7 @@ pub(crate) use dispatch_create::{
 #[allow(unused_imports)]
 pub use dispatch_status::{
     complete_dispatch, finalize_dispatch, finalize_dispatch_with_backends,
-    load_dispatch_row_pg_first, load_dispatch_row_pg_only, load_dispatch_row_with_backends,
-    mark_dispatch_completed, mark_dispatch_completed_pg_first, mark_dispatch_completed_pg_only,
+    load_dispatch_row_pg_first, load_dispatch_row_with_backends, mark_dispatch_completed_pg_first,
     set_dispatch_status_pg_first, set_dispatch_status_with_backends,
 };
 #[allow(unused_imports)]
