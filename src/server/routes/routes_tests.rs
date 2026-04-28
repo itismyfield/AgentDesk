@@ -2886,14 +2886,15 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
 }
 
 #[tokio::test]
-#[ignore = "SQLite-only test. cancel_turn now requires PG. Migrate to PG fixture — tracked in #1342."]
 async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
     let channel_id = "1485506232256168013";
     let channel_num = channel_id.parse::<u64>().unwrap();
@@ -2907,22 +2908,23 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     fs::create_dir_all(inflight_path.parent().unwrap()).unwrap();
     fs::write(&inflight_path, "{}").unwrap();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
-             VALUES ('agent-cancel-canonical', 'Agent Cancel Canonical', 'claude', ?1, datetime('now'), datetime('now'))",
-            [channel_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'agent-cancel-canonical', 'claude', 'working', datetime('now'), datetime('now'))",
-            [session_key],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+         VALUES ('agent-cancel-canonical', 'Agent Cancel Canonical', 'claude', $1, NOW(), NOW())",
+    )
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'agent-cancel-canonical', 'claude', 'working', NOW(), NOW())",
+    )
+    .bind(session_key)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     harness
         .seed_channel_session(
@@ -2938,7 +2940,13 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     harness.insert_dispatch_role_override(channel_num, 1485506232256168998);
     let watcher_cancel = harness.seed_watcher(channel_num);
 
-    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -2982,58 +2990,70 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
         "killed=false cancel must not signal watcher cancellation"
     );
 
-    let conn = db.lock().unwrap();
-    let session_status: String = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [session_key],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let session_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(session_status, "disconnected");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
-#[ignore = "SQLite-only test. cancel_turn now requires PG. Migrate to PG fixture — tracked in #1342."]
 async fn cancel_turn_targets_requested_provider_for_paired_agent() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
     let cc_channel_id = "1479671298497183835";
     let cdx_channel_id = "1479671301387059200";
     let cc_session_key = "mac-mini:AgentDesk-claude-adk-cc";
     let cdx_session_key = "mac-mini:AgentDesk-codex-adk-cdx";
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO agents (
-                id, name, provider, discord_channel_id, discord_channel_alt,
-                discord_channel_cc, discord_channel_cdx, created_at, updated_at
-             )
-             VALUES (
-                'project-agentdesk', 'AgentDesk', 'codex', ?1, ?2, ?1, ?2,
-                datetime('now'), datetime('now')
-             )",
-            [cc_channel_id, cdx_channel_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'project-agentdesk', 'claude', 'working', datetime('now', '-1 minute'), datetime('now'))",
-            [cc_session_key],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions
-             (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'project-agentdesk', 'codex', 'working', datetime('now'), datetime('now'))",
-            [cdx_session_key],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, provider, discord_channel_id, discord_channel_alt,
+            discord_channel_cc, discord_channel_cdx, created_at, updated_at
+         )
+         VALUES (
+            'project-agentdesk', 'AgentDesk', 'codex', $1, $2, $1, $2,
+            NOW(), NOW()
+         )",
+    )
+    .bind(cc_channel_id)
+    .bind(cdx_channel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'project-agentdesk', 'claude', 'working', NOW() - INTERVAL '1 minute', NOW())",
+    )
+    .bind(cc_session_key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions
+         (session_key, agent_id, provider, status, last_heartbeat, created_at)
+         VALUES ($1, 'project-agentdesk', 'codex', 'working', NOW(), NOW())",
+    )
+    .bind(cdx_session_key)
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -3059,23 +3079,23 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent() {
     assert_eq!(json["session_key"], cc_session_key);
     assert_eq!(json["tmux_session"], "AgentDesk-claude-adk-cc");
 
-    let conn = db.lock().unwrap();
-    let cc_status: String = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [cc_session_key],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let cdx_status: String = conn
-        .query_row(
-            "SELECT status FROM sessions WHERE session_key = ?1",
-            [cdx_session_key],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let cc_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(cc_session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cdx_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(cdx_session_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(cc_status, "disconnected");
     assert_eq!(cdx_status, "working");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -13736,7 +13756,6 @@ async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configu
 }
 
 #[tokio::test]
-#[ignore = "SQLite-only test. JS bridge cards.*/db.*/kanban.* now require PG. Migrate to PG fixture — tracked in #1342."]
 async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_it_up() {
     crate::pipeline::ensure_loaded();
     let (repo, _repo_override) = setup_test_repo();
@@ -13821,65 +13840,83 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     run_git(repo.path(), &["push", "-u", "origin", "wt/card-575-force"]);
     let feature_commit = run_git_output(worktree_path.as_path(), &["rev-parse", "HEAD"]);
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
     let mut config = crate::config::Config::default();
     config.policies.dir = policy_dir.path().to_path_buf();
-    let engine = PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap();
-    seed_agent(&db, "agent-ft-terminal");
-    seed_repo(&db, "test/repo");
-    set_pmd_channel(&db, "pmd-chan-123");
+    config.policies.hot_reload = false;
+    let engine = PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    seed_agent_pg(&pool, "agent-ft-terminal").await;
+    seed_repo_pg(&pool, "test/repo").await;
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ('kanban_manager_channel_id', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind("pmd-chan-123")
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, repo_id,
-                github_issue_number, latest_dispatch_id, created_at, updated_at, started_at
-            ) VALUES (
-                'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test/repo',
-                575, 'dispatch-ft-terminal', datetime('now', '-5 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
-                created_at, updated_at
-            ) VALUES (
-                'dispatch-ft-terminal', 'card-ft-terminal', 'agent-ft-terminal', 'implementation', 'dispatched',
-                'live impl', ?1, datetime('now', '-4 minutes'), datetime('now', '-4 minutes')
-            )",
-            [serde_json::json!({
-                "worktree_path": worktree_path.to_string_lossy().to_string(),
-                "worktree_branch": "wt/card-575-force"
-            })
-            .to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_strategy_mode', 'pr-always')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO sessions (
-                session_key, agent_id, provider, status, cwd, active_dispatch_id, last_heartbeat, created_at
-            ) VALUES (
-                'session-ft-terminal', 'agent-ft-terminal', 'codex', 'working', ?1, 'dispatch-ft-terminal',
-                datetime('now', '-4 minutes'), datetime('now', '-4 minutes')
-            )",
-            [worktree_path.to_string_lossy().to_string()],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at, started_at
+        ) VALUES (
+            'card-ft-terminal', 'Issue #575', 'in_progress', 'medium', 'agent-ft-terminal', 'test/repo',
+            575, 'dispatch-ft-terminal', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+            created_at, updated_at
+        ) VALUES (
+            'dispatch-ft-terminal', 'card-ft-terminal', 'agent-ft-terminal', 'implementation', 'dispatched',
+            'live impl', $1, NOW() - INTERVAL '4 minutes', NOW() - INTERVAL '4 minutes'
+        )",
+    )
+    .bind(
+        serde_json::json!({
+            "worktree_path": worktree_path.to_string_lossy().to_string(),
+            "worktree_branch": "wt/card-575-force"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ('merge_automation_enabled', 'true')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES ('merge_strategy_mode', 'pr-always')
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, cwd, active_dispatch_id, last_heartbeat, created_at
+        ) VALUES (
+            'session-ft-terminal', 'agent-ft-terminal', 'codex', 'working', $1, 'dispatch-ft-terminal',
+            NOW() - INTERVAL '4 minutes', NOW() - INTERVAL '4 minutes'
+        )",
+    )
+    .bind(worktree_path.to_string_lossy().to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router_with_config(db.clone(), engine, config, None);
+    let app = test_api_router_with_pg(db.clone(), engine, config, None, pool.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -13905,30 +13942,24 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         "force-transition to done must cancel the live work dispatch before terminal hooks"
     );
 
-    let hook_marker: Option<String> = {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'test_force_terminal_marker'",
-            [],
-            |row| row.get(0),
-        )
-        .ok()
-    };
+    let hook_marker: Option<String> =
+        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = 'test_force_terminal_marker'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         hook_marker.as_deref(),
         Some("card-ft-terminal:done"),
         "force-transition to done must still fire OnCardTerminal hooks"
     );
 
-    let merge_debug: (Option<String>, Option<String>) = {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT state, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or((None, None))
-    };
+    let merge_debug: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap()
+    .unwrap_or((None, None));
 
     run_git(
         repo.path(),
@@ -13978,63 +14009,33 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
 
     let tracking_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let (
-            observed_card_status,
-            observed_latest_dispatch_id,
-            observed_blocked_reason,
-            observed_dispatch_status,
-            observed_pr_tracking_state,
-            observed_pr_tracking_pr_number,
-            observed_pr_tracking_last_error,
-        ) = {
-            let conn = db.lock().unwrap();
-            let (observed_card_status, observed_latest_dispatch_id, observed_blocked_reason): (
-                String,
-                Option<String>,
-                Option<String>,
-            ) = conn
-                .query_row(
-                    "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-ft-terminal'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .unwrap();
-            let observed_dispatch_status: String = conn
-                .query_row(
-                    "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let (
-                observed_pr_tracking_state,
-                observed_pr_tracking_pr_number,
-                observed_pr_tracking_last_error,
-            ): (Option<String>, Option<i64>, Option<String>) = conn
-                .query_row(
-                    "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .unwrap_or((None, None, None));
-            (
-                observed_card_status,
-                observed_latest_dispatch_id,
-                observed_blocked_reason,
-                observed_dispatch_status,
-                observed_pr_tracking_state,
-                observed_pr_tracking_pr_number,
-                observed_pr_tracking_last_error,
-            )
-        };
+        let card_row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-ft-terminal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let observed_dispatch_status: String = sqlx::query_scalar(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-ft-terminal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pr_row: (Option<String>, Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+        .unwrap_or((None, None, None));
 
-        card_status = observed_card_status;
-        latest_dispatch_id = observed_latest_dispatch_id;
-        blocked_reason = observed_blocked_reason;
+        card_status = card_row.0;
+        latest_dispatch_id = card_row.1;
+        blocked_reason = card_row.2;
         dispatch_status = observed_dispatch_status;
-        pr_tracking_state = observed_pr_tracking_state;
-        pr_tracking_pr_number = observed_pr_tracking_pr_number;
-        pr_tracking_last_error = observed_pr_tracking_last_error;
+        pr_tracking_state = pr_row.0;
+        pr_tracking_pr_number = pr_row.1.map(|v| v as i64);
+        pr_tracking_last_error = pr_row.2;
 
         if pr_tracking_state.as_deref() == Some("wait-ci")
             && pr_tracking_pr_number == Some(905)
@@ -14067,6 +14068,9 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
     assert_eq!(pr_tracking_pr_number, Some(905));
     assert_eq!(pr_tracking_last_error, None);
     assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 // #1064: /api/kanban-cards/batch-transition and bulk-action were removed in
@@ -25512,76 +25516,87 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
     assert_eq!(activate_json["active_groups"], 2);
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
+#[tokio::test]
+async fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    seed_agent(&db, "agent-recovery");
-    seed_auto_queue_card(&db, "card-orphan", 9001, "in_progress", "agent-recovery");
-    seed_auto_queue_card(&db, "card-phantom", 9002, "in_progress", "agent-recovery");
-    seed_auto_queue_card(&db, "card-cancelled", 9003, "in_progress", "agent-recovery");
-    seed_auto_queue_card(&db, "card-valid", 9004, "in_progress", "agent-recovery");
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-recovery").await;
+    seed_auto_queue_card_pg(&pool, "card-orphan", 9001, "in_progress", "agent-recovery").await;
+    seed_auto_queue_card_pg(&pool, "card-phantom", 9002, "in_progress", "agent-recovery").await;
+    seed_auto_queue_card_pg(
+        &pool,
+        "card-cancelled",
+        9003,
+        "in_progress",
+        "agent-recovery",
+    )
+    .await;
+    seed_auto_queue_card_pg(&pool, "card-valid", 9004, "in_progress", "agent-recovery").await;
 
-    {
-        let conn = db.lock().unwrap();
+    // Active run
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-recovery', 'test-repo', 'agent-recovery', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Active run
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-             VALUES ('run-recovery', 'test-repo', 'agent-recovery', 'active')",
-            [],
-        )
-        .unwrap();
+    // Entry A: dispatched + dispatch_id=NULL (orphan — should be reset)
+    // #214: dispatched_at must be >2min ago to pass grace period
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+         VALUES ('entry-orphan', 'run-recovery', 'card-orphan', 'agent-recovery', 'dispatched', NULL, NOW() - INTERVAL '3 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Entry A: dispatched + dispatch_id=NULL (orphan — should be reset)
-        // #214: dispatched_at must be >2min ago to pass grace period
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-orphan', 'run-recovery', 'card-orphan', 'agent-recovery', 'dispatched', NULL, datetime('now', '-3 minutes'))",
-            [],
-        )
-        .unwrap();
+    // Entry B: dispatched + phantom dispatch_id (not in task_dispatches — should be reset)
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+         VALUES ('entry-phantom', 'run-recovery', 'card-phantom', 'agent-recovery', 'dispatched', 'phantom-id-999', NOW() - INTERVAL '3 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Entry B: dispatched + phantom dispatch_id (not in task_dispatches — should be reset)
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-phantom', 'run-recovery', 'card-phantom', 'agent-recovery', 'dispatched', 'phantom-id-999', datetime('now', '-3 minutes'))",
-            [],
-        )
-        .unwrap();
+    // Entry C: dispatched + cancelled dispatch (should be reset)
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ('dispatch-cancelled', 'card-cancelled', 'agent-recovery', 'implementation', 'cancelled', 'test')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+         VALUES ('entry-cancelled', 'run-recovery', 'card-cancelled', 'agent-recovery', 'dispatched', 'dispatch-cancelled', NOW() - INTERVAL '3 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-        // Entry C: dispatched + cancelled dispatch (should be reset)
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
-             VALUES ('dispatch-cancelled', 'card-cancelled', 'agent-recovery', 'implementation', 'cancelled', 'test')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-cancelled', 'run-recovery', 'card-cancelled', 'agent-recovery', 'dispatched', 'dispatch-cancelled', datetime('now', '-3 minutes'))",
-            [],
-        )
-        .unwrap();
-
-        // Entry D: dispatched + valid active dispatch (must NOT be reset)
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
-             VALUES ('dispatch-valid', 'card-valid', 'agent-recovery', 'implementation', 'dispatched', 'test')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-valid', 'run-recovery', 'card-valid', 'agent-recovery', 'dispatched', 'dispatch-valid', datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
+    // Entry D: dispatched + valid active dispatch (must NOT be reset)
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ('dispatch-valid', 'card-valid', 'agent-recovery', 'implementation', 'dispatched', 'test')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+         VALUES ('entry-valid', 'run-recovery', 'card-valid', 'agent-recovery', 'dispatched', 'dispatch-valid', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Fire onTick1min — triggers recovery path 2
     engine
@@ -25591,28 +25606,23 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         )
         .unwrap();
 
-    // Verify
-    let conn = db.lock().unwrap();
-
     // A: orphan (NULL dispatch_id) → reset to pending
-    let (status_a, did_a): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (status_a, did_a): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(status_a, "pending", "orphan entry must be reset to pending");
     assert!(did_a.is_none(), "orphan entry dispatch_id must stay NULL");
 
     // B: phantom dispatch_id → reset to pending
-    let (status_b, did_b): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-phantom'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (status_b, did_b): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-phantom'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         status_b, "pending",
         "phantom dispatch entry must be reset to pending"
@@ -25623,13 +25633,12 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
     );
 
     // C: cancelled dispatch → reset to pending
-    let (status_c, did_c): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-cancelled'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (status_c, did_c): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-cancelled'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         status_c, "pending",
         "cancelled dispatch entry must be reset to pending"
@@ -25640,13 +25649,12 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
     );
 
     // D: valid active dispatch → must remain dispatched
-    let (status_d, did_d): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-valid'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (status_d, did_d): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-valid'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         status_d, "dispatched",
         "valid dispatch entry must NOT be reset"
@@ -25656,78 +25664,87 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         Some("dispatch-valid"),
         "valid entry dispatch_id must be preserved"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
+#[tokio::test]
+async fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    seed_agent(&db, "agent-recovery-config");
-    seed_auto_queue_card(
-        &db,
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-recovery-config").await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-expired-old",
         9011,
         "in_progress",
         "agent-recovery-config",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-expired-recent",
         9012,
         "in_progress",
         "agent-recovery-config",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-orphan-config",
         9013,
         "in_progress",
         "agent-recovery-config",
-    );
+    )
+    .await;
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kv_meta (key, value) VALUES
-                ('staleDispatchedGraceMin', '5'),
-                ('staleDispatchedTerminalStatuses', 'expired'),
-                ('staleDispatchedRecoverNullDispatch', 'false'),
-                ('staleDispatchedRecoverMissingDispatch', 'false')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-recovery-config', 'test-repo', 'agent-recovery-config', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
-             VALUES ('dispatch-expired-old', 'card-expired-old', 'agent-recovery-config', 'implementation', 'expired', 'test')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
-             VALUES ('dispatch-expired-recent', 'card-expired-recent', 'agent-recovery-config', 'implementation', 'expired', 'test')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
-             VALUES
-             ('entry-expired-old', 'run-recovery-config', 'card-expired-old', 'agent-recovery-config', 'dispatched', 'dispatch-expired-old', datetime('now', '-6 minutes')),
-             ('entry-expired-recent', 'run-recovery-config', 'card-expired-recent', 'agent-recovery-config', 'dispatched', 'dispatch-expired-recent', datetime('now', '-4 minutes')),
-             ('entry-orphan-config', 'run-recovery-config', 'card-orphan-config', 'agent-recovery-config', 'dispatched', NULL, datetime('now', '-6 minutes'))",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value) VALUES
+            ('staleDispatchedGraceMin', '5'),
+            ('staleDispatchedTerminalStatuses', 'expired'),
+            ('staleDispatchedRecoverNullDispatch', 'false'),
+            ('staleDispatchedRecoverMissingDispatch', 'false')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-recovery-config', 'test-repo', 'agent-recovery-config', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ('dispatch-expired-old', 'card-expired-old', 'agent-recovery-config', 'implementation', 'expired', 'test')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES ('dispatch-expired-recent', 'card-expired-recent', 'agent-recovery-config', 'implementation', 'expired', 'test')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at)
+         VALUES
+         ('entry-expired-old', 'run-recovery-config', 'card-expired-old', 'agent-recovery-config', 'dispatched', 'dispatch-expired-old', NOW() - INTERVAL '6 minutes'),
+         ('entry-expired-recent', 'run-recovery-config', 'card-expired-recent', 'agent-recovery-config', 'dispatched', 'dispatch-expired-recent', NOW() - INTERVAL '4 minutes'),
+         ('entry-orphan-config', 'run-recovery-config', 'card-orphan-config', 'agent-recovery-config', 'dispatched', NULL, NOW() - INTERVAL '6 minutes')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     engine
         .fire_hook(
@@ -25736,122 +25753,130 @@ fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
         )
         .unwrap();
 
-    let conn = db.lock().unwrap();
-    let expired_old: (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-old'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let expired_old: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-old'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(expired_old.0, "pending");
     assert!(expired_old.1.is_none());
 
-    let expired_recent: (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-recent'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let expired_recent: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-expired-recent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(expired_recent.0, "dispatched");
     assert_eq!(expired_recent.1.as_deref(), Some("dispatch-expired-recent"));
 
-    let orphan_config: (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan-config'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let orphan_config: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan-config'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(orphan_config.0, "dispatched");
     assert!(orphan_config.1.is_none());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// Regression test for #295: onTick1min must backstop terminal cards that still
 /// have pending auto-queue entries in active/paused runs.
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn auto_queue_recovery_skips_terminal_pending_entries() {
+#[tokio::test]
+async fn auto_queue_recovery_skips_terminal_pending_entries() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    seed_agent(&db, "agent-terminal-recovery");
-    seed_auto_queue_card(
-        &db,
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-terminal-recovery").await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-terminal-active",
         9011,
         "done",
         "agent-terminal-recovery",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-terminal-paused",
         9012,
         "done",
         "agent-terminal-recovery",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-terminal-generated",
         9013,
         "done",
         "agent-terminal-recovery",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-nonterminal-active",
         9014,
         "requested",
         "agent-terminal-recovery",
-    );
+    )
+    .await;
 
-    {
-        let conn = db.lock().unwrap();
-        for (run_id, status) in [
-            ("run-terminal-active", "active"),
-            ("run-terminal-paused", "paused"),
-            ("run-terminal-generated", "generated"),
-        ] {
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-                 VALUES (?1, 'test-repo', 'agent-terminal-recovery', ?2)",
-                sqlite_params![run_id, status],
-            )
-            .unwrap();
-        }
+    for (run_id, status) in [
+        ("run-terminal-active", "active"),
+        ("run-terminal-paused", "paused"),
+        ("run-terminal-generated", "generated"),
+    ] {
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ($1, 'test-repo', 'agent-terminal-recovery', $2)",
+        )
+        .bind(run_id)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
-        for (entry_id, run_id, card_id) in [
-            (
-                "entry-terminal-active",
-                "run-terminal-active",
-                "card-terminal-active",
-            ),
-            (
-                "entry-terminal-paused",
-                "run-terminal-paused",
-                "card-terminal-paused",
-            ),
-            (
-                "entry-terminal-generated",
-                "run-terminal-generated",
-                "card-terminal-generated",
-            ),
-            (
-                "entry-nonterminal-active",
-                "run-terminal-active",
-                "card-nonterminal-active",
-            ),
-        ] {
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) \
-                 VALUES (?1, ?2, ?3, 'agent-terminal-recovery', 'pending')",
-                sqlite_params![entry_id, run_id, card_id],
-            )
-            .unwrap();
-        }
+    for (entry_id, run_id, card_id) in [
+        (
+            "entry-terminal-active",
+            "run-terminal-active",
+            "card-terminal-active",
+        ),
+        (
+            "entry-terminal-paused",
+            "run-terminal-paused",
+            "card-terminal-paused",
+        ),
+        (
+            "entry-terminal-generated",
+            "run-terminal-generated",
+            "card-terminal-generated",
+        ),
+        (
+            "entry-nonterminal-active",
+            "run-terminal-active",
+            "card-nonterminal-active",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) \
+             VALUES ($1, $2, $3, 'agent-terminal-recovery', 'pending')",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     engine
@@ -25861,16 +25886,12 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
         )
         .unwrap();
 
-    let conn = db.lock().unwrap();
-    let statuses: std::collections::HashMap<String, String> = conn
-        .prepare("SELECT id, status FROM auto_queue_entries ORDER BY id ASC")
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .unwrap()
-        .collect::<std::result::Result<_, _>>()
-        .unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, status FROM auto_queue_entries ORDER BY id ASC")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let statuses: std::collections::HashMap<String, String> = rows.into_iter().collect();
 
     assert_eq!(
         statuses.get("entry-terminal-active").map(String::as_str),
@@ -25890,79 +25911,87 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
         Some("skipped"),
         "non-terminal pending work must not be swept by #295 terminal cleanup"
     );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots() {
+#[tokio::test]
+async fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots() {
     crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    seed_agent(&db, "agent-finished-recovery");
-    seed_auto_queue_card(
-        &db,
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-finished-recovery").await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-finished-done",
         9015,
         "done",
         "agent-finished-recovery",
-    );
-    seed_auto_queue_card(
-        &db,
+    )
+    .await;
+    seed_auto_queue_card_pg(
+        &pool,
         "card-finished-skipped",
         9016,
         "done",
         "agent-finished-recovery",
-    );
+    )
+    .await;
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-finished-recovery', 'test-repo', 'agent-finished-recovery', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
-            ) VALUES (
-                'entry-finished-done', 'run-finished-recovery', 'card-finished-done',
-                'agent-finished-recovery', 'done', 0, 0, datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
-            ) VALUES (
-                'entry-finished-skipped', 'run-finished-recovery', 'card-finished-skipped',
-                'agent-finished-recovery', 'skipped', 1, 1, datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_slots (
-                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
-            ) VALUES (
-                'agent-finished-recovery', 0, 'run-finished-recovery', 0, '{}'
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_slots (
-                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
-            ) VALUES (
-                'agent-finished-recovery', 1, 'run-finished-recovery', 1, '{}'
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-finished-recovery', 'test-repo', 'agent-finished-recovery', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+        ) VALUES (
+            'entry-finished-done', 'run-finished-recovery', 'card-finished-done',
+            'agent-finished-recovery', 'done', 0, 0, NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+        ) VALUES (
+            'entry-finished-skipped', 'run-finished-recovery', 'card-finished-skipped',
+            'agent-finished-recovery', 'skipped', 1, 1, NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_slots (
+            agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+        ) VALUES (
+            'agent-finished-recovery', 0, 'run-finished-recovery', 0, '{}'::jsonb
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_slots (
+            agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+        ) VALUES (
+            'agent-finished-recovery', 1, 'run-finished-recovery', 1, '{}'::jsonb
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     engine
         .fire_hook(
@@ -25971,35 +26000,35 @@ fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots
         )
         .unwrap();
 
-    let conn = db.lock().unwrap();
-    let run_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'run-finished-recovery'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let run_status: String =
+        sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'run-finished-recovery'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         run_status, "completed",
         "finished non-phase-gate run must be completed by onTick1min backstop"
     );
 
-    for slot_index in [0, 1] {
-        let slot: (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT assigned_run_id, assigned_thread_group
-                 FROM auto_queue_slots
-                 WHERE agent_id = 'agent-finished-recovery' AND slot_index = ?1",
-                [slot_index],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+    for slot_index in [0_i32, 1_i32] {
+        let slot: (Option<String>, Option<i32>) = sqlx::query_as(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-finished-recovery' AND slot_index = $1",
+        )
+        .bind(slot_index)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             slot,
             (None, None),
             "completed run must release slot {slot_index}"
         );
     }
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[test]
