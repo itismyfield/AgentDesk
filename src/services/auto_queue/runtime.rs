@@ -302,14 +302,6 @@ pub async fn clear_slot_threads_for_slot_pg(
     Ok(cleared)
 }
 
-pub async fn reset_slot_thread_bindings(
-    db: &Db,
-    agent_id: &str,
-    slot_index: i64,
-) -> Result<(usize, usize, usize), String> {
-    reset_slot_thread_bindings_excluding(db, agent_id, slot_index, None).await
-}
-
 pub async fn reset_slot_thread_bindings_excluding(
     db: &Db,
     agent_id: &str,

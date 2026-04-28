@@ -120,36 +120,6 @@ pub(crate) fn enqueue(
     Ok(true)
 }
 
-pub(crate) fn enqueue_with_db(db: &Db, message: OutboxMessage<'_>) -> bool {
-    match db.separate_conn() {
-        Ok(conn) => enqueue(&conn, message).unwrap_or(false),
-        Err(error) => {
-            tracing::warn!("failed to open outbox connection: {error}");
-            false
-        }
-    }
-}
-
-pub(crate) fn enqueue_lifecycle_notification(
-    db: &Db,
-    target: &str,
-    session_key: Option<&str>,
-    reason_code: &str,
-    content: &str,
-) -> bool {
-    enqueue_with_db(
-        db,
-        OutboxMessage {
-            target,
-            content,
-            bot: "notify",
-            source: "system",
-            reason_code: Some(reason_code),
-            session_key,
-        },
-    )
-}
-
 pub(crate) fn enqueue_lifecycle_notification_best_effort(
     db: Option<&Db>,
     pg_pool: Option<&PgPool>,
@@ -195,9 +165,30 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
         }
     }
 
-    db.is_some_and(|db| {
-        enqueue_lifecycle_notification(db, target, session_key, reason_code, content)
-    })
+    let Some(db) = db else {
+        return false;
+    };
+    let message = OutboxMessage {
+        target,
+        content,
+        bot: "notify",
+        source: "system",
+        reason_code: Some(reason_code),
+        session_key,
+    };
+    match db.separate_conn() {
+        Ok(conn) => enqueue(&conn, message).unwrap_or(false),
+        Err(error) => {
+            warn_lifecycle_enqueue_failure(
+                "sqlite",
+                target,
+                session_key,
+                reason_code,
+                format!("open connection: {error}"),
+            );
+            false
+        }
+    }
 }
 
 pub(crate) async fn enqueue_outbox_pg(

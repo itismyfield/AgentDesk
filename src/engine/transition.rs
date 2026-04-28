@@ -668,52 +668,6 @@ fn review_status_for(status: &str, pipeline: &PipelineConfig) -> Option<String> 
 
 // ── Executor ─────────────────────────────────────────────────
 
-/// Execute a `TransitionDecision` against the database.
-///
-/// Returns `Ok(true)` if the decision was Allowed and intents executed,
-/// `Ok(false)` if NoOp, and `Err` if Blocked.
-#[allow(dead_code)]
-pub fn execute_decision(db: &crate::db::Db, decision: &TransitionDecision) -> anyhow::Result<bool> {
-    match &decision.outcome {
-        TransitionOutcome::Blocked(reason) => {
-            // Execute audit log intents even for blocked decisions
-            let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            for intent in &decision.intents {
-                if let TransitionIntent::AuditLog {
-                    card_id,
-                    from,
-                    to,
-                    source,
-                    message,
-                } = intent
-                {
-                    execute_audit_log(&conn, card_id, from, to, source, message);
-                }
-            }
-            Err(anyhow::anyhow!("{}", reason))
-        }
-        TransitionOutcome::NoOp => Ok(false),
-        TransitionOutcome::Allowed => {
-            let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            conn.execute_batch("BEGIN")
-                .map_err(|e| anyhow::anyhow!("BEGIN: {e}"))?;
-            let exec_result = (|| -> anyhow::Result<()> {
-                for intent in &decision.intents {
-                    execute_intent(&conn, intent)?;
-                }
-                Ok(())
-            })();
-            if let Err(e) = exec_result {
-                conn.execute_batch("ROLLBACK").ok();
-                return Err(e);
-            }
-            conn.execute_batch("COMMIT")
-                .map_err(|e| anyhow::anyhow!("COMMIT: {e}"))?;
-            Ok(true)
-        }
-    }
-}
-
 /// Execute a single intent against an already-locked connection.
 ///
 /// Public for use by callers that manage their own DB lock (e.g., `kanban.rs`).
