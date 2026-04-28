@@ -329,7 +329,7 @@
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
-| `services::opencode` | `src/services/opencode.rs` | 1495 | giant-file |
+| `services::opencode` | `src/services/opencode.rs` | 1695 | giant-file |
 | `services::platform` | `src/services/platform/mod.rs` | 20 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1330 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |

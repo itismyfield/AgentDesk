@@ -3,7 +3,7 @@
 //! Architecture: spawns `opencode serve --hostname 127.0.0.1 --port <N>`, drives the
 //! HTTP REST + SSE API, and normalizes events to AgentDesk `StreamMessage`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -691,6 +691,66 @@ fn text_part_snapshot_key(part_id: &str, message_id: Option<&str>) -> String {
         .unwrap_or_else(|| part_id.to_string())
 }
 
+fn move_text_tracking_value(
+    map: &mut HashMap<String, String>,
+    from_key: &str,
+    to_key: &str,
+    merge_as_prefix: bool,
+) {
+    if from_key == to_key {
+        return;
+    }
+
+    let Some(value) = map.remove(from_key) else {
+        return;
+    };
+
+    match map.entry(to_key.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(value);
+        }
+        Entry::Occupied(mut entry) if merge_as_prefix => {
+            let mut merged = value;
+            merged.push_str(entry.get());
+            *entry.get_mut() = merged;
+        }
+        Entry::Occupied(_) => {}
+    }
+}
+
+fn text_part_tracking_key(
+    state: &mut SseMessageState,
+    part_id: &str,
+    message_id: Option<&str>,
+) -> String {
+    let snapshot_key = text_part_snapshot_key(part_id, message_id);
+    if message_id.is_none() {
+        return snapshot_key;
+    }
+
+    let unqualified_key = text_part_snapshot_key(part_id, None);
+    move_text_tracking_value(
+        &mut state.pending_text_deltas,
+        &unqualified_key,
+        &snapshot_key,
+        true,
+    );
+    move_text_tracking_value(
+        &mut state.text_part_snapshots,
+        &unqualified_key,
+        &snapshot_key,
+        false,
+    );
+    move_text_tracking_value(
+        &mut state.part_types,
+        &unqualified_key,
+        &snapshot_key,
+        false,
+    );
+
+    snapshot_key
+}
+
 fn part_id_from_value(value: &Value) -> Option<&str> {
     value
         .get("id")
@@ -702,6 +762,54 @@ fn part_id_from_value(value: &Value) -> Option<&str> {
 
 fn part_type_from_value(value: &Value) -> Option<&str> {
     value.get("type").and_then(|v| v.as_str())
+}
+
+fn known_message_role(role: &str) -> Option<&str> {
+    match role {
+        "assistant" | "user" => Some(role),
+        _ => None,
+    }
+}
+
+fn role_field_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("role")
+        .and_then(|v| v.as_str())
+        .and_then(known_message_role)
+}
+
+fn message_role_from_props(props: &Value) -> Option<&str> {
+    props
+        .get("message")
+        .and_then(role_field_from_value)
+        .or_else(|| {
+            props
+                .get("messageRole")
+                .or_else(|| props.get("message_role"))
+                .and_then(|v| v.as_str())
+                .and_then(known_message_role)
+        })
+        .or_else(|| role_field_from_value(props))
+}
+
+fn message_role_from_part<'a>(
+    part: &'a Value,
+    event_message_role: Option<&'a str>,
+) -> Option<&'a str> {
+    part.get("message")
+        .and_then(role_field_from_value)
+        .or_else(|| {
+            part.get("messageRole")
+                .or_else(|| part.get("message_role"))
+                .and_then(|v| v.as_str())
+                .and_then(known_message_role)
+        })
+        .or_else(|| role_field_from_value(part))
+        .or(event_message_role)
+}
+
+fn is_user_message_role(role: Option<&str>) -> bool {
+    matches!(role, Some("user"))
 }
 
 fn is_reasoning_part_type(part_type: &str) -> bool {
@@ -735,7 +843,12 @@ fn register_part_type(
     event_message_id: Option<&str>,
 ) -> Option<String> {
     let part_type = part_type_from_value(part)?;
-    let snapshot_key = snapshot_key_from_part(part, event_message_id)?;
+    let part_id = part_id_from_value(part)?;
+    let snapshot_key = text_part_tracking_key(
+        state,
+        part_id,
+        message_id_from_value(part).or(event_message_id),
+    );
     state
         .part_types
         .insert(snapshot_key.clone(), part_type.to_string());
@@ -786,7 +899,7 @@ fn emit_text_part(
         return;
     };
     let message_id = message_id_from_value(part).or(event_message_id);
-    let snapshot_key = text_part_snapshot_key(part_id, message_id);
+    let snapshot_key = text_part_tracking_key(state, part_id, message_id);
     state
         .part_types
         .insert(snapshot_key.clone(), "text".to_string());
@@ -860,9 +973,18 @@ fn emit_part(
     sender: &Sender<StreamMessage>,
     state: &mut SseMessageState,
     event_message_id: Option<&str>,
+    event_message_role: Option<&str>,
 ) {
     let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let message_role = message_role_from_part(part, event_message_role);
     register_part_type(part, state, event_message_id);
+    if is_user_message_role(message_role) {
+        if let Some(snapshot_key) = snapshot_key_from_part(part, event_message_id) {
+            state.pending_text_deltas.remove(&snapshot_key);
+            state.text_part_snapshots.remove(&snapshot_key);
+        }
+        return;
+    }
 
     match part_type {
         "text" => emit_text_part(part, sender, state, event_message_id),
@@ -976,9 +1098,11 @@ fn process_sse_event(
         }
 
         "part" => {
-            let part = props.and_then(|p| p.get("part"))?;
-            let message_id = props.and_then(message_id_from_value);
-            emit_part(part, sender, state, message_id);
+            let props = props?;
+            let part = props.get("part")?;
+            let message_id = message_id_from_value(props);
+            let message_role = message_role_from_props(props);
+            emit_part(part, sender, state, message_id, message_role);
             Some(false)
         }
 
@@ -995,7 +1119,17 @@ fn process_sse_event(
                 let message_id = message_id_from_value(props)
                     .or_else(|| props.get("part").and_then(message_id_from_value));
                 let snapshot_key =
-                    part_id.map(|part_id| text_part_snapshot_key(part_id, message_id));
+                    part_id.map(|part_id| text_part_tracking_key(state, part_id, message_id));
+                let message_role = props
+                    .get("part")
+                    .and_then(|part| message_role_from_part(part, message_role_from_props(props)))
+                    .or_else(|| message_role_from_props(props));
+                if is_user_message_role(message_role) {
+                    if let Some(snapshot_key) = snapshot_key {
+                        state.pending_text_deltas.remove(&snapshot_key);
+                    }
+                    return Some(false);
+                }
                 let part_type = part_type_from_delta_props(props, state, snapshot_key.as_deref())
                     .map(str::to_string);
 
@@ -1027,17 +1161,26 @@ fn process_sse_event(
         }
 
         "message.part.updated" => {
-            let part = props.and_then(|p| p.get("part"))?;
-            let message_id = props.and_then(message_id_from_value);
-            emit_part(part, sender, state, message_id);
+            let props = props?;
+            let part = props.get("part")?;
+            let message_id = message_id_from_value(props);
+            let message_role = message_role_from_props(props);
+            emit_part(part, sender, state, message_id, message_role);
             Some(false)
         }
 
         "message.completed" => {
             // Full assembled message — emit any final text parts not yet streamed
             if let Some(message) = props.and_then(|p| p.get("message")) {
+                let message_role = role_field_from_value(message);
+                if is_user_message_role(message_role) {
+                    return Some(false);
+                }
                 if let Some(parts) = message.get("parts").and_then(|p| p.as_array()) {
                     for part in parts {
+                        if is_user_message_role(message_role_from_part(part, message_role)) {
+                            continue;
+                        }
                         if part.get("type").and_then(|v| v.as_str()) == Some("text") {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 // Only emit if we haven't already streamed it
@@ -1201,6 +1344,45 @@ mod tests {
     }
 
     #[test]
+    fn test_message_part_updated_user_text_ignored() {
+        let data = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","message":{"id":"msg-user","role":"user"},"part":{"id":"part-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "user-role text parts must not be emitted as assistant output"
+        );
+    }
+
+    #[test]
+    fn test_message_part_delta_user_text_ignored() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","message":{"role":"user"},"partID":"part-user","partType":"text","field":"text","delta":"[User: Alice (ID: 1)]\n"}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","message":{"role":"user"},"partID":"part-user","partType":"text","field":"text","delta":"하이"}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "user-role text deltas must not be emitted as assistant output"
+        );
+    }
+
+    #[test]
+    fn test_message_completed_user_text_ignored() {
+        let data = r#"{"type":"message.completed","properties":{"sessionID":"s1","message":{"id":"msg-user","role":"user","parts":[{"id":"part-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"}]}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "user-role completed messages must not be emitted as assistant output"
+        );
+    }
+
+    #[test]
     fn test_message_part_delta_then_updated_does_not_duplicate_text() {
         let events = [
             r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"O"}}"#,
@@ -1223,6 +1405,24 @@ mod tests {
     fn test_unknown_delta_flushes_before_later_text_delta() {
         let events = [
             r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"O"}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","partType":"text","field":"text","delta":"K"}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        let text = msgs
+            .iter()
+            .filter_map(|msg| match msg {
+                StreamMessage::Text { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn test_unknown_delta_with_late_message_id_flushes_in_order() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","partID":"part-1","field":"text","delta":"O"}}"#,
             r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","partType":"text","field":"text","delta":"K"}}"#,
         ];
         let (msgs, stops) = parse_events(&events, "s1");
