@@ -16,30 +16,28 @@ const POLICY_DB_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
 pub(super) fn register_db_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    _db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let db_obj = Object::new(ctx.clone())?;
 
     // Internal: __db_query_raw(sql, params_json) → json_string
-    let db_q = db.clone();
     let pg_q = pg_pool.clone();
     let query_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_raw(db_q.as_ref(), pg_q.clone(), &sql, &params_json)
+            db_query_raw(pg_q.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__query_raw", query_raw)?;
 
     // Internal: __db_execute_raw(sql, params_json) → json_string
-    let db_e = db.clone();
     let pg_e = pg_pool.clone();
     let execute_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_execute_raw(db_e.as_ref(), pg_e.clone(), &sql, &params_json)
+            db_execute_raw(pg_e.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__execute_raw", execute_raw)?;
@@ -98,7 +96,7 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
     }
 }
 
-fn db_query_raw(db: Option<&Db>, pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
+fn db_query_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     let started = std::time::Instant::now();
     emit_raw_db_audit("agentdesk.db.query", sql);
     let params: Vec<serde_json::Value> =
@@ -107,99 +105,15 @@ fn db_query_raw(db: Option<&Db>, pg_pool: Option<PgPool>, sql: &str, params_json
             Err(error_json) => return error_json,
         };
 
-    if let Some(pg_pool) = pg_pool {
-        return db_query_raw_pg(&pg_pool, sql, &params, started);
-    }
-    let Some(db) = db else {
+    let Some(pg_pool) = pg_pool else {
         return policy_db_error_json(
-            "agentdesk.db.query.sqlite_backend",
+            "agentdesk.db.query.pg_backend",
             sql,
-            "sqlite backend is unavailable".to_string(),
+            "postgres backend is required for db.query".to_string(),
         );
     };
 
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-
-    // Use a separate read-only connection to avoid blocking the write Mutex.
-    // This prevents deadlock when onTick (holding engine lock) queries DB
-    // while request handlers hold the write lock.
-    let conn = match db.read_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.read_conn",
-                sql,
-                format!("db read: {e}"),
-            );
-        }
-    };
-
-    let mut stmt = match conn.prepare(sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.prepare",
-                sql,
-                format!("prepare: {e}"),
-            );
-        }
-    };
-
-    let col_count = stmt.column_count();
-    let col_names: Vec<std::string::String> = (0..col_count)
-        .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
-        .collect();
-
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        .collect();
-
-    let rows = match stmt.query_map(params_ref.as_slice(), |row| {
-        let mut map = serde_json::Map::new();
-        for (i, col_name) in col_names.iter().enumerate() {
-            let val: libsql_rusqlite::types::Value = row.get(i)?; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            let jv = sqlite_to_json(&val);
-            map.insert(col_name.clone(), jv);
-        }
-        Ok(serde_json::Value::Object(map))
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.query_map",
-                sql,
-                format!("query: {e}"),
-            );
-        }
-    };
-
-    let result: Vec<serde_json::Value> = match rows.collect::<Result<Vec<_>, _>>() {
-        Ok(result) => result,
-        Err(error) => {
-            return policy_db_error_json(
-                "agentdesk.db.query.collect_rows",
-                sql,
-                format!("row decode: {error}"),
-            );
-        }
-    };
-    let elapsed = started.elapsed();
-    if elapsed >= POLICY_DB_WARN_THRESHOLD {
-        tracing::warn!(
-            elapsed_ms = elapsed.as_millis(),
-            row_count = result.len(),
-            sql = %compact_sql(sql),
-            "policy db query slow"
-        );
-    }
-    serde_json::to_string(&result).unwrap_or_else(|error| {
-        policy_db_error_json(
-            "agentdesk.db.query.serialize",
-            sql,
-            format!("serialize query result: {error}"),
-        )
-    })
+    db_query_raw_pg(&pg_pool, sql, &params, started)
 }
 
 fn db_query_raw_pg(
@@ -259,12 +173,7 @@ fn db_query_raw_pg(
     })
 }
 
-fn db_execute_raw(
-    db: Option<&Db>,
-    pg_pool: Option<PgPool>,
-    sql: &str,
-    params_json: &str,
-) -> String {
+fn db_execute_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     let started = std::time::Instant::now();
     emit_raw_db_audit("agentdesk.db.execute", sql);
     if let Some(violation) = detect_core_table_write(sql) {
@@ -277,63 +186,19 @@ fn db_execute_raw(
             Err(error_json) => return error_json,
         };
 
-    if let Some(pg_pool) = pg_pool {
-        return db_execute_raw_pg(&pg_pool, sql, &params, started);
-    }
-    let Some(db) = db else {
+    let Some(pg_pool) = pg_pool else {
         return policy_db_error_json(
-            "agentdesk.db.execute.sqlite_backend",
+            "agentdesk.db.execute.pg_backend",
             sql,
-            "sqlite backend is unavailable".to_string(),
+            "postgres backend is required for db.execute".to_string(),
         );
     };
 
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect(); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-
-    // Use a separate read-write connection to avoid holding the main
-    // Rust Mutex that request handlers need. SQLite WAL serializes
-    // concurrent writers via busy_timeout (5s).
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            return policy_db_error_json(
-                "agentdesk.db.execute.separate_conn",
-                sql,
-                format!("db conn: {e}"),
-            );
-        }
-    };
-
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        .iter()
-        .map(|v| v as &dyn libsql_rusqlite::types::ToSql) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        .collect();
-
-    let changes = match conn.execute(sql, params_ref.as_slice()) {
-        Ok(n) => n,
-        Err(e) => {
-            return policy_db_error_json(
-                "agentdesk.db.execute.execute",
-                sql,
-                format!("execute: {e}"),
-            );
-        }
-    };
-    let elapsed = started.elapsed();
-    if elapsed >= POLICY_DB_WARN_THRESHOLD {
-        tracing::warn!(
-            elapsed_ms = elapsed.as_millis(),
-            changes,
-            sql = %compact_sql(sql),
-            "policy db execute slow"
-        );
-    }
-
-    format!(r#"{{"changes":{changes}}}"#)
+    db_execute_raw_pg(&pg_pool, sql, &params, started)
 }
 
 pub(crate) fn execute_policy_sql(
-    db: Option<&Db>,
+    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     sql: &str,
     params: &[serde_json::Value],
@@ -344,32 +209,19 @@ pub(crate) fn execute_policy_sql(
         return Err(violation.error_message().to_string());
     }
 
-    if let Some(pg_pool) = pg_pool {
-        let prepared_sql = prepare_policy_sql_for_pg(sql, params)?;
-        let pool = pg_pool.clone();
-        return run_async_bridge_pg(&pool, move |pool| async move {
-            sqlx::query(&prepared_sql)
-                .execute(&pool)
-                .await
-                .map(|result| result.rows_affected())
-                .map_err(|error| format!("execute postgres policy SQL: {error}"))
-        });
-    }
-
-    let Some(db) = db else {
-        return Err("sqlite backend is unavailable".to_string());
+    let Some(pg_pool) = pg_pool else {
+        return Err("postgres backend is required for ExecuteSQL intent".to_string());
     };
-    let bind: Vec<libsql_rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind
-        .iter()
-        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
-        .collect();
-    let conn = db
-        .separate_conn()
-        .map_err(|error| format!("db conn: {error}"))?;
-    conn.execute(sql, params_ref.as_slice())
-        .map(|changes| changes as u64)
-        .map_err(|error| format!("execute sqlite policy SQL: {error}"))
+
+    let prepared_sql = prepare_policy_sql_for_pg(sql, params)?;
+    let pool = pg_pool.clone();
+    run_async_bridge_pg(&pool, move |pool| async move {
+        sqlx::query(&prepared_sql)
+            .execute(&pool)
+            .await
+            .map(|result| result.rows_affected())
+            .map_err(|error| format!("execute postgres policy SQL: {error}"))
+    })
 }
 
 fn db_execute_raw_pg(
@@ -951,14 +803,6 @@ fn compact_sql(sql: &str) -> String {
     }
 }
 
-fn run_async_bridge<F, T>(future: F) -> Result<T, String>
-where
-    F: Future<Output = Result<T, String>> + Send + 'static,
-    T: Send + 'static,
-{
-    crate::utils::async_bridge::block_on_result(future, |error| error)
-}
-
 fn run_async_bridge_pg<F, T>(
     pool: &PgPool,
     future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
@@ -968,27 +812,6 @@ where
     T: Send + 'static,
 {
     crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| error)
-}
-
-fn json_to_sqlite(val: &serde_json::Value) -> libsql_rusqlite::types::Value {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    match val {
-        serde_json::Value::Null => libsql_rusqlite::types::Value::Null, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        serde_json::Value::Bool(b) => {
-            libsql_rusqlite::types::Value::Integer(if *b { 1 } else { 0 }) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        }
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                libsql_rusqlite::types::Value::Integer(i) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            } else if let Some(f) = n.as_f64() {
-                libsql_rusqlite::types::Value::Real(f) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            } else {
-                libsql_rusqlite::types::Value::Null // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            }
-        }
-        serde_json::Value::String(s) => libsql_rusqlite::types::Value::Text(s.clone()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        _ => libsql_rusqlite::types::Value::Text(val.to_string()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    }
 }
 
 #[cfg(test)]
@@ -1181,20 +1004,5 @@ mod tests {
 
         pool.close().await;
         test_db.drop().await;
-    }
-}
-
-fn sqlite_to_json(val: &libsql_rusqlite::types::Value) -> serde_json::Value {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    match val {
-        libsql_rusqlite::types::Value::Null => serde_json::Value::Null, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        libsql_rusqlite::types::Value::Integer(i) => serde_json::json!(*i), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        libsql_rusqlite::types::Value::Real(f) => serde_json::json!(*f), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        libsql_rusqlite::types::Value::Text(s) => serde_json::Value::String(s.clone()), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        libsql_rusqlite::types::Value::Blob(b) => {
-            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
-            serde_json::Value::String(encoded)
-        }
     }
 }
