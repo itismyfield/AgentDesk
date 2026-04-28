@@ -21,9 +21,9 @@ use crate::services::tmux_diagnostics::{
 };
 
 use super::formatting::{
-    ReplaceLongMessageOutcome, build_streaming_placeholder_text, escape_for_code_fence,
-    format_tool_input, plan_streaming_rollover, replace_long_message_raw_with_outcome,
-    send_long_message_raw, truncate_str,
+    ReplaceLongMessageOutcome, build_streaming_placeholder_text, format_tool_input,
+    plan_streaming_rollover, replace_long_message_raw_with_outcome, send_long_message_raw,
+    truncate_str,
 };
 use super::placeholder_cleanup::{
     PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
@@ -2649,6 +2649,19 @@ fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: Sessio
         )
     {
         events.push(event);
+    }
+}
+
+const REDACTED_THINKING_STATUS_LINE: &str = "💭 Thinking...";
+
+fn redacted_thinking_transcript_event() -> SessionTranscriptEvent {
+    SessionTranscriptEvent {
+        kind: SessionTranscriptEventKind::Thinking,
+        tool_name: None,
+        summary: None,
+        content: String::new(),
+        status: Some("info".to_string()),
+        is_error: false,
     }
 }
 
@@ -6670,8 +6683,6 @@ pub(super) struct WatcherToolState {
     pub current_tool_line: Option<String>,
     /// Previous distinct tool/thinking status for 2-line trail rendering.
     pub prev_tool_status: Option<String>,
-    /// Accumulated thinking text from streaming deltas
-    pub thinking_buffer: String,
     /// Whether we are currently inside a thinking block
     pub in_thinking: bool,
     /// Whether any tool_use block has been seen in this turn
@@ -6687,7 +6698,6 @@ impl WatcherToolState {
         Self {
             current_tool_line: None,
             prev_tool_status: None,
-            thinking_buffer: String::new(),
             in_thinking: false,
             any_tool_used: false,
             has_post_tool_text: false,
@@ -6713,6 +6723,12 @@ impl WatcherToolState {
             None,
         );
         self.current_tool_line = None;
+    }
+
+    fn mark_thinking(&mut self) {
+        if self.current_tool_line.as_deref() != Some(REDACTED_THINKING_STATUS_LINE) {
+            self.set_current_tool_line(Some(REDACTED_THINKING_STATUS_LINE.to_string()));
+        }
     }
 }
 
@@ -6830,49 +6846,16 @@ pub(super) fn process_watcher_lines(
                                             },
                                         );
                                     } else if block_type == Some("thinking") {
-                                        // Claude CLI emits thinking inside the
-                                        // `assistant` JSON message (not via
-                                        // `content_block_*` streaming events).
-                                        // When the API returns plaintext
-                                        // thinking text, mirror it into the
-                                        // body code-fence the same way the
-                                        // unified turn_bridge consumer does.
-                                        // When the API returns encrypted
-                                        // thinking (`thinking: ""` + signature
-                                        // only), the field is empty and we
-                                        // skip — there is no plaintext to
-                                        // surface.
-                                        let text = block
+                                        let has_plaintext_thinking = block
                                             .get("thinking")
                                             .and_then(|t| t.as_str())
                                             .map(|t| t.trim())
-                                            .filter(|t| !t.is_empty());
-                                        if let Some(thinking_text) = text {
-                                            if !full_response.is_empty()
-                                                && !full_response.ends_with('\n')
-                                            {
-                                                full_response.push('\n');
-                                            }
-                                            full_response.push_str("\n💭 **Reasoning**\n```\n");
-                                            full_response
-                                                .push_str(&escape_for_code_fence(thinking_text));
-                                            full_response.push_str("\n```\n");
-                                            tool_state.set_current_tool_line(Some(format!(
-                                                "💭 {thinking_text}"
-                                            )));
+                                            .is_some_and(|text| !text.is_empty());
+                                        if has_plaintext_thinking {
+                                            tool_state.mark_thinking();
                                             push_transcript_event(
                                                 &mut tool_state.transcript_events,
-                                                SessionTranscriptEvent {
-                                                    kind: SessionTranscriptEventKind::Thinking,
-                                                    tool_name: None,
-                                                    summary: Some(
-                                                        truncate_str(thinking_text, 120)
-                                                            .to_string(),
-                                                    ),
-                                                    content: thinking_text.to_string(),
-                                                    status: Some("info".to_string()),
-                                                    is_error: false,
-                                                },
+                                                redacted_thinking_transcript_event(),
                                             );
                                         }
                                     }
@@ -6886,8 +6869,7 @@ pub(super) fn process_watcher_lines(
                         let cb_type = cb.get("type").and_then(|t| t.as_str());
                         if cb_type == Some("thinking") {
                             tool_state.in_thinking = true;
-                            tool_state.thinking_buffer.clear();
-                            tool_state.set_current_tool_line(Some("💭 Thinking...".to_string()));
+                            tool_state.mark_thinking();
                         } else if cb_type == Some("tool_use") {
                             tool_state.any_tool_used = true;
                             tool_state.has_post_tool_text = false;
@@ -6898,13 +6880,8 @@ pub(super) fn process_watcher_lines(
                 }
                 "content_block_delta" => {
                     if let Some(delta) = val.get("delta") {
-                        if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
-                            // Accumulate thinking text and update display
-                            tool_state.thinking_buffer.push_str(thinking);
-                            let display = tool_state.thinking_buffer.trim().to_string();
-                            if !display.is_empty() {
-                                tool_state.set_current_tool_line(Some(format!("💭 {display}")));
-                            }
+                        if delta.get("thinking").and_then(|t| t.as_str()).is_some() {
+                            tool_state.mark_thinking();
                         } else if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                             full_response.push_str(text);
                             if tool_state.any_tool_used {
@@ -6916,33 +6893,12 @@ pub(super) fn process_watcher_lines(
                 }
                 "content_block_stop" => {
                     if tool_state.in_thinking {
-                        // Thinking block completed — show full text
                         tool_state.in_thinking = false;
-                        let display = tool_state.thinking_buffer.trim().to_string();
-                        if !display.is_empty() {
-                            tool_state.set_current_tool_line(Some(format!("💭 {display}")));
-                            // #1199 follow-up: production traffic flows through this
-                            // legacy raw-JSON parser, not the unified
-                            // `StreamMessage::Thinking` arm. Mirror the body
-                            // code-fence append here so users actually see CoT.
-                            if !full_response.is_empty() && !full_response.ends_with('\n') {
-                                full_response.push('\n');
-                            }
-                            full_response.push_str("\n💭 **Reasoning**\n```\n");
-                            full_response.push_str(&escape_for_code_fence(&display));
-                            full_response.push_str("\n```\n");
-                            push_transcript_event(
-                                &mut tool_state.transcript_events,
-                                SessionTranscriptEvent {
-                                    kind: SessionTranscriptEventKind::Thinking,
-                                    tool_name: None,
-                                    summary: Some(truncate_str(&display, 120).to_string()),
-                                    content: display,
-                                    status: Some("info".to_string()),
-                                    is_error: false,
-                                },
-                            );
-                        }
+                        tool_state.mark_thinking();
+                        push_transcript_event(
+                            &mut tool_state.transcript_events,
+                            redacted_thinking_transcript_event(),
+                        );
                     } else if let Some(line) = tool_state.current_tool_line.clone() {
                         // Tool completed — mark with checkmark
                         if line.starts_with("⚙") {
@@ -7875,6 +7831,7 @@ mod tests {
         watcher_ready_for_input_turn_completed, watcher_should_yield_to_inflight_state,
         watcher_stream_seed,
     };
+    use crate::db::session_transcripts::SessionTranscriptEventKind;
     use crate::services::agent_protocol::TaskNotificationKind;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome;
@@ -9992,6 +9949,65 @@ mod tests {
             tool_state.current_tool_line.as_deref(),
             Some("⚙ Bash: `cargo build`")
         );
+    }
+
+    #[test]
+    fn watcher_redacts_assistant_thinking_block() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"},{\"type\":\"text\",\"text\":\"final answer\"}]}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.found_result);
+        assert_eq!(full_response, "final answer");
+        assert!(!full_response.contains("internal reasoning"));
+        assert!(!full_response.contains("Reasoning"));
+        assert!(tool_state.transcript_events.iter().any(|event| matches!(
+            event.kind,
+            SessionTranscriptEventKind::Thinking
+        ) && event.summary.is_none()
+            && event.content.is_empty()));
+        assert!(tool_state.transcript_events.iter().all(|event| {
+            event.summary.as_deref() != Some("internal reasoning")
+                && !event.content.contains("internal reasoning")
+        }));
+    }
+
+    #[test]
+    fn watcher_redacts_streaming_thinking_delta() {
+        let mut buffer = concat!(
+            "{\"type\":\"content_block_start\",\"content_block\":{\"type\":\"thinking\"}}\n",
+            "{\"type\":\"content_block_delta\",\"delta\":{\"thinking\":\"internal reasoning\"}}\n",
+            "{\"type\":\"content_block_stop\"}\n",
+            "{\"type\":\"content_block_delta\",\"delta\":{\"text\":\"final answer\"}}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.found_result);
+        assert_eq!(full_response, "final answer");
+        assert!(!full_response.contains("internal reasoning"));
+        assert!(!full_response.contains("Reasoning"));
+        assert!(tool_state.transcript_events.iter().any(|event| matches!(
+            event.kind,
+            SessionTranscriptEventKind::Thinking
+        ) && event.summary.is_none()
+            && event.content.is_empty()));
+        assert!(tool_state.transcript_events.iter().all(|event| {
+            event.summary.as_deref() != Some("internal reasoning")
+                && !event.content.contains("internal reasoning")
+        }));
     }
 
     #[test]
