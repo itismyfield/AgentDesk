@@ -5,8 +5,8 @@ use std::{ffi::OsString, fs, path::PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 use super::{
-    register_globals, register_globals_with_supervisor, review_state_sync,
-    review_state_sync_on_conn,
+    register_globals, register_globals_with_supervisor, register_globals_with_supervisor_and_pg,
+    review_state_sync, review_state_sync_on_conn,
 };
 
 macro_rules! sqlite_params {
@@ -17,6 +17,154 @@ macro_rules! sqlite_params {
 
 fn test_db() -> Db {
     crate::db::test_db()
+}
+
+fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
+    let mut config = crate::config::Config::default();
+    config.policies.hot_reload = false;
+    crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+}
+
+struct TestPostgresDb {
+    _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+    admin_url: String,
+    database_name: String,
+    database_url: String,
+    cleanup_armed: bool,
+}
+
+impl TestPostgresDb {
+    async fn create() -> Self {
+        let lock = crate::db::postgres::lock_test_lifecycle();
+        let admin_url = postgres_admin_database_url();
+        let database_name = format!("agentdesk_engine_ops_{}", uuid::Uuid::new_v4().simple());
+        let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+        crate::db::postgres::create_test_database(&admin_url, &database_name, "engine ops tests")
+            .await
+            .unwrap();
+
+        Self {
+            _lock: lock,
+            admin_url,
+            database_name,
+            database_url,
+            cleanup_armed: true,
+        }
+    }
+
+    async fn connect_and_migrate(&self) -> sqlx::PgPool {
+        crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, "engine ops tests")
+            .await
+            .unwrap()
+    }
+
+    async fn drop(mut self) {
+        let drop_result = crate::db::postgres::drop_test_database(
+            &self.admin_url,
+            &self.database_name,
+            "engine ops tests",
+        )
+        .await;
+        if drop_result.is_ok() {
+            self.cleanup_armed = false;
+        }
+        drop_result.expect("drop postgres test db");
+    }
+}
+
+impl Drop for TestPostgresDb {
+    fn drop(&mut self) {
+        if !self.cleanup_armed {
+            return;
+        }
+
+        cleanup_test_postgres_db_from_drop(self.admin_url.clone(), self.database_name.clone());
+    }
+}
+
+fn cleanup_test_postgres_db_from_drop(admin_url: String, database_name: String) {
+    let cleanup_database_name = database_name.clone();
+    let thread_name = format!("engine ops tests cleanup {cleanup_database_name}");
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!(
+                        "engine ops tests cleanup runtime failed for {database_name}: {error}"
+                    );
+                    return;
+                }
+            };
+
+            if let Err(error) = runtime.block_on(crate::db::postgres::drop_test_database(
+                &admin_url,
+                &database_name,
+                "engine ops tests",
+            )) {
+                eprintln!("engine ops tests cleanup failed for {database_name}: {error}");
+            }
+        });
+
+    match spawn_result {
+        Ok(handle) => {
+            if handle.join().is_err() {
+                eprintln!("engine ops tests cleanup thread panicked for {cleanup_database_name}");
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "engine ops tests cleanup thread spawn failed for {cleanup_database_name}: {error}"
+            );
+        }
+    }
+}
+
+fn postgres_base_database_url() -> String {
+    if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+
+    let user = std::env::var("PGUSER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "postgres".to_string());
+    let password = std::env::var("PGPASSWORD")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let host = std::env::var("PGHOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = std::env::var("PGPORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "5432".to_string());
+
+    match password {
+        Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+        None => format!("postgresql://{user}@{host}:{port}"),
+    }
+}
+
+fn postgres_admin_database_url() -> String {
+    let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "postgres".to_string());
+    format!("{}/{}", postgres_base_database_url(), admin_db)
 }
 
 fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -852,48 +1000,59 @@ fn policies_js_files_under_10kb_budget() {
     );
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
+#[tokio::test]
+async fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    {
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
-             VALUES ('ag-queue', 'Queue Agent', '111', '222')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
-             VALUES ('card-log', 'Queue Card', 'in_progress', 'ag-queue', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-             VALUES ('run-log', 'itismyfield/AgentDesk', 'ag-queue', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, 'implementation', 'dispatched', 'Queue Dispatch', ?4, datetime('now'), datetime('now'))",
-            sqlite_params![
-                "dispatch-log",
-                "card-log",
-                "ag-queue",
-                r#"{"entry_id":"entry-log","agent_id":"ag-queue"}"#
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status, thread_group, batch_phase, slot_index) \
-             VALUES ('entry-log', 'run-log', 'card-log', 'ag-queue', 'dispatch-log', 'dispatched', 2, 3, 4)",
-            [],
-        )
-        .unwrap();
-    }
+    let _engine = test_engine_with_pg(&db, pool.clone());
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+         VALUES ('ag-queue', 'Queue Agent', '111', '222')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+         VALUES ('card-log', 'Queue Card', 'in_progress', 'ag-queue', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-log', 'itismyfield/AgentDesk', 'ag-queue', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+            created_at, updated_at
+         ) VALUES ($1, $2, $3, 'implementation', 'dispatched', 'Queue Dispatch', $4, NOW(), NOW())",
+    )
+    .bind("dispatch-log")
+    .bind("card-log")
+    .bind("ag-queue")
+    .bind(r#"{"entry_id":"entry-log","agent_id":"ag-queue"}"#)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, dispatch_id, status, thread_group,
+            batch_phase, slot_index
+         ) VALUES (
+            'entry-log', 'run-log', 'card-log', 'ag-queue', 'dispatch-log',
+            'dispatched', 2, 3, 4
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let policy_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js");
     let policy = fs::read_to_string(&policy_path).expect("auto-queue policy must be readable");
@@ -901,12 +1060,23 @@ fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
+    let pool_for_js = pool.clone();
+    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals(&ctx, db.clone()).unwrap();
+        register_globals_with_supervisor_and_pg(
+            &ctx,
+            Some(db_for_js),
+            Some(pool_for_js),
+            crate::supervisor::BridgeHandle::new(),
+        )
+        .unwrap();
         // #1078: auto-queue now requires() helpers from policies/lib/, so the
         // module loader must be installed before evaluating the policy source.
-        crate::engine::loader::install_policy_module_loader(&ctx, &policies_root, &policies_root).unwrap();
-        let _: rquickjs::Value = ctx.eval(r#"agentdesk.registerPolicy = function(_) {};"#).unwrap();
+        crate::engine::loader::install_policy_module_loader(&ctx, &policies_root, &policies_root)
+            .unwrap();
+        let _: rquickjs::Value = ctx
+            .eval(r#"agentdesk.registerPolicy = function(_) {};"#)
+            .unwrap();
         let _: rquickjs::Value = ctx.eval(policy.as_str()).unwrap();
         let result: String = ctx
             .eval(
@@ -948,6 +1118,9 @@ fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
             "formatted context must include agent_id: {formatted}"
         );
     });
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 /// #128: JS setStatus("in_progress") sets started_at.
@@ -1336,69 +1509,77 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
     assert_eq!(dispatch_count, 1);
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
+#[tokio::test]
+async fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
     crate::pipeline::ensure_loaded();
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    {
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
-             VALUES ('aq-run-agent', 'AQ Run Agent', 'claude', 'idle', '123456789012345678')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, created_at, updated_at
-            ) VALUES (
-                'aq-run-card', 'AQ Run Card', 'ready', 'medium', 'aq-run-agent',
-                datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-             VALUES ('aq-run-status', 'repo-1', 'aq-run-agent', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank
-            ) VALUES (
-                'aq-run-entry', 'aq-run-status', 'aq-run-card',
-                'aq-run-agent', 'done', 0
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_slots (
-                agent_id, slot_index, assigned_run_id, assigned_thread_group
-            ) VALUES (
-                'aq-run-agent', 0, 'aq-run-status', 0
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
-        &crate::config::Config::default(),
-        db.clone(),
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, discord_channel_id)
+         VALUES ('aq-run-agent', 'AQ Run Agent', 'claude', 'idle', '123456789012345678')",
     )
+    .execute(&pool)
+    .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            'aq-run-card', 'AQ Run Card', 'ready', 'medium', 'aq-run-agent',
+            NOW(), NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('aq-run-status', 'repo-1', 'aq-run-agent', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank
+         ) VALUES (
+            'aq-run-entry', 'aq-run-status', 'aq-run-card',
+            'aq-run-agent', 'done', 0
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_slots (
+            agent_id, slot_index, assigned_run_id, assigned_thread_group
+         ) VALUES (
+            'aq-run-agent', 0, 'aq-run-status', 0
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
+    let pool_for_js = pool.clone();
+    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        register_globals_with_supervisor_and_pg(
+            &ctx,
+            Some(db_for_js),
+            Some(pool_for_js),
+            bridge.clone(),
+        )
+        .unwrap();
         let raw: String = ctx
             .eval(
                 r#"
@@ -1447,93 +1628,104 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
         assert_eq!(parsed["completed"], true);
     });
 
-    let conn = db.separate_conn().unwrap();
-    let run_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'aq-run-status'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let slot_run: Option<String> = conn
-        .query_row(
-            "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'aq-run-agent' AND slot_index = 0",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let message_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
+    let run_status: String =
+        sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'aq-run-status'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let slot_run: Option<String> = sqlx::query_scalar(
+        "SELECT assigned_run_id FROM auto_queue_slots WHERE agent_id = 'aq-run-agent' AND slot_index = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let message_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(run_status, "completed");
     assert!(slot_run.is_none());
     assert_eq!(message_count, 1);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
-#[test]
-#[ignore = "SQLite-only test. autoQueue.recordConsultationDispatch JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
+#[tokio::test]
+async fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
     crate::pipeline::ensure_loaded();
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    {
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
-             VALUES ('aq-consult-agent', 'AQ Consult Agent', 'claude', 'idle', '123456789012345678')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, metadata, created_at, updated_at
-            ) VALUES (
-                'aq-consult-card', 'AQ Consult Card', 'requested', 'medium', 'aq-consult-agent',
-                ?1, datetime('now'), datetime('now')
-            )",
-            [serde_json::json!({
-                "keep": "yes",
-                "preflight_status": "consult_required"
-            })
-            .to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-             VALUES ('aq-consult-run', 'repo-1', 'aq-consult-agent', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (
-                id, run_id, kanban_card_id, agent_id, status, priority_rank
-            ) VALUES (
-                'aq-consult-entry', 'aq-consult-run', 'aq-consult-card',
-                'aq-consult-agent', 'pending', 0
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
-             VALUES ('dispatch-consult-1', 'aq-consult-agent', 'dispatched', '{}')",
-            [],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
-        &crate::config::Config::default(),
-        db.clone(),
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, discord_channel_id)
+         VALUES ('aq-consult-agent', 'AQ Consult Agent', 'claude', 'idle', '123456789012345678')",
     )
+    .execute(&pool)
+    .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, metadata, created_at, updated_at
+         ) VALUES (
+            'aq-consult-card', 'AQ Consult Card', 'requested', 'medium', 'aq-consult-agent',
+            CAST($1 AS jsonb), NOW(), NOW()
+         )",
+    )
+    .bind(
+        serde_json::json!({
+            "keep": "yes",
+            "preflight_status": "consult_required"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('aq-consult-run', 'repo-1', 'aq-consult-agent', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, priority_rank
+         ) VALUES (
+            'aq-consult-entry', 'aq-consult-run', 'aq-consult-card',
+            'aq-consult-agent', 'pending', 0
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+         VALUES ('dispatch-consult-1', 'aq-consult-agent', 'dispatched', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
+    let pool_for_js = pool.clone();
+    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        register_globals_with_supervisor_and_pg(
+            &ctx,
+            Some(db_for_js),
+            Some(pool_for_js),
+            bridge.clone(),
+        )
+        .unwrap();
         let wrapper_type: String = ctx
             .eval(r#"typeof agentdesk.autoQueue.recordConsultationDispatch"#)
             .unwrap();
@@ -1570,101 +1762,110 @@ fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
         );
     });
 
-    let conn = db.separate_conn().unwrap();
-    let metadata_raw: String = conn
-        .query_row(
-            "SELECT metadata FROM kanban_cards WHERE id = 'aq-consult-card'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let metadata: serde_json::Value = serde_json::from_str(&metadata_raw).unwrap();
-    let (entry_status, dispatch_id): (String, Option<String>) = conn
-        .query_row(
-            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'aq-consult-entry'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM kanban_cards WHERE id = 'aq-consult-card'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let entry_row: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'aq-consult-entry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (entry_status, dispatch_id) = entry_row;
     assert_eq!(metadata["keep"], "yes");
     assert_eq!(metadata["preflight_status"], "consult_required");
     assert_eq!(metadata["consultation_status"], "pending");
     assert_eq!(metadata["consultation_dispatch_id"], "dispatch-consult-1");
     assert_eq!(entry_status, "dispatched");
     assert_eq!(dispatch_id.as_deref(), Some("dispatch-consult-1"));
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
-#[test]
-#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
+#[tokio::test]
+async fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
     crate::pipeline::ensure_loaded();
 
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    {
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
-             VALUES ('aq-phase-agent', 'AQ Phase Agent', 'claude', 'idle', '123456789012345678')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, created_at, updated_at
-            ) VALUES (
-                'aq-phase-card', 'AQ Phase Card', 'ready', 'medium', 'aq-phase-agent',
-                datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-             VALUES ('aq-phase-run', 'repo-1', 'aq-phase-agent', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
-             VALUES ('aq-phase-valid-1', 'aq-phase-agent', 'dispatched', '{}')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
-             VALUES ('aq-phase-valid-2', 'aq-phase-agent', 'dispatched', '{}')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, to_agent_id, status, context) \
-             VALUES ('aq-phase-stale', 'aq-phase-agent', 'dispatched', '{}')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_phase_gates (
-                run_id, phase, status, dispatch_id, pass_verdict
-            ) VALUES (
-                'aq-phase-run', 2, 'pending', 'aq-phase-stale', 'phase_gate_passed'
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    let engine = crate::engine::PolicyEngine::new_with_legacy_db(
-        &crate::config::Config::default(),
-        db.clone(),
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, discord_channel_id)
+         VALUES ('aq-phase-agent', 'AQ Phase Agent', 'claude', 'idle', '123456789012345678')",
     )
+    .execute(&pool)
+    .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            'aq-phase-card', 'AQ Phase Card', 'ready', 'medium', 'aq-phase-agent',
+            NOW(), NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('aq-phase-run', 'repo-1', 'aq-phase-agent', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+         VALUES ('aq-phase-valid-1', 'aq-phase-agent', 'dispatched', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+         VALUES ('aq-phase-valid-2', 'aq-phase-agent', 'dispatched', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (id, to_agent_id, status, context)
+         VALUES ('aq-phase-stale', 'aq-phase-agent', 'dispatched', '{}')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_phase_gates (
+            run_id, phase, status, dispatch_id, pass_verdict
+         ) VALUES (
+            'aq-phase-run', 2, 'pending', 'aq-phase-stale', 'phase_gate_passed'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
 
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
+    let pool_for_js = pool.clone();
+    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        register_globals_with_supervisor_and_pg(
+            &ctx,
+            Some(db_for_js),
+            Some(pool_for_js),
+            bridge.clone(),
+        )
+        .unwrap();
         let raw: String = ctx
             .eval(
                 r#"
@@ -1717,12 +1918,16 @@ fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
         assert_eq!(parsed["rows"][0]["status"], "failed");
         assert_eq!(parsed["rows"][0]["verdict"], "phase_gate_failed");
         assert_eq!(parsed["rows"][0]["next_phase"], 3);
-        assert_eq!(parsed["rows"][0]["final_phase"], 1);
+        // PG BOOLEAN surfaces as JSON `true` (SQLite was integer 1).
+        assert_eq!(parsed["rows"][0]["final_phase"], true);
         assert_eq!(parsed["rows"][0]["anchor_card_id"], "aq-phase-card");
         assert_eq!(parsed["rows"][0]["failure_reason"], "phase gate failed");
         assert_eq!(parsed["cleared"], true);
         assert_eq!(parsed["remaining"], 0);
     });
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[test]
