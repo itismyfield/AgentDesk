@@ -861,6 +861,16 @@ pub(super) struct SharedData {
     /// duplicate placeholder.
     pub(in crate::services::discord) queued_placeholders:
         dashmap::DashMap<(ChannelId, MessageId), MessageId>,
+    /// #1332 round-4 codex review P2: per-channel mutex guarding
+    /// `queued_placeholders` snapshot writes. When two updates for the same
+    /// channel race (e.g., two messages lose the start-turn race
+    /// simultaneously, or an insert races a queue-exit drain), each caller
+    /// must serialize its `(snapshot DashMap → atomic_write file)` block so
+    /// an older snapshot cannot finish last and overwrite a newer mapping.
+    /// The map fast-path stays on the lock-free `DashMap` above; only the
+    /// persistence I/O is serialized per channel.
+    pub(in crate::services::discord) queued_placeholders_persist_locks:
+        dashmap::DashMap<ChannelId, Arc<std::sync::Mutex<()>>>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -1059,18 +1069,38 @@ impl SharedData {
             .unwrap_or_else(|| vec![UserRecord::new(fallback_user_id, fallback_user_name)])
     }
 
-    /// #1332 round-3 codex review P2: write-through insert for the
-    /// `queued_placeholders` mapping. Updates the in-memory `DashMap` first
-    /// so the running process keeps its existing read-after-write semantics,
-    /// then snapshots the channel's mappings to disk so a subsequent restart
-    /// can re-attach the restored mailbox queue entries to the same
-    /// `📬 메시지 대기 중` Discord cards.
+    /// #1332 round-4 codex review P2: fetch (or create) the per-channel
+    /// persistence mutex. The mutex itself is stored as `Arc<Mutex<()>>` so
+    /// callers can clone it out of the `DashMap` and release the shard lock
+    /// before acquiring the channel mutex — eliminating any chance of a
+    /// deadlock between DashMap shard locks and the persistence mutex.
+    pub(in crate::services::discord) fn queued_placeholders_persist_lock(
+        &self,
+        channel_id: ChannelId,
+    ) -> Arc<std::sync::Mutex<()>> {
+        self.queued_placeholders_persist_locks
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// #1332 round-3 codex review P2 + round-4 P2: write-through insert for
+    /// the `queued_placeholders` mapping. The in-memory `DashMap` mutation
+    /// + the on-disk snapshot write are both performed under a per-channel
+    /// persistence mutex so two concurrent inserts (or an insert racing a
+    /// remove) on the same channel cannot reorder their on-disk effect:
+    /// the snapshot that lands last on disk is always the snapshot taken
+    /// after the latest mutation. The DashMap shard lock is released before
+    /// the file I/O begins, so DashMap reads from the rest of the system
+    /// continue to make progress.
     pub(super) fn insert_queued_placeholder(
         &self,
         channel_id: ChannelId,
         user_msg_id: MessageId,
         placeholder_msg_id: MessageId,
     ) {
+        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
+        let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.queued_placeholders
             .insert((channel_id, user_msg_id), placeholder_msg_id);
         queued_placeholders_store::persist_channel_from_map(
@@ -1081,15 +1111,19 @@ impl SharedData {
         );
     }
 
-    /// #1332 round-3 codex review P2: write-through remove for the
-    /// `queued_placeholders` mapping. Returns the placeholder message id that
-    /// was removed (if any) so callers can drive the same downstream flow as
-    /// the raw `DashMap::remove`.
+    /// #1332 round-3 codex review P2 + round-4 P2: write-through remove for
+    /// the `queued_placeholders` mapping. Returns the placeholder message id
+    /// that was removed (if any) so callers can drive the same downstream
+    /// flow as the raw `DashMap::remove`. Mutation + snapshot run under the
+    /// per-channel persistence mutex; see `insert_queued_placeholder` for
+    /// the deadlock-avoidance rationale.
     pub(super) fn remove_queued_placeholder(
         &self,
         channel_id: ChannelId,
         user_msg_id: MessageId,
     ) -> Option<MessageId> {
+        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
+        let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let removed = self
             .queued_placeholders
             .remove(&(channel_id, user_msg_id))
@@ -1438,6 +1472,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
         placeholder_controller: Arc::new(placeholder_controller::PlaceholderController::default()),
         queued_placeholders: dashmap::DashMap::new(),
+        queued_placeholders_persist_locks: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1706,6 +1741,14 @@ fn queue_exit_drain_queued_placeholders(
     channel_id: ChannelId,
     queue_exit_events: &[&QueueExitEvent],
 ) -> Vec<(MessageId, QueueExitKind)> {
+    // codex review round-4 P2: hold the channel's persistence mutex across
+    // the whole batch drain + snapshot write. Without this, a concurrent
+    // `insert_queued_placeholder` for the same channel could observe its
+    // mutation reflected in memory but lose the race to write the
+    // *post-drain* snapshot to disk — leaving a stale entry that resurrects
+    // on restart for an intervention that has already exited the queue.
+    let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+    let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut visible_cards_to_clear: Vec<(MessageId, QueueExitKind)> = Vec::new();
     let mut mutated = false;
     for event in queue_exit_events {
@@ -4207,6 +4250,176 @@ mod tests {
                 .get(&(channel_id, user_msg_id_b))
                 .map(|v| *v),
             Some(placeholder_b)
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    /// codex review round-4 P2: serialize concurrent
+    /// `insert_queued_placeholder` / `remove_queued_placeholder` calls on the
+    /// SAME channel via the per-channel persistence mutex. Without the
+    /// mutex, two concurrent updates could each snapshot the DashMap and
+    /// then race their `atomic_write` calls — letting an older snapshot
+    /// finish last and resurrect an entry the newer call had already
+    /// removed (or drop one the newer call had inserted). After this test
+    /// returns, the on-disk snapshot MUST match the in-memory `DashMap`
+    /// byte-for-byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_insert_remove_serializes_persistence_per_channel() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+        use std::collections::HashSet;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let shared = super::make_shared_data_for_tests();
+        // `make_shared_data_for_tests` hard-codes provider=Claude and
+        // token_hash="test-token-hash"; load via the same constants so the
+        // load path looks at the same namespace the write-through helper
+        // wrote to.
+        let provider = shared.provider.clone();
+        let token_hash = shared.token_hash.clone();
+        let channel_id = ChannelId::new(950_000_000_000_001);
+
+        // Pre-seed N entries so each concurrent task has something to remove.
+        // Use a non-trivial fan-out (16 inserts + 16 removes spawned in
+        // parallel) to maximize the chance of catching a snapshot-write
+        // reordering bug if the per-channel lock were absent.
+        const FANOUT: u64 = 16;
+        let preseed_keys: Vec<(MessageId, MessageId)> = (0..FANOUT)
+            .map(|i| {
+                (
+                    MessageId::new(850_000_000_000_000 + i),
+                    MessageId::new(750_000_000_000_000 + i),
+                )
+            })
+            .collect();
+        for (user_msg_id, placeholder_msg_id) in &preseed_keys {
+            shared.insert_queued_placeholder(channel_id, *user_msg_id, *placeholder_msg_id);
+        }
+
+        // Spawn 2*FANOUT concurrent operations on the SAME channel.  Half
+        // remove a pre-seeded key, half insert a fresh key.  Each call
+        // independently snapshots the DashMap and writes the channel file;
+        // without the per-channel persistence mutex, an older snapshot can
+        // land on disk after a newer one and overwrite the newer state.
+        let mut handles = Vec::new();
+        for (user_msg_id, _) in preseed_keys.iter() {
+            let shared = shared.clone();
+            let user_msg_id = *user_msg_id;
+            handles.push(tokio::task::spawn_blocking(move || {
+                shared.remove_queued_placeholder(channel_id, user_msg_id);
+            }));
+        }
+        let new_keys: Vec<(MessageId, MessageId)> = (0..FANOUT)
+            .map(|i| {
+                (
+                    MessageId::new(860_000_000_000_000 + i),
+                    MessageId::new(760_000_000_000_000 + i),
+                )
+            })
+            .collect();
+        for (user_msg_id, placeholder_msg_id) in new_keys.iter() {
+            let shared = shared.clone();
+            let user_msg_id = *user_msg_id;
+            let placeholder_msg_id = *placeholder_msg_id;
+            handles.push(tokio::task::spawn_blocking(move || {
+                shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
+            }));
+        }
+        for h in handles {
+            h.await.expect("concurrent persistence task must not panic");
+        }
+
+        // Final in-memory state: the FANOUT pre-seeded entries are gone,
+        // the FANOUT new entries remain.
+        let in_memory: HashSet<(MessageId, MessageId)> = shared
+            .queued_placeholders
+            .iter()
+            .filter(|kv| kv.key().0 == channel_id)
+            .map(|kv| (kv.key().1, *kv.value()))
+            .collect();
+        let expected_in_memory: HashSet<(MessageId, MessageId)> =
+            new_keys.iter().copied().collect();
+        assert_eq!(
+            in_memory, expected_in_memory,
+            "in-memory DashMap should reflect every concurrent mutation"
+        );
+
+        // The critical assertion: the on-disk snapshot must match
+        // byte-for-byte.  If two snapshots raced, an older write would
+        // overwrite the newer one and the loaded set would diverge from
+        // memory (extra resurrected entries, or missing fresh ones).
+        let restored = queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        let on_disk: HashSet<(MessageId, MessageId)> = restored
+            .into_iter()
+            .filter(|((ch, _), _)| *ch == channel_id)
+            .map(|((_, user_msg_id), placeholder_msg_id)| (user_msg_id, placeholder_msg_id))
+            .collect();
+        assert_eq!(
+            on_disk, expected_in_memory,
+            "on-disk snapshot must equal in-memory state after concurrent inserts/removes (per-channel persistence mutex serializes snapshot writes)",
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    /// codex review round-4 P2: the per-channel persistence mutex is keyed
+    /// by `ChannelId`, so two channels MUST be able to persist
+    /// concurrently without serializing on each other's I/O. This is the
+    /// throughput half of the contract — the previous test asserts
+    /// correctness within a single channel; this test asserts isolation
+    /// across channels.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_persistence_does_not_serialize_across_channels() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let shared = super::make_shared_data_for_tests();
+        let provider = shared.provider.clone();
+        let token_hash = shared.token_hash.clone();
+        let channel_a = ChannelId::new(960_000_000_000_001);
+        let channel_b = ChannelId::new(960_000_000_000_002);
+        let user_msg_a = MessageId::new(870_000_000_000_001);
+        let user_msg_b = MessageId::new(870_000_000_000_002);
+        let placeholder_a = MessageId::new(770_000_000_000_001);
+        let placeholder_b = MessageId::new(770_000_000_000_002);
+
+        // Insert on both channels concurrently. tokio::join! awaits both
+        // at once; if the implementation accidentally used a single global
+        // persistence mutex this would still pass correctness-wise, so the
+        // real assertion is the post-condition below — both channels'
+        // mappings land on disk in their respective files.
+        let shared_a = shared.clone();
+        let shared_b = shared.clone();
+        let task_a = tokio::task::spawn_blocking(move || {
+            shared_a.insert_queued_placeholder(channel_a, user_msg_a, placeholder_a);
+        });
+        let task_b = tokio::task::spawn_blocking(move || {
+            shared_b.insert_queued_placeholder(channel_b, user_msg_b, placeholder_b);
+        });
+        let (ra, rb) = tokio::join!(task_a, task_b);
+        ra.expect("channel-a persistence must not panic");
+        rb.expect("channel-b persistence must not panic");
+
+        let restored = queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        assert_eq!(
+            restored.get(&(channel_a, user_msg_a)).copied(),
+            Some(placeholder_a),
+            "channel-a snapshot must be persisted independently",
+        );
+        assert_eq!(
+            restored.get(&(channel_b, user_msg_b)).copied(),
+            Some(placeholder_b),
+            "channel-b snapshot must be persisted independently",
         );
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };

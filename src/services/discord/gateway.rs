@@ -289,6 +289,14 @@ pub(super) fn drain_merged_queued_placeholders(
     head_message_id: MessageId,
     source_message_ids: &[MessageId],
 ) -> Vec<MessageId> {
+    // codex review round-4 P2: serialize the merged-source drain with every
+    // other `queued_placeholders` mutation on the same channel via the
+    // per-channel persistence mutex. Otherwise an `insert_queued_placeholder`
+    // for the head id could race this drain and let the older snapshot
+    // overwrite the newer disk file, resurrecting non-head source mappings
+    // on restart.
+    let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+    let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut to_delete = Vec::new();
     let mut mutated = false;
     for message_id in source_message_ids {
