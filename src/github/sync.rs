@@ -569,7 +569,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // `update_entry_status_on_pg_tx` — see explicit sweep at the end for why
     // we still fall back to `maybe_finalize_run_if_ready_pg` for those runs.
     let dispatched_rows = sqlx::query(
-        "SELECT id
+        "SELECT id, run_id
          FROM auto_queue_entries
          WHERE kanban_card_id = $1 AND status = 'dispatched'",
     )
@@ -578,10 +578,15 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     .await
     .map_err(|error| format!("load dispatched auto-queue entries for {card_id}: {error}"))?;
 
+    let mut done_run_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     for row in dispatched_rows {
         let entry_id: String = row
             .try_get("id")
             .map_err(|error| format!("read dispatched auto-queue entry id: {error}"))?;
+        if let Ok(Some(run_id)) = row.try_get::<Option<String>, _>("run_id") {
+            done_run_ids.insert(run_id);
+        }
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'done',
@@ -644,6 +649,25 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // `_pg` lane deterministic.
     for run_id in pending_run_ids {
         let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
+    }
+
+    // PG GitHub sync does not receive a PolicyEngine, so it cannot fire the
+    // `OnCardTerminal` phase-gate policy path. Review-disabled runs explicitly
+    // opt out of that gate, so complete them here once the last dispatched
+    // entry has been marked done.
+    for run_id in done_run_ids {
+        let review_mode = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(review_mode, 'enabled')
+             FROM auto_queue_runs
+             WHERE id = $1",
+        )
+        .bind(&run_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| format!("load auto-queue review mode for run {run_id}: {error}"))?;
+        if review_mode.as_deref() == Some("disabled") {
+            let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
+        }
     }
 
     Ok(())

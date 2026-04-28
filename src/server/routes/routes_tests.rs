@@ -26019,7 +26019,7 @@ async fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases
     );
 
     for slot_index in [0_i32, 1_i32] {
-        let slot: (Option<String>, Option<i32>) = sqlx::query_as(
+        let slot: (Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT assigned_run_id, assigned_thread_group
              FROM auto_queue_slots
              WHERE agent_id = 'agent-finished-recovery' AND slot_index = $1",

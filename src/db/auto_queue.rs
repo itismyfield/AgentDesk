@@ -2285,7 +2285,7 @@ pub async fn record_consultation_dispatch_on_pg(
 
     let updated = sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = $1,
+         SET metadata = $1::jsonb,
              updated_at = NOW()
          WHERE id = $2",
     )
@@ -2305,8 +2305,8 @@ pub async fn record_consultation_dispatch_on_pg(
         .to_string());
     }
 
-    let entry_result = update_entry_status_on_pg(
-        pool,
+    let entry_result = update_entry_status_on_pg_tx(
+        &mut tx,
         entry_id,
         ENTRY_STATUS_DISPATCHED,
         trigger_source,

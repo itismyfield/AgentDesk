@@ -3334,7 +3334,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let slot_thread_group_final: Option<i32> = sqlx::query_scalar(
+        let slot_thread_group_final: Option<i64> = sqlx::query_scalar(
             "SELECT assigned_thread_group FROM auto_queue_slots
              WHERE agent_id = 'agent-1' AND slot_index = 0",
         )
