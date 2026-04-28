@@ -1810,6 +1810,40 @@ pub(in crate::services::discord) fn classify_turn_kind_from_author(
     }
 }
 
+/// codex review round-8 P2 (#1332): release the mailbox slot acquired by
+/// `mailbox_try_start_turn` after a `send_intake_placeholder` POST failure.
+///
+/// During the await window of the failed POST, a concurrent message can lose
+/// the start-turn race and enqueue a soft intervention on this channel. Once
+/// we release the slot here the channel becomes idle, and unless we explicitly
+/// schedule a kickoff that queued message is stranded behind the now-idle
+/// mailbox until some unrelated event drains it. `mailbox_finish_turn`
+/// reports `has_pending == true` whenever such a backlog exists; in that
+/// case we fan out via the standard `schedule_deferred_idle_queue_kickoff`
+/// hook (the same one used by `recovery_engine` / `placeholder_sweeper` /
+/// the cancel paths), which spawns a deferred drain so this failure path
+/// returns promptly to its caller.
+///
+/// Returns `true` when a kickoff was scheduled so the caller can log it.
+pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post_failure(
+    shared: &Arc<SharedData>,
+    provider: &super::super::ProviderKind,
+    channel_id: ChannelId,
+) -> bool {
+    let finish = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+    if finish.mailbox_online && finish.has_pending {
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "intake_placeholder_post_failed",
+        );
+        true
+    } else {
+        false
+    }
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -2992,13 +3026,18 @@ pub(in crate::services::discord) async fn handle_text_message(
             Ok(msg_id) => msg_id,
             Err(error) => {
                 let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
-                let _ = super::super::mailbox_finish_turn(shared, &bot_owner_provider, channel_id)
-                    .await;
+                let kicked = release_mailbox_after_placeholder_post_failure(
+                    shared,
+                    &bot_owner_provider,
+                    channel_id,
+                )
+                .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
-                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot",
+                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot, kickoff_scheduled={}",
                     channel_id,
-                    error
+                    error,
+                    kicked
                 );
                 return Err::<(), Error>(error.into());
             }
@@ -6304,5 +6343,133 @@ mod tests {
         assert!(alice_user_prompt.starts_with("[User: Alice (ID: 101)]"));
         assert!(bob_user_prompt.starts_with("[User: Bob (ID: 202)]"));
         assert_ne!(alice_user_prompt, bob_user_prompt);
+    }
+
+    /// codex review round-8 P2 (#1332): when `send_intake_placeholder` POSTs
+    /// while another concurrent message has lost the race and queued itself,
+    /// the failure-path mailbox release MUST schedule a deferred kickoff so
+    /// the queued message is dispatched. The previous code ignored
+    /// `FinishTurnResult::has_pending` and let the channel sit idle with a
+    /// persisted queued item, so this test pins the kickoff.
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_mailbox_after_placeholder_post_failure_schedules_kickoff_when_pending() {
+        use crate::services::provider::CancelToken;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = super::super::super::ProviderKind::Codex;
+        let channel_id = ChannelId::new(987_654_321);
+        let owner = UserId::new(42);
+        let active_msg_id = MessageId::new(1_000);
+        let queued_msg_id = MessageId::new(1_001);
+
+        // 1. Active turn acquires the slot via the start-turn race.
+        let cancel_token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            cancel_token.clone(),
+            owner,
+            active_msg_id,
+        )
+        .await;
+        assert!(started, "fresh mailbox should accept the active turn");
+        shared.global_active.fetch_add(1, Ordering::Relaxed);
+
+        // 2. While the placeholder POST is in flight, a concurrent message
+        //    loses the race and is enqueued as a soft intervention.
+        let enqueue = super::super::super::mailbox_enqueue_intervention(
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            super::super::super::Intervention {
+                author_id: owner,
+                message_id: queued_msg_id,
+                source_message_ids: vec![queued_msg_id],
+                text: "race-loser queued message".to_string(),
+                mode: super::super::super::InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+        )
+        .await;
+        assert!(enqueue.enqueued, "concurrent race-loser should enqueue");
+
+        // 3. Snapshot the deferred-hook backlog BEFORE the simulated failure
+        //    so we can prove the kickoff was actually scheduled.
+        let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+
+        // 4. Simulate the placeholder POST failure: invoke the new release
+        //    helper that wraps `mailbox_finish_turn` + the deferred kickoff.
+        let kicked =
+            release_mailbox_after_placeholder_post_failure(&shared, &provider, channel_id).await;
+
+        // 5. The helper MUST report a kickoff was scheduled, the deferred
+        //    backlog MUST have been incremented synchronously by
+        //    `schedule_deferred_idle_queue_kickoff`, and the mailbox MUST
+        //    still have the queued item ready for the kickoff to drain.
+        assert!(kicked, "kickoff must be scheduled when has_pending == true");
+        let backlog_after = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+        assert_eq!(
+            backlog_after,
+            backlog_before + 1,
+            "deferred_hook_backlog must increment exactly once when a kickoff is scheduled (channel must not be left idle with a queued item)"
+        );
+
+        let snapshot = shared.mailbox(channel_id).snapshot().await;
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            1,
+            "queued race-loser must remain in the mailbox so the deferred kickoff can drain it"
+        );
+        assert_eq!(
+            snapshot.intervention_queue[0].message_id, queued_msg_id,
+            "queued message identity must be preserved across mailbox_finish_turn"
+        );
+    }
+
+    /// Negative: when the mailbox queue is empty after `mailbox_finish_turn`,
+    /// the failure-path helper must NOT schedule a deferred kickoff (no
+    /// double-kicks, no spurious wake-ups for channels with nothing pending).
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_mailbox_after_placeholder_post_failure_skips_kickoff_when_idle() {
+        use crate::services::provider::CancelToken;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = super::super::super::ProviderKind::Codex;
+        let channel_id = ChannelId::new(123_456_789);
+        let owner = UserId::new(7);
+        let active_msg_id = MessageId::new(2_000);
+
+        let cancel_token = Arc::new(CancelToken::new());
+        let started = super::super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            cancel_token.clone(),
+            owner,
+            active_msg_id,
+        )
+        .await;
+        assert!(started, "fresh mailbox should accept the active turn");
+        shared.global_active.fetch_add(1, Ordering::Relaxed);
+
+        let backlog_before = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+        let kicked =
+            release_mailbox_after_placeholder_post_failure(&shared, &provider, channel_id).await;
+        assert!(
+            !kicked,
+            "no kickoff should be scheduled when nothing is pending"
+        );
+        let backlog_after = shared.deferred_hook_backlog.load(Ordering::Relaxed);
+        assert_eq!(
+            backlog_after, backlog_before,
+            "deferred_hook_backlog must not grow when the queue is empty (avoid spurious wake-ups)"
+        );
     }
 }
