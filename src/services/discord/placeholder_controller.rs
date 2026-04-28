@@ -5,18 +5,19 @@
 //! goes through the same FSM and the same edit-coalescer.
 //!
 //! Lifecycle FSM:
-//!   `NotCreated` → `Active` → `Completed | TimedOut | Aborted`
+//!   `NotCreated` → `Queued | Active` → `Completed | TimedOut | Aborted`
+//!   `Queued` → `Active` (when a mailbox-queued turn is dispatched)
 //!
 //! Operating rules:
 //!   - One `PlaceholderKey` (provider + channel + message) maps to exactly one
 //!     Discord message id (1:1).
-//!   - Repeated `ensure_active` calls with identical content collapse into a
-//!     single Discord PATCH (coalescing).
+//!   - Repeated `ensure_active` / `ensure_queued` calls with identical content
+//!     collapse into a single Discord PATCH (coalescing).
 //!   - Terminal transitions (`Completed` / `TimedOut` / `Aborted`) are
 //!     idempotent — the second call only emits a trace, never a PATCH.
-//!   - Once a key has reached a terminal state any further `ensure_active`
-//!     calls are no-ops; `placeholder_sweeper` is responsible for cleaning up
-//!     stale `Active` entries via its own TTL path.
+//!   - Once a key has reached a terminal state any further `ensure_active` /
+//!     `ensure_queued` calls are no-ops; `placeholder_sweeper` is responsible
+//!     for cleaning up stale `Active` entries via its own TTL path.
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
@@ -39,6 +40,10 @@ pub(super) struct PlaceholderKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlaceholderLifecycle {
     NotCreated,
+    /// Mailbox-queued turn waiting for the active turn to finish (#1332).
+    /// Visually distinct from `Active` so the user is not misled into thinking
+    /// processing has already begun.
+    Queued,
     Active,
     Completed,
     TimedOut,
@@ -144,7 +149,8 @@ impl PlaceholderController {
 
     /// Drive the placeholder into `Active`. Issues a Discord PATCH only if the
     /// rendered content actually changed since the last call. Safe to call on
-    /// every assistant token / tool event tick.
+    /// every assistant token / tool event tick. Allowed source states:
+    /// `NotCreated`, `Queued` (mailbox dequeue path, #1332), `Active` (re-render).
     pub(super) async fn ensure_active<G: TurnGateway + ?Sized>(
         &self,
         gateway: &G,
@@ -177,7 +183,9 @@ impl PlaceholderController {
 
         // Coalesce identical re-renders into a single PATCH.  Tool-stream
         // ticks can fire several times per second and Discord rate-limits
-        // PATCHes <100ms apart.
+        // PATCHes <100ms apart. `Queued` content always differs from `Active`
+        // (different header), so the Queued → Active transition correctly
+        // forces a PATCH even when last_rendered is set.
         if guarded.last_rendered.as_deref() == Some(rendered.as_str())
             && matches!(guarded.state, PlaceholderLifecycle::Active)
         {
@@ -207,6 +215,60 @@ impl PlaceholderController {
                 // bound the map under `PLACEHOLDER_ENTRIES_MAX`.
                 PlaceholderControllerOutcome::EditFailed
             }
+        }
+    }
+
+    /// Drive the placeholder into `Queued` (#1332) — used when a user message
+    /// loses the `mailbox_try_start_turn` race and is enqueued for later
+    /// dispatch. Visually distinct from `Active` so the user knows the turn
+    /// has not started yet. Allowed only from `NotCreated` / `Queued`; rejected
+    /// once the card has reached `Active` or any terminal state.
+    pub(super) async fn ensure_queued<G: TurnGateway + ?Sized>(
+        &self,
+        gateway: &G,
+        key: PlaceholderKey,
+        input: PlaceholderActiveInput,
+    ) -> PlaceholderControllerOutcome {
+        let entry = self.entry(&key);
+        let mut guarded = entry.lock().await;
+
+        if matches!(
+            guarded.state,
+            PlaceholderLifecycle::Active
+                | PlaceholderLifecycle::Completed
+                | PlaceholderLifecycle::TimedOut
+                | PlaceholderLifecycle::Aborted
+        ) {
+            return PlaceholderControllerOutcome::Rejected;
+        }
+
+        let rendered = build_monitor_handoff_placeholder_with_context(
+            MonitorHandoffStatus::Queued,
+            input.reason,
+            input.started_at_unix,
+            input.tool_summary.as_deref(),
+            input.command_summary.as_deref(),
+            input.context_line.as_deref(),
+        );
+
+        if guarded.last_rendered.as_deref() == Some(rendered.as_str())
+            && matches!(guarded.state, PlaceholderLifecycle::Queued)
+        {
+            return PlaceholderControllerOutcome::Coalesced;
+        }
+
+        let edit_result = gateway
+            .edit_message(key.channel_id, key.message_id, &rendered)
+            .await;
+
+        match edit_result {
+            Ok(_) => {
+                guarded.state = PlaceholderLifecycle::Queued;
+                guarded.last_rendered = Some(rendered);
+                guarded.active_snapshot = Some(input);
+                PlaceholderControllerOutcome::Edited
+            }
+            Err(_) => PlaceholderControllerOutcome::EditFailed,
         }
     }
 
@@ -301,6 +363,18 @@ impl PlaceholderController {
     /// #1308 P2).
     pub(super) fn detach(&self, key: &PlaceholderKey) {
         self.entries.remove(key);
+    }
+
+    /// #1332: drop every entry whose `(channel_id, message_id)` matches the
+    /// argument, regardless of provider. Used by the queue-exit feedback path
+    /// where the provider scope was discarded with the queued-placeholder
+    /// mapping; without provider-agnostic detach a cancelled queued
+    /// intervention would leave a stale `Queued` row in the cap-bounded
+    /// `entries` map (`Queued` is excluded from the regular eviction sweep
+    /// because in-flight queued placeholders must survive until dispatch).
+    pub(super) fn detach_by_message(&self, channel_id: ChannelId, message_id: MessageId) {
+        self.entries
+            .retain(|key, _| !(key.channel_id == channel_id && key.message_id == message_id));
     }
 }
 
@@ -665,6 +739,142 @@ mod tests {
             gateway.edits.load(Ordering::SeqCst),
             edits_before_detach,
             "detach must not emit any Discord PATCH"
+        );
+    }
+
+    // #1332: Queued → Active transition emits a PATCH and keeps the same
+    // Discord message id so the user sees `📬 메시지 대기 중` morph into
+    // `🔄 백그라운드 처리 중` on dispatch.
+    #[tokio::test]
+    async fn ensure_queued_then_active_transitions_in_place() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let queued_input = PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let outcome = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::Queued
+        );
+        let queued_render = gateway.last_edit.lock().await.clone().unwrap();
+        assert!(queued_render.contains("📬 **메시지 대기 중**"));
+        assert!(queued_render.contains("앞선 턴 진행 중"));
+
+        let active_outcome = controller
+            .ensure_active(gateway.as_ref(), key(), sample_input())
+            .await;
+        assert_eq!(active_outcome, PlaceholderControllerOutcome::Edited);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::Active
+        );
+        let active_render = gateway.last_edit.lock().await.clone().unwrap();
+        assert!(active_render.contains("🔄 **백그라운드 처리 중**"));
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 2);
+    }
+
+    // #1332: Repeated `ensure_queued` with identical input coalesces into a
+    // single PATCH — the Queued state mirrors Active's coalescing contract.
+    #[tokio::test]
+    async fn ensure_queued_coalesces_identical_input() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let queued_input = || PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let _ = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input())
+            .await;
+        let outcome = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input())
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
+    }
+
+    // #1332: A Queued placeholder can be aborted (e.g. the queued intervention
+    // is cancelled) and renders the standard `Aborted` terminal card.
+    #[tokio::test]
+    async fn queued_to_aborted_is_terminal() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let queued_input = PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let _ = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .await;
+        let outcome = controller
+            .transition(gateway.as_ref(), key(), PlaceholderLifecycle::Aborted)
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::Aborted
+        );
+    }
+
+    // #1332: provider-agnostic detach drops every entry sharing the
+    // (channel, message) pair so the queue-exit feedback path can clear a
+    // stale Queued row without re-tracking which provider owned the card.
+    #[tokio::test]
+    async fn detach_by_message_drops_queued_entry_regardless_of_provider() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let queued_input = PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let _ = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .await;
+        assert_eq!(controller.entries.len(), 1);
+        controller.detach_by_message(key().channel_id, key().message_id);
+        assert_eq!(controller.entries.len(), 0);
+    }
+
+    // #1332: `ensure_queued` is rejected once the placeholder has reached
+    // `Active` — once a turn is processing we never want to revert to Queued.
+    #[tokio::test]
+    async fn ensure_queued_rejected_after_active() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let _ = controller
+            .ensure_active(gateway.as_ref(), key(), sample_input())
+            .await;
+        let queued_input = PlaceholderActiveInput {
+            reason: MonitorHandoffReason::Queued,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let outcome = controller
+            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Rejected);
+        assert_eq!(
+            controller.lifecycle(&key()).await,
+            PlaceholderLifecycle::Active
         );
     }
 

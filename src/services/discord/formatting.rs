@@ -1311,6 +1311,29 @@ mod tests {
         assert!(aborted.starts_with("⚠ **백그라운드 중단** (모니터 연결 끊김)\n"));
     }
 
+    // #1332: Queued status renders the dedicated `📬 메시지 대기 중` card
+    // with the `> **사유**: 앞선 턴 진행 중` sub-line and the queued footer.
+    #[test]
+    fn test_build_monitor_handoff_placeholder_queued_renders_mailbox_card() {
+        let text = build_monitor_handoff_placeholder_with_context(
+            MonitorHandoffStatus::Queued,
+            MonitorHandoffReason::Queued,
+            1_700_000_000,
+            // Tool/command/context are intentionally ignored for Queued so the
+            // card cannot leak partial state from an earlier turn.
+            Some("Bash"),
+            Some("ls -la"),
+            Some("⏳ context"),
+        );
+        assert!(text.starts_with("📬 **메시지 대기 중**\n"));
+        assert!(text.contains("> **사유**: 앞선 턴 진행 중"));
+        assert!(!text.contains("> **도구**:"));
+        assert!(!text.contains("> **명령**:"));
+        assert!(!text.contains("> **요약**:"));
+        assert!(text.contains("> **시작**: <t:1700000000:R>"));
+        assert!(text.ends_with("현재 진행 중인 턴 완료 후 처리 시작합니다."));
+    }
+
     #[test]
     fn test_build_monitor_handoff_placeholder_truncates_long_tool_and_command() {
         let long_tool = "⚙ Read: ".to_string() + &"x".repeat(500);
@@ -2691,6 +2714,8 @@ pub(super) fn humanize_tool_status(tool_line: &str) -> String {
 /// Reason label shown in the monitor handoff placeholder. Mirrors the issue
 /// #1114 spec: 비동기 dispatch (tmux watcher), 인라인 타임아웃 (timeout
 /// before stream end), 명시 호출 (explicit `/monitor`-style invocation).
+/// `Queued` (#1332) is paired with `MonitorHandoffStatus::Queued` to render
+/// the mailbox-queued placeholder card (앞선 턴 진행 중).
 /// `InlineTimeout` and `ExplicitCall` are exposed for downstream wiring
 /// (#1113 lifecycle, #1115 sweeper) and are exercised via tests today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2699,6 +2724,7 @@ pub(super) enum MonitorHandoffReason {
     AsyncDispatch,
     InlineTimeout,
     ExplicitCall,
+    Queued,
 }
 
 impl MonitorHandoffReason {
@@ -2707,6 +2733,7 @@ impl MonitorHandoffReason {
             Self::AsyncDispatch => "비동기 dispatch",
             Self::InlineTimeout => "인라인 타임아웃",
             Self::ExplicitCall => "명시 호출",
+            Self::Queued => "앞선 턴 진행 중",
         }
     }
 }
@@ -2715,9 +2742,12 @@ impl MonitorHandoffReason {
 /// emoji/title pair shown to the user. Terminal variants (Completed / Failed
 /// / TimedOut / Aborted) are exposed for downstream wiring (#1115 sweeper,
 /// watcher terminal updates) and are exercised via tests today.
+/// `Queued` (#1332) is the pre-active state used while a user message waits
+/// for the mailbox dequeue.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub(super) enum MonitorHandoffStatus<'a> {
+    Queued,
     Active,
     Completed,
     Failed { reason: &'a str },
@@ -2730,6 +2760,7 @@ const MONITOR_HANDOFF_COMMAND_MAX_BYTES: usize = 80;
 
 fn monitor_handoff_header(status: MonitorHandoffStatus<'_>) -> String {
     match status {
+        MonitorHandoffStatus::Queued => "📬 **메시지 대기 중**".to_string(),
         MonitorHandoffStatus::Active => "🔄 **백그라운드 처리 중**".to_string(),
         MonitorHandoffStatus::Completed => "✅ **백그라운드 완료**".to_string(),
         MonitorHandoffStatus::Failed { reason } => {
@@ -2749,6 +2780,7 @@ fn monitor_handoff_header(status: MonitorHandoffStatus<'_>) -> String {
 
 fn monitor_handoff_footer(status: MonitorHandoffStatus<'_>) -> &'static str {
     match status {
+        MonitorHandoffStatus::Queued => "현재 진행 중인 턴 완료 후 처리 시작합니다.",
         MonitorHandoffStatus::Active => "완료 시 이 채널로 결과 이어서 보냅니다.",
         MonitorHandoffStatus::Completed => "결과가 위에 도착했습니다.",
         MonitorHandoffStatus::Failed { .. } => "자세한 사유는 다음 응답을 확인해 주세요.",
@@ -2838,15 +2870,23 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
 
     let mut lines = Vec::with_capacity(6);
     lines.push(header);
-    lines.push(format!(
-        "> **도구**: {tool_field} · **사유**: {reason}",
-        reason = reason.label()
-    ));
-    if let Some(command) = command_line {
-        lines.push(format!("> **명령**: `{command}`"));
-    }
-    if let Some(context) = context_line {
-        lines.push(format!("> **요약**: {context}"));
+    // #1332 — the Queued card has no tool/command yet (turn has not started),
+    // so collapse to a reason-only sub-line. Active/terminal cards keep the
+    // dual 도구·사유 layout from #1114.
+    if matches!(status, MonitorHandoffStatus::Queued) {
+        let _ = (tool_field, command_line, context_line);
+        lines.push(format!("> **사유**: {reason}", reason = reason.label()));
+    } else {
+        lines.push(format!(
+            "> **도구**: {tool_field} · **사유**: {reason}",
+            reason = reason.label()
+        ));
+        if let Some(command) = command_line {
+            lines.push(format!("> **명령**: `{command}`"));
+        }
+        if let Some(context) = context_line {
+            lines.push(format!("> **요약**: {context}"));
+        }
     }
     lines.push(format!("> **시작**: <t:{started_at_unix}:R>"));
     lines.push(footer.to_string());

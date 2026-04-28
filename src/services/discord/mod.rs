@@ -852,6 +852,14 @@ pub(super) struct SharedData {
     /// instead of racing.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
+    /// #1332: per-channel mapping from a mailbox-queued user message id to the
+    /// Discord placeholder message id displaying the `📬 메시지 대기 중` card.
+    /// Populated when `mailbox_try_start_turn` reports the new message lost the
+    /// race; consumed by the dispatch path when the queued turn is dequeued so
+    /// the existing Queued card transitions to `Active` instead of leaking a
+    /// duplicate placeholder.
+    pub(in crate::services::discord) queued_placeholders:
+        dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -1359,6 +1367,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         tmux_relay_coords: dashmap::DashMap::new(),
         placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
         placeholder_controller: Arc::new(placeholder_controller::PlaceholderController::default()),
+        queued_placeholders: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1612,6 +1621,27 @@ async fn apply_queue_exit_feedback(
         .collect();
     if queue_exit_events.is_empty() {
         return;
+    }
+
+    // #1332: drop any stale `📬 메시지 대기 중` placeholder mappings up front
+    // so a subsequent dispatch never wires a newly-started turn to a placeholder
+    // that belongs to a cancelled/expired intervention. Also detach the
+    // controller entry so the cap-bounded `placeholder_controller.entries`
+    // map does not retain a stale Queued row (Queued is not in the standard
+    // eviction sweep — it is meant to live until dispatch). Runs regardless
+    // of whether the cached serenity ctx is available so a missing ctx never
+    // silently misroutes the next turn.
+    for event in &queue_exit_events {
+        for message_id in &event.intervention.source_message_ids {
+            if let Some((_, placeholder_msg_id)) = shared
+                .queued_placeholders
+                .remove(&(channel_id, *message_id))
+            {
+                shared
+                    .placeholder_controller
+                    .detach_by_message(channel_id, placeholder_msg_id);
+            }
+        }
     }
 
     let Some(ctx) = shared.cached_serenity_ctx.get() else {
@@ -3697,5 +3727,46 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    // #1332: When a queued intervention is cancelled / expired / superseded the
+    // queue-exit feedback path must drop the corresponding entry in
+    // `queued_placeholders` so a subsequent dispatch never reuses a placeholder
+    // belonging to a no-longer-active intervention. The placeholder controller
+    // entry tied to the same Discord message id must also be detached so the
+    // cap-bounded `entries` map does not retain a stale Queued row.
+    #[tokio::test]
+    async fn queued_placeholders_cleared_on_queue_exit() {
+        use super::QueueExitEvent;
+        use super::QueueExitKind;
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(900_000_000_000_001);
+        let user_msg_id = MessageId::new(800_000_000_000_001);
+        let placeholder_msg_id = MessageId::new(700_000_000_000_001);
+        shared
+            .queued_placeholders
+            .insert((channel_id, user_msg_id), placeholder_msg_id);
+        assert_eq!(shared.queued_placeholders.len(), 1);
+
+        let event = QueueExitEvent {
+            intervention: Intervention {
+                author_id: UserId::new(42),
+                message_id: user_msg_id,
+                source_message_ids: vec![user_msg_id],
+                text: "ignored".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+            },
+            kind: QueueExitKind::Cancelled,
+        };
+        super::apply_queue_exit_feedback(&shared, channel_id, std::slice::from_ref(&event)).await;
+        assert_eq!(
+            shared.queued_placeholders.len(),
+            0,
+            "queue-exit feedback must drop the queued placeholder mapping"
+        );
     }
 }

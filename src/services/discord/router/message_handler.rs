@@ -2536,20 +2536,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         take_session_retry_context(shared, channel_id),
     );
 
-    // Send placeholder message (after restore notification so restore appears first).
-    let placeholder_msg_id = send_intake_placeholder(
-        ctx.http.clone(),
-        shared.clone(),
-        channel_id,
-        if reply_to_user_message && dispatch_id_for_thread.is_none() {
-            Some((channel_id, user_msg_id))
-        } else {
-            None
-        },
-    )
-    .await
-    .map_err(|error| -> Error { error.into() })?;
-
+    // #1332: probe turn liveness BEFORE posting any placeholder so a queued
+    // message renders the dedicated `📬 메시지 대기 중` card instead of the
+    // misleading `🔄 백그라운드 처리 중` Active card. The previous order
+    // (send_intake_placeholder → mailbox_try_start_turn) made every queued
+    // message look like processing had already begun.
+    //
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
     // because the async gap between check and insert allows interleaving.
@@ -2563,6 +2555,73 @@ pub(in crate::services::discord) async fn handle_text_message(
         user_msg_id,
     )
     .await;
+
+    // #1332 dispatch hand-off: if this turn was previously enqueued and is now
+    // being dispatched, reuse the Queued placeholder card so the user sees a
+    // single message transition `📬 → 🔄` instead of two distinct placeholders.
+    let queued_placeholder_handoff = if started {
+        shared
+            .queued_placeholders
+            .remove(&(channel_id, user_msg_id))
+            .map(|(_, msg_id)| msg_id)
+    } else {
+        None
+    };
+
+    let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
+        // Drive the controller from Queued → Active so the user sees the
+        // existing `📬 메시지 대기 중` card morph into `🔄 백그라운드 처리 중`
+        // at the exact moment the queued turn starts. The streaming path will
+        // overwrite this Active card with response text shortly after; the
+        // brief Active beat is the visible "we picked your queued message up"
+        // signal. If the controller rejects (e.g. the entry is already
+        // terminal because of a race), we still reuse the message id so the
+        // streaming path edits the same Discord card and the user does not
+        // see a duplicate placeholder.
+        let key = super::super::placeholder_controller::PlaceholderKey {
+            provider: super::super::resolve_discord_bot_provider(token),
+            channel_id,
+            message_id: existing,
+        };
+        let active_input = super::super::placeholder_controller::PlaceholderActiveInput {
+            reason: super::super::formatting::MonitorHandoffReason::Queued,
+            started_at_unix: chrono::Utc::now().timestamp(),
+            tool_summary: None,
+            command_summary: None,
+            context_line: None,
+        };
+        let gateway = super::super::gateway::DiscordGateway::new(
+            ctx.http.clone(),
+            shared.clone(),
+            super::super::resolve_discord_bot_provider(token),
+            None,
+        );
+        let _ = shared
+            .placeholder_controller
+            .ensure_active(&gateway, key, active_input)
+            .await;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 📬➡️🔄 DISPATCH: queued placeholder transitioned to Active (channel {}, msg {})",
+            channel_id,
+            existing
+        );
+        existing
+    } else {
+        send_intake_placeholder(
+            ctx.http.clone(),
+            shared.clone(),
+            channel_id,
+            if reply_to_user_message && dispatch_id_for_thread.is_none() {
+                Some((channel_id, user_msg_id))
+            } else {
+                None
+            },
+        )
+        .await
+        .map_err(|error| -> Error { error.into() })?
+    };
+
     if !started {
         let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
         let enqueue_outcome = super::super::mailbox_enqueue_intervention(
@@ -2633,9 +2692,14 @@ pub(in crate::services::discord) async fn handle_text_message(
         // the user-visible breadcrumb of the background notification (e.g.
         // a `Bash run_in_background` completion message). Deleting it
         // silently destroys information the user has no way to recover from.
-        // For foreground (human-typed) turns we still delete — the user's
-        // own message stays visible and the `⏳` reaction tells them the
-        // turn was queued.
+        //
+        // #1332: Foreground turns also preserve the placeholder, but instead
+        // of leaving the bare `...` we EDIT it into a `📬 메시지 대기 중`
+        // card via the placeholder controller and store a `(channel,
+        // user_msg_id) → placeholder_msg_id` mapping so the dispatch path can
+        // later transition the same Discord message into `🔄 Active`. If the
+        // edit fails (e.g. Discord API hiccup), fall back to the legacy delete
+        // so users never see a stale `...` placeholder.
         if turn_kind.is_background_trigger() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -2643,6 +2707,54 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 placeholder_msg_id
             );
+        } else if enqueued && !is_thread_routed {
+            let gateway = DiscordGateway::new(
+                ctx.http.clone(),
+                shared.clone(),
+                bot_owner_provider.clone(),
+                None,
+            );
+            let key = super::super::placeholder_controller::PlaceholderKey {
+                provider: bot_owner_provider.clone(),
+                channel_id,
+                message_id: placeholder_msg_id,
+            };
+            let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
+                reason: super::super::formatting::MonitorHandoffReason::Queued,
+                started_at_unix: chrono::Utc::now().timestamp(),
+                tool_summary: None,
+                command_summary: None,
+                context_line: None,
+            };
+            let outcome = shared
+                .placeholder_controller
+                .ensure_queued(&gateway, key, queued_input)
+                .await;
+            use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
+            match outcome {
+                Edited | Coalesced => {
+                    shared
+                        .queued_placeholders
+                        .insert((channel_id, user_msg_id), placeholder_msg_id);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 📬 RACE: queued placeholder rendered (channel {}, msg {})",
+                        channel_id,
+                        placeholder_msg_id
+                    );
+                }
+                _ => {
+                    let _ = channel_id
+                        .delete_message(&ctx.http, placeholder_msg_id)
+                        .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⚠ RACE: queued placeholder render failed, deleted instead (channel {}, msg {})",
+                        channel_id,
+                        placeholder_msg_id
+                    );
+                }
+            }
         } else {
             let _ = channel_id
                 .delete_message(&ctx.http, placeholder_msg_id)
