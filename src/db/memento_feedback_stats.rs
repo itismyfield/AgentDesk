@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use libsql_rusqlite::{Connection, params};
-use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::Db;
 
@@ -38,20 +37,6 @@ pub fn upsert_turn_stat(db: &Db, stat: &MementoFeedbackTurnStat) -> Result<()> {
         anyhow!("db lock failed while recording memento feedback stats: {error}")
     })?;
     upsert_turn_stat_on_conn(&mut conn, stat)
-}
-
-#[allow(dead_code)]
-pub async fn upsert_turn_stat_db(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
-    stat: &MementoFeedbackTurnStat,
-) -> Result<()> {
-    if let Some(pool) = pg_pool {
-        return upsert_turn_stat_pg(pool, stat).await;
-    }
-
-    let db = db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
-    upsert_turn_stat(db, stat)
 }
 
 pub fn upsert_turn_stat_on_conn(
@@ -95,51 +80,6 @@ pub fn upsert_turn_stat_on_conn(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn upsert_turn_stat_pg(pool: &PgPool, stat: &MementoFeedbackTurnStat) -> Result<()> {
-    validate_turn_stat(stat)?;
-    sqlx::query(
-        "INSERT INTO memento_feedback_turn_stats (
-            turn_id,
-            stat_date,
-            agent_id,
-            provider,
-            recall_count,
-            manual_tool_feedback_count,
-            manual_covered_recall_count,
-            auto_tool_feedback_count,
-            covered_recall_count
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (turn_id) DO UPDATE SET
-            stat_date = EXCLUDED.stat_date,
-            agent_id = EXCLUDED.agent_id,
-            provider = EXCLUDED.provider,
-            recall_count = EXCLUDED.recall_count,
-            manual_tool_feedback_count = EXCLUDED.manual_tool_feedback_count,
-            manual_covered_recall_count = EXCLUDED.manual_covered_recall_count,
-            auto_tool_feedback_count = EXCLUDED.auto_tool_feedback_count,
-            covered_recall_count = EXCLUDED.covered_recall_count",
-    )
-    .bind(&stat.turn_id)
-    .bind(&stat.stat_date)
-    .bind(&stat.agent_id)
-    .bind(&stat.provider)
-    .bind(stat.recall_count)
-    .bind(stat.manual_tool_feedback_count)
-    .bind(stat.manual_covered_recall_count)
-    .bind(stat.auto_tool_feedback_count)
-    .bind(stat.covered_recall_count)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        anyhow!(
-            "upsert postgres memento feedback stat {}: {error}",
-            stat.turn_id
-        )
-    })?;
-    Ok(())
-}
-
 #[cfg(test)]
 pub fn list_daily_stats(conn: &Connection) -> Result<Vec<MementoFeedbackDailyStat>> {
     let mut stmt = conn.prepare(
@@ -174,69 +114,6 @@ pub fn list_daily_stats(conn: &Connection) -> Result<Vec<MementoFeedbackDailySta
         })
     })?;
     Ok(rows.collect::<libsql_rusqlite::Result<Vec<_>>>()?)
-}
-
-#[allow(dead_code)]
-pub async fn list_daily_stats_pg(pool: &PgPool) -> Result<Vec<MementoFeedbackDailyStat>> {
-    let rows = sqlx::query(
-        "SELECT
-            stat_date,
-            agent_id,
-            provider,
-            recall_count,
-            tool_feedback_count,
-            manual_tool_feedback_count,
-            manual_covered_recall_count,
-            auto_tool_feedback_count,
-            covered_recall_count,
-            compliance_rate,
-            coverage_rate
-         FROM memento_feedback_daily_stats
-         ORDER BY stat_date DESC, agent_id ASC, provider ASC",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|error| anyhow!("list postgres memento feedback daily stats: {error}"))?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(MementoFeedbackDailyStat {
-                stat_date: row
-                    .try_get("stat_date")
-                    .map_err(|error| anyhow!("read stat_date: {error}"))?,
-                agent_id: row
-                    .try_get("agent_id")
-                    .map_err(|error| anyhow!("read agent_id: {error}"))?,
-                provider: row
-                    .try_get("provider")
-                    .map_err(|error| anyhow!("read provider: {error}"))?,
-                recall_count: row
-                    .try_get("recall_count")
-                    .map_err(|error| anyhow!("read recall_count: {error}"))?,
-                tool_feedback_count: row
-                    .try_get("tool_feedback_count")
-                    .map_err(|error| anyhow!("read tool_feedback_count: {error}"))?,
-                manual_tool_feedback_count: row
-                    .try_get("manual_tool_feedback_count")
-                    .map_err(|error| anyhow!("read manual_tool_feedback_count: {error}"))?,
-                manual_covered_recall_count: row
-                    .try_get("manual_covered_recall_count")
-                    .map_err(|error| anyhow!("read manual_covered_recall_count: {error}"))?,
-                auto_tool_feedback_count: row
-                    .try_get("auto_tool_feedback_count")
-                    .map_err(|error| anyhow!("read auto_tool_feedback_count: {error}"))?,
-                covered_recall_count: row
-                    .try_get("covered_recall_count")
-                    .map_err(|error| anyhow!("read covered_recall_count: {error}"))?,
-                compliance_rate: row
-                    .try_get("compliance_rate")
-                    .map_err(|error| anyhow!("read compliance_rate: {error}"))?,
-                coverage_rate: row
-                    .try_get("coverage_rate")
-                    .map_err(|error| anyhow!("read coverage_rate: {error}"))?,
-            })
-        })
-        .collect()
 }
 
 fn validate_turn_stat(stat: &MementoFeedbackTurnStat) -> Result<()> {
