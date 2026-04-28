@@ -822,7 +822,6 @@ where
         && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-            Some(db),
             engine.pg_pool().cloned(),
         );
     }
@@ -1182,10 +1181,9 @@ async fn transition_status_with_opts_pg_inner(
     if effective.is_terminal(new_status)
         && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
     {
-        crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-            db,
-            Some(pg_pool.clone()),
-        );
+        crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
+            pg_pool.clone(),
+        ));
     }
 
     Ok((
@@ -1801,7 +1799,6 @@ pub fn fire_transition_hooks_with_backends(
         // #119: Record true_negative for cards that passed review and reached terminal state
         if pipeline.is_terminal(to) && record_true_negative_if_pass(db, engine.pg_pool(), card_id) {
             crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-                Some(db),
                 engine.pg_pool().cloned(),
             );
         }
@@ -1967,10 +1964,9 @@ fn fire_transition_hooks_pg(
         if pipeline.is_terminal(to)
             && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
         {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-                db,
-                Some(pg_pool.clone()),
-            );
+            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
+                pg_pool.clone(),
+            ));
         }
     }
 }

@@ -15,79 +15,19 @@ const MIN_CATEGORY_OUTCOMES: i64 = 3;
 /// Called from each decision branch (accept, dispute, dismiss) to avoid
 /// relying on code after the match block that early-returning branches skip.
 pub(super) async fn record_decision_tuning(
-    db: &crate::db::Db,
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     decision: &str,
     dispatch_id: Option<&str>,
 ) {
-    if let Some(pool) = pg_pool {
-        record_decision_tuning_pg(pool, card_id, decision, dispatch_id).await;
+    let Some(pool) = pg_pool else {
+        tracing::warn!(
+            card_id,
+            "[review-tuning] postgres pool unavailable; skipping tuning outcome record"
+        );
         return;
-    }
-
-    let (review_round, last_verdict, finding_cats) = db
-        .lock()
-        .ok()
-        .map(|conn| {
-            let round: Option<i64> = conn
-                .query_row(
-                    "SELECT review_round FROM card_review_state WHERE card_id = ?1",
-                    [card_id],
-                    |row| row.get(0),
-                )
-                .ok();
-            let verdict: Option<String> = conn
-                .query_row(
-                    "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
-                    [card_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            let cats: Option<String> = conn
-                .query_row(
-                    "SELECT td.result FROM task_dispatches td \
-                     WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
-                     AND td.status = 'completed' ORDER BY td.rowid DESC LIMIT 1",
-                    [card_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-                .and_then(|r| {
-                    serde_json::from_str::<serde_json::Value>(&r)
-                        .ok()
-                        .and_then(|v| {
-                            v["items"].as_array().map(|items| {
-                                let cats: Vec<String> = items
-                                    .iter()
-                                    .filter_map(|it| it["category"].as_str().map(|s| s.to_string()))
-                                    .collect();
-                                serde_json::to_string(&cats).unwrap_or_default()
-                            })
-                        })
-                });
-            (round, verdict, cats)
-        })
-        .unwrap_or((None, None, None));
-
-    let outcome = match decision {
-        "accept" => "true_positive",
-        "dismiss" => "false_positive",
-        "dispute" => "disputed",
-        _ => "unknown",
     };
-    record_tuning_outcome(
-        db,
-        card_id,
-        dispatch_id,
-        review_round,
-        last_verdict.as_deref().unwrap_or("unknown"),
-        Some(decision),
-        outcome,
-        finding_cats.as_deref(),
-    );
+    record_decision_tuning_pg(pool, card_id, decision, dispatch_id).await;
 }
 
 async fn record_decision_tuning_pg(
@@ -197,39 +137,6 @@ fn finding_categories_from_dispatch_result(result: &str) -> Option<String> {
 }
 
 /// #119: Record a review tuning outcome for FP/FN aggregation.
-fn record_tuning_outcome(
-    db: &crate::db::Db,
-    card_id: &str,
-    dispatch_id: Option<&str>,
-    review_round: Option<i64>,
-    verdict: &str,
-    decision: Option<&str>,
-    outcome: &str,
-    finding_categories: Option<&str>,
-) {
-    if let Ok(conn) = db.lock() {
-        conn.execute(
-            "INSERT INTO review_tuning_outcomes \
-             (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            libsql_rusqlite::params![
-                card_id,
-                dispatch_id,
-                review_round,
-                verdict,
-                decision,
-                outcome,
-                finding_categories,
-            ],
-        )
-        .ok();
-        tracing::info!(
-            "[review-tuning] #119 recorded outcome: card={card_id} verdict={verdict} decision={} outcome={outcome}",
-            decision.unwrap_or("none")
-        );
-    }
-}
-
 async fn record_tuning_outcome_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -268,134 +175,43 @@ async fn record_tuning_outcome_pg(
 /// This avoids the old mtime-based debounce that could miss outcomes inserted
 /// shortly after the previous aggregate (e.g. a 5th sample crossing the threshold
 /// 10s after a 4-sample aggregate).
-pub fn spawn_aggregate_if_needed_with_pg(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<sqlx::PgPool>,
-) {
-    let db = db.cloned();
-    tokio::spawn(async move {
-        if let Some(pool) = pg_pool {
-            let max_outcome_id = sqlx::query(
-                "SELECT COALESCE(MAX(id), 0)::BIGINT AS max_outcome_id
-                 FROM review_tuning_outcomes",
-            )
-            .fetch_one(&pool)
-            .await
-            .ok()
-            .and_then(|row| row.try_get::<i64, _>("max_outcome_id").ok())
-            .unwrap_or(0);
-
-            let last_aggregated_outcome_id = sqlx::query(
-                "SELECT value
-                 FROM kv_meta
-                 WHERE key = $1
-                 LIMIT 1",
-            )
-            .bind("review_tuning_last_aggregated_rowid")
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|row| row.try_get::<Option<String>, _>("value").ok())
-            .flatten()
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(0);
-
-            if max_outcome_id <= last_aggregated_outcome_id {
-                return;
-            }
-
-            let _ = aggregate_review_tuning_core_pg(&pool).await;
-            return;
-        }
-
-        let Some(db) = db else {
-            return;
-        };
-
-        // Debounce: compare latest outcome rowid against last aggregated rowid
-        if let Ok(conn) = db.lock() {
-            let max_rowid: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(rowid), 0) FROM review_tuning_outcomes",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            let last_aggregated_rowid: i64 = conn
-                .query_row(
-                    "SELECT CAST(COALESCE(value, '0') AS INTEGER) FROM kv_meta WHERE key = 'review_tuning_last_aggregated_rowid'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            if max_rowid <= last_aggregated_rowid {
-                return; // no new outcomes since last aggregation, skip
-            }
-        }
-        aggregate_review_tuning_core(&db);
-    });
-}
-
-/// Core aggregation logic shared by the HTTP endpoint and background trigger.
-fn aggregate_review_tuning_core(db: &crate::db::Db) -> (i64, i64, i64, i64, i64, usize) {
-    let conn = match db.lock() {
-        Ok(c) => c,
-        Err(_) => return (0, 0, 0, 0, 0, 0),
+pub fn spawn_aggregate_if_needed_with_pg(pg_pool: Option<sqlx::PgPool>) {
+    let Some(pool) = pg_pool else {
+        return;
     };
-
-    // Snapshot the current max rowid BEFORE reading outcomes.
-    // This is stored in kv_meta after aggregation for rowid-based debounce.
-    let snapshot_max_rowid: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM review_tuning_outcomes",
-            [],
-            |row| row.get(0),
+    tokio::spawn(async move {
+        let max_outcome_id = sqlx::query(
+            "SELECT COALESCE(MAX(id), 0)::BIGINT AS max_outcome_id
+             FROM review_tuning_outcomes",
         )
+        .fetch_one(&pool)
+        .await
+        .ok()
+        .and_then(|row| row.try_get::<i64, _>("max_outcome_id").ok())
         .unwrap_or(0);
 
-    let mut stmt = match conn.prepare(
-        "SELECT outcome, finding_categories \
-         FROM review_tuning_outcomes \
-         WHERE created_at > datetime('now', '-30 days')",
-    ) {
-        Ok(s) => s,
-        Err(_) => return (0, 0, 0, 0, 0, 0),
-    };
-
-    let rows: Vec<(String, Option<String>)> = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
+        let last_aggregated_outcome_id = sqlx::query(
+            "SELECT value
+             FROM kv_meta
+             WHERE key = $1
+             LIMIT 1",
+        )
+        .bind("review_tuning_last_aggregated_rowid")
+        .fetch_optional(&pool)
+        .await
         .ok()
-        .into_iter()
-        .flat_map(|r| r.flatten())
-        .collect();
-    let (total_tp, total_fp, total_tn, total_fn, total_disputed, guidance_lines) =
-        summarize_review_tuning_rows(&rows);
-    let guidance = if guidance_lines.is_empty() {
-        String::new()
-    } else {
-        guidance_lines.join("\n")
-    };
+        .flatten()
+        .and_then(|row| row.try_get::<Option<String>, _>("value").ok())
+        .flatten()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
 
-    persist_review_tuning_guidance_sqlite(&conn, &guidance, snapshot_max_rowid);
-    write_review_tuning_guidance_file(&guidance);
+        if max_outcome_id <= last_aggregated_outcome_id {
+            return;
+        }
 
-    let lines = guidance_lines.len();
-    tracing::info!(
-        "[review-tuning] #119 aggregation: tp={total_tp} fp={total_fp} tn={total_tn} fn={total_fn} disputed={total_disputed}, {lines} guidance lines → {}",
-        review_tuning_guidance_path().display()
-    );
-
-    (
-        total_tp,
-        total_fp,
-        total_tn,
-        total_fn,
-        total_disputed,
-        lines,
-    )
+        let _ = aggregate_review_tuning_core_pg(&pool).await;
+    });
 }
 
 async fn aggregate_review_tuning_core_pg(pool: &sqlx::PgPool) -> (i64, i64, i64, i64, i64, usize) {
@@ -560,25 +376,6 @@ fn summarize_review_tuning_rows(
         total_disputed,
         guidance_lines,
     )
-}
-
-fn persist_review_tuning_guidance_sqlite(
-    conn: &libsql_rusqlite::Connection,
-    guidance: &str,
-    snapshot_max_rowid: i64,
-) {
-    conn.execute(
-        "INSERT INTO kv_meta (key, value) VALUES ('review_tuning_guidance', ?1) \
-         ON CONFLICT(key) DO UPDATE SET value = ?1",
-        [&guidance],
-    )
-    .ok();
-    conn.execute(
-        "INSERT INTO kv_meta (key, value) VALUES ('review_tuning_last_aggregated_rowid', ?1) \
-         ON CONFLICT(key) DO UPDATE SET value = ?1",
-        [&snapshot_max_rowid.to_string()],
-    )
-    .ok();
 }
 
 async fn persist_review_tuning_guidance_pg(
@@ -747,18 +544,10 @@ mod tests {
         format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
-    fn sqlite_test_db() -> crate::db::Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
-    }
-
     #[tokio::test]
     async fn record_decision_tuning_pg_records_latest_review_context() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        let sqlite_db = sqlite_test_db();
 
         sqlx::query(
             "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
@@ -802,7 +591,6 @@ mod tests {
         .unwrap();
 
         record_decision_tuning(
-            &sqlite_db,
             Some(&pool),
             "card-pg-tuning",
             "accept",

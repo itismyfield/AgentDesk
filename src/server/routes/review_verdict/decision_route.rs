@@ -60,11 +60,7 @@ async fn transition_status_pg_first(
 }
 
 fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
-    if let Some(pool) = state.pg_pool_ref() {
-        spawn_aggregate_if_needed_with_pg(None, Some(pool.clone()));
-    } else {
-        spawn_aggregate_if_needed_with_pg(Some(legacy_db(state)), None);
-    }
+    spawn_aggregate_if_needed_with_pg(state.pg_pool_ref().cloned());
 }
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
@@ -1603,7 +1599,6 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome
             record_decision_tuning(
-                legacy_db(&state),
                 state.pg_pool_ref(),
                 &body.card_id,
                 "accept",
@@ -1656,7 +1651,6 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
             record_decision_tuning(
-                legacy_db(&state),
                 state.pg_pool_ref(),
                 &body.card_id,
                 "dispute",
@@ -1942,7 +1936,6 @@ pub async fn submit_review_decision(
     );
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
     record_decision_tuning(
-        legacy_db(&state),
         state.pg_pool_ref(),
         &body.card_id,
         &body.decision,
