@@ -938,24 +938,6 @@ pub(super) async fn update_agent(
     )
 }
 
-fn sqlite_agent_channels(
-    conn: &libsql_rusqlite::Connection,
-    id: &str,
-) -> Result<(Option<String>, crate::db::agents::AgentChannelBindings), String> {
-    let status = conn
-        .query_row("SELECT status FROM agents WHERE id = ?1", [id], |row| {
-            row.get::<_, Option<String>>(0)
-        })
-        .map_err(|error| match error {
-            libsql_rusqlite::Error::QueryReturnedNoRows => "agent not found".to_string(),
-            error => format!("{error}"),
-        })?;
-    let bindings = crate::db::agents::load_agent_channel_bindings(conn, id)
-        .map_err(|error| format!("load agent channels: {error}"))?
-        .ok_or_else(|| "agent not found".to_string())?;
-    Ok((status, bindings))
-}
-
 async fn pg_agent_channels(
     pool: &sqlx::PgPool,
     id: &str,
@@ -1258,22 +1240,6 @@ async fn pg_agent_has_active_turn(pool: &sqlx::PgPool, id: &str) -> Result<bool,
     .map_err(|error| format!("check active turns: {error}"))
 }
 
-fn sqlite_agent_has_active_turn(
-    conn: &libsql_rusqlite::Connection,
-    id: &str,
-) -> Result<bool, String> {
-    conn.query_row(
-        "SELECT COUNT(*)
-           FROM sessions
-          WHERE agent_id = ?1
-            AND (status = 'working' OR active_dispatch_id IS NOT NULL)",
-        [id],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|count| count > 0)
-    .map_err(|error| format!("check active turns: {error}"))
-}
-
 pub(super) async fn archive_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1486,33 +1452,6 @@ async fn load_duplicate_source_pg(
     source_id: &str,
 ) -> Result<Option<Value>, String> {
     load_agent_pg(pool, source_id).await
-}
-
-fn load_duplicate_source_sqlite(
-    conn: &libsql_rusqlite::Connection,
-    source_id: &str,
-) -> Result<Option<Value>, String> {
-    conn.query_row(
-        "SELECT id, name, name_ko, provider, department, avatar_emoji
-           FROM agents WHERE id = ?1",
-        [source_id],
-        |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "name_ko": row.get::<_, Option<String>>(2)?,
-                "provider": row.get::<_, Option<String>>(3)?,
-                "department": row.get::<_, Option<String>>(4)?,
-                "department_id": row.get::<_, Option<String>>(4)?,
-                "avatar_emoji": row.get::<_, Option<String>>(5)?,
-            }))
-        },
-    )
-    .map(Some)
-    .or_else(|error| match error {
-        libsql_rusqlite::Error::QueryReturnedNoRows => Ok(None),
-        error => Err(format!("{error}")),
-    })
 }
 
 fn update_duplicate_config_metadata(

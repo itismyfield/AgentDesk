@@ -822,27 +822,6 @@ fn stage_json(
     })
 }
 
-fn sqlite_stage_row_to_json(
-    row: &libsql_rusqlite::Row,
-) -> libsql_rusqlite::Result<serde_json::Value> {
-    Ok(stage_json(
-        row.get::<_, i64>(0)?,
-        row.get::<_, Option<String>>(1)?,
-        row.get::<_, Option<String>>(2)?,
-        row.get::<_, i64>(3)?,
-        row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-        row.get::<_, i64>(6)?,
-        row.get::<_, Option<String>>(7)?,
-        row.get::<_, Option<String>>(8)?,
-        row.get::<_, Option<String>>(9)?,
-        row.get::<_, Option<String>>(10)?,
-        row.get::<_, Option<String>>(11)?,
-        row.get::<_, Option<i64>>(12)?,
-        row.get::<_, Option<String>>(13)?,
-    ))
-}
-
 fn pg_stage_row_to_json(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value, sqlx::Error> {
     let stage_order = row.try_get::<i64, _>("stage_order")?;
     let timeout_minutes = row.try_get::<i64, _>("timeout_minutes")?;
@@ -864,44 +843,6 @@ fn pg_stage_row_to_json(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value
         max_retries,
         row.try_get::<Option<String>, _>("parallel_with")?,
     ))
-}
-
-fn list_pipeline_stages_sqlite(
-    conn: &libsql_rusqlite::Connection,
-    repo: Option<&str>,
-    agent_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut sql = String::from(
-        "SELECT id, repo_id, stage_name, stage_order, trigger_after, entry_skill,
-                timeout_minutes, on_failure, skip_condition, provider,
-                agent_override_id, on_failure_target, max_retries, parallel_with
-         FROM pipeline_stages WHERE 1=1",
-    );
-    let mut bind_values: Vec<String> = Vec::new();
-
-    if let Some(repo) = repo {
-        bind_values.push(repo.to_string());
-        sql.push_str(&format!(" AND repo_id = ?{}", bind_values.len()));
-    }
-
-    if let Some(agent_id) = agent_id {
-        bind_values.push(agent_id.to_string());
-        sql.push_str(&format!(" AND agent_override_id = ?{}", bind_values.len()));
-    }
-
-    sql.push_str(" ORDER BY stage_order ASC");
-
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|error| format!("prepare stages: {error}"))?;
-    let params_ref: Vec<&dyn libsql_rusqlite::types::ToSql> = bind_values
-        .iter()
-        .map(|value| value as &dyn libsql_rusqlite::types::ToSql)
-        .collect();
-    let rows = stmt
-        .query_map(params_ref.as_slice(), sqlite_stage_row_to_json)
-        .map_err(|error| format!("query stages: {error}"))?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
 async fn list_pipeline_stages_pg(
@@ -983,37 +924,6 @@ fn dispatch_history_json(
     })
 }
 
-fn list_card_pipeline_history_sqlite(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type,
-                    status, title, context, result, created_at, updated_at
-             FROM task_dispatches WHERE kanban_card_id = ?1 ORDER BY created_at ASC",
-        )
-        .map_err(|error| format!("history query: {error}"))?;
-    let rows = stmt
-        .query_map([card_id], |row| {
-            Ok(dispatch_pipeline_history_json(
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-            ))
-        })
-        .map_err(|error| format!("history query: {error}"))?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
-}
-
 async fn list_card_pipeline_history_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1047,34 +957,6 @@ async fn list_card_pipeline_history_pg(
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()
         .map_err(|error| format!("decode history row: {error}"))
-}
-
-fn list_card_history_sqlite(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, dispatch_type, status, from_agent_id, to_agent_id, title, result, created_at, updated_at
-             FROM task_dispatches WHERE kanban_card_id = ?1 ORDER BY created_at ASC",
-        )
-        .map_err(|error| format!("prepare: {error}"))?;
-    let rows = stmt
-        .query_map([card_id], |row| {
-            Ok(dispatch_history_json(
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-            ))
-        })
-        .map_err(|error| format!("prepare: {error}"))?;
-    Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
 async fn list_card_history_pg(

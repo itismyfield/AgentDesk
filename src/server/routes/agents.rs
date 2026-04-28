@@ -181,14 +181,6 @@ struct ParsedTurnToolEvent {
     identity_value: String,
 }
 
-fn agent_exists(conn: &libsql_rusqlite::Connection, id: &str) -> bool {
-    conn.query_row("SELECT COUNT(*) FROM agents WHERE id = ?1", [id], |row| {
-        row.get::<_, i64>(0)
-    })
-    .map(|count| count > 0)
-    .unwrap_or(false)
-}
-
 fn resolve_channel_identifier(value: &str) -> Option<u64> {
     super::dispatches::resolve_channel_alias_pub(value).or_else(|| value.trim().parse::<u64>().ok())
 }
@@ -518,82 +510,6 @@ fn collect_turn_tool_events(
         .skip(len.saturating_sub(24))
         .map(|entry| entry.event)
         .collect()
-}
-
-fn find_agent_turn_session(
-    conn: &libsql_rusqlite::Connection,
-    agent_id: &str,
-) -> Result<Option<AgentTurnSession>, libsql_rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(s.session_key, ''), s.provider, s.status, s.active_dispatch_id,
-                s.last_heartbeat, s.created_at, s.thread_channel_id,
-                COALESCE(
-                    s.thread_channel_id,
-                    a.discord_channel_id,
-                    a.discord_channel_alt,
-                    a.discord_channel_cc,
-                    a.discord_channel_cdx
-                ) AS runtime_channel_id
-         FROM sessions s
-         LEFT JOIN agents a ON a.id = s.agent_id
-         WHERE s.agent_id = ?1
-         ORDER BY s.last_heartbeat DESC, s.created_at DESC, s.id DESC",
-    )?;
-
-    let rows = stmt.query_map([agent_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-
-    let mut resolver = SessionActivityResolver::new();
-    let mut latest = None;
-
-    for row in rows {
-        let (
-            session_key,
-            provider,
-            raw_status,
-            active_dispatch_id,
-            last_heartbeat,
-            created_at,
-            thread_channel_id,
-            runtime_channel_id,
-        ) = row?;
-        let session_key_ref = (!session_key.trim().is_empty()).then_some(session_key.as_str());
-        let effective = resolver.resolve(
-            session_key_ref,
-            raw_status.as_deref(),
-            active_dispatch_id.as_deref(),
-            last_heartbeat.as_deref(),
-        );
-        let candidate = AgentTurnSession {
-            session_key,
-            provider,
-            last_heartbeat,
-            created_at,
-            thread_channel_id,
-            runtime_channel_id,
-            effective_status: effective.status,
-            effective_active_dispatch_id: effective.active_dispatch_id,
-            is_working: effective.is_working,
-        };
-        if latest.is_none() {
-            latest = Some(candidate.clone());
-        }
-        if candidate.is_working {
-            return Ok(Some(candidate));
-        }
-    }
-
-    Ok(latest)
 }
 
 async fn agent_exists_pg(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx::Error> {

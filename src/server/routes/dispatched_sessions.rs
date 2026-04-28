@@ -2033,35 +2033,6 @@ async fn load_session_by_id_pg(
     Ok(Some((session_key, agent_id, provider, status)))
 }
 
-fn load_session_by_id_sqlite(
-    db: &crate::db::Db,
-    id: i64,
-) -> Result<Option<(String, Option<String>, Option<String>, Option<String>)>, String> {
-    let conn = db.lock().map_err(|error| format!("db lock: {error}"))?;
-    let row = conn
-        .query_row(
-            "SELECT session_key, agent_id, provider, status
-             FROM sessions
-             WHERE id = ?1",
-            libsql_rusqlite::params![id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            },
-        )
-        .ok();
-    match row {
-        Some((Some(session_key), agent_id, provider, status)) => {
-            Ok(Some((session_key, agent_id, provider, status)))
-        }
-        Some(_) | None => Ok(None),
-    }
-}
-
 /// GET /api/sessions/{id}/tmux-output?lines=N
 ///
 /// #1067: Skill promotion for watch-agent-turn. Returns the latest N lines of

@@ -6,7 +6,7 @@ use serde_json::json;
 use sqlx::Row as SqlxRow;
 
 use crate::config::{Config, EscalationMode};
-use crate::db::agents::{load_agent_channel_bindings, load_agent_channel_bindings_pg};
+use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::server::routes::AppState;
 use crate::services::discord::health::active_request_owner_for_channel;
 
@@ -147,17 +147,6 @@ fn escalation_defaults(config: &Config) -> EscalationSettings {
     }
 }
 
-fn load_override(conn: &libsql_rusqlite::Connection) -> Option<EscalationSettings> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = ?1",
-            [ESCALATION_SETTINGS_OVERRIDE_KEY],
-            |row| row.get(0),
-        )
-        .ok();
-    raw.and_then(|raw| serde_json::from_str::<EscalationSettings>(&raw).ok())
-}
-
 async fn load_override_pg_async(pool: &sqlx::PgPool) -> Result<Option<EscalationSettings>, String> {
     let raw = sqlx::query_scalar::<_, String>(
         "SELECT value
@@ -176,10 +165,6 @@ async fn load_override_pg_async(pool: &sqlx::PgPool) -> Result<Option<Escalation
     Ok(raw.and_then(|value| serde_json::from_str::<EscalationSettings>(&value).ok()))
 }
 
-fn merged_settings(conn: &libsql_rusqlite::Connection, config: &Config) -> EscalationSettings {
-    load_override(conn).unwrap_or_else(|| escalation_defaults(config))
-}
-
 fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<EscalationSettings, String> {
     let defaults = escalation_defaults(config);
     crate::utils::async_bridge::block_on_pg_result(
@@ -193,15 +178,8 @@ fn merged_settings_pg(pool: &sqlx::PgPool, config: &Config) -> Result<Escalation
     )
 }
 
-pub(in crate::server::routes) fn effective_owner_user_id(
-    conn: &libsql_rusqlite::Connection,
-    config: &Config,
-) -> Option<u64> {
-    merged_settings(conn, config).owner_user_id
-}
-
 pub(in crate::server::routes) fn effective_owner_user_id_with_backends(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     config: &Config,
 ) -> Option<u64> {
@@ -214,26 +192,7 @@ pub(in crate::server::routes) fn effective_owner_user_id_with_backends(
         }
     }
 
-    if let Some(db) = db {
-        if let Ok(conn) = db.lock() {
-            return effective_owner_user_id(&conn, config);
-        }
-    }
-
     escalation_defaults(config).owner_user_id
-}
-
-fn store_override(
-    conn: &libsql_rusqlite::Connection,
-    settings: &EscalationSettings,
-) -> Result<(), String> {
-    let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![ESCALATION_SETTINGS_OVERRIDE_KEY, raw],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 fn store_override_pg(pool: &sqlx::PgPool, settings: &EscalationSettings) -> Result<(), String> {
@@ -331,53 +290,6 @@ fn resolve_mode_at(settings: &EscalationSettings, now: DateTime<Utc>) -> Escalat
     }
 }
 
-fn load_card_summary(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) -> Result<CardEscalationSummary, String> {
-    conn.query_row(
-        "SELECT
-             title,
-             github_issue_number,
-             assigned_agent_id,
-             description,
-             status,
-             review_status,
-             blocked_reason,
-             (
-                 SELECT COUNT(*)
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1
-             ) AS dispatch_count,
-             (
-                 SELECT to_agent_id
-                 FROM task_dispatches
-                 WHERE kanban_card_id = ?1
-                   AND to_agent_id IS NOT NULL
-                   AND TRIM(to_agent_id) != ''
-                 ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC
-                 LIMIT 1
-             ) AS last_agent_id
-         FROM kanban_cards
-         WHERE id = ?1",
-        [card_id],
-        |row| {
-            Ok(CardEscalationSummary {
-                title: row.get(0)?,
-                issue_number: row.get(1)?,
-                assigned_agent_id: row.get(2)?,
-                description: row.get(3)?,
-                status: row.get(4)?,
-                review_status: row.get(5)?,
-                blocked_reason: row.get(6)?,
-                dispatch_count: row.get(7)?,
-                last_agent_id: row.get(8)?,
-            })
-        },
-    )
-    .map_err(|_| format!("card not found: {card_id}"))
-}
-
 async fn load_card_summary_pg_async(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -449,21 +361,6 @@ async fn load_card_summary_pg_async(
     })
 }
 
-fn latest_dispatch_agent_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT to_agent_id
-         FROM task_dispatches
-         WHERE kanban_card_id = ?1
-           AND to_agent_id IS NOT NULL
-           AND TRIM(to_agent_id) != ''
-         ORDER BY datetime(created_at) DESC, rowid DESC
-         LIMIT 1",
-        [card_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
 async fn latest_dispatch_agent_id_pg_async(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -481,41 +378,6 @@ async fn latest_dispatch_agent_id_pg_async(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("load postgres latest dispatch agent {card_id}: {error}"))
-}
-
-fn candidate_parent_channels(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    assigned_agent_id: Option<&str>,
-) -> Vec<u64> {
-    let mut agent_ids = Vec::new();
-    if let Some(agent_id) = latest_dispatch_agent_id(conn, card_id) {
-        agent_ids.push(agent_id);
-    }
-    if let Some(agent_id) = assigned_agent_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if !agent_ids.iter().any(|existing| existing == agent_id) {
-            agent_ids.push(agent_id.to_string());
-        }
-    }
-
-    let mut channels = Vec::new();
-    for agent_id in agent_ids {
-        let Ok(Some(bindings)) = load_agent_channel_bindings(conn, &agent_id) else {
-            continue;
-        };
-        for channel in bindings.all_channels() {
-            let Some(channel_id) = parse_channel_reference(&channel) else {
-                continue;
-            };
-            if !channels.contains(&channel_id) {
-                channels.push(channel_id);
-            }
-        }
-    }
-    channels
 }
 
 async fn candidate_parent_channels_pg_async(
@@ -596,15 +458,6 @@ fn escalation_thread_key(card_id: &str) -> String {
     format!("{ESCALATION_THREAD_KEY_PREFIX}{card_id}")
 }
 
-fn load_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM kv_meta WHERE key = ?1",
-        [escalation_thread_key(card_id)],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
 async fn load_cached_thread_id_pg_async(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -620,19 +473,6 @@ async fn load_cached_thread_id_pg_async(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))
-}
-
-fn save_cached_thread_id(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    thread_id: &str,
-) -> Result<(), String> {
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        libsql_rusqlite::params![escalation_thread_key(card_id), thread_id],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 fn save_cached_thread_id_pg(
@@ -660,15 +500,6 @@ fn save_cached_thread_id_pg(
         },
         |error| error,
     )
-}
-
-fn clear_cached_thread_id(conn: &libsql_rusqlite::Connection, card_id: &str) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM kv_meta WHERE key = ?1",
-        [escalation_thread_key(card_id)],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 fn clear_cached_thread_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Result<(), String> {
@@ -905,52 +736,6 @@ fn summarize_dispatch_result_text(raw: &str) -> Option<String> {
         })
 }
 
-fn load_recent_dispatch_results(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT dispatch_type, result
-             FROM task_dispatches
-             WHERE kanban_card_id = ?1
-               AND status IN ('completed', 'failed')
-             ORDER BY datetime(COALESCE(completed_at, updated_at, created_at)) DESC, rowid DESC
-             LIMIT ?2",
-        )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(
-            libsql_rusqlite::params![card_id, ESCALATION_RECENT_RESULT_LIMIT as i64],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
-        )
-        .map_err(|err| err.to_string())?;
-
-    let mut results = Vec::new();
-    for row in rows {
-        let (dispatch_type, result) = row.map_err(|err| err.to_string())?;
-        let Some(summary) = result
-            .as_deref()
-            .and_then(summarize_dispatch_result_text)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let label = dispatch_type
-            .as_deref()
-            .map(normalize_whitespace)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "dispatch".to_string());
-        results.push(format!("{label}: {summary}"));
-    }
-    Ok(results)
-}
-
 async fn load_recent_dispatch_results_pg_async(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -992,39 +777,6 @@ async fn load_recent_dispatch_results_pg_async(
         results.push(format!("{label}: {summary}"));
     }
     Ok(results)
-}
-
-fn load_card_context(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    summary: &CardEscalationSummary,
-) -> Result<Option<CardContext>, String> {
-    let issue_summary = summarize_issue_description(summary.description.as_deref());
-    let progress_summary = format_progress_summary(summary);
-    let recent_results = load_recent_dispatch_results(conn, card_id)?;
-    let blocked_reason = summary
-        .blocked_reason
-        .as_deref()
-        .map(normalize_whitespace)
-        .filter(|value| !value.is_empty())
-        .map(|value| truncate_chars(&value, ESCALATION_REASON_CHAR_LIMIT));
-
-    let context = CardContext {
-        issue_summary,
-        progress_summary,
-        recent_results,
-        blocked_reason,
-    };
-
-    if context.issue_summary.is_none()
-        && context.progress_summary.is_none()
-        && context.recent_results.is_empty()
-        && context.blocked_reason.is_none()
-    {
-        Ok(None)
-    } else {
-        Ok(Some(context))
-    }
 }
 
 async fn load_card_context_pg_async(
