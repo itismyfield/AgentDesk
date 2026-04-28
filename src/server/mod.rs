@@ -225,7 +225,7 @@ where
         // cancel tombstones to the durable store across dcserver restarts.
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
-    crate::services::observability::init_observability(legacy_db.clone(), pg_pool.clone());
+    crate::services::observability::init_observability(pg_pool.clone());
     crate::pipeline::refresh_override_health_report(legacy_db.as_ref(), pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(

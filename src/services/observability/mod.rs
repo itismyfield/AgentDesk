@@ -466,7 +466,7 @@ fn runtime() -> Arc<ObservabilityRuntime> {
         .clone()
 }
 
-pub fn init_observability(_db: Option<Db>, pg_pool: Option<PgPool>) {
+pub fn init_observability(pg_pool: Option<PgPool>) {
     let runtime = runtime();
     if let Ok(mut storage) = runtime.storage.lock() {
         storage.pg_pool = pg_pool;
@@ -995,7 +995,6 @@ fn snapshot_rows(
 }
 
 pub async fn query_analytics(
-    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AnalyticsFilters,
 ) -> Result<AnalyticsResponse> {
@@ -1039,7 +1038,6 @@ pub async fn query_analytics(
 }
 
 pub async fn query_agent_quality_events(
-    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &AgentQualityFilters,
 ) -> Result<Vec<AgentQualityEventRecord>> {
@@ -1204,7 +1202,6 @@ pub async fn query_agent_quality_ranking_with(
 }
 
 pub async fn query_invariant_analytics(
-    _db: &Db,
     pg_pool: Option<&PgPool>,
     filters: &InvariantAnalyticsFilters,
 ) -> Result<InvariantAnalyticsResponse> {
@@ -2857,7 +2854,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         emit_turn_started(
             "codex",
@@ -2887,7 +2884,6 @@ mod tests {
         flush_for_tests().await;
 
         let response = query_analytics(
-            &db,
             None,
             &AnalyticsFilters {
                 provider: Some("codex".to_string()),
@@ -2910,7 +2906,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         assert!(record_invariant_check(
             true,
@@ -2932,7 +2928,6 @@ mod tests {
         flush_for_tests().await;
 
         let error = query_invariant_analytics(
-            &db,
             None,
             &InvariantAnalyticsFilters {
                 provider: Some("codex".to_string()),
@@ -2951,7 +2946,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         assert!(!record_invariant_check(
             false,
@@ -2972,7 +2967,6 @@ mod tests {
         flush_for_tests().await;
 
         let error = query_invariant_analytics(
-            &db,
             None,
             &InvariantAnalyticsFilters {
                 provider: Some("claude".to_string()),
@@ -2991,7 +2985,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         emit_agent_quality_event(AgentQualityEvent {
             source_event_id: Some("turn-1".to_string()),
@@ -3009,7 +3003,6 @@ mod tests {
         flush_for_tests().await;
 
         let error = query_agent_quality_events(
-            &db,
             None,
             &AgentQualityFilters {
                 agent_id: Some("agent-1".to_string()),
@@ -3029,10 +3022,9 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         let error = query_agent_quality_events(
-            &db,
             None,
             &AgentQualityFilters {
                 agent_id: Some("agent-window".to_string()),
@@ -3052,10 +3044,9 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         let error = query_agent_quality_events(
-            &db,
             None,
             &AgentQualityFilters {
                 agent_id: Some("agent-A".to_string()),
@@ -3075,7 +3066,7 @@ mod tests {
         let _guard = test_runtime_lock();
         reset_for_tests();
         let db = crate::db::test_db();
-        init_observability(Some(db.clone()), None);
+        init_observability(None);
 
         let iterations = 500usize;
         let mut tasks = Vec::new();
@@ -3092,7 +3083,6 @@ mod tests {
         flush_for_tests().await;
 
         let response = query_analytics(
-            &db,
             None,
             &AnalyticsFilters {
                 provider: Some("claude".to_string()),
