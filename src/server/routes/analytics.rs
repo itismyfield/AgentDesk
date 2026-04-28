@@ -1769,7 +1769,6 @@ mod tests {
         crate::services::observability::metrics::reset_for_tests();
         crate::services::observability::events::reset_for_tests();
 
-        let db = crate::db::test_db();
         crate::services::observability::init_observability(None);
 
         // Attempt + success

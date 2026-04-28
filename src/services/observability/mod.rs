@@ -10,8 +10,6 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::db::Db;
-
 // Foundation observability layer introduced by #1070 (Epic #905 Phase 1).
 // `metrics` → lightweight channel/provider atomic counters for hot paths.
 // `events`  → bounded in-memory structured event log + periodic JSONL flush.
@@ -2853,7 +2851,6 @@ mod tests {
     async fn event_flush_without_pg_keeps_live_counters() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         emit_turn_started(
@@ -2905,7 +2902,6 @@ mod tests {
     async fn invariant_true_check_does_not_record_violation() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         assert!(record_invariant_check(
@@ -2945,7 +2941,6 @@ mod tests {
     async fn invariant_violation_emit_and_query_round_trip() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         assert!(!record_invariant_check(
@@ -2984,7 +2979,6 @@ mod tests {
     async fn agent_quality_emit_and_query_round_trip() -> Result<()> {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         emit_agent_quality_event(AgentQualityEvent {
@@ -3021,7 +3015,6 @@ mod tests {
     async fn agent_quality_query_without_pg_pool_is_unavailable() -> Result<()> {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         let error = query_agent_quality_events(
@@ -3043,7 +3036,6 @@ mod tests {
     async fn agent_quality_unscoped_query_without_pg_pool_is_unavailable() -> Result<()> {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         let error = query_agent_quality_events(
@@ -3065,7 +3057,6 @@ mod tests {
     async fn counter_updates_are_thread_safe() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         init_observability(None);
 
         let iterations = 500usize;
@@ -3100,7 +3091,6 @@ mod tests {
     async fn init_observability_retains_only_pg_pool_when_configured() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
         let pg_pool = PgPoolOptions::new().connect_lazy_with(
             PgConnectOptions::new()
                 .host("localhost")
@@ -3108,7 +3098,7 @@ mod tests {
                 .database("agentdesk"),
         );
 
-        init_observability(Some(db), Some(pg_pool));
+        init_observability(Some(pg_pool));
 
         let (has_db, has_pg_pool) = test_storage_presence();
         assert!(
@@ -3122,8 +3112,7 @@ mod tests {
     async fn emit_overhead_stays_well_below_hot_path_budget() {
         let _guard = test_runtime_lock();
         reset_for_tests();
-        let db = crate::db::test_db();
-        init_observability(Some(db), None);
+        init_observability(None);
 
         let iterations = 20_000usize;
         let baseline_start = std::time::Instant::now();
