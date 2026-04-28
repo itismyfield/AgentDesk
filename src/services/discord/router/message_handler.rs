@@ -2810,6 +2810,19 @@ pub(in crate::services::discord) async fn handle_text_message(
         // at mod.rs:1151), so once we hold the lock the dispatch path
         // cannot promote our intervention to active until we release.
         //
+        // Codex round-11 P2 broadened the recheck: the round-10 condition
+        // `active_user_message_id == user_msg_id` only catches the
+        // dispatch-promotion case. There are other queue-exit timelines
+        // (cancellation, supersede, merged-drain of a non-head
+        // source_message_id) where `user_msg_id` has left the queue but the
+        // active turn does NOT equal us — `active_user_message_id` may be
+        // `None` or a different message (e.g. the merge-head). Inserting a
+        // `📬` mapping in those cases would orphan a card that no future
+        // dispatch or queue-exit cleanup will ever reference. The expanded
+        // recheck below additionally verifies `user_msg_id` is still in the
+        // intervention queue (head `message_id` OR any `source_message_ids`
+        // entry) and bails if not.
+        //
         // Background-trigger / thread-routed turns + reused mappings stay
         // out of the `queued_placeholders` map by design and skip the
         // dispatch-state recheck entirely.
@@ -2829,11 +2842,41 @@ pub(in crate::services::discord) async fn handle_text_message(
             // the guard, no dispatch path can advance from "queued" to
             // "active for our user_msg_id".
             let snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
-            if snapshot.active_user_message_id == Some(user_msg_id) {
-                // Dispatch already consumed our queued entry and started a
-                // turn for our message; our POST is an orphan. Drop the
-                // lock before deleting the Discord message so we never
-                // hold the persist mutex across an HTTP DELETE await.
+            // Round-11 codex review P2: the round-10 recheck only bailed when
+            // `active_user_message_id == user_msg_id`, but there are other
+            // states where `user_msg_id` is no longer in the queue and a
+            // `📬` mapping must NOT be inserted:
+            //   1. The intervention was cancelled / superseded between our
+            //      enqueue and our lock acquire (queue-exit drain ran).
+            //   2. The intervention was the non-head `source_message_id` of a
+            //      merged Intervention that has already been dequeued (the
+            //      merged-drain ran on dispatch).
+            // In either case `active_user_message_id` may be `None` or a
+            // different message (e.g. the merge-head), so the round-10
+            // `active == user_msg_id` check passes through and we would
+            // insert a `📬` mapping for a `user_msg_id` that no future
+            // dispatch or queue-exit cleanup will ever reference → stale
+            // card forever.
+            //
+            // Fix: in addition to the round-10 active-equals-us check, also
+            // verify `user_msg_id` is still in the queue (head
+            // `intervention.message_id` OR any `source_message_ids` entry).
+            // If neither holds, treat it as a race-loss and bail.
+            let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+                intervention.message_id == user_msg_id
+                    || intervention.source_message_ids.contains(&user_msg_id)
+            });
+            let dispatch_already_running_for_our_msg =
+                snapshot.active_user_message_id == Some(user_msg_id);
+            if dispatch_already_running_for_our_msg || !still_queued {
+                // Either dispatch already promoted us into an active turn
+                // (round-10 case) OR our entry has left the queue via
+                // cancellation / supersede / merged-drain (round-11 case).
+                // In all cases our POSTed placeholder is an orphan that no
+                // future dispatch or queue-exit cleanup will ever reference
+                // — drop the lock before the HTTP DELETE await, delete the
+                // orphan, remove the `⏳` reaction, and skip the mapping
+                // insert.
                 drop(persist_guard);
                 let _ = channel_id
                     .delete_message(&ctx.http, placeholder_msg_id)
@@ -2846,11 +2889,19 @@ pub(in crate::services::discord) async fn handle_text_message(
                 )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST",
-                    channel_id,
-                    user_msg_id
-                );
+                if dispatch_already_running_for_our_msg {
+                    tracing::info!(
+                        "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST",
+                        channel_id,
+                        user_msg_id
+                    );
+                } else {
+                    tracing::info!(
+                        "  [{ts}] 🔁 RACE: message no longer queued (cancelled/superseded/merged-drained) (channel {}, msg {}); deleting orphan placeholder POST",
+                        channel_id,
+                        user_msg_id
+                    );
+                }
                 return Ok(());
             }
             shared.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
@@ -6819,6 +6870,109 @@ mod tests {
         assert!(
             !shared.queued_placeholder_still_owned(channel_id, our_msg_id, placeholder_msg_id),
             "queued_placeholder_still_owned must report not-owned so the PATCH branch skips the render"
+        );
+    }
+
+    /// codex review round-11 P2 (#1332): the round-10 recheck only bailed
+    /// when `active_user_message_id == user_msg_id`, but other queue-exit
+    /// timelines also leave `user_msg_id` orphaned without making us the
+    /// active turn. Specifically:
+    ///   - The intervention was cancelled / superseded between enqueue
+    ///     and our lock acquire.
+    ///   - The intervention is the non-head `source_message_id` of a
+    ///     merged Intervention that has already been dequeued and its
+    ///     merged-drain ran.
+    /// In those cases `active_user_message_id` may be `None` or a
+    /// different message, so the round-10 `active == user_msg_id` check
+    /// passes through and we would insert a `📬` mapping for a
+    /// `user_msg_id` that no future dispatch or queue-exit cleanup will
+    /// ever reference → stale card forever.
+    ///
+    /// Round-11 fix: in addition to the round-10 active-equals-us check,
+    /// also verify `user_msg_id` is still in the queue (head
+    /// `intervention.message_id` OR any `source_message_ids` entry). If
+    /// neither holds, treat it as a race-loss and bail.
+    ///
+    /// This test simulates the cancelled/superseded scenario where:
+    ///   - `active_user_message_id == None` (no active turn — e.g. the
+    ///     active turn finished and nothing else has started yet, OR the
+    ///     channel never had an active turn after our enqueue was wiped).
+    ///   - `intervention_queue` does NOT contain `our_msg_id` (queue
+    ///     was drained / our entry was cancelled).
+    ///
+    /// Pre round-11 (queue-membership check absent): the recheck would
+    /// pass through (active != us), the production code would insert a
+    /// `📬` mapping for our_msg_id, and the card would be left orphaned
+    /// forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn race_loss_recheck_bails_when_message_no_longer_queued() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(424_242_424);
+        let our_msg_id = MessageId::new(9_001);
+        let placeholder_msg_id = MessageId::new(9_002);
+
+        // Acquire the per-channel persist lock FIRST (round-10 / round-11
+        // ordering). We do NOT enqueue our_msg_id and we do NOT start a
+        // turn for our_msg_id, simulating the timeline where:
+        //   - we enqueued, then released; queue-exit drain ran (cancel /
+        //     supersede / merged-drain) and removed our_msg_id;
+        //   - the active turn either finished or never picked us up;
+        //   - we now take the persist lock to insert our `📬` mapping,
+        //     observe `active_user_message_id == None` and a queue that
+        //     no longer contains our_msg_id.
+        let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+        let persist_guard = persist_lock.lock_owned().await;
+
+        // Snapshot UNDER the lock.
+        let snapshot = super::super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+
+        // Round-11 invariant: not the active turn.
+        assert_eq!(
+            snapshot.active_user_message_id, None,
+            "test setup: no active turn so the round-10 condition active == us is FALSE",
+        );
+        // Round-11 invariant: queue does not contain our_msg_id.
+        let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+            intervention.message_id == our_msg_id
+                || intervention.source_message_ids.contains(&our_msg_id)
+        });
+        assert!(
+            !still_queued,
+            "test setup: our_msg_id must NOT be in the queue (cancelled/superseded/merged-drained)",
+        );
+
+        // Compute the recheck condition exactly as the production code does.
+        let dispatch_already_running_for_our_msg =
+            snapshot.active_user_message_id == Some(our_msg_id);
+        let should_bail = dispatch_already_running_for_our_msg || !still_queued;
+        assert!(
+            should_bail,
+            "round-11: recheck must bail when message no longer queued, even if active != us",
+        );
+
+        // Production bail branch: do NOT call `insert_queued_placeholder_locked`.
+        // Pre round-11 the broadened check did not exist, so the only
+        // condition was `active == us`, which is FALSE here, and the code
+        // would have inserted a stale `📬` mapping.
+        if !should_bail {
+            shared.insert_queued_placeholder_locked(channel_id, our_msg_id, placeholder_msg_id);
+        }
+        drop(persist_guard);
+
+        // Round-11 invariant: no stale mapping in memory.
+        assert!(
+            !shared
+                .queued_placeholders
+                .contains_key(&(channel_id, our_msg_id)),
+            "round-11: no stale Queued mapping must be inserted when message no longer queued",
+        );
+
+        // The ownership recheck reports not-owned, so the PATCH branch
+        // would skip the `ensure_queued` render entirely — no stale `📬`
+        // card surfaces.
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, our_msg_id, placeholder_msg_id),
+            "queued_placeholder_still_owned must report not-owned so the PATCH branch skips the render",
         );
     }
 }
