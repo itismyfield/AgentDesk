@@ -96,7 +96,7 @@
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 505 |  |
 | `engine::ops::ci_recovery_ops` | `src/engine/ops/ci_recovery_ops.rs` | 286 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 81 |  |
-| `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1200 | giant-file |
+| `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1008 | giant-file |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 756 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 539 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 399 |  |
