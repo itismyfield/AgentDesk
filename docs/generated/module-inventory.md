@@ -143,8 +143,8 @@
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 916 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 319 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 2163 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1804 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 2079 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1743 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1938 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
@@ -152,7 +152,7 @@
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 195 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 212 |  |
-| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 4610 | giant-file |
+| `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 4581 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 424 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 6101 | giant-file |
@@ -169,7 +169,7 @@
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 |  |
 | `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 252 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 69 |  |
-| `server::routes::escalation` | `src/server/routes/escalation.rs` | 2376 | giant-file |
+| `server::routes::escalation` | `src/server/routes/escalation.rs` | 2128 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 537 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 959 |  |
@@ -184,7 +184,7 @@
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 127 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 547 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 4483 | giant-file |
-| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1512 | giant-file |
+| `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 1394 | giant-file |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 315 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 347 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
