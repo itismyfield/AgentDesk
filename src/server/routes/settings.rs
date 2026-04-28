@@ -477,6 +477,10 @@ pub async fn patch_config_entries(
 /// YAML values are treated as startup baseline and overwrite runtime overrides on reboot.
 /// When `runtime.reset_overrides_on_restart` is enabled, the entire managed surface resets
 /// back to YAML-or-hardcoded defaults.
+///
+/// SQLite-backed; retained as a `cfg(test)`-only helper. Production runtime seeds
+/// kv_meta defaults via `crate::db::postgres::apply_kv_seed_actions` (PG-only since #1306).
+#[cfg(test)]
 pub fn seed_config_defaults(conn: &libsql_rusqlite::Connection, config: &crate::config::Config) {
     apply_kv_seed_actions(conn, &config_default_seed_actions(config));
 
@@ -535,6 +539,7 @@ pub(crate) fn config_default_seed_actions(config: &crate::config::Config) -> Vec
     actions
 }
 
+#[cfg(test)]
 fn apply_kv_seed_actions(conn: &libsql_rusqlite::Connection, actions: &[KvSeedAction]) {
     for action in actions {
         match action {
