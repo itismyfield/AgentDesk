@@ -2279,7 +2279,7 @@ async fn finalize_restore_run_pg(pool: &sqlx::PgPool, run_id: &str) -> Result<()
 
 #[derive(Clone)]
 pub(crate) struct AutoQueueActivateDeps {
-    db: crate::db::Db,
+    db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
     engine: crate::engine::PolicyEngine,
     config: Arc<crate::config::Config>,
@@ -2289,21 +2289,8 @@ pub(crate) struct AutoQueueActivateDeps {
 
 impl AutoQueueActivateDeps {
     fn from_state(state: &AppState) -> Self {
-        // TODO(#1238 / 843g): `AutoQueueActivateDeps.db` still carries a
-        // `Db` because the auto-queue activation path has not yet been
-        // ported to PG-only. Production runtimes never reach the SQLite
-        // branch inside `AutoQueueService`, so the placeholder Db sourced
-        // from `AppState::legacy_db_for_pending_migration` (via
-        // `auto_queue_service()`) is unused at runtime. Once #1238 ports
-        // the constructor signature to `Option<Db>`, replace this with
-        // `state.legacy_db().cloned()`.
-        let db = state
-            .legacy_db()
-            .cloned()
-            .or_else(|| state.engine.legacy_db().cloned())
-            .unwrap_or_else(super::pending_migration_shim_for_callers);
         Self {
-            db,
+            db: state.legacy_db().cloned(),
             pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
@@ -2314,7 +2301,7 @@ impl AutoQueueActivateDeps {
 
     pub(crate) fn for_bridge(db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
         Self {
-            db,
+            db: Some(db),
             pg_pool: engine.pg_pool().cloned(),
             engine,
             config: Arc::new(crate::config::Config::default()),
@@ -2324,10 +2311,7 @@ impl AutoQueueActivateDeps {
     }
 
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(
-            Some(self.db.clone()),
-            self.engine.clone(),
-        )
+        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -2383,8 +2367,11 @@ fn load_activate_card_state_prefer_pg(
         );
     }
 
-    let conn = deps
+    let db = deps
         .db
+        .as_ref()
+        .ok_or_else(|| "postgres backend required for auto-queue activation".to_string())?;
+    let conn = db
         .separate_conn()
         .map_err(|error| format!("open sqlite activate card state DB for {card_id}: {error}"))?;
     load_activate_card_state(&conn, card_id, entry_id)
@@ -2476,7 +2463,11 @@ fn slot_requires_thread_reset_before_reuse_prefer_pg(
         );
     }
 
-    let conn = deps.db.separate_conn().map_err(|error| {
+    let db = deps
+        .db
+        .as_ref()
+        .ok_or_else(|| "postgres backend required for auto-queue slot reset".to_string())?;
+    let conn = db.separate_conn().map_err(|error| {
         format!("open sqlite slot reset DB for {agent_id}:{slot_index}: {error}")
     })?;
     Ok(slot_requires_thread_reset_before_reuse(
@@ -2630,8 +2621,12 @@ fn create_activate_dispatch_prefer_pg(
         );
     }
 
+    let db = deps
+        .db
+        .as_ref()
+        .ok_or_else(|| "postgres backend required for auto-queue dispatch creation".to_string())?;
     crate::dispatch::create_dispatch(
-        &deps.db,
+        db,
         &deps.engine,
         card_id,
         to_agent_id,
