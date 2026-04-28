@@ -861,16 +861,27 @@ pub(super) struct SharedData {
     /// duplicate placeholder.
     pub(in crate::services::discord) queued_placeholders:
         dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    /// #1332 round-4 codex review P2: per-channel mutex guarding
-    /// `queued_placeholders` snapshot writes. When two updates for the same
-    /// channel race (e.g., two messages lose the start-turn race
-    /// simultaneously, or an insert races a queue-exit drain), each caller
-    /// must serialize its `(snapshot DashMap → atomic_write file)` block so
-    /// an older snapshot cannot finish last and overwrite a newer mapping.
-    /// The map fast-path stays on the lock-free `DashMap` above; only the
-    /// persistence I/O is serialized per channel.
+    /// #1332 round-4 codex review P2 + round-5 P2: per-channel mutex guarding
+    /// `queued_placeholders` snapshot writes AND any Discord PATCH that
+    /// asserts queued ownership. When two updates for the same channel race
+    /// (e.g., two messages lose the start-turn race simultaneously, or an
+    /// insert races a queue-exit drain), each caller must serialize its
+    /// `(snapshot DashMap → atomic_write file)` block so an older snapshot
+    /// cannot finish last and overwrite a newer mapping. Round-5 extends the
+    /// lock to span the ownership recheck + Discord edit + persistence
+    /// rollback in the race-loss render path so the same Discord message can
+    /// never be written by both the queued-placeholder render and the
+    /// dispatch/queue-exit cleanup paths.
+    ///
+    /// Invariant (round-5 P2): any Discord PATCH that asserts queued
+    /// ownership MUST hold this lock across both the ownership recheck AND
+    /// the PATCH (and across the persistence write that follows). The map
+    /// fast-path stays on the lock-free `DashMap` above; only ownership-
+    /// coupled mutations are serialized per channel. The lock is async
+    /// (`tokio::sync::Mutex`) so it can be held across `.await` points
+    /// without blocking the runtime worker.
     pub(in crate::services::discord) queued_placeholders_persist_locks:
-        dashmap::DashMap<ChannelId, Arc<std::sync::Mutex<()>>>,
+        dashmap::DashMap<ChannelId, Arc<tokio::sync::Mutex<()>>>,
     /// Per-channel in-flight turn recovery marker (restart resume in progress)
     /// Value is the Instant when recovery started, used for stale-recovery timeout.
     pub(super) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
@@ -1069,38 +1080,57 @@ impl SharedData {
             .unwrap_or_else(|| vec![UserRecord::new(fallback_user_id, fallback_user_name)])
     }
 
-    /// #1332 round-4 codex review P2: fetch (or create) the per-channel
-    /// persistence mutex. The mutex itself is stored as `Arc<Mutex<()>>` so
-    /// callers can clone it out of the `DashMap` and release the shard lock
-    /// before acquiring the channel mutex — eliminating any chance of a
-    /// deadlock between DashMap shard locks and the persistence mutex.
+    /// #1332 round-4 codex review P2 + round-5 P2: fetch (or create) the
+    /// per-channel persistence mutex. The mutex itself is stored as
+    /// `Arc<tokio::sync::Mutex<()>>` so callers can clone it out of the
+    /// `DashMap` and release the shard lock before acquiring the channel
+    /// mutex — eliminating any chance of a deadlock between DashMap shard
+    /// locks and the persistence mutex. Round-5 switched from
+    /// `std::sync::Mutex` to `tokio::sync::Mutex` so the lock can be held
+    /// across `.await` points (specifically the `ensure_queued` Discord
+    /// PATCH in the race-loss render path) without blocking a runtime
+    /// worker.
     pub(in crate::services::discord) fn queued_placeholders_persist_lock(
         &self,
         channel_id: ChannelId,
-    ) -> Arc<std::sync::Mutex<()>> {
+    ) -> Arc<tokio::sync::Mutex<()>> {
         self.queued_placeholders_persist_locks
             .entry(channel_id)
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     }
 
-    /// #1332 round-3 codex review P2 + round-4 P2: write-through insert for
-    /// the `queued_placeholders` mapping. The in-memory `DashMap` mutation
-    /// + the on-disk snapshot write are both performed under a per-channel
-    /// persistence mutex so two concurrent inserts (or an insert racing a
-    /// remove) on the same channel cannot reorder their on-disk effect:
-    /// the snapshot that lands last on disk is always the snapshot taken
-    /// after the latest mutation. The DashMap shard lock is released before
-    /// the file I/O begins, so DashMap reads from the rest of the system
-    /// continue to make progress.
-    pub(super) fn insert_queued_placeholder(
+    /// #1332 round-3 codex review P2 + round-4 P2 + round-5 P2: write-through
+    /// insert for the `queued_placeholders` mapping. The in-memory `DashMap`
+    /// mutation + the on-disk snapshot write are both performed under a
+    /// per-channel async persistence mutex so two concurrent inserts (or an
+    /// insert racing a remove) on the same channel cannot reorder their
+    /// on-disk effect: the snapshot that lands last on disk is always the
+    /// snapshot taken after the latest mutation. The DashMap shard lock is
+    /// released before the file I/O begins, so DashMap reads from the rest
+    /// of the system continue to make progress.
+    pub(super) async fn insert_queued_placeholder(
         &self,
         channel_id: ChannelId,
         user_msg_id: MessageId,
         placeholder_msg_id: MessageId,
     ) {
         let persist_lock = self.queued_placeholders_persist_lock(channel_id);
-        let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _persist_guard = persist_lock.lock().await;
+        self.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+    }
+
+    /// #1332 round-5 codex review P2: insert variant that assumes the
+    /// caller already holds the per-channel persistence mutex. Used by the
+    /// race-loss render path so the lock can span ownership recheck +
+    /// `ensure_queued` PATCH + persistence write (and an optional rollback)
+    /// without re-acquiring the lock between steps.
+    pub(in crate::services::discord) fn insert_queued_placeholder_locked(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        placeholder_msg_id: MessageId,
+    ) {
         self.queued_placeholders
             .insert((channel_id, user_msg_id), placeholder_msg_id);
         queued_placeholders_store::persist_channel_from_map(
@@ -1111,19 +1141,31 @@ impl SharedData {
         );
     }
 
-    /// #1332 round-3 codex review P2 + round-4 P2: write-through remove for
-    /// the `queued_placeholders` mapping. Returns the placeholder message id
-    /// that was removed (if any) so callers can drive the same downstream
-    /// flow as the raw `DashMap::remove`. Mutation + snapshot run under the
-    /// per-channel persistence mutex; see `insert_queued_placeholder` for
-    /// the deadlock-avoidance rationale.
-    pub(super) fn remove_queued_placeholder(
+    /// #1332 round-3 codex review P2 + round-4 P2 + round-5 P2: write-through
+    /// remove for the `queued_placeholders` mapping. Returns the placeholder
+    /// message id that was removed (if any) so callers can drive the same
+    /// downstream flow as the raw `DashMap::remove`. Mutation + snapshot run
+    /// under the per-channel persistence mutex; see
+    /// `insert_queued_placeholder` for the deadlock-avoidance rationale.
+    pub(super) async fn remove_queued_placeholder(
         &self,
         channel_id: ChannelId,
         user_msg_id: MessageId,
     ) -> Option<MessageId> {
         let persist_lock = self.queued_placeholders_persist_lock(channel_id);
-        let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _persist_guard = persist_lock.lock().await;
+        self.remove_queued_placeholder_locked(channel_id, user_msg_id)
+    }
+
+    /// #1332 round-5 codex review P2: remove variant that assumes the caller
+    /// already holds the per-channel persistence mutex. Used by the
+    /// race-loss render path's rollback branch so the entire ownership-
+    /// coupled critical section runs under one async lock acquisition.
+    pub(in crate::services::discord) fn remove_queued_placeholder_locked(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+    ) -> Option<MessageId> {
         let removed = self
             .queued_placeholders
             .remove(&(channel_id, user_msg_id))
@@ -1736,19 +1778,21 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
 /// visible Discord card ids the caller should edit/delete. Split out from
 /// `apply_queue_exit_feedback` so the bookkeeping is testable without a
 /// serenity HTTP client.
-fn queue_exit_drain_queued_placeholders(
+async fn queue_exit_drain_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
     queue_exit_events: &[&QueueExitEvent],
 ) -> Vec<(MessageId, QueueExitKind)> {
-    // codex review round-4 P2: hold the channel's persistence mutex across
-    // the whole batch drain + snapshot write. Without this, a concurrent
-    // `insert_queued_placeholder` for the same channel could observe its
-    // mutation reflected in memory but lose the race to write the
-    // *post-drain* snapshot to disk — leaving a stale entry that resurrects
-    // on restart for an intervention that has already exited the queue.
+    // codex review round-4 P2 + round-5 P2: hold the channel's persistence
+    // mutex across the whole batch drain + snapshot write. Without this, a
+    // concurrent `insert_queued_placeholder` for the same channel could
+    // observe its mutation reflected in memory but lose the race to write
+    // the *post-drain* snapshot to disk — leaving a stale entry that
+    // resurrects on restart for an intervention that has already exited the
+    // queue. Round-5 promoted the lock to `tokio::sync::Mutex` so callers
+    // that span `.await` can still serialize against this drain.
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
-    let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _persist_guard = persist_lock.lock().await;
     let mut visible_cards_to_clear: Vec<(MessageId, QueueExitKind)> = Vec::new();
     let mut mutated = false;
     for event in queue_exit_events {
@@ -1810,7 +1854,7 @@ async fn apply_queue_exit_feedback(
     // ctx (best-effort: log on cache miss and leave the bookkeeping in place
     // so a future ctx can still reach the same rows via `detach_by_message`).
     let visible_cards_to_clear =
-        queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events);
+        queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
 
     let Some(ctx) = shared.cached_serenity_ctx.get() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2678,6 +2722,30 @@ pub(super) async fn kickoff_idle_queues(
             "  [{ts}] 🚀 KICKOFF: starting queued turn for channel {}",
             channel_id
         );
+
+        // codex review round-5 P2 (finding 3 — drain merged placeholders on
+        // idle kickoff): when a merged-source intervention is restored from
+        // the persisted queue (or scheduled by `schedule_deferred_idle_queue_kickoff`)
+        // and dispatched here directly via `router::handle_text_message`,
+        // only the head id (`intervention.message_id`) is consumed by the
+        // dispatch hand-off. Any non-head `source_message_ids` would leak
+        // both their `queued_placeholders` mappings and their stale `📬`
+        // Discord cards. The live dispatch path (`DiscordGateway::dispatch_queued_turn`)
+        // already calls this same drain helper; round-5 mirrors that
+        // cleanup here so restart-induced kickoff produces identical
+        // post-conditions.
+        let drained_cards = gateway::drain_merged_queued_placeholders(
+            shared,
+            channel_id,
+            intervention.message_id,
+            &intervention.source_message_ids,
+        )
+        .await;
+        for placeholder_msg_id in drained_cards {
+            let _ = channel_id
+                .delete_message(&ctx.http, placeholder_msg_id)
+                .await;
+        }
 
         if let Err(e) = router::handle_text_message(
             ctx,
@@ -4012,7 +4080,8 @@ mod tests {
         ];
         let event_refs: Vec<&QueueExitEvent> = events.iter().collect();
 
-        let cards = super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs);
+        let cards =
+            super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs).await;
 
         assert_eq!(cards.len(), 3);
         assert!(
@@ -4082,7 +4151,8 @@ mod tests {
         };
         let event_refs: Vec<&QueueExitEvent> = vec![&event];
 
-        let cards = super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs);
+        let cards =
+            super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs).await;
 
         assert_eq!(
             cards.len(),
@@ -4105,8 +4175,8 @@ mod tests {
     /// recheck ownership and decline to mutate Discord — otherwise it would
     /// edit/delete a message that the active turn now uses as its live
     /// response card.
-    #[test]
-    fn queued_placeholder_ownership_recheck_detects_dispatch_consumption() {
+    #[tokio::test]
+    async fn queued_placeholder_ownership_recheck_detects_dispatch_consumption() {
         // Isolate the round-3 P2 write-through to a tempdir so this test does
         // not pollute the developer's ~/.adk/release runtime directory when
         // AGENTDESK_ROOT_DIR is unset.
@@ -4122,7 +4192,9 @@ mod tests {
         let placeholder_msg_id = MessageId::new(730_000_000_000_001);
 
         // 1) Race-loss handler inserts the mapping after enqueue.
-        shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
+        shared
+            .insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id)
+            .await;
         assert!(
             shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
             "fresh insert must report ownership"
@@ -4130,7 +4202,9 @@ mod tests {
 
         // 2) Dispatch path picks up the queued turn — the active turn finished
         //    concurrently and `remove_queued_placeholder` consumes the handoff.
-        let consumed = shared.remove_queued_placeholder(channel_id, user_msg_id);
+        let consumed = shared
+            .remove_queued_placeholder(channel_id, user_msg_id)
+            .await;
         assert_eq!(consumed, Some(placeholder_msg_id));
 
         // 3) Race-loss handler reaches its `ensure_queued` await — the
@@ -4146,7 +4220,9 @@ mod tests {
         //    just presence, so we never edit a message that belongs to a newer
         //    turn.
         let other_placeholder = MessageId::new(730_000_000_000_002);
-        shared.insert_queued_placeholder(channel_id, user_msg_id, other_placeholder);
+        shared
+            .insert_queued_placeholder(channel_id, user_msg_id, other_placeholder)
+            .await;
         assert!(
             !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
             "recheck must compare placeholder ids, not just presence"
@@ -4298,7 +4374,9 @@ mod tests {
             })
             .collect();
         for (user_msg_id, placeholder_msg_id) in &preseed_keys {
-            shared.insert_queued_placeholder(channel_id, *user_msg_id, *placeholder_msg_id);
+            shared
+                .insert_queued_placeholder(channel_id, *user_msg_id, *placeholder_msg_id)
+                .await;
         }
 
         // Spawn 2*FANOUT concurrent operations on the SAME channel.  Half
@@ -4306,12 +4384,17 @@ mod tests {
         // independently snapshots the DashMap and writes the channel file;
         // without the per-channel persistence mutex, an older snapshot can
         // land on disk after a newer one and overwrite the newer state.
+        // Round-5 P2 promoted the lock to `tokio::sync::Mutex`, so the
+        // tasks are now plain `tokio::spawn` futures rather than
+        // `spawn_blocking` closures — the persistence helpers are async.
         let mut handles = Vec::new();
         for (user_msg_id, _) in preseed_keys.iter() {
             let shared = shared.clone();
             let user_msg_id = *user_msg_id;
-            handles.push(tokio::task::spawn_blocking(move || {
-                shared.remove_queued_placeholder(channel_id, user_msg_id);
+            handles.push(tokio::spawn(async move {
+                shared
+                    .remove_queued_placeholder(channel_id, user_msg_id)
+                    .await;
             }));
         }
         let new_keys: Vec<(MessageId, MessageId)> = (0..FANOUT)
@@ -4326,8 +4409,10 @@ mod tests {
             let shared = shared.clone();
             let user_msg_id = *user_msg_id;
             let placeholder_msg_id = *placeholder_msg_id;
-            handles.push(tokio::task::spawn_blocking(move || {
-                shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
+            handles.push(tokio::spawn(async move {
+                shared
+                    .insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id)
+                    .await;
             }));
         }
         for h in handles {
@@ -4400,11 +4485,15 @@ mod tests {
         // mappings land on disk in their respective files.
         let shared_a = shared.clone();
         let shared_b = shared.clone();
-        let task_a = tokio::task::spawn_blocking(move || {
-            shared_a.insert_queued_placeholder(channel_a, user_msg_a, placeholder_a);
+        let task_a = tokio::spawn(async move {
+            shared_a
+                .insert_queued_placeholder(channel_a, user_msg_a, placeholder_a)
+                .await;
         });
-        let task_b = tokio::task::spawn_blocking(move || {
-            shared_b.insert_queued_placeholder(channel_b, user_msg_b, placeholder_b);
+        let task_b = tokio::spawn(async move {
+            shared_b
+                .insert_queued_placeholder(channel_b, user_msg_b, placeholder_b)
+                .await;
         });
         let (ra, rb) = tokio::join!(task_a, task_b);
         ra.expect("channel-a persistence must not panic");
@@ -4420,6 +4509,255 @@ mod tests {
             restored.get(&(channel_b, user_msg_b)).copied(),
             Some(placeholder_b),
             "channel-b snapshot must be persisted independently",
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    /// codex review round-5 P2 (finding 1 — atomic ownership coupling):
+    /// the per-channel persistence mutex MUST exclude every other path that
+    /// mutates `queued_placeholders` for the same channel while a render
+    /// task is holding it across `ensure_queued`. This test holds the
+    /// persistence lock from a foreground task and confirms a concurrent
+    /// `remove_queued_placeholder` (the dispatch path's hand-off consumer)
+    /// blocks until the render task drops the lock — proving that the
+    /// ownership recheck + Discord PATCH + persistence rollback critical
+    /// section in the race-loss handler cannot be interleaved with the
+    /// dispatch/queue-exit cleanup paths. Without the lock extension, the
+    /// dispatch path could consume the mapping during `ensure_queued`'s
+    /// await window and the render path would write its `📬` card OVER
+    /// the live response card.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn queued_render_lock_blocks_concurrent_remove_until_release() {
+        use crate::services::discord::runtime_store::lock_test_env;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(970_000_000_000_001);
+        let user_msg_id = MessageId::new(880_000_000_000_001);
+        let placeholder_msg_id = MessageId::new(780_000_000_000_001);
+
+        // Pre-seed the mapping so `remove_queued_placeholder` has something
+        // to consume.  The race-loss path in production reaches this
+        // critical section AFTER inserting the mapping under the same
+        // lock.
+        shared
+            .insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id)
+            .await;
+
+        // Acquire the per-channel persistence lock (the same lock the
+        // race-loss render path now holds across ownership recheck +
+        // ensure_queued + persistence rollback).
+        let render_lock = shared.queued_placeholders_persist_lock(channel_id);
+        let render_guard = render_lock.lock().await;
+
+        // Spawn a concurrent dispatch-style consumer that calls the public
+        // `remove_queued_placeholder` helper.  It must not complete while
+        // the render task holds the lock, otherwise the mapping could be
+        // yanked during the render path's `ensure_queued` await — which is
+        // exactly the round-4 hazard round-5 closes.
+        let dispatch_started = Arc::new(AtomicBool::new(false));
+        let dispatch_done = Arc::new(AtomicBool::new(false));
+        let shared_clone = shared.clone();
+        let dispatch_started_inner = dispatch_started.clone();
+        let dispatch_done_inner = dispatch_done.clone();
+        let dispatch_handle = tokio::spawn(async move {
+            dispatch_started_inner.store(true, Ordering::SeqCst);
+            let consumed = shared_clone
+                .remove_queued_placeholder(channel_id, user_msg_id)
+                .await;
+            dispatch_done_inner.store(true, Ordering::SeqCst);
+            consumed
+        });
+
+        // Give the dispatch task a generous chance to acquire the lock
+        // (which it must NOT be able to do).  Even on a cold runtime,
+        // 200 ms is well past any reasonable scheduling delay.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..40 {
+            if dispatch_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            dispatch_started.load(Ordering::SeqCst),
+            "dispatch task must have started polling for the lock"
+        );
+        assert!(
+            !dispatch_done.load(Ordering::SeqCst),
+            "render lock must block the concurrent remove — round-5 invariant: any Discord PATCH that asserts queued ownership holds this lock across both the ownership recheck AND the PATCH",
+        );
+
+        // While the render task still owns the lock, the mapping must
+        // remain untouched — proving the render path's ownership recheck
+        // would observe the same value it inserted, regardless of how
+        // many dispatch tasks queue up behind it.
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "mapping must survive while render lock is held — atomicity guarantee"
+        );
+
+        // Release the render lock; the dispatch task can now acquire it
+        // and complete the remove.
+        drop(render_guard);
+        let consumed = dispatch_handle
+            .await
+            .expect("dispatch task must not panic")
+            .expect("dispatch must consume the placeholder once the lock is released");
+        assert_eq!(
+            consumed, placeholder_msg_id,
+            "dispatch must consume the exact placeholder the render path inserted"
+        );
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "after the render task drops the lock, the dispatch consumer is free to claim ownership"
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    /// codex review round-5 P2 (finding 3 — drain merged placeholders on
+    /// idle kickoff): simulate a dcserver restart with a merged-source
+    /// queued intervention persisted on disk, then drive the same drain
+    /// helper that `kickoff_idle_queues` now calls before
+    /// `router::handle_text_message`. Only the head id remains in the
+    /// mapping after the drain; the non-head source ids' mappings are
+    /// removed (and their visible `📬` cards returned for deletion). Prior
+    /// to round-5, only the live `dispatch_queued_turn` path called this
+    /// helper, so a restart-induced kickoff would leak non-head mappings
+    /// AND leave stale `📬` cards visible in Discord.
+    #[tokio::test]
+    async fn restart_kickoff_drains_non_head_queued_placeholders() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        // 1) "Pre-restart": persist three queued_placeholders mappings on
+        //    disk — one head + two merged-tail source ids.  The
+        //    intervention head id is `head_msg`; the dispatch path uses
+        //    `intervention.message_id` (which equals the head id) as the
+        //    Active card, and every other source id is a merged tail.
+        let pre_restart = super::make_shared_data_for_tests();
+        let provider = pre_restart.provider.clone();
+        let token_hash = pre_restart.token_hash.clone();
+        let channel_id = ChannelId::new(980_000_000_000_001);
+        let head_msg = MessageId::new(890_000_000_000_001);
+        let head_card = MessageId::new(790_000_000_000_001);
+        let merged_a_msg = MessageId::new(890_000_000_000_002);
+        let merged_a_card = MessageId::new(790_000_000_000_002);
+        let merged_b_msg = MessageId::new(890_000_000_000_003);
+        let merged_b_card = MessageId::new(790_000_000_000_003);
+
+        pre_restart
+            .insert_queued_placeholder(channel_id, head_msg, head_card)
+            .await;
+        pre_restart
+            .insert_queued_placeholder(channel_id, merged_a_msg, merged_a_card)
+            .await;
+        pre_restart
+            .insert_queued_placeholder(channel_id, merged_b_msg, merged_b_card)
+            .await;
+
+        // Sanity: every mapping made it onto disk.
+        let on_disk_pre =
+            queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        assert_eq!(
+            on_disk_pre.get(&(channel_id, head_msg)).copied(),
+            Some(head_card)
+        );
+        assert_eq!(
+            on_disk_pre.get(&(channel_id, merged_a_msg)).copied(),
+            Some(merged_a_card)
+        );
+        assert_eq!(
+            on_disk_pre.get(&(channel_id, merged_b_msg)).copied(),
+            Some(merged_b_card)
+        );
+
+        // 2) Drop the pre-restart SharedData and bootstrap a fresh one,
+        //    mirroring what runtime_bootstrap does on dcserver startup.
+        //    The new SharedData re-loads queued_placeholders from disk so
+        //    the test can observe the restored state.
+        drop(pre_restart);
+        let post_restart = super::make_shared_data_for_tests();
+        let restored = queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        for ((ch, user_msg_id), placeholder_msg_id) in &restored {
+            post_restart
+                .queued_placeholders
+                .insert((*ch, *user_msg_id), *placeholder_msg_id);
+        }
+        assert_eq!(
+            post_restart.queued_placeholders.len(),
+            3,
+            "fresh SharedData must reflect every persisted mapping"
+        );
+
+        // 3) Simulate the kickoff path: it now calls
+        //    `drain_merged_queued_placeholders` BEFORE dispatching
+        //    `router::handle_text_message`, identical to what
+        //    `dispatch_queued_turn` already does in the live path.
+        let drained = super::gateway::drain_merged_queued_placeholders(
+            &post_restart,
+            channel_id,
+            head_msg,
+            &[merged_a_msg, merged_b_msg, head_msg],
+        )
+        .await;
+
+        // 4) Assertions: non-head mappings drained, head retained, and the
+        //    drained list contains only the non-head Discord card ids so
+        //    the kickoff caller can delete them.
+        let drained_set: HashSet<MessageId> = drained.into_iter().collect();
+        assert_eq!(drained_set.len(), 2, "exactly two non-head cards drained");
+        assert!(drained_set.contains(&merged_a_card));
+        assert!(drained_set.contains(&merged_b_card));
+        assert!(
+            !drained_set.contains(&head_card),
+            "head card must NOT be drained — the dispatch hand-off path consumes it"
+        );
+        assert_eq!(
+            post_restart.queued_placeholders.len(),
+            1,
+            "head mapping survives the drain"
+        );
+        assert_eq!(
+            post_restart
+                .queued_placeholders
+                .get(&(channel_id, head_msg))
+                .map(|entry| *entry.value()),
+            Some(head_card),
+            "head mapping retains its placeholder id for the dispatch hand-off"
+        );
+
+        // 5) The on-disk snapshot must equal the post-drain in-memory
+        //    state, so a *second* restart would not resurrect the merged
+        //    tail mappings (otherwise the leak would compound on every
+        //    restart).
+        let on_disk_post =
+            queued_placeholders_store::load_queued_placeholders(&provider, &token_hash);
+        assert_eq!(
+            on_disk_post.get(&(channel_id, head_msg)).copied(),
+            Some(head_card)
+        );
+        assert!(
+            on_disk_post.get(&(channel_id, merged_a_msg)).is_none(),
+            "merged-a mapping must be cleared from disk after the kickoff drain"
+        );
+        assert!(
+            on_disk_post.get(&(channel_id, merged_b_msg)).is_none(),
+            "merged-b mapping must be cleared from disk after the kickoff drain"
         );
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };

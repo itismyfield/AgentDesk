@@ -283,20 +283,23 @@ fn dispatch_post_error(
 /// Discord message ids whose visible cards the caller should delete (kept as
 /// a return value to keep the helper independent of `serenity::Http` so the
 /// test harness can invoke it without a real Discord client).
-pub(super) fn drain_merged_queued_placeholders(
+pub(super) async fn drain_merged_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
     head_message_id: MessageId,
     source_message_ids: &[MessageId],
 ) -> Vec<MessageId> {
-    // codex review round-4 P2: serialize the merged-source drain with every
-    // other `queued_placeholders` mutation on the same channel via the
-    // per-channel persistence mutex. Otherwise an `insert_queued_placeholder`
-    // for the head id could race this drain and let the older snapshot
-    // overwrite the newer disk file, resurrecting non-head source mappings
-    // on restart.
+    // codex review round-4 P2 + round-5 P2: serialize the merged-source
+    // drain with every other `queued_placeholders` mutation on the same
+    // channel via the per-channel async persistence mutex. Otherwise an
+    // `insert_queued_placeholder` for the head id could race this drain and
+    // let the older snapshot overwrite the newer disk file, resurrecting
+    // non-head source mappings on restart. The lock is async so this helper
+    // can be safely awaited from both the live dispatch path and the
+    // restart-induced kickoff path (round-5 P2 finding 3) without blocking
+    // the runtime worker.
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
-    let _persist_guard = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _persist_guard = persist_lock.lock().await;
     let mut to_delete = Vec::new();
     let mut mutated = false;
     for message_id in source_message_ids {
@@ -507,7 +510,8 @@ impl TurnGateway for DiscordGateway {
                 channel_id,
                 intervention.message_id,
                 &intervention.source_message_ids,
-            );
+            )
+            .await;
             for placeholder_msg_id in drained {
                 let _ = channel_id
                     .delete_message(&self.http, placeholder_msg_id)
@@ -722,7 +726,8 @@ mod tests {
             channel_id,
             head_msg,
             &[merged_a_msg, merged_b_msg, head_msg],
-        );
+        )
+        .await;
 
         // Head id must remain in queued_placeholders so the dispatch hand-off
         // path can consume it; the two merged ids must be drained AND
@@ -756,7 +761,8 @@ mod tests {
             .queued_placeholders
             .insert((channel_id, head_msg), head_card);
 
-        let drained = drain_merged_queued_placeholders(&shared, channel_id, head_msg, &[head_msg]);
+        let drained =
+            drain_merged_queued_placeholders(&shared, channel_id, head_msg, &[head_msg]).await;
 
         assert!(drained.is_empty());
         assert_eq!(shared.queued_placeholders.len(), 1);

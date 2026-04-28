@@ -2568,8 +2568,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // not see duplicate `📬` cards left behind for the merged tail.
     let queued_placeholder_handoff = if started {
         // Use the write-through helper so the on-disk snapshot stays in sync
-        // with the in-memory map (codex review round-3 P2).
-        shared.remove_queued_placeholder(channel_id, user_msg_id)
+        // with the in-memory map (codex review round-3 P2). Round-5 P2: the
+        // helper now takes the per-channel async persistence mutex, so this
+        // dispatch hand-off serializes against any concurrent race-loss
+        // render path on the same channel.
+        shared
+            .remove_queued_placeholder(channel_id, user_msg_id)
+            .await
     } else {
         None
     };
@@ -2583,46 +2588,78 @@ pub(in crate::services::discord) async fn handle_text_message(
     // running on a non-active turn.
     if !started {
         let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
-        let post_result = send_intake_placeholder(
-            ctx.http.clone(),
-            shared.clone(),
-            channel_id,
-            if reply_to_user_message && dispatch_id_for_thread.is_none() {
-                Some((channel_id, user_msg_id))
-            } else {
-                None
-            },
-        )
-        .await;
+        let is_thread_routed = channel_id != original_channel_id;
+        let want_queued_card = !turn_kind.is_background_trigger() && !is_thread_routed;
 
-        let placeholder_msg_id = match post_result {
-            Ok(msg_id) => msg_id,
-            Err(error) => {
-                // POST failed — finish the race-loss path WITHOUT enqueuing.
-                // Without a placeholder there is no Discord card to wire up,
-                // and enqueuing without a mapping would risk the dispatch
-                // path posting a duplicate placeholder when the active turn
-                // eventually finishes. Surface the failure via the regular
-                // ⏳ cleanup and return.
-                super::super::formatting::remove_reaction_raw(
-                    &ctx.http,
-                    channel_id,
-                    user_msg_id,
-                    '⏳',
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ RACE: placeholder POST failed for race-lost message, dropping (channel {}, error={})",
-                    channel_id,
-                    error
-                );
-                return Ok(());
+        // codex review round-5 P2 (finding 2 — re-queue reuse): if a queued
+        // placeholder mapping already exists for `(channel_id, user_msg_id)`
+        // — typically because the active turn finished and the queued
+        // turn was about to dispatch, but a new turn intercepted and won the
+        // mailbox race before that dispatch could run — REUSE the existing
+        // `📬` card instead of POSTing a fresh placeholder. Posting a new
+        // placeholder would orphan the prior one (its mapping would be
+        // overwritten by the new `insert_queued_placeholder` below, and the
+        // old card would stay visible with no bookkeeping path to clean it
+        // up). Background-trigger turns and thread-routed turns never write
+        // to `queued_placeholders`, so they always go through the fresh
+        // POST path.
+        let existing_queued_card = if want_queued_card {
+            shared
+                .queued_placeholders
+                .get(&(channel_id, user_msg_id))
+                .map(|entry| *entry.value())
+        } else {
+            None
+        };
+
+        let placeholder_msg_id = if let Some(existing) = existing_queued_card {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ♻ RACE: reusing existing queued placeholder (channel {}, msg {}) — re-queue without new POST",
+                channel_id,
+                existing
+            );
+            existing
+        } else {
+            let post_result = send_intake_placeholder(
+                ctx.http.clone(),
+                shared.clone(),
+                channel_id,
+                if reply_to_user_message && dispatch_id_for_thread.is_none() {
+                    Some((channel_id, user_msg_id))
+                } else {
+                    None
+                },
+            )
+            .await;
+
+            match post_result {
+                Ok(msg_id) => msg_id,
+                Err(error) => {
+                    // POST failed — finish the race-loss path WITHOUT enqueuing.
+                    // Without a placeholder there is no Discord card to wire up,
+                    // and enqueuing without a mapping would risk the dispatch
+                    // path posting a duplicate placeholder when the active turn
+                    // eventually finishes. Surface the failure via the regular
+                    // ⏳ cleanup and return.
+                    super::super::formatting::remove_reaction_raw(
+                        &ctx.http,
+                        channel_id,
+                        user_msg_id,
+                        '⏳',
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ RACE: placeholder POST failed for race-lost message, dropping (channel {}, error={})",
+                        channel_id,
+                        error
+                    );
+                    return Ok(());
+                }
             }
         };
 
-        let is_thread_routed = channel_id != original_channel_id;
-        let want_queued_card = !turn_kind.is_background_trigger() && !is_thread_routed;
         // codex review P2: register the placeholder mapping BEFORE enqueue so
         // a fast dequeue (active turn finishing concurrently) always sees a
         // valid mapping when it picks the intervention up. If the subsequent
@@ -2631,8 +2668,15 @@ pub(in crate::services::discord) async fn handle_text_message(
         // codex review round-3 P2: also write-through to disk so a dcserver
         // restart while a foreground turn is queued can re-attach the
         // restored mailbox queue entry to the same `📬` Discord card.
-        if want_queued_card {
-            shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
+        //
+        // codex review round-5 P2 (finding 2): when reusing an existing
+        // mapping, the entry is already correct — skip re-insertion to
+        // avoid an unnecessary persistence write.
+        let reused_existing_mapping = existing_queued_card.is_some();
+        if want_queued_card && !reused_existing_mapping {
+            shared
+                .insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id)
+                .await;
         }
 
         let enqueue_outcome = super::super::mailbox_enqueue_intervention(
@@ -2670,8 +2714,15 @@ pub(in crate::services::discord) async fn handle_text_message(
         // not remain — there is no intervention for the dispatch path to
         // pick up. Drop the speculatively-inserted entry to keep
         // `queued_placeholders` consistent (write-through clears disk too).
-        if !enqueued && want_queued_card {
-            shared.remove_queued_placeholder(channel_id, user_msg_id);
+        //
+        // codex review round-5 P2 (finding 2): only roll back when we
+        // inserted a fresh mapping in this call. When reusing an existing
+        // entry the prior race-loss owns it and its lifecycle is tracked
+        // there; do not yank it from under that owner.
+        if !enqueued && want_queued_card && !reused_existing_mapping {
+            shared
+                .remove_queued_placeholder(channel_id, user_msg_id)
+                .await;
         }
 
         // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
@@ -2718,18 +2769,35 @@ pub(in crate::services::discord) async fn handle_text_message(
                 channel_id,
                 placeholder_msg_id
             );
-        } else if enqueued && want_queued_card {
-            // codex review round-3 P1: between `mailbox_enqueue_intervention`
-            // and the `ensure_queued` await below, the active turn can finish
-            // and the dispatch path can already have consumed our
+        } else if enqueued && want_queued_card && !reused_existing_mapping {
+            // codex review round-3 P1 + round-5 P2 (finding 1 — atomic
+            // ownership coupling): between `mailbox_enqueue_intervention`
+            // and the `ensure_queued` await below, the active turn can
+            // finish and the dispatch path can already have consumed our
             // `(channel_id, user_msg_id)` mapping — at which point the
             // placeholder we POSTed has been promoted to the live response
             // card. Editing it to `📬 메시지 대기 중` (or deleting it on the
-            // fallback branch) would corrupt/erase the active card. Recheck
-            // ownership atomically before each Discord mutation; on mismatch
-            // the consumer now owns the message — exit without rolling back
-            // the mapping.
+            // fallback branch) would corrupt/erase the active card. Round-4
+            // checked ownership immediately before the PATCH, but the await
+            // window between the check and the PATCH still allowed
+            // `dispatch_queued_turn` (or `queue_exit_drain_queued_placeholders`)
+            // to consume the mapping concurrently. Round-5 wraps the
+            // ownership recheck + `ensure_queued` PATCH + persistence
+            // rollback in a single critical section guarded by the
+            // per-channel async persistence mutex. Every other path that
+            // mutates `queued_placeholders` (insert / remove / merged
+            // drain / queue-exit drain) takes the same mutex, so the
+            // mapping cannot change underneath this PATCH once we hold
+            // the lock.
+            //
+            // Invariant: any Discord PATCH that asserts queued ownership
+            // MUST hold this lock across both the ownership recheck AND
+            // the PATCH. Skipping the lock (or acquiring it only around
+            // the persistence write) would reintroduce the round-4 hazard.
+            let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
+            let persist_guard = persist_lock.lock().await;
             if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
+                drop(persist_guard);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 🔁 RACE: queued placeholder handoff already consumed by dispatch (channel {}, msg {}); skipping render",
@@ -2762,6 +2830,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
                 match outcome {
                     Edited | Coalesced => {
+                        drop(persist_guard);
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
                             "  [{ts}] 📬 RACE: queued placeholder rendered (channel {}, msg {})",
@@ -2772,17 +2841,22 @@ pub(in crate::services::discord) async fn handle_text_message(
                     _ => {
                         // Edit failed — roll back the mapping and delete the
                         // raw `...` so the dispatch path never matches a
-                        // Discord message that no longer exists. Recheck
-                        // ownership one more time before mutating Discord —
-                        // dispatch may have consumed the handoff during the
-                        // `ensure_queued` await above (codex review round-3
-                        // P1).
-                        if shared.queued_placeholder_still_owned(
+                        // Discord message that no longer exists. The lock
+                        // guarantees the mapping cannot have changed since
+                        // our recheck above, so a single decision (still
+                        // owned → roll back) is sound. Use the `_locked`
+                        // variant to avoid re-acquiring the lock we
+                        // already hold (round-5 P2).
+                        let still_owned_under_lock = shared.queued_placeholder_still_owned(
                             channel_id,
                             user_msg_id,
                             placeholder_msg_id,
-                        ) {
-                            shared.remove_queued_placeholder(channel_id, user_msg_id);
+                        );
+                        if still_owned_under_lock {
+                            shared.remove_queued_placeholder_locked(channel_id, user_msg_id);
+                        }
+                        drop(persist_guard);
+                        if still_owned_under_lock {
                             let _ = channel_id
                                 .delete_message(&ctx.http, placeholder_msg_id)
                                 .await;
@@ -2803,6 +2877,19 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                 }
             }
+        } else if enqueued && want_queued_card && reused_existing_mapping {
+            // codex review round-5 P2 (finding 2): the existing card
+            // already shows `📬 메시지 대기 중`. Skip the redundant
+            // `ensure_queued` PATCH (the prior race-loss already wrote it,
+            // and re-emitting the identical content would hit a
+            // `Coalesced` no-op anyway). Leaving the card untouched is
+            // correct — the user already sees it.
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ♻ RACE: re-queue reused existing 📬 card without re-render (channel {}, msg {})",
+                channel_id,
+                placeholder_msg_id
+            );
         } else {
             let _ = channel_id
                 .delete_message(&ctx.http, placeholder_msg_id)
