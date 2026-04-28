@@ -359,7 +359,7 @@ struct ThreadMapValidationOutcome {
 }
 
 pub(crate) async fn validate_channel_thread_maps_on_startup_with_backends(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     token: &str,
 ) -> (usize, usize) {
@@ -374,90 +374,18 @@ pub(crate) async fn validate_channel_thread_maps_on_startup_with_backends(
         }
     };
 
-    if let Some(pool) = pg_pool {
-        return validate_channel_thread_maps_on_startup_with_base_url_pg(
-            pool,
-            &client,
-            token,
-            "https://discord.com/api/v10",
-        )
-        .await;
-    }
-
-    let Some(db) = db else {
+    let Some(pool) = pg_pool else {
+        // PG-only after #843 / #1239. Without a pool there is nothing to validate.
         return (0, 0);
     };
 
-    validate_channel_thread_maps_on_startup_with_base_url(
-        db,
+    validate_channel_thread_maps_on_startup_with_base_url_pg(
+        pool,
         &client,
         token,
         "https://discord.com/api/v10",
     )
     .await
-}
-
-async fn validate_channel_thread_maps_on_startup_with_base_url(
-    db: &crate::db::Db,
-    client: &reqwest::Client,
-    token: &str,
-    base_url: &str,
-) -> (usize, usize) {
-    let rows: Vec<ThreadMapValidationRow> = match db.lock() {
-        Ok(conn) => conn
-            .prepare(
-                "SELECT id, channel_thread_map, active_thread_id
-                 FROM kanban_cards
-                 WHERE channel_thread_map IS NOT NULL
-                   AND TRIM(channel_thread_map) != ''
-                   AND TRIM(channel_thread_map) != '{}'",
-            )
-            .and_then(|mut stmt| {
-                stmt.query_map([], |row| {
-                    Ok(ThreadMapValidationRow {
-                        card_id: row.get(0)?,
-                        map_json: row.get(1)?,
-                        active_thread_id: row.get(2)?,
-                    })
-                })
-                .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            })
-            .unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!("[dispatch] startup thread-map validation skipped (db lock): {e}");
-            return (0, 0);
-        }
-    };
-
-    let mut checked = 0usize;
-    let mut cleared = 0usize;
-
-    for row in rows {
-        let outcome = validate_thread_map_validation_row(client, token, base_url, &row).await;
-        checked += outcome.checked;
-        cleared += outcome.cleared;
-
-        if !outcome.persist {
-            continue;
-        }
-
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET channel_thread_map = ?1,
-                     active_thread_id = ?2
-                 WHERE id = ?3",
-                libsql_rusqlite::params![
-                    outcome.new_map,
-                    outcome.new_active_thread_id,
-                    row.card_id
-                ],
-            )
-            .ok();
-        }
-    }
-
-    (checked, cleared)
 }
 
 async fn validate_channel_thread_maps_on_startup_with_base_url_pg(
@@ -738,15 +666,11 @@ pub(super) async fn try_reuse_thread(
 
     if !resp.status().is_success() {
         tracing::info!("[dispatch] Thread {thread_id} no longer accessible, will create new");
-        // Clear stale thread for this channel
+        // Clear stale thread for this channel (PG-only after #843 / #1239).
         if let Some(pool) = pg_pool {
             clear_thread_for_channel_pg(pool, card_id, expected_parent)
                 .await
                 .ok();
-        } else if let Some(db) = db {
-            if let Ok(conn) = db.lock() {
-                clear_thread_for_channel(&conn, card_id, expected_parent);
-            }
         }
         return Ok(None);
     }
@@ -770,7 +694,7 @@ pub(super) async fn try_reuse_thread(
             "[dispatch] Thread {thread_id} belongs to channel {parent_id}, expected {expected_parent}, skipping reuse"
         );
         // Clear stale cross-channel thread references so retries don't keep
-        // probing the wrong thread via active_thread_id fallback
+        // probing the wrong thread via active_thread_id fallback (PG-only).
         if let Some(pool) = pg_pool {
             clear_thread_for_channel_pg(pool, card_id, expected_parent)
                 .await
@@ -786,18 +710,6 @@ pub(super) async fn try_reuse_thread(
             .execute(pool)
             .await
             .ok();
-        } else if let Some(db) = db {
-            if let Ok(conn) = db.lock() {
-                clear_thread_for_channel(&conn, card_id, expected_parent);
-                // Also clear active_thread_id if it points to the mismatched thread,
-                // preventing get_thread_for_channel() fallback from re-selecting it
-                conn.execute(
-                    "UPDATE kanban_cards SET active_thread_id = NULL \
-                     WHERE id = ?1 AND active_thread_id = ?2",
-                    libsql_rusqlite::params![card_id, thread_id],
-                )
-                .ok();
-            }
         }
         return Ok(None);
     }
@@ -810,15 +722,11 @@ pub(super) async fn try_reuse_thread(
         .unwrap_or(false);
     if is_locked {
         tracing::info!("[dispatch] Thread {thread_id} is locked, will create new");
-        // Clear stale thread for this channel
+        // Clear stale thread for this channel (PG-only after #843 / #1239).
         if let Some(pool) = pg_pool {
             clear_thread_for_channel_pg(pool, card_id, expected_parent)
                 .await
                 .ok();
-        } else if let Some(db) = db {
-            if let Ok(conn) = db.lock() {
-                clear_thread_for_channel(&conn, card_id, expected_parent);
-            }
         }
         return Ok(Some((false, None)));
     }
@@ -871,7 +779,7 @@ pub(super) async fn try_reuse_thread(
     .await
     {
         Ok(outcome) => {
-            // Update dispatch thread_id and mark as notified
+            // Update dispatch thread_id and mark as notified (PG-only).
             if let Some(pool) = pg_pool {
                 sqlx::query(
                     "UPDATE task_dispatches
@@ -894,22 +802,6 @@ pub(super) async fn try_reuse_thread(
                 .execute(pool)
                 .await
                 .ok();
-            } else if let Some(db) = db {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                        libsql_rusqlite::params![thread_id, dispatch_id],
-                    )
-                    .ok();
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        libsql_rusqlite::params![
-                            format!("dispatch_notified:{}", dispatch_id),
-                            dispatch_id
-                        ],
-                    )
-                    .ok();
-                }
             }
             if let Err(error) =
                 super::discord_delivery::persist_dispatch_message_target_and_add_pending_reaction_with_pg(
@@ -949,10 +841,6 @@ pub(super) async fn try_reuse_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get,
-    };
-    use serde_json::json;
     use std::{
         future::Future,
         io::{self, Write},
@@ -961,13 +849,6 @@ mod tests {
 
     struct TestLogWriter {
         buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    fn test_db() -> crate::db::Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
     }
 
     impl Write for TestLogWriter {
@@ -1119,84 +1000,11 @@ mod tests {
         format!("{}/postgres", postgres_base_database_url())
     }
 
-    async fn spawn_thread_info_server() -> (String, tokio::task::JoinHandle<()>) {
-        async fn channel(Path(thread_id): Path<String>) -> impl IntoResponse {
-            match thread_id.as_str() {
-                "thread-valid" => (
-                    StatusCode::OK,
-                    Json(json!({"id":"thread-valid","parent_id":"111"})),
-                )
-                    .into_response(),
-                "thread-wrong-parent" => (
-                    StatusCode::OK,
-                    Json(json!({"id":"thread-wrong-parent","parent_id":"999"})),
-                )
-                    .into_response(),
-                _ => StatusCode::NOT_FOUND.into_response(),
-            }
-        }
-
-        let app = Router::new().route("/channels/{thread_id}", get(channel));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{addr}"), handle)
-    }
-
-    #[tokio::test]
-    async fn startup_validation_clears_missing_and_mismatched_thread_bindings() {
-        let db = test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (
-                    id, title, status, priority, channel_thread_map, active_thread_id,
-                    created_at, updated_at
-                ) VALUES (
-                    'card-thread-map-startup', 'Issue #335', 'review', 'medium',
-                    '{\"111\":\"thread-valid\",\"222\":\"thread-missing\",\"333\":\"thread-wrong-parent\"}',
-                    'thread-missing',
-                    datetime('now'), datetime('now')
-                )",
-                [],
-            )
-            .unwrap();
-        }
-
-        let client = reqwest::Client::builder().build().unwrap();
-        let (base_url, server_handle) = spawn_thread_info_server().await;
-        let (checked, cleared) = validate_channel_thread_maps_on_startup_with_base_url(
-            &db,
-            &client,
-            "test-token",
-            &base_url,
-        )
-        .await;
-        server_handle.abort();
-
-        assert_eq!(checked, 3);
-        assert_eq!(cleared, 2);
-
-        let conn = db.lock().unwrap();
-        let (map_json, active_thread_id): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT channel_thread_map, active_thread_id
-                 FROM kanban_cards
-                 WHERE id = 'card-thread-map-startup'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-
-        let map: serde_json::Value =
-            serde_json::from_str(map_json.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(map["111"], "thread-valid");
-        assert!(map.get("222").is_none());
-        assert!(map.get("333").is_none());
-        assert_eq!(active_thread_id.as_deref(), Some("thread-valid"));
-    }
+    // Note: the SQLite-only `startup_validation_clears_missing_and_mismatched_thread_bindings`
+    // test was dropped together with `validate_channel_thread_maps_on_startup_with_base_url`.
+    // The PG-side validator is exercised by the `_pg` helper in production via
+    // `validate_channel_thread_maps_on_startup_with_backends`; an end-to-end PG twin
+    // can be added once a Discord transport stub is wired into PG fixtures (#1239).
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_thread_for_channel_pg_warns_on_non_object_thread_map() {
