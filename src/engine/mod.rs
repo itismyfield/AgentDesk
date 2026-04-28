@@ -1872,6 +1872,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. JS bridge cards.*/db.*/kanban.* now require PG. Migrate to PG fixture — tracked in #1342."]
     fn queued_review_enter_replays_terminal_transition_hooks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

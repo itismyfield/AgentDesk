@@ -6986,6 +6986,7 @@ mod tests {
     /// so the pr:create_failed marker survives the transition.
     #[cfg(unix)]
     #[test]
+    #[ignore = "SQLite-only test. JS bridge cards.*/db.*/kanban.* now require PG. Migrate to PG fixture — tracked in #1342."]
     fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
         let (_repo, _repo_guard) = setup_test_repo();
 
