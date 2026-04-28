@@ -1501,7 +1501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_api_friction_reports_dual_writes_sqlite_shadow_when_pg_present() {
+    async fn record_api_friction_reports_uses_pg_only_when_sqlite_handle_present() {
         fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {
             match previous {
                 Some(value) => unsafe { std::env::set_var(name, value) },
@@ -1557,14 +1557,12 @@ mod tests {
         assert_eq!(result.memory_stored_count, 0);
         assert!(result.memory_errors.is_empty(), "{result:?}");
 
-        let sqlite_row: (String, String) = sqlite_db
+        let sqlite_count: i64 = sqlite_db
             .lock()
             .unwrap()
-            .query_row(
-                "SELECT id, memory_status FROM api_friction_events LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .query_row("SELECT COUNT(*) FROM api_friction_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let pg_row = sqlx::query_as::<_, (String, String)>(
             "SELECT id, memory_status
@@ -1574,8 +1572,7 @@ mod tests {
         .fetch_one(&pg_pool)
         .await
         .unwrap();
-        assert_eq!(sqlite_row.0, pg_row.0);
-        assert_eq!(sqlite_row.1, "skipped_backend");
+        assert_eq!(sqlite_count, 0);
         assert_eq!(pg_row.1, "skipped_backend");
 
         restore_env("AGENTDESK_ROOT_DIR", previous_root);

@@ -58,14 +58,14 @@ Initial pass did not surface a clear production PG site still decoding raw `TIME
 
 | Location | Status | Note |
 | --- | --- | --- |
-| `src/services/api_friction.rs:189-215,715-849` | `hardened` | Temporary dual-write is now explicit: PG remains the capture authority, but each recorded event is mirrored into SQLite with the same event ID while `process_api_friction_patterns(...)` still aggregates from SQLite. Memory-status updates now fan out to both backends for those mirrored rows. |
+| `src/services/api_friction.rs:189-273,715-849` | `hardened` | PG-only authority is now explicit: capture and pattern processing require a Postgres pool, ignore the legacy SQLite handle when one is passed, and fail fast instead of falling back to SQLite. |
 | `src/services/message_outbox.rs:141-190,236-277` | `hardened` | PG-only authority is now explicit in code comments: once `pg_pool` exists, lifecycle/outbox rows must land in PG because the release worker drains PG exclusively. SQLite is retained only for legacy no-PG runtime/tests. |
 | `src/services/retrospectives.rs:88-101,1137-1219` | `hardened` | PG-only authority is now explicit for `card_retrospectives` in mixed mode, and the PG test now asserts SQLite stays empty so the no-mirror choice is executable rather than implied. |
 | `src/services/discord_dm_reply_store.rs:85-123,156-173,261-276` | `hardened` | Pending DM reply ownership is now explicitly PG-first in mixed mode for register/read/consume paths; SQLite remains a legacy compatibility path only when PG is absent. |
-| `src/db/auto_queue.rs:1519-1627` | `hardened` | The remaining slot-rebind/release helpers now declare themselves as SQLite-only compatibility paths for legacy no-PG callers/tests instead of ambiguous `TODO(#839)` holdovers. PG slot ownership remains authoritative through the `*_pg` helpers. |
+| `src/db/auto_queue.rs:1004-1045,1996-2236` | `hardened` | Slot rebind/release ownership is PG-only in the active implementation: the audit guard now requires the `*_pg` helpers and rejects old `TODO(#839)` ambiguity if legacy helper ranges return. |
 
 ## Later sub-PR guidance
 
 - Fix PRs for category 1 should start with `src/dispatch/dispatch_context.rs`, `src/services/api_friction.rs`, and `src/server/routes/pipeline.rs`, because they still encode stale `INT4` assumptions in PG code.
 - Fix PRs for categories 2 and 4 should prioritize places where malformed JSON or failed PG reads currently degrade to `Null`, stringified payloads, or `false`.
-- Category 5 follow-ups from the initial audit are closed in this checklist revision: `api_friction` uses temporary dual-write, while `message_outbox`, `retrospectives`, `discord_dm_reply_store`, and the targeted `auto_queue` helpers now carry explicit PG-authority / SQLite-compatibility decisions in code.
+- Category 5 follow-ups from the initial audit are closed in this checklist revision: `api_friction`, `message_outbox`, `retrospectives`, `discord_dm_reply_store`, and the targeted `auto_queue` helpers now carry explicit PG-authority / SQLite-compatibility decisions in code.

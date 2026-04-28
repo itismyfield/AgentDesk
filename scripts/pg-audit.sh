@@ -31,11 +31,14 @@ if [ -n "$pending_rows" ]; then
   fail "category-5 checklist still contains follow-up rows"
 fi
 
-require_fixed_string "Temporary dual-write: policy-tick aggregation still reads SQLite-only state." src/services/api_friction.rs
+require_fixed_string "postgres pool is required for API friction capture; sqlite fallback is unavailable" src/services/api_friction.rs
+require_fixed_string "postgres pool is required for API friction processing; sqlite fallback is unavailable" src/services/api_friction.rs
 require_fixed_string "PG outbox rows are authoritative whenever a pool is configured." src/services/message_outbox.rs
 require_fixed_string "PG card_retrospectives rows are authoritative once a pool is attached." src/services/retrospectives.rs
 require_fixed_string "PG pending_dm_replies rows are authoritative in mixed mode." src/services/discord_dm_reply_store.rs
-require_fixed_string "SQLite-only compatibility path: PG auto-queue slot ownership is" src/db/auto_queue.rs
+require_fixed_string "pub async fn rebind_slot_for_group_agent_pg" src/db/auto_queue.rs
+require_fixed_string "async fn bind_slot_index_for_group_entries_pg" src/db/auto_queue.rs
+require_fixed_string "pub async fn release_slot_for_group_agent_pg" src/db/auto_queue.rs
 
 if sed -n '/pub fn rebind_slot_for_group_agent/,/pub async fn rebind_slot_for_group_agent_pg/p' src/db/auto_queue.rs \
   | grep -Fq 'TODO(#839)'; then
