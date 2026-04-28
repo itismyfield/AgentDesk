@@ -186,13 +186,11 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   └── v1.rs
-│   ├── background.rs
 │   ├── boot.rs
 │   ├── cron_catalog.rs
 │   ├── maintenance.rs
 │   ├── mod.rs
 │   ├── state.rs
-│   ├── tick.rs
 │   ├── worker_registry.rs
 │   └── ws.rs
 ├── services/
