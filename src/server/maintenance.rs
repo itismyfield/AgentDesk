@@ -4,11 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
-use libsql_rusqlite::OptionalExtension;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
-
-use crate::db::Db;
 
 type MaintenanceFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -230,48 +227,6 @@ impl MaintenanceJobStore for PgMaintenanceJobStore {
     }
 }
 
-struct SqliteMaintenanceJobStore {
-    db: Db,
-}
-
-impl SqliteMaintenanceJobStore {
-    fn new(db: Db) -> Self {
-        Self { db }
-    }
-}
-
-impl MaintenanceJobStore for SqliteMaintenanceJobStore {
-    fn read<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Option<String>> {
-        Box::pin(async move {
-            let conn = self
-                .db
-                .lock()
-                .map_err(|error| format!("lock sqlite maintenance store: {error}"))?;
-            conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .optional()
-            .map_err(|error| format!("read sqlite maintenance kv_meta {key}: {error}"))
-            .map(|value| value.flatten())
-        })
-    }
-
-    fn upsert<'a>(&'a self, key: &'a str, value: &'a str) -> StoreFuture<'a, ()> {
-        Box::pin(async move {
-            let conn = self
-                .db
-                .lock()
-                .map_err(|error| format!("lock sqlite maintenance store: {error}"))?;
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![key, value],
-            )
-            .map(|_| ())
-            .map_err(|error| format!("upsert sqlite maintenance kv_meta {key}: {error}"))
-        })
-    }
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MaintenanceJobStatus {
@@ -326,11 +281,6 @@ pub(crate) async fn scheduler_loop(pg_pool: Arc<PgPool>) {
 
 pub(crate) async fn list_job_statuses_pg(pg_pool: PgPool) -> Vec<MaintenanceJobStatus> {
     let store: Arc<dyn MaintenanceJobStore> = Arc::new(PgMaintenanceJobStore::new(pg_pool));
-    build_job_statuses(&MaintenanceJobRegistry::static_registry(), store).await
-}
-
-pub(crate) async fn list_job_statuses_sqlite(db: Db) -> Vec<MaintenanceJobStatus> {
-    let store: Arc<dyn MaintenanceJobStore> = Arc::new(SqliteMaintenanceJobStore::new(db));
     build_job_statuses(&MaintenanceJobRegistry::static_registry(), store).await
 }
 

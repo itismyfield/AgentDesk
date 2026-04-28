@@ -152,15 +152,10 @@ async fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<s
         }
     }
 
-    // #1237 (843f): runtime is PG-only, so `state.db` is None at runtime and
-    // the SQLite branch is reachable only from tests (which do supply a Db).
-    // #1238 (843g) will drop the SQLite branch entirely and require PG.
+    // #1239 (843g): SQLite path removed; runtime is PG-only.
     let maintenance_jobs = match state.pg_pool_ref() {
         Some(pool) => crate::server::maintenance::list_job_statuses_pg(pool.clone()).await,
-        None => match state.db.clone() {
-            Some(db) => crate::server::maintenance::list_job_statuses_sqlite(db).await,
-            None => Vec::new(),
-        },
+        None => Vec::new(),
     };
     for job in maintenance_jobs {
         match serde_json::to_value(job) {
