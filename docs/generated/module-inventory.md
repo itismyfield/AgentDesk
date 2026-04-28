@@ -302,7 +302,7 @@
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 776 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1252 | giant-file |
-| `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 204 |  |
+| `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 207 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatches` | `src/services/dispatches.rs` | 434 |  |
 | `services::dispatches_followup` | `src/services/dispatches_followup.rs` | 143 |  |
