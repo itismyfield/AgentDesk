@@ -213,7 +213,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             .await
             .map_err(|e| format!("startup reseed: {e}"))?;
     }
-    crate::pipeline::refresh_override_health_report(None, pg_pool.as_ref()).await;
+    crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     crate::services::termination_audit::init_audit_db(pg_pool.clone());
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;

@@ -641,8 +641,7 @@ pub async fn set_repo_pipeline(
                 // previously had override warnings doesn't keep reporting them
                 // through /api/health and the kv_meta mirror after the override
                 // is cleared by the rollback.
-                crate::pipeline::refresh_override_health_report(state.legacy_db(), Some(pool))
-                    .await;
+                crate::pipeline::refresh_override_health_report(Some(pool)).await;
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
@@ -650,7 +649,7 @@ pub async fn set_repo_pipeline(
             }
             // #1230 — refresh persisted override health report so /api/health and the
             // postgres `kv_meta` mirror reflect the latest repo override warnings.
-            crate::pipeline::refresh_override_health_report(state.legacy_db(), Some(pool)).await;
+            crate::pipeline::refresh_override_health_report(Some(pool)).await;
             (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
         }
         Err(error) => (
@@ -739,8 +738,7 @@ pub async fn set_agent_pipeline(
                 // that previously had override warnings doesn't keep
                 // reporting them through /api/health and the kv_meta mirror
                 // after the override is cleared by the rollback.
-                crate::pipeline::refresh_override_health_report(state.legacy_db(), Some(pool))
-                    .await;
+                crate::pipeline::refresh_override_health_report(Some(pool)).await;
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
@@ -748,7 +746,7 @@ pub async fn set_agent_pipeline(
             }
             // #1230 — refresh persisted override health report so /api/health and the
             // postgres `kv_meta` mirror reflect the latest agent override warnings.
-            crate::pipeline::refresh_override_health_report(state.legacy_db(), Some(pool)).await;
+            crate::pipeline::refresh_override_health_report(Some(pool)).await;
             (
                 StatusCode::OK,
                 Json(json!({"ok": true, "agent_id": agent_id})),

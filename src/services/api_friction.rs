@@ -261,7 +261,6 @@ pub(crate) async fn record_api_friction_reports(
 }
 
 pub(crate) async fn process_api_friction_patterns(
-    _db: &Db,
     pg_pool: Option<&PgPool>,
     min_events: Option<usize>,
     limit: Option<usize>,
@@ -1642,7 +1641,7 @@ mod tests {
         .await
         .unwrap();
 
-        let summary = process_api_friction_patterns(&db, Some(&pg_pool), None, None)
+        let summary = process_api_friction_patterns(Some(&pg_pool), None, None)
             .await
             .unwrap();
         drop(lock);

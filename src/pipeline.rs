@@ -175,7 +175,6 @@ pub async fn load_persisted_override_health_report(
 }
 
 pub async fn refresh_override_health_report(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
 ) -> PipelineOverrideHealthReport {
     ensure_loaded();
@@ -200,8 +199,8 @@ pub async fn refresh_override_health_report(
         tracing::warn!("[pipeline] {warning}");
     }
 
-    persist_override_health_report(db, pg_pool, &report).await;
-    record_override_audit_logs(db, pg_pool, &report).await;
+    persist_override_health_report(pg_pool, &report).await;
+    record_override_audit_logs(pg_pool, &report).await;
     report
 }
 
@@ -443,7 +442,6 @@ fn format_replace_warning(warning: &PipelineOverrideReplaceWarning) -> String {
 }
 
 async fn persist_override_health_report(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     report: &PipelineOverrideHealthReport,
 ) {
@@ -480,7 +478,6 @@ async fn persist_override_health_report(
 }
 
 async fn record_override_audit_logs(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     report: &PipelineOverrideHealthReport,
 ) {
@@ -1696,7 +1693,7 @@ mod tests {
         let db = unused_legacy_db();
         pg_seed_repo(&pool, "repo-bad-json", Some(r#"{"states":["broken"]}"#)).await;
 
-        let report = refresh_override_health_report(Some(&db), Some(&pool)).await;
+        let report = refresh_override_health_report(Some(&pool)).await;
         assert_eq!(report.status, "warn");
         assert_eq!(report.warnings_count, 1);
         assert_eq!(report.parse_failures.len(), 1);
@@ -1744,7 +1741,7 @@ mod tests {
         )
         .await;
 
-        let report = refresh_override_health_report(Some(&db), Some(&pool)).await;
+        let report = refresh_override_health_report(Some(&pool)).await;
         let warning = report
             .replace_warnings
             .iter()
@@ -1791,7 +1788,7 @@ mod tests {
         .to_string();
         pg_seed_repo(&pool, "repo-partial-states", Some(&override_json)).await;
 
-        let report = refresh_override_health_report(Some(&db), Some(&pool)).await;
+        let report = refresh_override_health_report(Some(&pool)).await;
         let warning = report
             .replace_warnings
             .iter()

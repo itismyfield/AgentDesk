@@ -226,7 +226,7 @@ where
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
-    crate::pipeline::refresh_override_health_report(legacy_db.as_ref(), pg_pool.as_ref()).await;
+    crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
             &config,
@@ -370,24 +370,20 @@ async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
         if is_five_min_policy_tick(count) {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
-            if let Some(db) = engine.legacy_db() {
-                if let Err(error) = crate::services::api_friction::process_api_friction_patterns(
-                    db,
-                    pg_pool.as_deref().or_else(|| engine.pg_pool()),
-                    None,
-                    None,
-                )
-                .await
-                {
-                    tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
-                }
+            if let Err(error) = crate::services::api_friction::process_api_friction_patterns(
+                pg_pool.as_deref().or_else(|| engine.pg_pool()),
+                None,
+                None,
+            )
+            .await
+            {
+                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
             }
             // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
             // compute + persist + alert on threshold breach.
             let slo_pool = pg_pool.as_deref().or_else(|| engine.pg_pool());
-            let slo_db = engine.legacy_db();
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let _ = crate::services::slo::run_aggregation_tick(slo_db, slo_pool, now_ms).await;
+            let _ = crate::services::slo::run_aggregation_tick(None, slo_pool, now_ms).await;
 
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick", "legacy").await;
