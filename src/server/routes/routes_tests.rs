@@ -13755,7 +13755,13 @@ async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configu
     );
 }
 
-#[tokio::test]
+// #1342 ci-red: this test exercises the JS bridge's setStatus path during
+// the OnCardTerminal hook, which on PG holds a write tx across pipeline
+// resolution. With the default `#[tokio::test]` (current_thread) runtime
+// the hook executor and the source pool's drivers contend for the only
+// worker thread, so a multi-thread runtime is required for the test to
+// drive the pool while the actor thread is dispatching JS hooks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_it_up() {
     crate::pipeline::ensure_loaded();
     let (repo, _repo_override) = setup_test_repo();
@@ -14021,7 +14027,9 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         .fetch_one(&pool)
         .await
         .unwrap();
-        let pr_row: (Option<String>, Option<i32>, Option<String>) = sqlx::query_as(
+        // #1342 ci-red: pr_tracking.pr_number is INT8/BIGINT in the PG
+        // schema (sqlx 0.8 strict typing), so it must be decoded as i64.
+        let pr_row: (Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
             "SELECT state, pr_number, last_error FROM pr_tracking WHERE card_id = 'card-ft-terminal'",
         )
         .fetch_optional(&pool)
@@ -14034,7 +14042,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         blocked_reason = card_row.2;
         dispatch_status = observed_dispatch_status;
         pr_tracking_state = pr_row.0;
-        pr_tracking_pr_number = pr_row.1.map(|v| v as i64);
+        pr_tracking_pr_number = pr_row.1;
         pr_tracking_last_error = pr_row.2;
 
         if pr_tracking_state.as_deref() == Some("wait-ci")

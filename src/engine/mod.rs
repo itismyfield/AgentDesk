@@ -2023,7 +2023,17 @@ mod tests {
         assert_eq!(context_json["reset_reason"], "repeated_findings");
     }
 
-    #[tokio::test]
+    // #1342 ci-red: this test queues an OnReviewEnter hook through the actor
+    // queue while the actor itself is blocked on `block_actor_for_test`. The
+    // queued hook then calls `agentdesk.kanban.setStatus(..., "done", true)`,
+    // which on the PG backend goes through `block_on_pg_result` and needs the
+    // tokio runtime that owns the source pool to keep making progress while
+    // the test thread waits on `blocker.join()` / `queued.join()`. The
+    // current_thread runtime that `#[tokio::test]` provides freezes the pool
+    // because the only worker is blocked on those joins, so the JS bridge's
+    // `block_in_place + handle.block_on` cannot acquire a connection. A
+    // multi-threaded runtime keeps the pool drivers alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_review_enter_replays_terminal_transition_hooks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
