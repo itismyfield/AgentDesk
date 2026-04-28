@@ -190,6 +190,46 @@ However, the skill path depends on the active OpenCode runtime having the
 expected skill files/config available. There is no AgentDesk-level OpenCode
 skill-sync or MCP-sync contract in this repo yet.
 
+### Additional OpenCode parity gaps
+
+The 2026-04-28 code audit found several gaps beyond prompt/output cleanup:
+
+- OpenCode advertises `supports_resume: true` and `resume_without_reset: true`
+  (`src/services/provider.rs:139-147`), but
+  `src/services/opencode.rs:94-107` ignores `_session_id`, always creates a new
+  OpenCode session (`src/services/opencode.rs:197-199`), then disposes and
+  kills the OpenCode server after the turn (`src/services/opencode.rs:138-139`).
+  Discord callers pass the session id through
+  `src/services/discord/router/message_handler.rs:1461-1474` and
+  `:3389-3402`, so the public capability currently overpromises.
+- OpenCode simple execution does not honor the caller's cancellation token:
+  `execute_command_simple_cancellable(...)` accepts `_cancel_token` but creates
+  a new local token instead (`src/services/opencode.rs:40-55`). The timeout
+  path in `src/services/provider_exec.rs:68-87` cancels the caller token and
+  kills the PID registered on that token, so simple OpenCode timeouts can leave
+  the spawned `opencode serve` path running until it exits on its own.
+- OpenCode model overrides are not wired to the actual OpenCode API shape.
+  AgentDesk sends `{"modelID": ...}` when creating a session
+  (`src/services/opencode.rs:251-256`), but OpenCode `Session.CreateInput`
+  only accepts session metadata such as `parentID`, `title`, `permission`, and
+  `workspaceID` (`packages/opencode/src/session/session.ts:179-185`). The model
+  belongs in `PromptInput.model` as `{ providerID, modelID }`
+  (`packages/opencode/src/session/prompt.ts:1677-1688`).
+- Doctor/provider health has an OpenCode check id and display label
+  (`src/cli/doctor/orchestrator.rs:870-877`, `:2252-2258`), but
+  `build_provider_checks(...)` only schedules Claude, Codex, Gemini, and Qwen
+  (`src/cli/doctor/orchestrator.rs:903-920`).
+- Runtime skill sync still targets Claude/Codex/Gemini/Qwen but not OpenCode:
+  `src/runtime_layout/skill_sync.rs:569-576` falls unknown providers back to
+  Codex, `src/server/routes/skills_api.rs:100-117` scans only release skills,
+  Codex, and Claude roots, and `skills/manifest.json` exposes the built-in
+  memory skills only to Claude/Codex. This conflicts with the Discord runtime
+  scanner, which already knows OpenCode's `.opencode/skills` roots
+  (`src/services/discord/mod.rs:2657-2678`).
+- `opencode serve` stdout/stderr are both discarded
+  (`src/services/opencode.rs:151-166`), so failed startup or health timeout
+  diagnostics lose provider-side error text that would help operators.
+
 ## Target Experience
 
 OpenCode should be safe and useful enough that operators can use it in Discord
@@ -198,6 +238,8 @@ without switching providers for routine inspection tasks.
 P0 target:
 
 - hidden system/developer/channel instructions never appear in Discord output;
+- OpenCode capability metadata matches implemented behavior, especially resume,
+  cancellation, and model override behavior;
 - OpenCode final answers are delivered as final answers, not prompt prelude or
   raw process narration;
 - OpenCode SSE streaming handles text deltas and full text snapshots without
@@ -223,6 +265,35 @@ Non-goals:
 - Do not broaden Discord outbound migration or v3 delivery work.
 
 ## Proposed Implementation Contract
+
+### P0. OpenCode runtime contract correctness
+
+Make OpenCode's advertised provider capabilities match the implemented runtime
+contract.
+
+Required behavior:
+
+1. Either implement real OpenCode session reuse/resume or set
+   `supports_resume` / `resume_without_reset` to `false` until it exists.
+2. Make Discord restart/resume copy avoid promising `--resume` semantics for
+   OpenCode unless the provider actually reuses an OpenCode session.
+3. Pass the caller's `CancelToken` through OpenCode simple execution and
+   register the spawned `opencode serve` PID on that same token.
+4. Move model override handling out of session creation and into
+   `/prompt_async` as OpenCode `PromptInput.model`.
+5. Preserve current remote-profile rejection until an explicit remote OpenCode
+   execution path exists.
+
+Acceptance:
+
+- tests prove OpenCode simple timeout/cancel registers the child PID on the
+  caller token;
+- tests prove non-default OpenCode model selection serializes as
+  `{"model":{"providerID": "...", "modelID": "..."}}` in the prompt payload;
+- restart/control copy no longer promises resumability when OpenCode cannot
+  resume;
+- provider capability tests distinguish implemented OpenCode behavior from the
+  Claude/Codex/Qwen managed tmux contract.
 
 ### P0. Hidden-context outbound sanitizer
 
@@ -365,6 +436,9 @@ Minimum checks:
 - binary path and version from provider CLI registry;
 - `opencode serve` health probe;
 - MCP config presence and managed server count;
+- include OpenCode in `build_provider_checks(...)`;
+- capture bounded `opencode serve` stderr/stdout during startup and health
+  failure paths;
 - whether the provider is using the non-managed backend path;
 - explicit unsupported features: remote profile, managed tmux resume, compact
   percent.
@@ -383,7 +457,9 @@ These are useful but not required for first parity:
 - explicit session resume support if OpenCode HTTP sessions can be resumed
   safely from AgentDesk;
 - richer tool-result compaction for very large OpenCode tool outputs;
-- OpenCode-specific skill runtime validation in the skill-sync tooling.
+- OpenCode-specific skill runtime validation in the skill-sync tooling;
+- OpenCode-aware server-side skill API roots so dashboard/API skill inventory
+  sees the same `.opencode/skills` content that Discord runtime scanning sees.
 
 ## Regression Test Plan
 
