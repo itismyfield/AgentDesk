@@ -4,7 +4,7 @@
 
 - Production Rust modules: `320`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `85`
+- Giant files: `84`
 
 ## Namespace Summary
 
@@ -74,13 +74,13 @@
 | `db::auto_queue` | `src/db/auto_queue.rs` | 5940 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::kanban` | `src/db/kanban.rs` | 484 |  |
-| `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 378 |  |
+| `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 255 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1421 | giant-file |
 | `db::schema` | `src/db/schema.rs` | 3195 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 485 |  |
-| `db::session_transcripts` | `src/db/session_transcripts.rs` | 1245 | giant-file |
+| `db::session_transcripts` | `src/db/session_transcripts.rs` | 853 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
-| `db::turns` | `src/db/turns.rs` | 572 |  |
+| `db::turns` | `src/db/turns.rs` | 387 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 4899 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 23 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3802 | giant-file |
