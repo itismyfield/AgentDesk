@@ -349,6 +349,7 @@ fn channel_slot_mut<'a>(
         "claude" => Some(&mut channels.claude),
         "codex" => Some(&mut channels.codex),
         "gemini" => Some(&mut channels.gemini),
+        "opencode" => Some(&mut channels.opencode),
         "qwen" => Some(&mut channels.qwen),
         _ => None,
     }

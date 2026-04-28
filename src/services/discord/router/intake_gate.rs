@@ -704,7 +704,7 @@ pub(in crate::services::discord) async fn handle_event(
             // message handling produces a bogus "No active session" error in DMs.
             if !text.is_empty() {
                 if try_handle_pending_dm_reply(
-                    data.shared.sqlite.as_ref(),
+                    data.shared.legacy_sqlite(),
                     data.shared.pg_pool.as_ref(),
                     new_message,
                 )

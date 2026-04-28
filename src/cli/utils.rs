@@ -15,7 +15,7 @@ pub fn print_help() {
         "    dcserver [TOKEN]        Start Discord bot server(s); without TOKEN uses configured Discord bots"
     );
     println!(
-        "    restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini|qwen> [--report-message-id <ID>]]"
+        "    restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini|opencode|qwen> [--report-message-id <ID>]]"
     );
     println!("    discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!("    discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");

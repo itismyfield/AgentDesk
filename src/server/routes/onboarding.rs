@@ -5,7 +5,6 @@ use std::{
 };
 
 use axum::{Json, extract::State, http::StatusCode};
-use libsql_rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -14,16 +13,14 @@ use super::AppState;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
+#[cfg(test)]
+#[cfg(test)]
 fn legacy_db(state: &AppState) -> &crate::db::Db {
-    /* TODO(#1238 / 843g): see kanban.rs::legacy_db. Onboarding routes
-    still expect a `&Db`; PG-only runtimes never read it. */
-    use std::sync::OnceLock;
-    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
     state
         .engine
         .legacy_db()
         .or_else(|| state.legacy_db())
-        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
+        .expect("legacy SQLite DB is only available in no-PG tests")
 }
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -257,103 +254,228 @@ fn onboarding_draft_secret_policy_value() -> serde_json::Value {
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
 pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match legacy_db(&state).lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
+    if let Some(pool) = state.pg_pool_ref() {
+        return match status_pg(pool).await {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
+                Json(json!({"error": error})),
+            ),
+        };
+    }
 
-    // Check whether onboarding created any agents yet.
-    let has_bots: bool = conn
-        .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
-        .unwrap_or(false);
+    #[cfg(not(test))]
+    {
+        return match status_config() {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        };
+    }
 
-    // Get existing config
-    let bot_token: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
-            [],
-            |row| row.get(0),
+    #[cfg(test)]
+    {
+        let conn = match legacy_db(&state).lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        // Check whether onboarding created any agents yet.
+        let has_bots: bool = conn
+            .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
+            .unwrap_or(false);
+
+        // Get existing config
+        let bot_token: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let guild_id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_guild_id'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let owner_id = sanitize_legacy_owner_id(
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_owner_id'",
+                [],
+                |row| row.get(0),
+            )
+            .ok(),
+        );
+
+        let agent_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        // Get channel mappings from agents table
+        let mut stmt = conn
+            .prepare("SELECT id, name, discord_channel_id FROM agents ORDER BY id")
+            .unwrap();
+        let agents: Vec<serde_json::Value> = stmt
+            .query_map([], |row| {
+                Ok(json!({
+                    "agent_id": row.get::<_, String>(0)?,
+                    "name": row.get::<_, Option<String>>(1)?,
+                    "channel_id": row.get::<_, Option<String>>(2)?,
+                }))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        // Load all bot tokens for pre-fill
+        let announce_token: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_announce_token'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let notify_token: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_notify_token'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let command_token_2: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_command_token_2'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let primary_provider: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_provider'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let command_provider_2: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'onboarding_command_provider_2'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let completed = has_bots && agent_count > 0;
+        let runtime_root = crate::cli::agentdesk_runtime_root();
+        let completion_state = runtime_root
+            .as_ref()
+            .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
+        let draft_available = runtime_root
+            .as_ref()
+            .map(|root| onboarding_draft_path(root).is_file())
+            .unwrap_or(false);
+        let setup_mode = onboarding_setup_mode(completed);
+        let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
+
+        // Never return raw onboarding tokens from status.
+        // This endpoint can be reachable without auth, so redact all token values.
+        let redact = |_t: Option<String>| -> Option<String> { None };
+
+        (
+            StatusCode::OK,
+            Json(json!({
+                "completed": completed,
+                "agent_count": agent_count,
+                "bot_tokens": {
+                    "command": redact(bot_token),
+                    "announce": redact(announce_token),
+                    "notify": redact(notify_token),
+                    "command2": redact(command_token_2),
+                },
+                "bot_providers": {
+                    "command": primary_provider,
+                    "command2": command_provider_2,
+                },
+                "guild_id": guild_id,
+                "owner_id": owner_id,
+                "agents": agents,
+                "draft_available": draft_available,
+                "setup_mode": setup_mode,
+                "resume_state": resume_state,
+                "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
+                "partial_apply": completion_state
+                    .as_ref()
+                    .map(|state| state.partial_apply)
+                    .unwrap_or(false),
+                "retry_recommended": completion_state
+                    .as_ref()
+                    .map(|state| state.retry_recommended)
+                    .unwrap_or(false),
+                "rerun_policy": onboarding_rerun_policy_value(
+                    OnboardingRerunPolicy::ReuseExisting,
+                    false,
+                ),
+            })),
         )
-        .ok();
+    }
+}
 
-    let guild_id: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_guild_id'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+async fn pg_kv_value(pool: &sqlx::PgPool, key: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load postgres kv_meta {key}: {error}"))
+}
 
-    let owner_id = sanitize_legacy_owner_id(
-        conn.query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_owner_id'",
-            [],
-            |row| row.get(0),
-        )
-        .ok(),
-    );
+async fn onboarding_has_agents_pg(pool: &sqlx::PgPool) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>("SELECT COUNT(*) > 0 FROM agents")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("check postgres onboarding agents: {error}"))
+}
 
-    let agent_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM agents", [], |row| row.get(0))
-        .unwrap_or(0);
-
-    // Get channel mappings from agents table
-    let mut stmt = conn
-        .prepare("SELECT id, name, discord_channel_id FROM agents ORDER BY id")
-        .unwrap();
-    let agents: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
-            Ok(json!({
-                "agent_id": row.get::<_, String>(0)?,
-                "name": row.get::<_, Option<String>>(1)?,
-                "channel_id": row.get::<_, Option<String>>(2)?,
-            }))
+async fn status_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
+    let has_bots = onboarding_has_agents_pg(pool).await?;
+    let bot_token = pg_kv_value(pool, "onboarding_bot_token").await?;
+    let guild_id = pg_kv_value(pool, "onboarding_guild_id").await?;
+    let owner_id = sanitize_legacy_owner_id(pg_kv_value(pool, "onboarding_owner_id").await?);
+    let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM agents")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("count postgres onboarding agents: {error}"))?;
+    let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT id, name, discord_channel_id FROM agents ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load postgres onboarding agents: {error}"))?;
+    let agents = rows
+        .into_iter()
+        .map(|(agent_id, name, channel_id)| {
+            json!({
+                "agent_id": agent_id,
+                "name": name,
+                "channel_id": channel_id,
+            })
         })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+        .collect::<Vec<_>>();
 
-    // Load all bot tokens for pre-fill
-    let announce_token: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_announce_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-    let notify_token: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_notify_token'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-    let command_token_2: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_command_token_2'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-    let primary_provider: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_provider'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-    let command_provider_2: Option<String> = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'onboarding_command_provider_2'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let announce_token = pg_kv_value(pool, "onboarding_announce_token").await?;
+    let notify_token = pg_kv_value(pool, "onboarding_notify_token").await?;
+    let command_token_2 = pg_kv_value(pool, "onboarding_command_token_2").await?;
+    let primary_provider = pg_kv_value(pool, "onboarding_provider").await?;
+    let command_provider_2 = pg_kv_value(pool, "onboarding_command_provider_2").await?;
 
     let completed = has_bots && agent_count > 0;
     let runtime_root = crate::cli::agentdesk_runtime_root();
@@ -366,61 +488,151 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         .unwrap_or(false);
     let setup_mode = onboarding_setup_mode(completed);
     let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
-
-    // Never return raw onboarding tokens from status.
-    // This endpoint can be reachable without auth, so redact all token values.
     let redact = |_t: Option<String>| -> Option<String> { None };
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "completed": completed,
-            "agent_count": agent_count,
-            "bot_tokens": {
-                "command": redact(bot_token),
-                "announce": redact(announce_token),
-                "notify": redact(notify_token),
-                "command2": redact(command_token_2),
-            },
-            "bot_providers": {
-                "command": primary_provider,
-                "command2": command_provider_2,
-            },
-            "guild_id": guild_id,
-            "owner_id": owner_id,
-            "agents": agents,
-            "draft_available": draft_available,
-            "setup_mode": setup_mode,
-            "resume_state": resume_state,
-            "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
-            "partial_apply": completion_state
-                .as_ref()
-                .map(|state| state.partial_apply)
-                .unwrap_or(false),
-            "retry_recommended": completion_state
-                .as_ref()
-                .map(|state| state.retry_recommended)
-                .unwrap_or(false),
-            "rerun_policy": onboarding_rerun_policy_value(
-                OnboardingRerunPolicy::ReuseExisting,
-                false,
-            ),
-        })),
-    )
+    Ok(json!({
+        "completed": completed,
+        "agent_count": agent_count,
+        "bot_tokens": {
+            "command": redact(bot_token),
+            "announce": redact(announce_token),
+            "notify": redact(notify_token),
+            "command2": redact(command_token_2),
+        },
+        "bot_providers": {
+            "command": primary_provider,
+            "command2": command_provider_2,
+        },
+        "guild_id": guild_id,
+        "owner_id": owner_id,
+        "agents": agents,
+        "draft_available": draft_available,
+        "setup_mode": setup_mode,
+        "resume_state": resume_state,
+        "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
+        "partial_apply": completion_state
+            .as_ref()
+            .map(|state| state.partial_apply)
+            .unwrap_or(false),
+        "retry_recommended": completion_state
+            .as_ref()
+            .map(|state| state.retry_recommended)
+            .unwrap_or(false),
+        "rerun_policy": onboarding_rerun_policy_value(
+            OnboardingRerunPolicy::ReuseExisting,
+            false,
+        ),
+    }))
+}
+
+#[cfg(not(test))]
+fn status_config() -> Result<serde_json::Value, String> {
+    let runtime_root = crate::cli::agentdesk_runtime_root();
+    let config = match runtime_root.as_ref() {
+        Some(root) => load_onboarding_config(root)?,
+        None => crate::config::Config::default(),
+    };
+    let agent_count = config.agents.len() as i64;
+    let agents = config
+        .agents
+        .iter()
+        .map(|agent| {
+            let channel_id = agent.channels.iter().into_iter().find_map(|(_, channel)| {
+                channel.and_then(|channel| {
+                    channel
+                        .channel_id()
+                        .or_else(|| channel.channel_name())
+                        .or_else(|| channel.target())
+                })
+            });
+            json!({
+                "agent_id": agent.id,
+                "name": agent.name,
+                "channel_id": channel_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let completion_state = runtime_root
+        .as_ref()
+        .and_then(|root| load_onboarding_completion_state(root).ok().flatten());
+    let draft_available = runtime_root
+        .as_ref()
+        .map(|root| onboarding_draft_path(root).is_file())
+        .unwrap_or(false);
+    let completed = config.discord.guild_id.is_some() && agent_count > 0;
+    let setup_mode = onboarding_setup_mode(completed);
+    let resume_state = onboarding_resume_state(draft_available, completion_state.as_ref());
+
+    Ok(json!({
+        "completed": completed,
+        "agent_count": agent_count,
+        "bot_tokens": {
+            "command": Option::<String>::None,
+            "announce": Option::<String>::None,
+            "notify": Option::<String>::None,
+            "command2": Option::<String>::None,
+        },
+        "bot_providers": {
+            "command": config.discord.bots.get("command").and_then(|bot| bot.provider.clone()),
+            "command2": config.discord.bots.get("command_2").and_then(|bot| bot.provider.clone()),
+        },
+        "guild_id": config.discord.guild_id,
+        "owner_id": config.discord.owner_id.map(|id| id.to_string()),
+        "agents": agents,
+        "draft_available": draft_available,
+        "setup_mode": setup_mode,
+        "resume_state": resume_state,
+        "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
+        "partial_apply": completion_state
+            .as_ref()
+            .map(|state| state.partial_apply)
+            .unwrap_or(false),
+        "retry_recommended": completion_state
+            .as_ref()
+            .map(|state| state.retry_recommended)
+            .unwrap_or(false),
+        "rerun_policy": onboarding_rerun_policy_value(
+            OnboardingRerunPolicy::ReuseExisting,
+            false,
+        ),
+    }))
 }
 
 /// GET /api/onboarding/draft
 /// Returns the in-progress onboarding draft, distinct from completed setup summary.
 pub async fn draft_get(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let completed = match legacy_db(&state).lock() {
-        Ok(conn) => conn
-            .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
-            .unwrap_or(false),
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
+    let completed = if let Some(pool) = state.pg_pool_ref() {
+        match onboarding_has_agents_pg(pool).await {
+            Ok(completed) => completed,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        }
+    } else {
+        #[cfg(not(test))]
+        {
+            crate::cli::agentdesk_runtime_root()
+                .as_ref()
+                .and_then(|root| load_onboarding_config(root).ok())
+                .map(|config| config.discord.guild_id.is_some() && !config.agents.is_empty())
+                .unwrap_or(false)
+        }
+        #[cfg(test)]
+        {
+            match legacy_db(&state).lock() {
+                Ok(conn) => conn
+                    .query_row("SELECT COUNT(*) > 0 FROM agents", [], |row| row.get(0))
+                    .unwrap_or(false),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            }
         }
     };
 
@@ -601,16 +813,26 @@ async fn load_channels(
     token: Option<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Use provided token or saved token
-    let token = token.or_else(|| {
-        legacy_db(&state).lock().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
-                [],
-                |row| row.get(0),
+    let token = match token {
+        Some(token) => Some(token),
+        None if state.pg_pool_ref().is_some() => {
+            match pg_kv_value(
+                state.pg_pool_ref().expect("checked pg_pool_ref"),
+                "onboarding_bot_token",
             )
-            .ok()
-        })
-    });
+            .await
+            {
+                Ok(token) => token,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    );
+                }
+            }
+        }
+        None => saved_onboarding_bot_token_without_pg(&state),
+    };
 
     let Some(token) = token else {
         return (
@@ -680,6 +902,32 @@ async fn load_channels(
     }
 
     (StatusCode::OK, Json(json!({"guilds": result_guilds})))
+}
+
+#[cfg(not(test))]
+fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
+    crate::cli::agentdesk_runtime_root()
+        .as_ref()
+        .and_then(|root| load_onboarding_config(root).ok())
+        .and_then(|config| {
+            config
+                .discord
+                .bots
+                .get("command")
+                .and_then(|bot| bot.token.clone())
+        })
+}
+
+#[cfg(test)]
+fn saved_onboarding_bot_token_without_pg(state: &AppState) -> Option<String> {
+    legacy_db(state).lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    })
 }
 
 /// GET /api/onboarding/channels
@@ -1359,6 +1607,7 @@ fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     match primary_provider {
         "codex" => "claude",
         "gemini" => "codex",
+        "opencode" => "claude",
         _ => "codex",
     }
 }
@@ -1455,6 +1704,7 @@ fn agent_channel_slot_mut<'a>(
         "claude" => Some(&mut channels.claude),
         "codex" => Some(&mut channels.codex),
         "gemini" => Some(&mut channels.gemini),
+        "opencode" => Some(&mut channels.opencode),
         "qwen" => Some(&mut channels.qwen),
         _ => None,
     }
@@ -1547,13 +1797,16 @@ fn validate_unique_resolved_channels(
     Ok(())
 }
 
+#[cfg(test)]
 fn collect_onboarding_conflicts(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     runtime_root: &Path,
     provider: &str,
     resolved_channels: &[ResolvedChannelMapping],
     rerun_policy: OnboardingRerunPolicy,
 ) -> Result<Vec<String>, String> {
+    use rusqlite::OptionalExtension;
+
     validate_unique_resolved_channels(resolved_channels)?;
 
     let config = load_onboarding_config(runtime_root)?;
@@ -1644,7 +1897,7 @@ fn collect_onboarding_conflicts(
         let conflicting_db_channel_owner = conn
             .query_row(
                 "SELECT id FROM agents WHERE discord_channel_id = ?1 AND id != ?2 LIMIT 1",
-                libsql_rusqlite::params![mapping.channel_id, mapping.role_id],
+                rusqlite::params![mapping.channel_id, mapping.role_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -1654,6 +1907,244 @@ fn collect_onboarding_conflicts(
                     mapping.channel_id
                 )
             })?;
+        if let Some(other_agent_id) = conflicting_db_channel_owner {
+            conflicts.push(format!(
+                "Discord channel '{}' is already assigned to agent '{}' in DB",
+                mapping.channel_id, other_agent_id
+            ));
+        }
+
+        if let Some(agent) = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == mapping.role_id)
+        {
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting && agent.provider != provider {
+                conflicts.push(format!(
+                    "agent '{}' already uses provider '{}' in agentdesk.yaml; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                    mapping.role_id, agent.provider, provider
+                ));
+            }
+
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+                if let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) {
+                    let channel = channel_config_from_existing(slot.clone());
+                    let existing_channel_id = channel.channel_id();
+                    let existing_names = channel.all_names();
+                    let same_channel_id =
+                        existing_channel_id.as_deref() == Some(mapping.channel_id.as_str());
+                    let same_channel_name = existing_names.iter().any(|name| {
+                        name == &mapping.channel_name || name == &mapping.requested_channel_name
+                    });
+                    let conflicts_with_existing = if existing_channel_id.is_some() {
+                        !same_channel_id
+                    } else {
+                        !existing_names.is_empty() && !same_channel_name
+                    };
+                    if conflicts_with_existing {
+                        conflicts.push(format!(
+                            "agent '{}' already maps to a different channel in agentdesk.yaml; rerun_policy=reuse_existing refuses to replace it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+            }
+        }
+
+        for agent in &config.agents {
+            if agent.id == mapping.role_id {
+                continue;
+            }
+            let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) else {
+                continue;
+            };
+            let channel = channel_config_from_existing(slot.clone());
+            let uses_same_target = channel.channel_id().as_deref()
+                == Some(mapping.channel_id.as_str())
+                || channel.all_names().iter().any(|name| {
+                    name == &mapping.channel_name || name == &mapping.requested_channel_name
+                });
+            if uses_same_target {
+                conflicts.push(format!(
+                    "agent '{}' already owns channel '{}' in agentdesk.yaml",
+                    agent.id, mapping.channel_id
+                ));
+            }
+        }
+
+        if let Some(entry) = by_channel_id.and_then(|entries| entries.get(&mapping.channel_id))
+            && let Some(role_id) = role_map_entry_role_id(entry)
+            && role_id != mapping.role_id
+        {
+            conflicts.push(format!(
+                "role_map.json already binds channel '{}' to agent '{}'",
+                mapping.channel_id, role_id
+            ));
+        }
+
+        if let Some(entry) = by_channel_name.and_then(|entries| entries.get(&mapping.channel_name))
+            && let Some(role_id) = role_map_entry_role_id(entry)
+            && role_id != mapping.role_id
+        {
+            conflicts.push(format!(
+                "role_map.json already binds channel name '{}' to agent '{}'",
+                mapping.channel_name, role_id
+            ));
+        }
+
+        if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+            if let Some(entries) = by_channel_id {
+                for (existing_channel_id, entry) in entries {
+                    if role_map_entry_role_id(entry) == Some(mapping.role_id.as_str())
+                        && existing_channel_id != &mapping.channel_id
+                    {
+                        conflicts.push(format!(
+                            "role_map.json already binds agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+            }
+
+            if let Some(entries) = by_channel_name {
+                for (existing_name, entry) in entries {
+                    if role_map_entry_role_id(entry) != Some(mapping.role_id.as_str()) {
+                        continue;
+                    }
+
+                    let same_name = existing_name == &mapping.channel_name
+                        || existing_name == &mapping.requested_channel_name;
+                    if !same_name {
+                        conflicts.push(format!(
+                            "role_map.json already binds agent '{}' to channel name '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_name, mapping.channel_name
+                        ));
+                        continue;
+                    }
+
+                    if let Some(existing_channel_id) = role_map_entry_channel_id(entry)
+                        && existing_channel_id != mapping.channel_id
+                    {
+                        conflicts.push(format!(
+                            "role_map.json already binds channel name '{}' for agent '{}' to Discord channel '{}'; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            existing_name, mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(conflicts)
+}
+
+async fn collect_onboarding_conflicts_pg(
+    pool: &sqlx::PgPool,
+    runtime_root: &Path,
+    provider: &str,
+    resolved_channels: &[ResolvedChannelMapping],
+    rerun_policy: OnboardingRerunPolicy,
+) -> Result<Vec<String>, String> {
+    validate_unique_resolved_channels(resolved_channels)?;
+
+    let config = load_onboarding_config(runtime_root)?;
+    let role_map = load_onboarding_role_map(runtime_root)?;
+    let by_channel_id = role_map
+        .get("byChannelId")
+        .and_then(|value| value.as_object());
+    let by_channel_name = role_map
+        .get("byChannelName")
+        .and_then(|value| value.as_object());
+
+    let mut conflicts = Vec::new();
+
+    for mapping in resolved_channels {
+        let existing_agent = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT provider, discord_channel_id, description, system_prompt \
+             FROM agents WHERE id = $1",
+        )
+        .bind(&mapping.role_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("failed to query postgres agent {}: {e}", mapping.role_id))?;
+
+        if let Some((
+            existing_provider,
+            existing_channel_id,
+            existing_description,
+            existing_prompt,
+        )) = existing_agent
+        {
+            if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
+                if let Some(existing_channel_id) =
+                    normalized_optional_text(existing_channel_id.as_deref())
+                {
+                    if existing_channel_id != mapping.channel_id {
+                        conflicts.push(format!(
+                            "agent '{}' already uses Discord channel '{}' in DB; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_channel_id, mapping.channel_id
+                        ));
+                    }
+                }
+
+                if let Some(existing_provider) =
+                    normalized_optional_text(existing_provider.as_deref())
+                {
+                    if existing_provider != provider {
+                        conflicts.push(format!(
+                            "agent '{}' already uses provider '{}' in config DB state; rerun_policy=reuse_existing refuses to replace it with '{}'",
+                            mapping.role_id, existing_provider, provider
+                        ));
+                    }
+                }
+
+                if let (Some(existing), Some(requested)) = (
+                    normalized_optional_text(existing_description.as_deref()),
+                    normalized_optional_text(mapping.description.as_deref()),
+                ) {
+                    if existing != requested {
+                        conflicts.push(format!(
+                            "agent '{}' already has a different description in DB; rerun_policy=reuse_existing refuses to overwrite it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+
+                if let (Some(existing), Some(requested)) = (
+                    normalized_optional_text(existing_prompt.as_deref()),
+                    normalized_optional_text(mapping.system_prompt.as_deref()),
+                ) {
+                    if existing != requested {
+                        conflicts.push(format!(
+                            "agent '{}' already has a different system prompt in DB; rerun_policy=reuse_existing refuses to overwrite it",
+                            mapping.role_id
+                        ));
+                    }
+                }
+            }
+        }
+
+        let conflicting_db_channel_owner = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agents WHERE discord_channel_id = $1 AND id != $2 LIMIT 1",
+        )
+        .bind(&mapping.channel_id)
+        .bind(&mapping.role_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to check existing postgres DB channel owner {}: {e}",
+                mapping.channel_id
+            )
+        })?;
         if let Some(other_agent_id) = conflicting_db_channel_owner {
             conflicts.push(format!(
                 "Discord channel '{}' is already assigned to agent '{}' in DB",
@@ -1924,6 +2415,7 @@ fn agent_channel_slot_ref<'a>(
         "claude" => Some(&channels.claude),
         "codex" => Some(&channels.codex),
         "gemini" => Some(&channels.gemini),
+        "opencode" => Some(&channels.opencode),
         "qwen" => Some(&channels.qwen),
         _ => None,
     }
@@ -2163,6 +2655,181 @@ fn verify_onboarding_pipeline_artifact(runtime_root: &Path) -> Result<serde_json
         "states": pipeline.states.len(),
         "transitions": pipeline.transitions.len(),
     }))
+}
+
+async fn persist_onboarding_pg(
+    pool: &sqlx::PgPool,
+    body: &CompleteBody,
+    provider: &str,
+    resolved_channels: &[ResolvedChannelMapping],
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("failed to start postgres onboarding transaction: {error}"))?;
+
+    for (key, value) in [
+        ("onboarding_bot_token", Some(body.token.trim())),
+        ("onboarding_guild_id", Some(body.guild_id.trim())),
+        ("onboarding_provider", Some(provider)),
+        (
+            "onboarding_owner_id",
+            body.owner_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_announce_token",
+            body.announce_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_notify_token",
+            body.notify_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_command_token_2",
+            body.command_token_2
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_command_provider_2",
+            body.command_provider_2
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        ("onboarding_complete", Some("true")),
+    ] {
+        match value {
+            Some(value) => {
+                sqlx::query(
+                    "INSERT INTO kv_meta (key, value)
+                     VALUES ($1, $2)
+                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at = NULL",
+                )
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("failed to persist postgres kv_meta {key}: {error}"))?;
+            }
+            None => {
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("failed to clear postgres kv_meta {key}: {error}"))?;
+            }
+        }
+    }
+
+    for mapping in resolved_channels {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp)
+             VALUES ($1, $2, $3, $4, $5, $6, 'active', 0)
+             ON CONFLICT (id) DO UPDATE SET
+               name = COALESCE(EXCLUDED.name, agents.name),
+               provider = COALESCE(EXCLUDED.provider, agents.provider),
+               discord_channel_id = EXCLUDED.discord_channel_id,
+               description = COALESCE(EXCLUDED.description, agents.description),
+               system_prompt = COALESCE(EXCLUDED.system_prompt, agents.system_prompt),
+               updated_at = NOW()",
+        )
+        .bind(&mapping.role_id)
+        .bind(&mapping.role_id)
+        .bind(provider)
+        .bind(&mapping.channel_id)
+        .bind(&mapping.description)
+        .bind(&mapping.system_prompt)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to upsert postgres agent {}: {error}", mapping.role_id))?;
+    }
+
+    if !resolved_channels.is_empty() {
+        let (template_name, template_name_ko, template_icon, template_color) =
+            match body.template.as_deref() {
+                Some("delivery") => ("Delivery Squad", "전달 스쿼드", "🚀", "#8b5cf6"),
+                Some("operations") => ("Operations Cell", "운영 셀", "🛠️", "#10b981"),
+                Some("insight") => ("Insight Desk", "인사이트 데스크", "📚", "#3b82f6"),
+                _ => ("General", "일반", "📁", "#6b7280"),
+            };
+
+        let office_id = "hq";
+        sqlx::query(
+            "INSERT INTO offices (id, name, name_ko, icon)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(office_id)
+        .bind("Headquarters")
+        .bind("본사")
+        .bind("🏛️")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to upsert postgres default office: {error}"))?;
+
+        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
+        sqlx::query(
+            "INSERT INTO departments (id, name, name_ko, icon, color, office_id, sort_order)
+             VALUES ($1, $2, $3, $4, $5, $6, 0)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&dept_id)
+        .bind(template_name)
+        .bind(template_name_ko)
+        .bind(template_icon)
+        .bind(template_color)
+        .bind(office_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("failed to upsert postgres onboarding department: {error}"))?;
+
+        for mapping in resolved_channels {
+            sqlx::query(
+                "INSERT INTO office_agents (office_id, agent_id, department_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (office_id, agent_id)
+                 DO UPDATE SET department_id = EXCLUDED.department_id",
+            )
+            .bind(office_id)
+            .bind(&mapping.role_id)
+            .bind(&dept_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to assign postgres office agent {}: {error}",
+                    mapping.role_id
+                )
+            })?;
+
+            sqlx::query("UPDATE agents SET department = $1, updated_at = NOW() WHERE id = $2")
+                .bind(&dept_id)
+                .bind(&mapping.role_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed to set postgres agent department {}: {error}",
+                        mapping.role_id
+                    )
+                })?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("failed to commit postgres onboarding transaction: {error}"))
 }
 
 /// POST /api/onboarding/complete
@@ -2449,32 +3116,39 @@ async fn complete_with_options(
         );
     }
 
-    let mut conn = match legacy_db(state).lock() {
-        Ok(conn) => conn,
-        Err(error) => {
-            completion_state.last_error = Some(format!("{error}"));
-            let _ = save_onboarding_completion_state(&root, &completion_state);
-            return completion_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                false,
-                provider,
-                rerun_policy,
-                explicit_rerun_policy,
-                Some(&completion_state),
-                Some(format!("{error}")),
-                Vec::new(),
-                serde_json::Map::new(),
-            );
+    let conflicts = if let Some(pool) = state.pg_pool_ref() {
+        collect_onboarding_conflicts_pg(pool, &root, provider, &resolved_channels, rerun_policy)
+            .await
+    } else {
+        #[cfg(not(test))]
+        {
+            Err("Postgres pool is required to check onboarding database conflicts".to_string())
+        }
+        #[cfg(test)]
+        {
+            let conn = match legacy_db(state).lock() {
+                Ok(conn) => conn,
+                Err(error) => {
+                    completion_state.last_error = Some(format!("{error}"));
+                    let _ = save_onboarding_completion_state(&root, &completion_state);
+                    return completion_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        false,
+                        provider,
+                        rerun_policy,
+                        explicit_rerun_policy,
+                        Some(&completion_state),
+                        Some(format!("{error}")),
+                        Vec::new(),
+                        serde_json::Map::new(),
+                    );
+                }
+            };
+            collect_onboarding_conflicts(&conn, &root, provider, &resolved_channels, rerun_policy)
         }
     };
 
-    let conflicts = match collect_onboarding_conflicts(
-        &conn,
-        &root,
-        provider,
-        &resolved_channels,
-        rerun_policy,
-    ) {
+    let conflicts = match conflicts {
         Ok(conflicts) => conflicts,
         Err(error) => {
             completion_state.last_error = Some(error.clone());
@@ -2772,11 +3446,9 @@ async fn complete_with_options(
         );
     }
 
-    let tx = match conn.transaction() {
-        Ok(tx) => tx,
-        Err(error) => {
-            completion_state.last_error =
-                Some(format!("failed to start onboarding transaction: {error}"));
+    if let Some(pool) = state.pg_pool_ref() {
+        if let Err(error) = persist_onboarding_pg(pool, body, provider, &resolved_channels).await {
+            completion_state.last_error = Some(error);
             let _ = save_onboarding_completion_state(&root, &completion_state);
             return completion_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2790,94 +3462,152 @@ async fn complete_with_options(
                 serde_json::Map::new(),
             );
         }
-    };
-
-    for (key, value) in [
-        ("onboarding_bot_token", Some(body.token.trim())),
-        ("onboarding_guild_id", Some(body.guild_id.trim())),
-        ("onboarding_provider", Some(provider)),
-        (
-            "onboarding_owner_id",
-            body.owner_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        ),
-        (
-            "onboarding_announce_token",
-            body.announce_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        ),
-        (
-            "onboarding_notify_token",
-            body.notify_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        ),
-        (
-            "onboarding_command_token_2",
-            body.command_token_2
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        ),
-        (
-            "onboarding_command_provider_2",
-            body.command_provider_2
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        ),
-        ("onboarding_complete", Some("true")),
-    ] {
-        match value {
-            Some(value) => {
-                if let Err(error) = tx.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    libsql_rusqlite::params![key, value],
-                ) {
-                    completion_state.last_error =
-                        Some(format!("failed to persist kv_meta {}: {error}", key));
-                    let _ = save_onboarding_completion_state(&root, &completion_state);
-                    return completion_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        false,
-                        provider,
-                        rerun_policy,
-                        explicit_rerun_policy,
-                        Some(&completion_state),
-                        completion_state.last_error.clone(),
-                        Vec::new(),
-                        serde_json::Map::new(),
-                    );
-                }
-            }
-            None => {
-                if let Err(error) = tx.execute("DELETE FROM kv_meta WHERE key = ?1", [key]) {
-                    completion_state.last_error =
-                        Some(format!("failed to clear kv_meta {}: {error}", key));
-                    let _ = save_onboarding_completion_state(&root, &completion_state);
-                    return completion_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        false,
-                        provider,
-                        rerun_policy,
-                        explicit_rerun_policy,
-                        Some(&completion_state),
-                        completion_state.last_error.clone(),
-                        Vec::new(),
-                        serde_json::Map::new(),
-                    );
-                }
-            }
+    } else {
+        #[cfg(not(test))]
+        {
+            completion_state.last_error =
+                Some("Postgres pool is required to persist onboarding state".to_string());
+            let _ = save_onboarding_completion_state(&root, &completion_state);
+            return completion_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                provider,
+                rerun_policy,
+                explicit_rerun_policy,
+                Some(&completion_state),
+                completion_state.last_error.clone(),
+                Vec::new(),
+                serde_json::Map::new(),
+            );
         }
-    }
+        #[cfg(test)]
+        {
+            let mut conn = match legacy_db(state).lock() {
+                Ok(conn) => conn,
+                Err(error) => {
+                    completion_state.last_error = Some(format!("{error}"));
+                    let _ = save_onboarding_completion_state(&root, &completion_state);
+                    return completion_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        false,
+                        provider,
+                        rerun_policy,
+                        explicit_rerun_policy,
+                        Some(&completion_state),
+                        Some(format!("{error}")),
+                        Vec::new(),
+                        serde_json::Map::new(),
+                    );
+                }
+            };
 
-    for mapping in &resolved_channels {
-        if let Err(error) = tx.execute(
+            let tx = match conn.transaction() {
+                Ok(tx) => tx,
+                Err(error) => {
+                    completion_state.last_error =
+                        Some(format!("failed to start onboarding transaction: {error}"));
+                    let _ = save_onboarding_completion_state(&root, &completion_state);
+                    return completion_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        false,
+                        provider,
+                        rerun_policy,
+                        explicit_rerun_policy,
+                        Some(&completion_state),
+                        completion_state.last_error.clone(),
+                        Vec::new(),
+                        serde_json::Map::new(),
+                    );
+                }
+            };
+
+            for (key, value) in [
+                ("onboarding_bot_token", Some(body.token.trim())),
+                ("onboarding_guild_id", Some(body.guild_id.trim())),
+                ("onboarding_provider", Some(provider)),
+                (
+                    "onboarding_owner_id",
+                    body.owner_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ),
+                (
+                    "onboarding_announce_token",
+                    body.announce_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ),
+                (
+                    "onboarding_notify_token",
+                    body.notify_token
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ),
+                (
+                    "onboarding_command_token_2",
+                    body.command_token_2
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ),
+                (
+                    "onboarding_command_provider_2",
+                    body.command_provider_2
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                ),
+                ("onboarding_complete", Some("true")),
+            ] {
+                match value {
+                    Some(value) => {
+                        if let Err(error) = tx.execute(
+                            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                            rusqlite::params![key, value],
+                        ) {
+                            completion_state.last_error =
+                                Some(format!("failed to persist kv_meta {}: {error}", key));
+                            let _ = save_onboarding_completion_state(&root, &completion_state);
+                            return completion_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                false,
+                                provider,
+                                rerun_policy,
+                                explicit_rerun_policy,
+                                Some(&completion_state),
+                                completion_state.last_error.clone(),
+                                Vec::new(),
+                                serde_json::Map::new(),
+                            );
+                        }
+                    }
+                    None => {
+                        if let Err(error) = tx.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+                        {
+                            completion_state.last_error =
+                                Some(format!("failed to clear kv_meta {}: {error}", key));
+                            let _ = save_onboarding_completion_state(&root, &completion_state);
+                            return completion_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                false,
+                                provider,
+                                rerun_policy,
+                                explicit_rerun_policy,
+                                Some(&completion_state),
+                                completion_state.last_error.clone(),
+                                Vec::new(),
+                                serde_json::Map::new(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            for mapping in &resolved_channels {
+                if let Err(error) = tx.execute(
             "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0) \
              ON CONFLICT(id) DO UPDATE SET \
@@ -2886,7 +3616,7 @@ async fn complete_with_options(
                discord_channel_id = excluded.discord_channel_id, \
                description = COALESCE(excluded.description, agents.description), \
                system_prompt = COALESCE(excluded.system_prompt, agents.system_prompt)",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 mapping.role_id,
                 mapping.role_id,
                 provider,
@@ -2910,42 +3640,43 @@ async fn complete_with_options(
                 serde_json::Map::new(),
             );
         }
-    }
+            }
 
-    if !resolved_channels.is_empty() {
-        let (template_name, template_name_ko, template_icon, template_color) =
-            match body.template.as_deref() {
-                Some("delivery") => ("Delivery Squad", "전달 스쿼드", "🚀", "#8b5cf6"),
-                Some("operations") => ("Operations Cell", "운영 셀", "🛠️", "#10b981"),
-                Some("insight") => ("Insight Desk", "인사이트 데스크", "📚", "#3b82f6"),
-                _ => ("General", "일반", "📁", "#6b7280"),
-            };
+            if !resolved_channels.is_empty() {
+                let (template_name, template_name_ko, template_icon, template_color) =
+                    match body.template.as_deref() {
+                        Some("delivery") => ("Delivery Squad", "전달 스쿼드", "🚀", "#8b5cf6"),
+                        Some("operations") => ("Operations Cell", "운영 셀", "🛠️", "#10b981"),
+                        Some("insight") => ("Insight Desk", "인사이트 데스크", "📚", "#3b82f6"),
+                        _ => ("General", "일반", "📁", "#6b7280"),
+                    };
 
-        let office_id = "hq";
-        if let Err(error) = tx.execute(
-            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
-            libsql_rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
-        ) {
-            completion_state.last_error = Some(format!("failed to upsert default office: {error}"));
-            let _ = save_onboarding_completion_state(&root, &completion_state);
-            return completion_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                false,
-                provider,
-                rerun_policy,
-                explicit_rerun_policy,
-                Some(&completion_state),
-                completion_state.last_error.clone(),
-                Vec::new(),
-                serde_json::Map::new(),
-            );
-        }
+                let office_id = "hq";
+                if let Err(error) = tx.execute(
+                "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
+            ) {
+                completion_state.last_error =
+                    Some(format!("failed to upsert default office: {error}"));
+                let _ = save_onboarding_completion_state(&root, &completion_state);
+                return completion_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    false,
+                    provider,
+                    rerun_policy,
+                    explicit_rerun_policy,
+                    Some(&completion_state),
+                    completion_state.last_error.clone(),
+                    Vec::new(),
+                    serde_json::Map::new(),
+                );
+            }
 
-        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
-        if let Err(error) = tx.execute(
+                let dept_id = body.template.as_deref().unwrap_or("general").to_string();
+                if let Err(error) = tx.execute(
             "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 dept_id,
                 template_name,
                 template_name_ko,
@@ -2970,37 +3701,56 @@ async fn complete_with_options(
             );
         }
 
-        for mapping in &resolved_channels {
-            if let Err(error) = tx.execute(
-                "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
+                for mapping in &resolved_channels {
+                    if let Err(error) = tx.execute(
+                        "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
                  VALUES (?1, ?2, ?3)",
-                libsql_rusqlite::params![office_id, mapping.role_id, dept_id],
-            ) {
-                completion_state.last_error = Some(format!(
-                    "failed to assign office agent {}: {error}",
-                    mapping.role_id
-                ));
-                let _ = save_onboarding_completion_state(&root, &completion_state);
-                return completion_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    false,
-                    provider,
-                    rerun_policy,
-                    explicit_rerun_policy,
-                    Some(&completion_state),
-                    completion_state.last_error.clone(),
-                    Vec::new(),
-                    serde_json::Map::new(),
-                );
+                        rusqlite::params![office_id, mapping.role_id, dept_id],
+                    ) {
+                        completion_state.last_error = Some(format!(
+                            "failed to assign office agent {}: {error}",
+                            mapping.role_id
+                        ));
+                        let _ = save_onboarding_completion_state(&root, &completion_state);
+                        return completion_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            false,
+                            provider,
+                            rerun_policy,
+                            explicit_rerun_policy,
+                            Some(&completion_state),
+                            completion_state.last_error.clone(),
+                            Vec::new(),
+                            serde_json::Map::new(),
+                        );
+                    }
+                    if let Err(error) = tx.execute(
+                        "UPDATE agents SET department = ?1 WHERE id = ?2",
+                        rusqlite::params![dept_id, mapping.role_id],
+                    ) {
+                        completion_state.last_error = Some(format!(
+                            "failed to set agent department {}: {error}",
+                            mapping.role_id
+                        ));
+                        let _ = save_onboarding_completion_state(&root, &completion_state);
+                        return completion_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            false,
+                            provider,
+                            rerun_policy,
+                            explicit_rerun_policy,
+                            Some(&completion_state),
+                            completion_state.last_error.clone(),
+                            Vec::new(),
+                            serde_json::Map::new(),
+                        );
+                    }
+                }
             }
-            if let Err(error) = tx.execute(
-                "UPDATE agents SET department = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![dept_id, mapping.role_id],
-            ) {
-                completion_state.last_error = Some(format!(
-                    "failed to set agent department {}: {error}",
-                    mapping.role_id
-                ));
+
+            if let Err(error) = tx.commit() {
+                completion_state.last_error =
+                    Some(format!("failed to commit onboarding transaction: {error}"));
                 let _ = save_onboarding_completion_state(&root, &completion_state);
                 return completion_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3015,23 +3765,6 @@ async fn complete_with_options(
                 );
             }
         }
-    }
-
-    if let Err(error) = tx.commit() {
-        completion_state.last_error =
-            Some(format!("failed to commit onboarding transaction: {error}"));
-        let _ = save_onboarding_completion_state(&root, &completion_state);
-        return completion_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            false,
-            provider,
-            rerun_policy,
-            explicit_rerun_policy,
-            Some(&completion_state),
-            completion_state.last_error.clone(),
-            Vec::new(),
-            serde_json::Map::new(),
-        );
     }
 
     completion_state = build_onboarding_completion_state(
@@ -3777,7 +4510,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params!["onboarding_owner_id", "42"],
+                rusqlite::params!["onboarding_owner_id", "42"],
             )
             .unwrap();
         }
@@ -4134,7 +4867,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO agents (id, name, provider, discord_channel_id, description, system_prompt, status, xp) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0)",
-                libsql_rusqlite::params![
+                rusqlite::params![
                     "adk-cdx",
                     "adk-cdx",
                     "claude",
@@ -4311,6 +5044,58 @@ mod tests {
             }
         }
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_provider_reports_opencode_permission_denied_with_attempts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("opencode");
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+
+        std::fs::write(&provider, "#!/bin/sh\nprintf 'opencode 9.9.9\\n'\n").unwrap();
+        let mut perms = std::fs::metadata(&provider).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&provider, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("AGENTDESK_OPENCODE_PATH", &provider);
+        }
+
+        let (status, Json(body)) = check_provider(Json(CheckProviderBody {
+            provider: "opencode".to_string(),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["installed"], json!(false));
+        assert_eq!(body["logged_in"], json!(false));
+        assert_eq!(body["version"], json!(null));
+        assert_eq!(body["failure_kind"], json!("permission_denied"));
+        assert_eq!(body["path"], json!(null));
+        assert!(
+            body["attempts"]
+                .as_array()
+                .is_some_and(|attempts| !attempts.is_empty())
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_OPENCODE_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 }
 
 // ── Provider Check ──────────────────────────────────────────
@@ -4321,7 +5106,7 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini/qwen) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini/opencode/qwen) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -4329,11 +5114,14 @@ pub async fn check_provider(
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "opencode" => "opencode",
         "qwen" => "qwen",
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "provider must be 'claude', 'codex', 'gemini', or 'qwen'"})),
+                Json(
+                    json!({"error": "provider must be 'claude', 'codex', 'gemini', 'opencode', or 'qwen'"}),
+                ),
             );
         }
     };
@@ -4343,15 +5131,11 @@ pub async fn check_provider(
     // This ensures onboarding and actual launch always agree on availability.
     let resolution = {
         let provider = cmd.to_string();
-        tokio::task::spawn_blocking(move || match provider.as_str() {
-            "claude" | "codex" | "gemini" | "qwen" => Some(
-                crate::services::platform::resolve_provider_binary(&provider),
-            ),
-            _ => None,
+        tokio::task::spawn_blocking(move || {
+            crate::services::platform::resolve_provider_binary(&provider)
         })
         .await
         .ok()
-        .flatten()
     }
     .unwrap_or_else(|| crate::services::platform::resolve_provider_binary(cmd));
     let mut failure_kind = resolution.failure_kind.clone();
@@ -4389,20 +5173,24 @@ pub async fn check_provider(
     }
 
     // Check login (heuristic: config directory exists with content)
-    let logged_in = dirs::home_dir()
-        .map(|home| {
-            let config_dir = if cmd == "claude" {
-                home.join(".claude")
-            } else if cmd == "codex" {
-                home.join(".codex")
-            } else if cmd == "qwen" {
-                home.join(".qwen")
-            } else {
-                home.join(".gemini")
-            };
-            config_dir.is_dir()
-        })
-        .unwrap_or(false);
+    let logged_in = if cmd == "opencode" {
+        true
+    } else {
+        dirs::home_dir()
+            .map(|home| {
+                let config_dir = if cmd == "claude" {
+                    home.join(".claude")
+                } else if cmd == "codex" {
+                    home.join(".codex")
+                } else if cmd == "qwen" {
+                    home.join(".qwen")
+                } else {
+                    home.join(".gemini")
+                };
+                config_dir.is_dir()
+            })
+            .unwrap_or(false)
+    };
 
     (
         StatusCode::OK,

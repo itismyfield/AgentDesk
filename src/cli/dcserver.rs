@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use std::os::unix::io::AsRawFd;
 
 use crate::config;
-use crate::db;
 use crate::engine::PolicyEngine;
 use crate::server;
 use crate::services;
@@ -465,7 +464,8 @@ pub fn parse_restart_dcserver_report_context(
                 let raw = args
                     .get(i + 1)
                     .ok_or_else(|| {
-                        "--report-provider requires one of: claude, codex, gemini, qwen".to_string()
+                        "--report-provider requires one of: claude, codex, gemini, opencode, qwen"
+                            .to_string()
                     })?
                     .clone();
                 report_provider = Some(raw);
@@ -497,7 +497,7 @@ pub fn parse_restart_dcserver_report_context(
         (Some(provider_raw), Some(channel_id), current_msg_id) => {
             let provider = ProviderKind::from_str(&provider_raw).ok_or_else(|| {
                 format!(
-                    "invalid value for --report-provider: {} (expected claude, codex, gemini, or qwen)",
+                    "invalid value for --report-provider: {} (expected claude, codex, gemini, opencode, or qwen)",
                     provider_raw
                 )
             })?;
@@ -1227,158 +1227,107 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         }
 
-        // Initialize SQLite DB — clone handles for Discord bot before moving into HTTP server (#143)
-        let mut discord_db: Option<crate::db::Db> = None;
-        let mut discord_pg_pool: Option<sqlx::PgPool> = None;
         let mut discord_engine: Option<PolicyEngine> = None;
-        match db::init(&ad_config) {
-            Ok(ad_db) => {
-                if let Some(root) = runtime_root.as_ref() {
-                    match crate::services::discord_config_audit::audit_and_reconcile(
-                        root,
-                        ad_config,
-                        loaded.path,
-                        loaded.existed,
-                        &ad_db,
-                        &legacy_scan,
-                        false,
-                    ) {
-                        Ok(outcome) => {
-                            if outcome.report.warnings_count == 0 {
-                                println!("  ▸ Config audit : clean");
-                            } else {
-                                println!(
-                                    "  ▸ Config audit : {} warning(s)",
-                                    outcome.report.warnings_count
-                                );
-                            }
-                            if let Some(synced_agents) = outcome.report.storage.synced_agents {
-                                println!("  ▸ Agents : {synced_agents} synced from config");
-                            }
-                            ad_config = outcome.config;
-                        }
-                        Err(error) => {
-                            eprintln!("  ✖ Config audit failed: {error}");
-                            std::process::exit(1);
-                        }
-                    }
+        // Load data-driven pipeline definition (#106) — fail-fast on error
+        let pipeline_path = ad_config.policies.dir.join("default-pipeline.yaml");
+        if pipeline_path.exists() {
+            match crate::pipeline::load(&pipeline_path) {
+                Ok(()) => println!("  ▸ Pipeline : loaded {}", pipeline_path.display()),
+                Err(e) => {
+                    eprintln!("  ✖ Failed to load pipeline definition: {e}");
+                    eprintln!("    path: {}", pipeline_path.display());
+                    std::process::exit(1);
                 }
-
-                // Load data-driven pipeline definition (#106) — fail-fast on error
-                let pipeline_path = ad_config.policies.dir.join("default-pipeline.yaml");
-                if pipeline_path.exists() {
-                    match crate::pipeline::load(&pipeline_path) {
-                        Ok(()) => println!("  ▸ Pipeline : loaded {}", pipeline_path.display()),
-                        Err(e) => {
-                            eprintln!("  ✖ Failed to load pipeline definition: {e}");
-                            eprintln!("    path: {}", pipeline_path.display());
-                            std::process::exit(1);
-                        }
-                    }
-                }
-
-                match crate::db::postgres::connect_and_migrate(&ad_config).await {
-                    Ok(Some(pool)) => {
-                        if let Some(root) = runtime_root.as_ref() {
-                            match crate::services::discord_config_audit::load_runtime_config(root)
-                                .and_then(|loaded| {
-                                    crate::services::discord_config_audit::audit_and_reconcile_config_only(
-                                        root,
-                                        loaded.config,
-                                        loaded.path,
-                                        loaded.existed,
-                                        &legacy_scan,
-                                        false,
-                                    )
-                                })
-                            {
-                                Ok(outcome) => {
-                                    ad_config = outcome.config;
-                                }
-                                Err(error) => {
-                                    eprintln!(
-                                        "  ✖ Config audit after PostgreSQL migration failed: {error}"
-                                    );
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                        let startup_pg_pool =
-                            match crate::db::postgres::connect_for_startup(&ad_config).await {
-                                Ok(pool) => pool,
-                                Err(error) => {
-                                    eprintln!(
-                                        "  ⚠ PostgreSQL warmup pool unavailable: {error} — falling back to runtime pool"
-                                    );
-                                    None
-                                }
-                            };
-                        let startup_pool = startup_pg_pool.as_ref().unwrap_or(&pool);
-                        if let Err(error) =
-                            crate::db::postgres::startup_reseed(startup_pool, &ad_config).await
-                        {
-                            eprintln!("  ✖ PostgreSQL startup reseed failed: {error}");
-                            std::process::exit(1);
-                        }
-                        discord_pg_pool = Some(pool);
-                        drop(startup_pg_pool);
-                    }
-                    Ok(None) => {
-                        eprintln!("  ✖ PostgreSQL is required for Discord HTTP runtime");
-                        std::process::exit(1);
-                    }
-                    Err(error) => {
-                        eprintln!("  ✖ PostgreSQL connect/migrate failed: {error}");
-                        std::process::exit(1);
-                    }
-                }
-                crate::services::termination_audit::init_audit_db(
-                    ad_db.clone(),
-                    discord_pg_pool.clone(),
-                );
-
-                // Start axum HTTP server (background task) — now serves all API
-                // endpoints including /api/send, /api/senddm, /api/health
-                let http_port = ad_config.server.port;
-                match PolicyEngine::new_with_pg(&ad_config, discord_pg_pool.clone()) {
-                    Ok(engine) => {
-                        // Clone for Discord bot — direct finalize_dispatch access (#143)
-                        discord_db = Some(ad_db.clone());
-                        discord_engine = Some(engine.clone());
-                        let http_config = ad_config.clone();
-                        let registry_for_http = health_registry.clone();
-                        // #1237 (843f) / #1238 (843g): keep handing the legacy
-                        // SQLite handle to the HTTP runtime so unported handlers
-                        // (`update_card`, `/api/onboarding/*`, …) can still read
-                        // their compatibility tables in production.
-                        let ad_db_for_http = ad_db.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = server::run(
-                                http_config,
-                                ad_db_for_http,
-                                engine,
-                                Some(registry_for_http),
-                            )
-                            .await
-                            {
-                                eprintln!("  ⚠ HTTP server error: {e}");
-                            }
-                        });
-                        println!(
-                            "  ▸ HTTP    : listening on {}:{} (unified API + health)",
-                            ad_config.server.host, http_port
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("  ⚠ Policy engine init failed: {e} — HTTP server not started");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("  ⚠ DB init failed: {e} — HTTP server not started");
             }
         }
 
+        let discord_pg_pool = match crate::db::postgres::connect_and_migrate(&ad_config).await {
+            Ok(Some(pool)) => {
+                if let Some(root) = runtime_root.as_ref() {
+                    match crate::services::discord_config_audit::load_runtime_config(root)
+                        .and_then(|loaded| {
+                            crate::services::discord_config_audit::audit_and_reconcile_config_only(
+                                root,
+                                loaded.config,
+                                loaded.path,
+                                loaded.existed,
+                                &legacy_scan,
+                                false,
+                            )
+                        })
+                    {
+                        Ok(outcome) => {
+                            ad_config = outcome.config;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "  ✖ Config audit after PostgreSQL migration failed: {error}"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                let startup_pg_pool =
+                    match crate::db::postgres::connect_for_startup(&ad_config).await {
+                        Ok(pool) => pool,
+                        Err(error) => {
+                            eprintln!(
+                                "  ⚠ PostgreSQL warmup pool unavailable: {error} — falling back to runtime pool"
+                            );
+                            None
+                        }
+                    };
+                let startup_pool = startup_pg_pool.as_ref().unwrap_or(&pool);
+                if let Err(error) =
+                    crate::db::postgres::startup_reseed(startup_pool, &ad_config).await
+                {
+                    eprintln!("  ✖ PostgreSQL startup reseed failed: {error}");
+                    std::process::exit(1);
+                }
+                drop(startup_pg_pool);
+                pool
+            }
+            Ok(None) => {
+                eprintln!("  ✖ PostgreSQL is required for Discord HTTP runtime");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("  ✖ PostgreSQL connect/migrate failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
+
+        // Start axum HTTP server (background task) — now serves all API
+        // endpoints including /api/send, /api/senddm, /api/health
+        let http_port = ad_config.server.port;
+        match PolicyEngine::new_with_pg(&ad_config, Some(discord_pg_pool.clone())) {
+            Ok(engine) => {
+                discord_engine = Some(engine.clone());
+                let http_config = ad_config.clone();
+                let registry_for_http = health_registry.clone();
+                let http_pg_pool = Some(discord_pg_pool.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = server::run(
+                        http_config,
+                        engine,
+                        Some(registry_for_http),
+                        http_pg_pool,
+                    )
+                    .await
+                    {
+                        eprintln!("  ⚠ HTTP server error: {e}");
+                    }
+                });
+                println!(
+                    "  ▸ HTTP    : listening on {}:{} (unified API + health)",
+                    ad_config.server.host, http_port
+                );
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Policy engine init failed: {e} — HTTP server not started");
+            }
+        }
         // HTTP API port for self-referencing requests (dcserver → own HTTP server)
         let api_port = ad_config.server.port;
 
@@ -1421,8 +1370,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         startup_doctor_started,
                         health_registry,
                         api_port,
-                        sqlite: discord_db,
-                        pg_pool: discord_pg_pool,
+                        pg_pool: Some(discord_pg_pool),
                         engine: discord_engine,
                     },
                 )
@@ -1491,8 +1439,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let startup_started = startup_doctor_started.clone();
                     let hr = health_registry.clone();
                     let port = api_port;
-                    let db_clone = discord_db.clone();
-                    let pg_pool_clone = discord_pg_pool.clone();
+                    let pg_pool_clone = Some(discord_pg_pool.clone());
                     let engine_clone = discord_engine.clone();
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
@@ -1506,7 +1453,6 @@ pub fn handle_dcserver(token: Option<String>) {
                                 startup_doctor_started: startup_started,
                                 health_registry: hr,
                                 api_port: port,
-                                sqlite: db_clone,
                                 pg_pool: pg_pool_clone,
                                 engine: engine_clone,
                             },

@@ -129,7 +129,6 @@ fn refresh_inventory_docs_json(worktree_path: &str, timeout_ms: Option<u64>) -> 
 
 pub(super) fn register_runtime_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
@@ -157,7 +156,6 @@ pub(super) fn register_runtime_ops<'js>(
             should_defer_signal(&bridge_should_defer_signal)
         })?,
     )?;
-    let db_for_retrospective = db.clone();
     let pg_for_retrospective = pg_pool.clone();
     runtime_obj.set(
         "__recordCardRetrospectiveRaw",
@@ -165,7 +163,7 @@ pub(super) fn register_runtime_ops<'js>(
             ctx.clone(),
             move |card_id: String, terminal_status: String| -> String {
                 crate::services::retrospectives::record_card_retrospective_json(
-                    db_for_retrospective.as_ref(),
+                    None,
                     pg_for_retrospective.as_ref(),
                     &card_id,
                     &terminal_status,

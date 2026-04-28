@@ -488,6 +488,44 @@ mod failure_recovery {
                     .execute(&startup_pool)
                     .await
                     .expect("seed postgres review card");
+                    let reviewed_commit =
+                        crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
+                            .unwrap_or_else(|| {
+                                "0000000000000000000000000000000000000000".to_string()
+                            });
+                    sqlx::query(
+                        "INSERT INTO task_dispatches (
+                            id,
+                            kanban_card_id,
+                            to_agent_id,
+                            dispatch_type,
+                            status,
+                            title,
+                            context,
+                            created_at,
+                            updated_at,
+                            completed_at
+                         ) VALUES (
+                            'dispatch-969-work',
+                            'card-969-review',
+                            'agent-1',
+                            'implementation',
+                            'completed',
+                            'Completed implementation',
+                            $1::jsonb,
+                            NOW() - INTERVAL '2 minutes',
+                            NOW() - INTERVAL '1 minute',
+                            NOW() - INTERVAL '1 minute'
+                         )
+                         ON CONFLICT (id) DO NOTHING",
+                    )
+                    .bind(serde_json::json!({
+                        "reviewed_commit": reviewed_commit,
+                        "branch": "test-review-target"
+                    }))
+                    .execute(&startup_pool)
+                    .await
+                    .expect("seed postgres completed work dispatch");
                     sqlx::query(
                         "INSERT INTO dispatch_outbox (dispatch_id, action, status)
                          VALUES ('dispatch-969', 'notify', 'processing')
@@ -701,7 +739,7 @@ mod outbox_boundary {
         conn.execute(
             "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
              VALUES (?1, ?2, 'agent-1', 'card-160', 'Test', 'pending')",
-            libsql_rusqlite::params![dispatch_id, action],
+            [dispatch_id, action],
         )
         .unwrap();
     }
@@ -732,12 +770,10 @@ mod outbox_boundary {
                  ORDER BY id",
             )
             .unwrap();
-        stmt.query_map(libsql_rusqlite::params![dispatch_id, action], |row| {
-            row.get(0)
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        stmt.query_map([dispatch_id, action], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
     }
 
     fn has_reconcile_marker(db: &db::Db, dispatch_id: &str) -> bool {
@@ -871,7 +907,7 @@ mod outbox_boundary {
             fallback_conn
                 .execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    libsql_rusqlite::params!["reconcile_dispatch:d-160r2", "d-160r2"],
+                    ["reconcile_dispatch:d-160r2", "d-160r2"],
                 )
                 .unwrap();
         }

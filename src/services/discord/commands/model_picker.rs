@@ -129,7 +129,9 @@ async fn run_model_command(ctx: Context<'_>) -> Result<(), Error> {
 
     if !provider_supports_model_override(&ctx.data().provider) {
         tracing::info!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
-        ctx.say("Model override is only supported for Claude, Codex, Gemini, and Qwen channels.")
+        ctx.say(
+            "Model override is only supported for Claude, Codex, Gemini, OpenCode, and Qwen channels.",
+        )
             .await?;
         return Ok(());
     }

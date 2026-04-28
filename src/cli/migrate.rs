@@ -138,7 +138,7 @@ pub struct OpenClawMigrateArgs {
     /// Preview writing config/bot_settings.json mutations.
     #[arg(long)]
     pub write_bot_settings: bool,
-    /// Preview SQLite upserts.
+    /// Preview PostgreSQL upserts.
     #[arg(long)]
     pub write_db: bool,
     /// Preview replacing generated artifacts for the selected role(s).

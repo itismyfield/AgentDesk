@@ -197,8 +197,9 @@ fn pg_unavailable_response() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+#[cfg(test)]
 fn slot_thread_map_has_bindings(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
 ) -> bool {
@@ -207,7 +208,7 @@ fn slot_thread_map_has_bindings(
             "SELECT thread_id_map
              FROM auto_queue_slots
              WHERE agent_id = ?1 AND slot_index = ?2",
-            libsql_rusqlite::params![agent_id, slot_index],
+            rusqlite::params![agent_id, slot_index],
             |row| row.get(0),
         )
         .ok()
@@ -228,8 +229,9 @@ fn slot_thread_map_has_bindings(
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn slot_has_dispatch_thread_history(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
 ) -> bool {
@@ -244,14 +246,15 @@ fn slot_has_dispatch_thread_history(
                      THEN NULL
                  ELSE CAST(json_extract(context, '$.slot_index') AS INTEGER)
                END = ?2",
-        libsql_rusqlite::params![agent_id, slot_index],
+        rusqlite::params![agent_id, slot_index],
         |row| row.get(0),
     )
     .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn slot_requires_thread_reset_before_reuse(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     agent_id: &str,
     slot_index: i64,
     newly_assigned: bool,
@@ -1615,7 +1618,8 @@ impl ActivateCardState {
             )
     }
 
-    fn is_terminal(&self, conn: &libsql_rusqlite::Connection) -> bool {
+    #[cfg(test)]
+    fn is_terminal(&self, conn: &rusqlite::Connection) -> bool {
         crate::pipeline::ensure_loaded();
         crate::pipeline::resolve_for_card(
             conn,
@@ -1668,11 +1672,12 @@ struct RestoreDispatchAttemptResult {
     unbound_dispatch: bool,
 }
 
+#[cfg(test)]
 fn load_activate_card_state(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     entry_id: &str,
-) -> libsql_rusqlite::Result<ActivateCardState> {
+) -> rusqlite::Result<ActivateCardState> {
     let (status, title, metadata, latest_dispatch_id, repo_id, assigned_agent_id): (
         String,
         String,
@@ -2279,7 +2284,6 @@ async fn finalize_restore_run_pg(pool: &sqlx::PgPool, run_id: &str) -> Result<()
 
 #[derive(Clone)]
 pub(crate) struct AutoQueueActivateDeps {
-    db: crate::db::Db,
     pg_pool: Option<sqlx::PgPool>,
     engine: crate::engine::PolicyEngine,
     config: Arc<crate::config::Config>,
@@ -2289,21 +2293,7 @@ pub(crate) struct AutoQueueActivateDeps {
 
 impl AutoQueueActivateDeps {
     fn from_state(state: &AppState) -> Self {
-        // TODO(#1238 / 843g): `AutoQueueActivateDeps.db` still carries a
-        // `Db` because the auto-queue activation path has not yet been
-        // ported to PG-only. Production runtimes never reach the SQLite
-        // branch inside `AutoQueueService`, so the placeholder Db sourced
-        // from `AppState::legacy_db_for_pending_migration` (via
-        // `auto_queue_service()`) is unused at runtime. Once #1238 ports
-        // the constructor signature to `Option<Db>`, replace this with
-        // `state.legacy_db().cloned()`.
-        let db = state
-            .legacy_db()
-            .cloned()
-            .or_else(|| state.engine.legacy_db().cloned())
-            .unwrap_or_else(super::pending_migration_shim_for_callers);
         Self {
-            db,
             pg_pool: state.pg_pool.clone(),
             engine: state.engine.clone(),
             config: state.config.clone(),
@@ -2312,9 +2302,8 @@ impl AutoQueueActivateDeps {
         }
     }
 
-    pub(crate) fn for_bridge(db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
+    pub(crate) fn for_bridge(_db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
         Self {
-            db,
             pg_pool: engine.pg_pool().cloned(),
             engine,
             config: Arc::new(crate::config::Config::default()),
@@ -2324,10 +2313,7 @@ impl AutoQueueActivateDeps {
     }
 
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(
-            Some(self.db.clone()),
-            self.engine.clone(),
-        )
+        crate::services::auto_queue::AutoQueueService::new(self.engine.clone())
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -2352,7 +2338,7 @@ impl AutoQueueActivateDeps {
                 pool,
                 move |bridge_pool| async move {
                     Ok::<serde_json::Value, String>(
-                        crate::services::auto_queue::AutoQueueService::new(None, engine)
+                        crate::services::auto_queue::AutoQueueService::new(engine)
                             .entry_json_with_pg(&bridge_pool, &entry_id, guild_id.as_deref())
                             .await
                             .unwrap_or(serde_json::Value::Null),
@@ -2362,7 +2348,7 @@ impl AutoQueueActivateDeps {
             )
             .unwrap_or(serde_json::Value::Null);
         }
-        self.entry_json(entry_id)
+        serde_json::Value::Null
     }
 }
 
@@ -2383,12 +2369,8 @@ fn load_activate_card_state_prefer_pg(
         );
     }
 
-    let conn = deps
-        .db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite activate card state DB for {card_id}: {error}"))?;
-    load_activate_card_state(&conn, card_id, entry_id)
-        .map_err(|error| format!("load sqlite activate card state for {card_id}: {error}"))
+    let _ = (card_id, entry_id);
+    Err("postgres backend required for auto-queue activation".to_string())
 }
 
 fn update_entry_status_prefer_pg(
@@ -2429,33 +2411,26 @@ fn allocate_slot_for_group_agent_prefer_pg(
     thread_group: i64,
     agent_id: &str,
 ) -> Result<Option<crate::db::auto_queue::SlotAllocation>, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let run_id = run_id.to_string();
-        let agent_id = agent_id.to_string();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::db::auto_queue::allocate_slot_for_group_agent_pg(
-                    &bridge_pool,
-                    &run_id,
-                    thread_group,
-                    &agent_id,
-                )
-                .await
-            },
-            |error| error,
-        );
-    }
-
-    let conn = deps.db.separate_conn().map_err(|error| {
-        format!("open sqlite slot allocation DB for {run_id}:{thread_group}: {error}")
-    })?;
-    crate::db::auto_queue::allocate_slot_for_group_agent(&conn, run_id, thread_group, agent_id)
-        .map_err(|error| {
-            format!(
-                "allocate sqlite slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return Err(format!(
+            "postgres backend required for auto-queue slot allocation ({run_id}:{thread_group})"
+        ));
+    };
+    let run_id = run_id.to_string();
+    let agent_id = agent_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            crate::db::auto_queue::allocate_slot_for_group_agent_pg(
+                &bridge_pool,
+                &run_id,
+                thread_group,
+                &agent_id,
             )
-        })
+            .await
+        },
+        |error| error,
+    )
 }
 
 fn slot_requires_thread_reset_before_reuse_prefer_pg(
@@ -2483,16 +2458,13 @@ fn slot_requires_thread_reset_before_reuse_prefer_pg(
         );
     }
 
-    let conn = deps.db.separate_conn().map_err(|error| {
-        format!("open sqlite slot reset DB for {agent_id}:{slot_index}: {error}")
-    })?;
-    Ok(slot_requires_thread_reset_before_reuse(
-        &conn,
+    let _ = (
         agent_id,
         slot_index,
         newly_assigned,
         reassigned_from_other_group,
-    ))
+    );
+    Err("postgres backend required for auto-queue slot reset".to_string())
 }
 
 async fn select_consultation_counterpart_pg(
@@ -2637,32 +2609,28 @@ fn create_activate_dispatch_prefer_pg(
         );
     }
 
-    crate::dispatch::create_dispatch(
-        &deps.db,
-        &deps.engine,
-        card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-    )
-    .map(|dispatch| dispatch["id"].as_str().unwrap_or("").to_string())
-    .map_err(|error| error.to_string())
+    let _ = (deps, card_id, to_agent_id, dispatch_type, title, context);
+    Err("postgres backend required for auto-queue dispatch creation".to_string())
 }
 
 pub(crate) async fn activate_with_bridge_pg(
-    db: Option<crate::db::Db>,
+    _db: Option<crate::db::Db>,
     engine: crate::engine::PolicyEngine,
     body: ActivateBody,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(db) = db.or_else(|| engine.legacy_db().cloned()) else {
+    let Some(pg_pool) = engine.pg_pool().cloned() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "sqlite backend is unavailable"})),
+            Json(json!({"error": "postgres pool is not configured"})),
         );
     };
-    let mut deps = AutoQueueActivateDeps::for_bridge(db, engine.clone());
-    deps.pg_pool = engine.pg_pool().cloned();
+    let deps = AutoQueueActivateDeps {
+        pg_pool: Some(pg_pool),
+        engine,
+        config: Arc::new(crate::config::Config::default()),
+        health_registry: None,
+        guild_id: None,
+    };
     activate_with_deps_pg(&deps, body).await
 }
 
@@ -7896,7 +7864,7 @@ mod tests {
         extract_dependency_parse_result, reorder_entry_ids,
         slot_requires_thread_reset_before_reuse,
     };
-    use libsql_rusqlite::Connection;
+    use rusqlite::Connection;
     use std::collections::HashMap;
 
     fn entry(id: &str, status: &str, agent_id: &str) -> QueueEntryOrder {

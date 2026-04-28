@@ -10,9 +10,12 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 pub(super) fn register_agent_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    #[cfg(test)] db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
+    #[cfg(not(test))]
+    let db: Option<Db> = None;
+
     #[cfg(not(test))]
     let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -62,12 +65,25 @@ pub(super) fn register_agent_ops<'js>(
     )?;
 
     // __resolveCounterModelChannel(agentId) -> channelId | ""
+    #[cfg(test)]
+    let db_counter = db.clone();
     let pg_counter = pg_pool.clone();
     agents_obj.set(
         "__resolveCounterModelChannel",
         Function::new(ctx.clone(), move |agent_id: String| -> String {
             if let Some(pool) = pg_counter.as_ref() {
                 return resolve_agent_counter_channel_pg_raw(pool, &agent_id);
+            }
+            #[cfg(test)]
+            if let Some(db_counter) = db_counter.as_ref() {
+                return match db_counter.separate_conn() {
+                    Ok(conn) => crate::db::agents::load_agent_channel_bindings(&conn, &agent_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|bindings| bindings.counter_model_channel())
+                        .unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
             }
             String::new()
         })?,
@@ -155,7 +171,7 @@ pub(super) fn register_agent_ops<'js>(
 
 #[cfg(test)]
 fn agent_get_raw_sqlite_test(db: &Db, agent_id: &str) -> String {
-    use libsql_rusqlite::OptionalExtension;
+    use rusqlite::OptionalExtension;
 
     let result = (|| -> anyhow::Result<serde_json::Value> {
         let conn = db.read_conn()?;

@@ -311,7 +311,7 @@ pub(in crate::services::discord) async fn cmd_start(
             None => current_remote_for_settings.as_deref(),
         };
         save_last_session_runtime(
-            ctx.data().shared.sqlite.as_ref(),
+            ctx.data().shared.legacy_sqlite(),
             ctx.data().shared.pg_pool.as_ref(),
             &ctx.data().shared.token_hash,
             ch_key.parse::<u64>().unwrap_or_default(),

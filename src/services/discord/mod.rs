@@ -26,6 +26,7 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
 mod queued_placeholders_store;
+pub(crate) mod response_sanitizer;
 // #1074: landing zone for the future recovery-engine module split
 // (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
 // Named `recovery_paths` to avoid shadowing the existing
@@ -84,6 +85,7 @@ use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
 use crate::services::codex;
 use crate::services::gemini;
+use crate::services::opencode;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
@@ -974,7 +976,8 @@ pub(super) struct SharedData {
     pub(super) provider: ProviderKind,
     /// HTTP API port for self-referencing requests (from config server.port).
     pub(super) api_port: u16,
-    /// Shared DB handle for direct dispatch finalization (avoids HTTP round-trip).
+    /// Test-only legacy DB handle for SQLite compatibility tests.
+    #[cfg(test)]
     pub(super) sqlite: Option<crate::db::Db>,
     /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
     pub(super) pg_pool: Option<sqlx::PgPool>,
@@ -990,6 +993,20 @@ pub(super) struct SharedData {
 }
 
 impl SharedData {
+    #[cfg(test)]
+    pub(super) fn legacy_sqlite(&self) -> Option<&crate::db::Db> {
+        self.sqlite.as_ref()
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn legacy_sqlite(&self) -> Option<&crate::db::Db> {
+        None
+    }
+
+    pub(super) fn has_runtime_storage(&self) -> bool {
+        self.pg_pool.is_some() || self.legacy_sqlite().is_some()
+    }
+
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
     }
@@ -2826,7 +2843,10 @@ pub(super) fn scan_skills(
                 }
             }
         }
-        ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen => {
+        ProviderKind::Codex
+        | ProviderKind::Gemini
+        | ProviderKind::OpenCode
+        | ProviderKind::Qwen => {
             scan_directory_skills(
                 collect_provider_skill_roots(provider, project_path),
                 &mut seen,
@@ -2932,7 +2952,11 @@ fn skill_dir_fingerprint_with_projects(
 fn provider_supports_directory_skills(provider: &ProviderKind) -> bool {
     matches!(
         provider,
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen
+        ProviderKind::Claude
+            | ProviderKind::Codex
+            | ProviderKind::Gemini
+            | ProviderKind::OpenCode
+            | ProviderKind::Qwen
     )
 }
 
@@ -2941,6 +2965,7 @@ fn provider_home_skill_dir(provider: &ProviderKind, home: &Path) -> Option<std::
         ProviderKind::Claude => Some(home.join(".claude").join("commands")),
         ProviderKind::Codex => Some(home.join(".codex").join("skills")),
         ProviderKind::Gemini => Some(home.join(".gemini").join("skills")),
+        ProviderKind::OpenCode => Some(home.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(home.join(".qwen").join("skills")),
         ProviderKind::Unsupported(_) => None,
     }
@@ -2955,6 +2980,7 @@ fn provider_project_skill_dir(
         ProviderKind::Claude => Some(project_root.join(".claude").join("commands")),
         ProviderKind::Codex => Some(project_root.join(".codex").join("skills")),
         ProviderKind::Gemini => Some(project_root.join(".gemini").join("skills")),
+        ProviderKind::OpenCode => Some(project_root.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(project_root.join(".qwen").join("skills")),
         ProviderKind::Unsupported(_) => None,
     }
@@ -3121,7 +3147,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(shared.sqlite.as_ref(), shared.pg_pool.as_ref(), wt);
+                    cleanup_git_worktree(shared.legacy_sqlite(), shared.pg_pool.as_ref(), wt);
                 }
             }
             data.sessions.remove(&ch);
@@ -3154,7 +3180,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     for expired_session in &expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
             let should_record = mark_session_disconnected_for_idle_cleanup(
-                shared.sqlite.as_ref(),
+                shared.legacy_sqlite(),
                 shared.pg_pool.as_ref(),
                 session_key,
             )
@@ -3164,7 +3190,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             }
 
             crate::services::termination_audit::record_termination_with_handles(
-                shared.sqlite.as_ref(),
+                shared.legacy_sqlite(),
                 shared.pg_pool.as_ref(),
                 session_key,
                 None,

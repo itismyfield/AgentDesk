@@ -434,7 +434,21 @@ async fn upsert_agent_from_config_pg(pool: &PgPool, agent: &AgentDef) -> Result<
         .as_ref()
         .and_then(AgentChannel::target);
     let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-    let discord_channel_id = discord_channel_cc.clone();
+    let provider_primary = match agent.provider.as_str() {
+        "gemini" => agent
+            .channels
+            .gemini
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "opencode" => agent
+            .channels
+            .opencode
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
+        _ => None,
+    };
+    let discord_channel_id = provider_primary.or_else(|| discord_channel_cc.clone());
     let discord_channel_alt = discord_channel_cdx.clone();
 
     sqlx::query(

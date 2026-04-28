@@ -102,40 +102,11 @@ fn lookup_thread_for_channel_from_map_pg(
 
 /// Look up the thread_id for a specific channel from channel_thread_map.
 /// Falls back to active_thread_id for backward compatibility.
-pub(super) fn get_thread_for_channel(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    channel_id: u64,
+pub(super) fn get_thread_for_channel<T>(
+    _conn: &T,
+    _card_id: &str,
+    _channel_id: u64,
 ) -> Option<String> {
-    let map_json: Option<String> = conn
-        .query_row(
-            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    if let Some(thread_id) = lookup_thread_for_channel_from_map(map_json.as_deref(), channel_id) {
-        return Some(thread_id);
-    }
-
-    // Fallback: legacy active_thread_id — only if channel_thread_map is empty/absent.
-    // When the map exists but doesn't contain this channel, the thread belongs to a
-    // different channel (e.g. CDX review thread) and must NOT be reused for the
-    // primary channel's review-decision message.
-    if map_json
-        .as_deref()
-        .map_or(true, |s| s.is_empty() || s == "{}")
-    {
-        return conn
-            .query_row(
-                "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok();
-    }
     None
 }
 
@@ -183,36 +154,12 @@ pub(super) async fn get_thread_for_channel_pg(
 
 /// Set the thread_id for a specific channel in channel_thread_map.
 /// Also updates active_thread_id for backward compatibility.
-pub(super) fn set_thread_for_channel(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    channel_id: u64,
-    thread_id: &str,
+pub(super) fn set_thread_for_channel<T>(
+    _conn: &T,
+    _card_id: &str,
+    _channel_id: u64,
+    _thread_id: &str,
 ) {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    let mut map: serde_json::Map<String, serde_json::Value> = existing
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    map.insert(
-        channel_id.to_string(),
-        serde_json::Value::String(thread_id.to_string()),
-    );
-
-    let json_str = serde_json::to_string(&map).unwrap_or_default();
-    conn.execute(
-        "UPDATE kanban_cards SET channel_thread_map = ?1, active_thread_id = ?2 WHERE id = ?3",
-        libsql_rusqlite::params![json_str, thread_id, card_id],
-    )
-    .ok();
 }
 
 pub(super) async fn set_thread_for_channel_pg(
@@ -259,34 +206,7 @@ pub(super) async fn set_thread_for_channel_pg(
 }
 
 /// Clear thread mapping for a specific channel.
-pub(super) fn clear_thread_for_channel(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-    channel_id: u64,
-) {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    if let Some(json_str) = existing {
-        if let Ok(mut map) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
-        {
-            map.remove(&channel_id.to_string());
-            let new_json = serde_json::to_string(&map).unwrap_or_default();
-            conn.execute(
-                "UPDATE kanban_cards SET channel_thread_map = ?1 WHERE id = ?2",
-                libsql_rusqlite::params![new_json, card_id],
-            )
-            .ok();
-        }
-    }
-}
+pub(super) fn clear_thread_for_channel<T>(_conn: &T, _card_id: &str, _channel_id: u64) {}
 
 pub(super) async fn clear_thread_for_channel_pg(
     pool: &PgPool,
@@ -331,16 +251,7 @@ pub(super) async fn clear_thread_for_channel_pg(
 }
 
 /// Clear ALL thread mappings (card done).
-pub(in crate::server::routes) fn clear_all_threads(
-    conn: &libsql_rusqlite::Connection,
-    card_id: &str,
-) {
-    conn.execute(
-        "UPDATE kanban_cards SET channel_thread_map = NULL, active_thread_id = NULL WHERE id = ?1",
-        [card_id],
-    )
-    .ok();
-}
+pub(in crate::server::routes) fn clear_all_threads<T>(_conn: &T, _card_id: &str) {}
 
 #[derive(Debug)]
 struct ThreadMapValidationRow {

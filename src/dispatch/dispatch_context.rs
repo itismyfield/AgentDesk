@@ -1,6 +1,6 @@
 use anyhow::Result;
 #[cfg(test)]
-use libsql_rusqlite::OptionalExtension;
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -216,7 +216,7 @@ pub(super) fn dispatch_context_worktree_target(
 
 #[cfg(test)]
 pub(super) fn resolve_parent_dispatch_context_sqlite_test(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     context: &serde_json::Value,
 ) -> Result<(Option<String>, i64)> {
@@ -792,6 +792,16 @@ fn latest_completed_work_dispatch_target(
                 .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
         .map(str::to_string);
     let target_repo = context_json
         .as_ref()
@@ -871,7 +881,7 @@ fn result_has_work_completion_evidence(result: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 pub(super) fn validate_dispatch_completion_evidence_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     db: &Db,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
@@ -1990,7 +2000,7 @@ async fn latest_completed_work_dispatch_target_pg(
     kanban_card_id: &str,
 ) -> Option<DispatchExecutionTarget> {
     let (result_raw, context_raw): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT result, context
+        "SELECT result::text, context::text
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type IN ('implementation', 'rework')
@@ -2069,6 +2079,16 @@ async fn latest_completed_work_dispatch_target_pg(
         .and_then(|v| json_string_field(v, "completed_commit"))
         .or_else(|| {
             result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "completed_commit"))
+        })
+        .or_else(|| {
+            context_json
                 .as_ref()
                 .and_then(|v| json_string_field(v, "reviewed_commit"))
         })
@@ -2628,7 +2648,7 @@ mod tests {
              ) VALUES (
                 ?1, 'Test Card', ?2, ?3, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![card_id, status, issue_number],
+            rusqlite::params![card_id, status, issue_number],
         )
         .unwrap();
     }
@@ -2654,7 +2674,7 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         conn.execute(
             "UPDATE kanban_cards SET repo_id = ?1 WHERE id = ?2",
-            libsql_rusqlite::params![repo_id, card_id],
+            rusqlite::params![repo_id, card_id],
         )
         .unwrap();
     }
@@ -2840,7 +2860,7 @@ mod tests {
                 'card-review-identifiers', ?1, ?2, 'wt/692-review', 901, ?3, 'review',
                 datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![repo_dir, repo_dir, reviewed_commit],
+            rusqlite::params![repo_dir, repo_dir, reviewed_commit],
         )
         .unwrap();
         drop(conn);
@@ -2901,7 +2921,7 @@ mod tests {
                 'dispatch-800-stale', 'card-stale-completed-wt', 'agent-1', 'implementation', 'completed',
                 'Stale wt completion', ?1, ?2, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 serde_json::json!({
                     "worktree_path": stale_path_str,
                     "worktree_branch": stale_branch,
@@ -2959,7 +2979,7 @@ mod tests {
                 'dispatch-800-stale-commit', 'card-stale-completed-with-commit', 'agent-1', 'implementation', 'completed',
                 'Stale wt completion (with commit)', ?1, ?2, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 serde_json::json!({}).to_string(),
                 serde_json::json!({
                     "completed_worktree_path": stale_path_str,
@@ -3712,7 +3732,7 @@ mod tests {
              ) VALUES (
                 ?1, ?2, ?3, 'wt/sqlite-db-value', 7001, ?4, 'review', datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![card_id, repo_dir, repo_dir, reviewed_commit],
+            rusqlite::params![card_id, repo_dir, repo_dir, reviewed_commit],
         )
         .unwrap();
         drop(conn);

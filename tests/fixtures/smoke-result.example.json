@@ -1,0 +1,72 @@
+{
+  "_comment": "Example smoke-result.json fixtures.",
+
+  "all_passed": {
+    "provider": "codex",
+    "channel": "candidate",
+    "candidate_path": "/Users/user/.npm-global/bin/codex",
+    "canonical_path": "/Users/user/.npm-global/bin/codex",
+    "checks": {
+      "version": "ok",
+      "auth": "ok",
+      "simple": "ok",
+      "structured": "ok",
+      "stream": "ok",
+      "resume": "ok",
+      "cancel": "ok"
+    },
+    "overall_status": "ok",
+    "evidence": {
+      "version_output": "codex 0.2.0",
+      "candidate_version": "0.2.0",
+      "snapshot_version": "0.1.0",
+      "version_mismatch_gate": "passed"
+    },
+    "checked_at": "2026-04-26T01:00:00Z"
+  },
+
+  "failed_version_gate": {
+    "provider": "codex",
+    "channel": "candidate",
+    "candidate_path": "/Users/user/.npm-global/bin/codex",
+    "canonical_path": "/Users/user/.npm-global/bin/codex",
+    "checks": {
+      "version": "failed",
+      "auth": "skipped",
+      "simple": "skipped",
+      "structured": "skipped",
+      "stream": "skipped",
+      "resume": "skipped",
+      "cancel": "skipped"
+    },
+    "overall_status": "failed",
+    "evidence": {
+      "candidate_version": "0.1.0",
+      "snapshot_version": "0.1.0",
+      "failure_reason": "upgrade_version_unchanged"
+    },
+    "checked_at": "2026-04-26T01:00:00Z"
+  },
+
+  "partial_stream_failed": {
+    "provider": "claude",
+    "channel": "candidate",
+    "candidate_path": "/Users/user/.npm-global/bin/claude",
+    "canonical_path": "/Users/user/.npm-global/bin/claude",
+    "checks": {
+      "version": "ok",
+      "auth": "ok",
+      "simple": "ok",
+      "structured": "ok",
+      "stream": "failed",
+      "resume": "skipped",
+      "cancel": "skipped"
+    },
+    "overall_status": "failed",
+    "evidence": {
+      "stream_error": "unexpected end of stream",
+      "promotion_blocked": "true"
+    },
+    "checked_at": "2026-04-26T02:00:00Z"
+  }
+}

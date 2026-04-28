@@ -30,8 +30,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use crate::server::routes::api_router_with_pg;
-
 // Reuse the mock Discord transport from the discord_flow harness instead of
 // instantiating a second copy under this module — keeps the dedup invariants
 // observed by both lanes identical.
@@ -93,8 +91,8 @@ fn build_app_with_pg(
 ) -> axum::Router {
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router_with_pg(
-        Some(db),
+    crate::server::routes::api_router_with_pg_for_tests(
+        db,
         engine,
         crate::config::Config::default(),
         tx,

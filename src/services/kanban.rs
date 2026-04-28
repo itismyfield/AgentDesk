@@ -2,15 +2,11 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::db::{
-    Db,
-    kanban::{self, KanbanCardRecord, ListCardsFilter},
-};
+use crate::db::kanban::{self, KanbanCardRecord, ListCardsFilter};
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 #[derive(Clone)]
 pub struct KanbanService {
-    db: Db,
     pg_pool: Option<PgPool>,
 }
 
@@ -66,8 +62,8 @@ pub struct KanbanCardView {
 }
 
 impl KanbanService {
-    pub fn new(db: Db, pg_pool: Option<PgPool>) -> Self {
-        Self { db, pg_pool }
+    pub fn new(pg_pool: Option<PgPool>) -> Self {
+        Self { pg_pool }
     }
 
     pub async fn list_cards(&self, input: ListCardsInput) -> ServiceResult<ListCardsResponse> {

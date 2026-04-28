@@ -178,12 +178,14 @@ fn agent_channel_for_provider<'a>(
         "claude" => agent.channels.claude.as_ref(),
         "codex" => agent.channels.codex.as_ref(),
         "gemini" => agent.channels.gemini.as_ref(),
+        "opencode" => agent.channels.opencode.as_ref(),
         "qwen" => agent.channels.qwen.as_ref(),
         _ => None,
     }
     .or_else(|| agent.channels.claude.as_ref())
     .or_else(|| agent.channels.codex.as_ref())
     .or_else(|| agent.channels.gemini.as_ref())
+    .or_else(|| agent.channels.opencode.as_ref())
     .or_else(|| agent.channels.qwen.as_ref())
 }
 

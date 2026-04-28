@@ -1,11 +1,7 @@
-use super::{
-    discord_delivery::{
-        DispatchNotifyDeliveryResult, DispatchTransport, HttpDispatchTransport,
-        discord_api_base_url, discord_api_url,
-    },
-    thread_reuse::clear_all_threads,
+use super::discord_delivery::{
+    DispatchNotifyDeliveryResult, DispatchTransport, HttpDispatchTransport, discord_api_base_url,
+    discord_api_url,
 };
-use libsql_rusqlite::OptionalExtension;
 use sqlx::{PgPool, Row as SqlxRow};
 use std::process::Command;
 use std::sync::Arc;
@@ -205,21 +201,23 @@ fn generic_outbox_delivery_result(
     DispatchNotifyDeliveryResult::success(dispatch_id, action, detail)
 }
 
-fn dispatch_notify_delivery_suppressed(
-    conn: &libsql_rusqlite::Connection,
+#[cfg(test)]
+fn dispatch_notify_delivery_suppressed_sqlite(
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
-) -> libsql_rusqlite::Result<bool> {
+) -> bool {
     let status: Option<String> = conn
         .query_row(
             "SELECT status FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
             |row| row.get(0),
         )
-        .optional()?;
-    Ok(matches!(
+        .ok()
+        .flatten();
+    matches!(
         status.as_deref(),
         Some("completed") | Some("failed") | Some("cancelled")
-    ))
+    )
 }
 
 async fn dispatch_notify_delivery_suppressed_pg(
@@ -391,29 +389,29 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     db: &crate::db::Db,
     notifier: &N,
 ) -> usize {
-    process_outbox_batch_with_pg(Some(db), None, notifier).await
+    #[cfg(test)]
+    {
+        return process_outbox_batch_with_pg(Some(db), None, notifier).await;
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (db, notifier);
+        0
+    }
 }
 
-pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    notifier: &N,
-) -> usize {
-    let pending: Vec<DispatchOutboxRow> = if let Some(pool) = pg_pool {
-        claim_pending_dispatch_outbox_batch_pg(pool).await
-    } else {
-        let Some(db) = db else {
-            return 0;
-        };
+#[cfg(test)]
+async fn process_outbox_batch_sqlite<N: OutboxNotifier>(db: &crate::db::Db, notifier: &N) -> usize {
+    let pending: Vec<DispatchOutboxRow> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return 0,
         };
         let mut stmt = match conn.prepare(
-            "SELECT id, dispatch_id, action, agent_id, card_id, title, retry_count \
-             FROM dispatch_outbox \
-             WHERE status = 'pending' \
-               AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now')) \
+            "SELECT id, dispatch_id, action, agent_id, card_id, title, retry_count
+             FROM dispatch_outbox
+             WHERE status = 'pending'
+               AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))
              ORDER BY id ASC LIMIT 5",
         ) {
             Ok(s) => s,
@@ -438,20 +436,12 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     let count = pending.len();
     for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
         check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
+
         if action == "notify" {
-            let suppress_delivery = if let Some(pool) = pg_pool {
-                dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
-                    .await
-                    .unwrap_or(false)
-            } else if let Some(db) = db {
-                if let Ok(conn) = db.lock() {
-                    dispatch_notify_delivery_suppressed(&conn, &dispatch_id).unwrap_or(false)
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+            let suppress_delivery = db
+                .lock()
+                .map(|conn| dispatch_notify_delivery_suppressed_sqlite(&conn, &dispatch_id))
+                .unwrap_or(false);
             if suppress_delivery {
                 let delivery_result = generic_outbox_delivery_result(
                     &dispatch_id,
@@ -459,33 +449,120 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     "suppressed because dispatch is already terminal",
                 );
                 let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
-                if let Some(pool) = pg_pool {
-                    sqlx::query(
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
                         "UPDATE dispatch_outbox
                             SET status = 'done',
-                                processed_at = NOW(),
+                                processed_at = datetime('now'),
                                 error = NULL,
-                                delivery_status = $2,
-                                delivery_result = $3::jsonb
-                          WHERE id = $1",
+                                delivery_status = ?2,
+                                delivery_result = ?3
+                          WHERE id = ?1",
+                        rusqlite::params![id, delivery_result.status, delivery_result_json],
                     )
-                    .bind(id)
-                    .bind(&delivery_result.status)
-                    .bind(&delivery_result_json)
-                    .execute(pool)
-                    .await
                     .ok();
-                } else if let Some(db) = db {
+                }
+                continue;
+            }
+        }
+
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
+                [id],
+            )
+            .ok();
+        }
+
+        let result = match action.as_str() {
+            "notify" => {
+                if let (Some(aid), Some(cid), Some(t)) =
+                    (agent_id.clone(), card_id.clone(), title.clone())
+                {
+                    notifier
+                        .notify_dispatch(Some(db.clone()), aid, t, cid, dispatch_id.clone())
+                        .await
+                } else {
+                    Err("missing agent_id, card_id, or title for notify action".into())
+                }
+            }
+            "followup" => notifier
+                .handle_followup(Some(db.clone()), dispatch_id.clone())
+                .await
+                .map(|()| {
+                    generic_outbox_delivery_result(
+                        &dispatch_id,
+                        "followup",
+                        "followup handler completed",
+                    )
+                }),
+            "status_reaction" => notifier
+                .sync_status_reaction(Some(db.clone()), dispatch_id.clone())
+                .await
+                .map(|()| {
+                    generic_outbox_delivery_result(
+                        &dispatch_id,
+                        "status_reaction",
+                        "status reaction sync completed",
+                    )
+                }),
+            other => {
+                tracing::warn!("[dispatch-outbox] Unknown action: {other}");
+                Err(format!("unknown action: {other}"))
+            }
+        };
+
+        match result {
+            Ok(delivery_result) => {
+                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE dispatch_outbox
+                            SET status = 'done',
+                                processed_at = datetime('now'),
+                                error = NULL,
+                                delivery_status = ?2,
+                                delivery_result = ?3
+                          WHERE id = ?1",
+                        rusqlite::params![id, delivery_result.status, delivery_result_json],
+                    )
+                    .ok();
+                    if action == "notify" {
+                        crate::dispatch::set_dispatch_status_on_conn(
+                            &conn,
+                            &dispatch_id,
+                            "dispatched",
+                            None,
+                            "dispatch_outbox_notify",
+                            Some(&["pending"]),
+                            false,
+                        )
+                        .ok();
+                    }
+                }
+            }
+            Err(err) => {
+                let new_count = retry_count + 1;
+                if new_count > MAX_RETRY_COUNT {
+                    let delivery_result = DispatchNotifyDeliveryResult::permanent_failure(
+                        &dispatch_id,
+                        &action,
+                        &err,
+                    );
+                    let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                     if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE dispatch_outbox
-                                SET status = 'done',
+                                SET status = 'failed',
+                                    error = ?1,
+                                    retry_count = ?2,
                                     processed_at = datetime('now'),
-                                    error = NULL,
-                                    delivery_status = ?2,
-                                    delivery_result = ?3
-                              WHERE id = ?1",
-                            libsql_rusqlite::params![
+                                    delivery_status = ?4,
+                                    delivery_result = ?5
+                              WHERE id = ?3",
+                            rusqlite::params![
+                                err,
+                                new_count,
                                 id,
                                 delivery_result.status,
                                 delivery_result_json
@@ -493,21 +570,79 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                         )
                         .ok();
                     }
+                } else {
+                    let backoff_idx = (new_count - 1) as usize;
+                    let backoff_secs = RETRY_BACKOFF_SECS.get(backoff_idx).copied().unwrap_or(3600);
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox
+                                SET status = 'pending',
+                                    error = ?1,
+                                    retry_count = ?2,
+                                    next_attempt_at = datetime('now', '+' || ?3 || ' seconds')
+                              WHERE id = ?4",
+                            rusqlite::params![err, new_count, backoff_secs, id],
+                        )
+                        .ok();
+                    }
                 }
-                continue;
             }
         }
+    }
 
-        // Mark as processing
-        if pg_pool.is_none() {
-            if let Some(db) = db {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
-                        [id],
-                    )
-                    .ok();
-                }
+    count
+}
+
+pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
+    db: Option<&crate::db::Db>,
+    pg_pool: Option<&PgPool>,
+    notifier: &N,
+) -> usize {
+    #[cfg(test)]
+    if pg_pool.is_none() {
+        return match db {
+            Some(db) => process_outbox_batch_sqlite(db, notifier).await,
+            None => 0,
+        };
+    }
+
+    #[cfg(not(test))]
+    let _ = (db, notifier);
+    let Some(pool) = pg_pool else {
+        return 0;
+    };
+    let pending: Vec<DispatchOutboxRow> = claim_pending_dispatch_outbox_batch_pg(pool).await;
+
+    let count = pending.len();
+    for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
+        check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
+        if action == "notify" {
+            let suppress_delivery = dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
+                .await
+                .unwrap_or(false);
+            if suppress_delivery {
+                let delivery_result = generic_outbox_delivery_result(
+                    &dispatch_id,
+                    "notify",
+                    "suppressed because dispatch is already terminal",
+                );
+                let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
+                sqlx::query(
+                    "UPDATE dispatch_outbox
+                        SET status = 'done',
+                            processed_at = NOW(),
+                            error = NULL,
+                            delivery_status = $2,
+                            delivery_result = $3::jsonb
+                      WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&delivery_result.status)
+                .bind(&delivery_result_json)
+                .execute(pool)
+                .await
+                .ok();
+                continue;
             }
         }
 
@@ -561,55 +696,23 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
             Ok(delivery_result) => {
                 let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
                 // Mark done + transition dispatch pending → dispatched
-                if let Some(pool) = pg_pool {
-                    sqlx::query(
-                        "UPDATE dispatch_outbox
-                            SET status = 'done',
-                                processed_at = NOW(),
-                                error = NULL,
-                                delivery_status = $2,
-                                delivery_result = $3::jsonb
-                          WHERE id = $1",
-                    )
-                    .bind(id)
-                    .bind(&delivery_result.status)
-                    .bind(&delivery_result_json)
-                    .execute(pool)
-                    .await
-                    .ok();
-                    if action == "notify" {
-                        mark_dispatch_dispatched_pg(pool, &dispatch_id).await.ok();
-                    }
-                } else if let Some(db) = db {
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE dispatch_outbox
-                                SET status = 'done',
-                                    processed_at = datetime('now'),
-                                    error = NULL,
-                                    delivery_status = ?2,
-                                    delivery_result = ?3
-                              WHERE id = ?1",
-                            libsql_rusqlite::params![
-                                id,
-                                delivery_result.status,
-                                delivery_result_json
-                            ],
-                        )
-                        .ok();
-                        if action == "notify" {
-                            crate::dispatch::set_dispatch_status_on_conn(
-                                &conn,
-                                &dispatch_id,
-                                "dispatched",
-                                None,
-                                "dispatch_outbox_notify",
-                                Some(&["pending"]),
-                                false,
-                            )
-                            .ok();
-                        }
-                    }
+                sqlx::query(
+                    "UPDATE dispatch_outbox
+                        SET status = 'done',
+                            processed_at = NOW(),
+                            error = NULL,
+                            delivery_status = $2,
+                            delivery_result = $3::jsonb
+                      WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&delivery_result.status)
+                .bind(&delivery_result_json)
+                .execute(pool)
+                .await
+                .ok();
+                if action == "notify" {
+                    mark_dispatch_dispatched_pg(pool, &dispatch_id).await.ok();
                 }
             }
             Err(err) => {
@@ -625,42 +728,24 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                         &err,
                     );
                     let delivery_result_json = dispatch_delivery_result_json(&delivery_result);
-                    if let Some(pool) = pg_pool {
-                        sqlx::query(
-                            "UPDATE dispatch_outbox
-                                SET status = 'failed',
-                                    error = $1,
-                                    retry_count = $2,
-                                    processed_at = NOW(),
-                                    delivery_status = $4,
-                                    delivery_result = $5::jsonb
-                              WHERE id = $3",
-                        )
-                        .bind(&err)
-                        .bind(new_count)
-                        .bind(id)
-                        .bind(&delivery_result.status)
-                        .bind(&delivery_result_json)
-                        .execute(pool)
-                        .await
-                        .ok();
-                    } else if let Some(db) = db {
-                        if let Ok(conn) = db.lock() {
-                            conn.execute(
-                                "UPDATE dispatch_outbox SET status = 'failed', error = ?1, \
-                                 retry_count = ?2, processed_at = datetime('now'), \
-                                 delivery_status = ?4, delivery_result = ?5 WHERE id = ?3",
-                                libsql_rusqlite::params![
-                                    err,
-                                    new_count,
-                                    id,
-                                    delivery_result.status,
-                                    delivery_result_json
-                                ],
-                            )
-                            .ok();
-                        }
-                    }
+                    sqlx::query(
+                        "UPDATE dispatch_outbox
+                            SET status = 'failed',
+                                error = $1,
+                                retry_count = $2,
+                                processed_at = NOW(),
+                                delivery_status = $4,
+                                delivery_result = $5::jsonb
+                          WHERE id = $3",
+                    )
+                    .bind(&err)
+                    .bind(new_count)
+                    .bind(id)
+                    .bind(&delivery_result.status)
+                    .bind(&delivery_result_json)
+                    .execute(pool)
+                    .await
+                    .ok();
                 } else {
                     // Schedule retry with backoff (index = new_count - 1, since retry 1 uses BACKOFF[0])
                     let backoff_idx = (new_count - 1) as usize;
@@ -669,34 +754,21 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                         "[dispatch-outbox] Retry {new_count}/{MAX_RETRY_COUNT} for entry {id} (dispatch={dispatch_id}, action={action}) \
                          in {backoff_secs}s: {err}",
                     );
-                    if let Some(pool) = pg_pool {
-                        sqlx::query(
-                            "UPDATE dispatch_outbox
-                                SET status = 'pending',
-                                    error = $1,
-                                    retry_count = $2,
-                                    next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second')
-                              WHERE id = $4",
-                        )
-                        .bind(&err)
-                        .bind(new_count)
-                        .bind(backoff_secs)
-                        .bind(id)
-                        .execute(pool)
-                        .await
-                        .ok();
-                    } else if let Some(db) = db {
-                        if let Ok(conn) = db.lock() {
-                            conn.execute(
-                                "UPDATE dispatch_outbox SET status = 'pending', error = ?1, \
-                                 retry_count = ?2, \
-                                 next_attempt_at = datetime('now', '+' || ?3 || ' seconds') \
-                                 WHERE id = ?4",
-                                libsql_rusqlite::params![err, new_count, backoff_secs, id],
-                            )
-                            .ok();
-                        }
-                    }
+                    sqlx::query(
+                        "UPDATE dispatch_outbox
+                            SET status = 'pending',
+                                error = $1,
+                                retry_count = $2,
+                                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second')
+                          WHERE id = $4",
+                    )
+                    .bind(&err)
+                    .bind(new_count)
+                    .bind(backoff_secs)
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .ok();
                 }
             }
         }
@@ -1247,7 +1319,7 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
 }
 
 async fn load_completed_dispatch_info(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<CompletedDispatchInfo>, String> {
@@ -1304,37 +1376,11 @@ async fn load_completed_dispatch_info(
             .transpose();
     }
 
-    let Some(db) = db else {
-        return Err("dispatch lookup requires sqlite db or postgres pool".to_string());
-    };
-    let conn = db
-        .lock()
-        .map_err(|_| "db lock failed for dispatch lookup".to_string())?;
-    conn.query_row(
-        "SELECT td.dispatch_type, td.status, kc.id, td.result, td.context, td.thread_id, \
-                CAST(ROUND((julianday(COALESCE(td.completed_at, td.updated_at, td.created_at)) - julianday(td.created_at)) * 86400) AS INTEGER) \
-         FROM task_dispatches td \
-         JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
-         WHERE td.id = ?1",
-        [dispatch_id],
-        |row| {
-            Ok(CompletedDispatchInfo {
-                dispatch_type: row.get(0)?,
-                status: row.get(1)?,
-                card_id: row.get(2)?,
-                result_json: row.get(3)?,
-                context_json: row.get(4)?,
-                thread_id: row.get(5)?,
-                duration_seconds: row.get(6)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(|error| format!("load dispatch {dispatch_id} followup info: {error}"))
+    Err("dispatch lookup requires postgres pool".to_string())
 }
 
 async fn load_card_status(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
 ) -> Result<Option<String>, String> {
@@ -1352,22 +1398,11 @@ async fn load_card_status(
             .transpose();
     }
 
-    let Some(db) = db else {
-        return Err("card status lookup requires sqlite db or postgres pool".to_string());
-    };
-
-    Ok(db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-    }))
+    Err("card status lookup requires postgres pool".to_string())
 }
 
 async fn clear_all_dispatch_threads(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
 ) -> Result<(), String> {
@@ -1385,13 +1420,7 @@ async fn clear_all_dispatch_threads(
         return Ok(());
     }
 
-    let Some(db) = db else {
-        return Err("thread cleanup requires sqlite db or postgres pool".to_string());
-    };
-    if let Ok(conn) = db.lock() {
-        clear_all_threads(&conn, card_id);
-    }
-    Ok(())
+    Err("thread cleanup requires postgres pool".to_string())
 }
 
 // ── Channel helpers ─────────────────────────────────────────────
@@ -1968,10 +1997,7 @@ mod tests {
     }
 
     fn test_db() -> crate::db::Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
+        crate::db::test_db()
     }
 
     struct TestPostgresDb {
@@ -2587,8 +2613,8 @@ mod tests {
                 ["dispatch_notified:dispatch-pg-transport"],
                 |row| row.get(0),
             )
-            .optional()
-            .unwrap();
+            .ok()
+            .flatten();
         assert!(
             sqlite_notified.is_none(),
             "transport-backed PG delivery should not backfill SQLite guard keys"

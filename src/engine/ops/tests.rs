@@ -6,17 +6,67 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::{
     register_globals, register_globals_with_supervisor, register_globals_with_supervisor_and_pg,
-    review_state_sync, review_state_sync_on_conn,
 };
-
-macro_rules! sqlite_params {
-    ($($param:expr),* $(,)?) => {
-        ($(&$param,)*)
-    };
-}
 
 fn test_db() -> Db {
     crate::db::test_db()
+}
+
+fn legacy_review_state_sync_for_tests(conn: &rusqlite::Connection, json_str: &str) -> String {
+    let params: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+    };
+
+    let card_id = params["card_id"].as_str().unwrap_or("");
+    let state = params["state"].as_str().unwrap_or("");
+    if card_id.is_empty() || state.is_empty() {
+        return r#"{"error":"card_id and state are required"}"#.to_string();
+    }
+
+    if state == "clear_verdict" {
+        let result = conn.execute(
+            "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
+            rusqlite::params![card_id],
+        );
+        return match result {
+            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+        };
+    }
+
+    let review_round = params["review_round"].as_i64();
+    let last_verdict = params["last_verdict"].as_str();
+    let last_decision = params["last_decision"].as_str();
+    let pending_dispatch_id = params["pending_dispatch_id"].as_str();
+    let review_entered_at = params["review_entered_at"].as_str();
+
+    let result = conn.execute(
+        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, review_entered_at, updated_at) \
+         VALUES (?1, ?2, COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0), ?4, ?5, ?6, COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+         ON CONFLICT(card_id) DO UPDATE SET \
+         state = ?2, \
+         review_round = COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), review_round), \
+         last_verdict = COALESCE(?4, last_verdict), \
+         last_decision = COALESCE(?5, last_decision), \
+         pending_dispatch_id = CASE WHEN ?6 IS NOT NULL THEN ?6 WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id ELSE NULL END, \
+         review_entered_at = COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
+         updated_at = datetime('now')",
+        rusqlite::params![
+            card_id,
+            state,
+            review_round,
+            last_verdict,
+            last_decision,
+            pending_dispatch_id,
+            review_entered_at,
+        ],
+    );
+
+    match result {
+        Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+        Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+    }
 }
 
 fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
@@ -1061,11 +1111,9 @@ async fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     let pool_for_js = pool.clone();
-    let db_for_js = db.clone();
     ctx.with(|ctx| {
         register_globals_with_supervisor_and_pg(
             &ctx,
-            Some(db_for_js),
             Some(pool_for_js),
             crate::supervisor::BridgeHandle::new(),
         )
@@ -1260,170 +1308,6 @@ fn seed_card_for_review(db: &Db, card_id: &str) {
     .unwrap();
 }
 
-// #158: review_state_sync_on_conn — idle state sets state and clears pending_dispatch_id
-#[test]
-fn test_review_state_sync_idle() {
-    let db = test_db();
-    seed_card_for_review(&db, "rs-1");
-    let conn = db.separate_conn().unwrap();
-    // Seed existing review state with pending_dispatch_id
-    conn.execute(
-        "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
-         VALUES ('rs-1', 'suggestion_pending', 'disp-1', datetime('now'))",
-        [],
-    )
-    .unwrap();
-
-    let result = review_state_sync_on_conn(
-        &conn,
-        &serde_json::json!({"card_id": "rs-1", "state": "idle"}).to_string(),
-    );
-    assert!(
-        result.contains("\"ok\":true"),
-        "sync should succeed: {result}"
-    );
-
-    let (state, pd): (String, Option<String>) = conn
-        .query_row(
-            "SELECT state, pending_dispatch_id FROM card_review_state WHERE card_id = 'rs-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(state, "idle");
-    assert!(pd.is_none(), "idle should clear pending_dispatch_id");
-}
-
-// #158: leaving suggestion_pending must clear stale pending_dispatch_id
-#[test]
-fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
-    let db = test_db();
-    seed_card_for_review(&db, "rs-1b");
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
-         VALUES ('rs-1b', 'suggestion_pending', 'disp-2', datetime('now'))",
-        [],
-    )
-    .unwrap();
-
-    let result = review_state_sync_on_conn(
-        &conn,
-        &serde_json::json!({
-            "card_id": "rs-1b",
-            "state": "rework_pending",
-            "last_decision": "pm_rework"
-        })
-        .to_string(),
-    );
-    assert!(
-        result.contains("\"ok\":true"),
-        "sync should succeed: {result}"
-    );
-
-    let (state, pd): (String, Option<String>) = conn
-        .query_row(
-            "SELECT state, pending_dispatch_id FROM card_review_state WHERE card_id = 'rs-1b'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(state, "rework_pending");
-    assert!(
-        pd.is_none(),
-        "non-suggestion_pending states must clear stale pending_dispatch_id"
-    );
-}
-
-// #158: review_state_sync_on_conn — reviewing state auto-sets review_entered_at
-#[test]
-fn test_review_state_sync_reviewing() {
-    let db = test_db();
-    seed_card_for_review(&db, "rs-2");
-    let conn = db.separate_conn().unwrap();
-
-    let result = review_state_sync_on_conn(
-        &conn,
-        &serde_json::json!({"card_id": "rs-2", "state": "reviewing", "review_round": 1})
-            .to_string(),
-    );
-    assert!(result.contains("\"ok\":true"));
-
-    let (state, rr, entered): (String, Option<i64>, Option<String>) = conn
-        .query_row(
-            "SELECT state, review_round, review_entered_at FROM card_review_state WHERE card_id = 'rs-2'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(state, "reviewing");
-    assert_eq!(rr, Some(1));
-    assert!(
-        entered.is_some(),
-        "reviewing should auto-set review_entered_at"
-    );
-}
-
-// #158: review_state_sync_on_conn — clear_verdict only NULLs last_verdict
-#[test]
-fn test_review_state_sync_clear_verdict() {
-    let db = test_db();
-    seed_card_for_review(&db, "rs-3");
-    let conn = db.separate_conn().unwrap();
-    conn.execute(
-        "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) \
-         VALUES ('rs-3', 'reviewing', 'improve', datetime('now'))",
-        [],
-    )
-    .unwrap();
-
-    let result = review_state_sync_on_conn(
-        &conn,
-        &serde_json::json!({"card_id": "rs-3", "state": "clear_verdict"}).to_string(),
-    );
-    assert!(
-        result.contains("\"ok\":true"),
-        "sync should succeed: {result}"
-    );
-
-    let (state, verdict): (String, Option<String>) = conn
-        .query_row(
-            "SELECT state, last_verdict FROM card_review_state WHERE card_id = 'rs-3'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(state, "reviewing", "clear_verdict should not change state");
-    assert!(verdict.is_none(), "clear_verdict should NULL last_verdict");
-}
-
-// #158: review_state_sync (JSON wrapper) — round-trip test
-#[test]
-fn test_review_state_sync_json_wrapper() {
-    let db = test_db();
-    seed_card_for_review(&db, "rs-4");
-    let result = review_state_sync(
-        &db,
-        r#"{"card_id":"rs-4","state":"suggestion_pending","last_verdict":"improve","pending_dispatch_id":"d-99"}"#,
-    );
-    assert!(
-        result.contains("\"ok\":true"),
-        "sync should succeed: {result}"
-    );
-
-    let conn = db.separate_conn().unwrap();
-    let (state, verdict, pd): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT state, last_verdict, pending_dispatch_id FROM card_review_state WHERE card_id = 'rs-4'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(state, "suggestion_pending");
-    assert_eq!(verdict.as_deref(), Some("improve"));
-    assert_eq!(pd.as_deref(), Some("d-99"));
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "obsolete SQLite auto-queue fixture; PR #868 runtime path is PostgreSQL-only"]
 async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
@@ -1571,15 +1455,8 @@ async fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     let pool_for_js = pool.clone();
-    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor_and_pg(
-            &ctx,
-            Some(db_for_js),
-            Some(pool_for_js),
-            bridge.clone(),
-        )
-        .unwrap();
+        register_globals_with_supervisor_and_pg(&ctx, Some(pool_for_js), bridge.clone()).unwrap();
         let raw: String = ctx
             .eval(
                 r#"
@@ -1717,15 +1594,8 @@ async fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_statu
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     let pool_for_js = pool.clone();
-    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor_and_pg(
-            &ctx,
-            Some(db_for_js),
-            Some(pool_for_js),
-            bridge.clone(),
-        )
-        .unwrap();
+        register_globals_with_supervisor_and_pg(&ctx, Some(pool_for_js), bridge.clone()).unwrap();
         let wrapper_type: String = ctx
             .eval(r#"typeof agentdesk.autoQueue.recordConsultationDispatch"#)
             .unwrap();
@@ -1780,6 +1650,95 @@ async fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_statu
     assert_eq!(metadata["consultation_dispatch_id"], "dispatch-consult-1");
     assert_eq!(entry_status, "dispatched");
     assert_eq!(dispatch_id.as_deref(), Some("dispatch-consult-1"));
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn pg_consultation_dispatch_rolls_back_when_entry_status_is_stale() {
+    crate::pipeline::ensure_loaded();
+
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, status, discord_channel_id)
+         VALUES ('aq-consult-stale-agent', 'AQ Consult Stale Agent', 'claude', 'idle', '123456789012345678')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, metadata, created_at, updated_at
+         ) VALUES (
+            'aq-consult-stale-card', 'AQ Consult Stale Card', 'requested', 'medium',
+            'aq-consult-stale-agent', CAST($1 AS jsonb), NOW(), NOW()
+         )",
+    )
+    .bind(
+        serde_json::json!({
+            "keep": "yes",
+            "preflight_status": "consult_required"
+        })
+        .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('aq-consult-stale-run', 'repo-1', 'aq-consult-stale-agent', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank
+         ) VALUES (
+            'aq-consult-stale-entry', 'aq-consult-stale-run', 'aq-consult-stale-card',
+            'aq-consult-stale-agent', 'dispatched', 'dispatch-consult-stale', 0
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = crate::db::auto_queue::record_consultation_dispatch_on_pg(
+        &pool,
+        "aq-consult-stale-entry",
+        "aq-consult-stale-card",
+        "dispatch-consult-stale",
+        "test_consultation_dispatch",
+        r#"{"keep":"yes","preflight_status":"consult_required"}"#,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.contains("stale postgres consultation dispatch entry"),
+        "unexpected consultation dispatch error: {error}"
+    );
+    let metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM kanban_cards WHERE id = 'aq-consult-stale-card'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let entry_row: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'aq-consult-stale-entry'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (entry_status, dispatch_id) = entry_row;
+    assert_eq!(metadata["keep"], "yes");
+    assert_eq!(metadata["preflight_status"], "consult_required");
+    assert!(metadata.get("consultation_status").is_none());
+    assert!(metadata.get("consultation_dispatch_id").is_none());
+    assert_eq!(entry_status, "dispatched");
+    assert_eq!(dispatch_id.as_deref(), Some("dispatch-consult-stale"));
 
     pool.close().await;
     pg_db.drop().await;
@@ -1857,19 +1816,13 @@ async fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     let pool_for_js = pool.clone();
-    let db_for_js = db.clone();
     ctx.with(|ctx| {
-        register_globals_with_supervisor_and_pg(
-            &ctx,
-            Some(db_for_js),
-            Some(pool_for_js),
-            bridge.clone(),
-        )
-        .unwrap();
+        register_globals_with_supervisor_and_pg(&ctx, Some(pool_for_js), bridge.clone()).unwrap();
         let raw: String = ctx
             .eval(
                 r#"
                 JSON.stringify((function() {
+                  try {
                     var saved = agentdesk.autoQueue.savePhaseGateState("aq-phase-run", 2, {
                         status: "failed",
                         verdict: "phase_gate_failed",
@@ -1902,11 +1855,21 @@ async fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
                         cleared: cleared.changed,
                         remaining: remaining
                     };
+                  } catch (e) {
+                    return {
+                        error: String(e),
+                        stack: e && e.stack ? String(e.stack) : null
+                    };
+                  }
                 })())
                 "#,
             )
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            parsed.get("error").is_none(),
+            "phase gate bridge error: {parsed}"
+        );
         assert_eq!(
             parsed["saved"]["dispatch_ids"],
             serde_json::json!(["aq-phase-valid-1", "aq-phase-valid-2"])

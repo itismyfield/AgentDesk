@@ -9,7 +9,6 @@ pub(crate) struct RunBotContext {
     pub(crate) startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) health_registry: Arc<health::HealthRegistry>,
     pub(crate) api_port: u16,
-    pub(crate) sqlite: Option<crate::db::Db>,
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
 }
@@ -313,15 +312,11 @@ pub(in crate::services::discord) async fn collect_live_queue_message_ids(
     by_channel
 }
 
-fn spawn_startup_thread_map_validation(
-    db: Option<crate::db::Db>,
-    pg_pool: Option<sqlx::PgPool>,
-    token: String,
-) {
+fn spawn_startup_thread_map_validation(pg_pool: Option<sqlx::PgPool>, token: String) {
     tokio::spawn(async move {
         let (checked, cleared) =
             crate::server::routes::dispatches::validate_channel_thread_maps_on_startup_with_backends(
-                db.as_ref(),
+                None,
                 pg_pool.as_ref(),
                 &token,
             )
@@ -385,7 +380,6 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         return;
     }
 
-    let sqlite = shared.sqlite.as_ref();
     let pg_pool = shared.pg_pool.as_ref();
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
@@ -464,47 +458,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             }
         }
     } else {
-        let Some(db) = sqlite else {
-            return;
-        };
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let mut stmt = match conn.prepare(
-            "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
-             FROM task_dispatches d
-             JOIN kanban_cards kc ON kc.id = d.kanban_card_id
-             WHERE d.status = 'pending'
-               AND d.created_at < ?1
-               AND kc.assigned_agent_id = d.to_agent_id
-               AND NOT EXISTS (
-                 SELECT 1 FROM sessions s
-                 WHERE s.agent_id = d.to_agent_id
-                   AND s.status = 'working'
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM task_dispatches d2
-                 WHERE d2.kanban_card_id = d.kanban_card_id
-                   AND d2.rowid > d.rowid
-                   AND d2.status NOT IN ('cancelled', 'failed')
-               )",
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        stmt.query_map([&boot_time], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        return;
     };
 
     if orphans.is_empty() {
@@ -518,7 +472,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     );
 
     let mut delivered = 0usize;
-    for (dispatch_id, agent_id, card_id, title, dtype) in &orphans {
+    for (dispatch_id, agent_id, card_id, _title, dtype) in &orphans {
         // Clear any existing dispatch_notified marker — the 5-condition query already
         // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
@@ -530,19 +484,6 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                         .execute(pool)
                         .await
                         .ok();
-                } else {
-                    let Some(db) = sqlite else {
-                        continue;
-                    };
-                    let conn = match db.lock() {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-                    conn.execute(
-                        "DELETE FROM kv_meta WHERE key = ?1",
-                        [&dispatch_notified_key],
-                    )
-                    .ok();
                 }
             }
         }
@@ -569,18 +510,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                     queued
                 })
         } else {
-            let Some(db) = sqlite else {
-                continue;
-            };
-            crate::server::routes::dispatches::send_dispatch_to_discord(
-                db,
-                agent_id,
-                title,
-                card_id,
-                dispatch_id,
-            )
-            .await
-            .map(|_| true)
+            continue;
         };
         match recovery_result {
             Ok(true) => {
@@ -712,7 +642,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         startup_doctor_started,
         health_registry,
         api_port,
-        sqlite,
         pg_pool,
         engine,
     } = context;
@@ -911,7 +840,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         token_hash: token_hash.clone(),
         provider: provider.clone(),
         api_port,
-        sqlite,
+        #[cfg(test)]
+        sqlite: None,
         pg_pool,
         engine,
         health_registry: Arc::downgrade(&health_registry),
@@ -1472,11 +1402,10 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     // Thread-map validation is best-effort hygiene and can spend
                     // multiple REST round-trips on startup. Do not block intake
                     // reopening or queued-turn kickoff on it.
-                    if shared_for_tmux2.sqlite.is_some() || shared_for_tmux2.pg_pool.is_some() {
+                    if shared_for_tmux2.pg_pool.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
                         spawn_startup_thread_map_validation(
-                            shared_for_tmux2.sqlite.clone(),
                             shared_for_tmux2.pg_pool.clone(),
                             token_for_kickoff.clone(),
                         );

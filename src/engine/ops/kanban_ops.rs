@@ -47,7 +47,7 @@ async fn auto_queue_review_disabled_for_card_on_pg(
 
 pub(super) fn register_kanban_ops<'js>(
     ctx: &Ctx<'js>,
-    _db: Option<Db>,
+    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -113,16 +113,20 @@ pub(super) fn register_kanban_ops<'js>(
     // #155: setReviewStatus — controlled path for review_status + clock updates.
     // Replaces direct SQL UPDATEs so the ExecuteSQL guard can block bare review_status writes.
     let pg_review = pg_pool.clone();
+    let db_review = db;
     kanban_obj.set(
         "__setReviewStatusRaw",
         Function::new(
             ctx.clone(),
             move |card_id: String, opts_json: String| -> String {
-                let Some(pool) = pg_review.as_ref() else {
-                    return r#"{"error":"postgres backend is required for kanban.setReviewStatus"}"#
-                        .to_string();
-                };
-                set_review_status_raw_pg(pool, &card_id, &opts_json)
+                if let Some(pool) = pg_review.as_ref() {
+                    return set_review_status_raw_pg(pool, &card_id, &opts_json);
+                }
+                #[cfg(test)]
+                if let Some(db) = db_review.as_ref() {
+                    return set_review_status_raw_sqlite(db, &card_id, &opts_json);
+                }
+                r#"{"error":"postgres backend is required for kanban.setReviewStatus"}"#.to_string()
             },
         )?,
     )?;
@@ -629,6 +633,96 @@ fn clear_latest_dispatch_raw_pg(
     }
 }
 
+#[cfg(test)]
+fn set_review_status_raw_sqlite(db: &Db, card_id: &str, opts_json: &str) -> String {
+    let opts: serde_json::Value = match serde_json::from_str(opts_json) {
+        Ok(value) => value,
+        Err(error) => return format!(r#"{{"error":"bad opts: {}"}}"#, error),
+    };
+
+    let result = (|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| format!("open sqlite review status connection: {error}"))?;
+        let current_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("load sqlite card status for {card_id}: {error}"))?;
+        if let Some(exclude_status) = opts.get("exclude_status").and_then(|value| value.as_str())
+            && current_status.as_deref() == Some(exclude_status)
+        {
+            return Ok::<_, String>(
+                serde_json::json!({ "ok": true, "changed": false }).to_string(),
+            );
+        }
+
+        if let Some(review_status) = opts.get("review_status") {
+            if review_status.is_null() {
+                conn.execute(
+                    "UPDATE kanban_cards SET review_status = NULL, updated_at = datetime('now') WHERE id = ?1",
+                    [card_id],
+                )
+                .map_err(|error| format!("clear sqlite review_status for {card_id}: {error}"))?;
+            } else if let Some(status) = review_status.as_str() {
+                conn.execute(
+                    "UPDATE kanban_cards SET review_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                    rusqlite::params![status, card_id],
+                )
+                .map_err(|error| format!("set sqlite review_status for {card_id}: {error}"))?;
+            }
+        }
+        for (field, column) in [
+            ("suggestion_pending_at", "suggestion_pending_at"),
+            ("review_entered_at", "review_entered_at"),
+            ("awaiting_dod_at", "awaiting_dod_at"),
+        ] {
+            if let Some(value) = opts.get(field) {
+                if value.is_null() {
+                    conn.execute(
+                        &format!(
+                            "UPDATE kanban_cards SET {column} = NULL, updated_at = datetime('now') WHERE id = ?1"
+                        ),
+                        [card_id],
+                    )
+                    .map_err(|error| format!("clear sqlite {column} for {card_id}: {error}"))?;
+                } else if value.as_str() == Some("now") {
+                    conn.execute(
+                        &format!(
+                            "UPDATE kanban_cards SET {column} = datetime('now'), updated_at = datetime('now') WHERE id = ?1"
+                        ),
+                        [card_id],
+                    )
+                    .map_err(|error| format!("set sqlite {column} for {card_id}: {error}"))?;
+                }
+            }
+        }
+        if let Some(value) = opts.get("blocked_reason") {
+            if value.is_null() {
+                conn.execute(
+                    "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?1",
+                    [card_id],
+                )
+                .map_err(|error| format!("clear sqlite blocked_reason for {card_id}: {error}"))?;
+            } else if let Some(reason) = value.as_str() {
+                conn.execute(
+                    "UPDATE kanban_cards SET blocked_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
+                    rusqlite::params![reason, card_id],
+                )
+                .map_err(|error| format!("set sqlite blocked_reason for {card_id}: {error}"))?;
+            }
+        }
+        Ok(serde_json::json!({ "ok": true, "changed": true }).to_string())
+    })();
+
+    match result {
+        Ok(response) => response,
+        Err(error) => serde_json::json!({ "error": error }).to_string(),
+    }
+}
+
 fn set_review_status_raw_pg(pool: &PgPool, card_id: &str, opts_json: &str) -> String {
     let card_id = card_id.to_string();
     let opts: serde_json::Value = match serde_json::from_str(opts_json) {
@@ -750,6 +844,7 @@ async fn resolve_pipeline_on_pg_tx(
     } else {
         None
     };
+
     let agent_override = if let Some(agent_id) = agent_id {
         sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
             .bind(agent_id)
@@ -790,8 +885,106 @@ pub(super) fn review_state_sync_with_backends(
     if let Some(pool) = pg_pool {
         return review_state_sync_pg(pool, json_str);
     }
+    #[cfg(test)]
+    if let Some(db) = db {
+        return review_state_sync_sqlite(db, json_str);
+    }
+    #[cfg(not(test))]
     let _ = db;
     r#"{"error":"postgres backend is required for review_state_sync"}"#.to_string()
+}
+
+#[cfg(test)]
+fn review_state_sync_sqlite(db: &Db, json_str: &str) -> String {
+    let params: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+    };
+
+    let card_id = params["card_id"].as_str().unwrap_or("");
+    let state = params["state"].as_str().unwrap_or("");
+    if card_id.is_empty() || state.is_empty() {
+        return r#"{"error":"card_id and state are required"}"#.to_string();
+    }
+
+    let conn = match db.lock() {
+        Ok(conn) => conn,
+        Err(error) => return format!(r#"{{"error":"sqlite lock error: {}"}}"#, error),
+    };
+
+    if state == "clear_verdict" {
+        let result = conn.execute(
+            "UPDATE card_review_state
+             SET last_verdict = NULL,
+                 updated_at = datetime('now')
+             WHERE card_id = ?1",
+            rusqlite::params![card_id],
+        );
+        return match result {
+            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+        };
+    }
+
+    let review_round = params["review_round"].as_i64();
+    let last_verdict = params["last_verdict"].as_str();
+    let last_decision = params["last_decision"].as_str();
+    let pending_dispatch_id = params["pending_dispatch_id"].as_str();
+    let approach_change_round = params["approach_change_round"].as_i64();
+    let session_reset_round = params["session_reset_round"].as_i64();
+    let review_entered_at = params["review_entered_at"].as_str();
+
+    let result = conn.execute(
+        "INSERT INTO card_review_state (
+            card_id,
+            state,
+            review_round,
+            last_verdict,
+            last_decision,
+            pending_dispatch_id,
+            approach_change_round,
+            session_reset_round,
+            review_entered_at,
+            updated_at
+         ) VALUES (
+            ?1,
+            ?2,
+            COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0),
+            ?4,
+            ?5,
+            ?6,
+            ?7,
+            ?8,
+            COALESCE(CASE WHEN ?9 = 'now' THEN datetime('now') ELSE ?9 END, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END),
+            datetime('now')
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            state = ?2,
+            review_round = COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), review_round),
+            last_verdict = COALESCE(?4, last_verdict),
+            last_decision = COALESCE(?5, last_decision),
+            pending_dispatch_id = CASE WHEN ?6 IS NOT NULL THEN ?6 WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id ELSE NULL END,
+            approach_change_round = COALESCE(?7, approach_change_round),
+            session_reset_round = COALESCE(?8, session_reset_round),
+            review_entered_at = COALESCE(CASE WHEN ?9 = 'now' THEN datetime('now') ELSE ?9 END, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END),
+            updated_at = datetime('now')",
+        rusqlite::params![
+            card_id,
+            state,
+            review_round,
+            last_verdict,
+            last_decision,
+            pending_dispatch_id,
+            approach_change_round,
+            session_reset_round,
+            review_entered_at,
+        ],
+    );
+
+    match result {
+        Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+        Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+    }
 }
 
 pub(super) fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {

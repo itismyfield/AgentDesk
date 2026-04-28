@@ -213,16 +213,8 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
             .await
             .map_err(|e| format!("startup reseed: {e}"))?;
     }
-    // #1237 (843f): the direct CLI still constructs a SQLite handle for the
-    // few `cli/direct.rs` operations that have not yet been migrated to PG.
-    // Server runtime no longer goes through `crate::db::init`; this entry
-    // point will follow under #1238 (843g) once the remaining call sites are
-    // ported. Keep the handle here strictly so the legacy CLI flow continues
-    // to work unchanged for the duration of the cleanup epic.
-    let legacy_db =
-        crate::db::init(&config).map_err(|e| format!("init legacy compatibility db: {e}"))?;
-    crate::pipeline::refresh_override_health_report(Some(&legacy_db), pg_pool.as_ref()).await;
-    crate::services::termination_audit::init_audit_db(legacy_db.clone(), pg_pool.clone());
+    crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
+    crate::services::termination_audit::init_audit_db(pg_pool.clone());
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
         .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
@@ -237,7 +229,8 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     };
 
     Ok(AppState {
-        db: Some(legacy_db),
+        #[cfg(test)]
+        legacy_db_override: None,
         pg_pool,
         engine,
         config: Arc::new(config),

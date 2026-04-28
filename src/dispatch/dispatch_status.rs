@@ -1,6 +1,6 @@
 use anyhow::Result;
 #[cfg(test)]
-use libsql_rusqlite::OptionalExtension;
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -83,7 +83,7 @@ fn is_noop_completion_result(result: Option<&serde_json::Value>) -> bool {
 
 #[cfg(test)]
 fn auto_queue_review_disabled_for_dispatch_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
 ) -> bool {
     conn.query_row(
@@ -102,7 +102,7 @@ fn auto_queue_review_disabled_for_dispatch_on_conn(
 
 #[cfg(test)]
 fn restore_auto_queue_mainline_after_review_skip_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<()> {
@@ -145,7 +145,7 @@ fn restore_auto_queue_mainline_after_review_skip_on_conn(
              deferred_dod_json = NULL,
              updated_at = datetime('now')
          WHERE id = ?3",
-        libsql_rusqlite::params![target_status, dispatch_id, card_id],
+        rusqlite::params![target_status, dispatch_id, card_id],
     )
     .map_err(|error| anyhow::anyhow!("restore mainline card state for {card_id}: {error}"))?;
     Ok(())
@@ -306,6 +306,16 @@ async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
         .map_err(|error| {
             anyhow::anyhow!("postgres dispatch existence lookup {dispatch_id}: {error}")
         })
+}
+
+#[cfg(test)]
+fn dispatch_exists_on_conn(conn: &rusqlite::Connection, dispatch_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_dispatches WHERE id = ?1)",
+        [dispatch_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| anyhow::anyhow!("sqlite dispatch existence lookup {dispatch_id}: {error}"))
 }
 
 async fn validate_dispatch_completion_evidence_on_pg(
@@ -718,6 +728,61 @@ async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<b
     Ok(is_review_state && !has_review_dispatch && !has_active_work)
 }
 
+#[cfg(test)]
+fn card_needs_review_dispatch_on_conn(conn: &rusqlite::Connection, card_id: &str) -> Result<bool> {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT status, repo_id, assigned_agent_id
+             FROM kanban_cards
+             WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| {
+            anyhow::anyhow!("load sqlite card {card_id} for review redispatch: {error}")
+        })?;
+    let Some((card_status, repo_id, agent_id)) = row else {
+        return Ok(false);
+    };
+
+    let has_review_dispatch: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('review', 'review-decision')
+               AND status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("load sqlite review dispatch gate for {card_id}: {error}")
+        })?;
+    let has_active_work: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('implementation', 'rework')
+               AND status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| anyhow::anyhow!("load sqlite active work gate for {card_id}: {error}"))?;
+
+    let Some(card_status) = card_status else {
+        return Ok(false);
+    };
+    let effective =
+        crate::pipeline::resolve_for_card(conn, repo_id.as_deref(), agent_id.as_deref());
+    let is_review_state = effective
+        .hooks_for_state(&card_status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
+
+    Ok(is_review_state && !has_review_dispatch && !has_active_work)
+}
+
 async fn maybe_inject_phase_gate_verdict_pg(
     pool: &PgPool,
     dispatch_id: &str,
@@ -743,14 +808,14 @@ async fn maybe_inject_phase_gate_verdict_pg(
 /// fallback/backfill paths that must avoid duplicate notify entries.
 #[cfg(test)]
 pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
     agent_id: &str,
     card_id: &str,
     title: &str,
-) -> libsql_rusqlite::Result<bool> {
+) -> rusqlite::Result<bool> {
     conn.execute_batch("SAVEPOINT dispatch_notify_outbox")?;
-    let result = (|| -> libsql_rusqlite::Result<bool> {
+    let result = (|| -> rusqlite::Result<bool> {
         let dispatch_status: Option<String> = conn
             .query_row(
                 "SELECT status FROM task_dispatches WHERE id = ?1",
@@ -768,7 +833,7 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
              VALUES (?1, 'notify', ?2, ?3, ?4)",
-            libsql_rusqlite::params![dispatch_id, agent_id, card_id, title],
+            rusqlite::params![dispatch_id, agent_id, card_id, title],
         )?;
         Ok(inserted > 0)
     })();
@@ -784,21 +849,6 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
             Err(err)
         }
     }
-}
-
-#[cfg(not(test))]
-pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
-    _conn: &libsql_rusqlite::Connection,
-    dispatch_id: &str,
-    _agent_id: &str,
-    _card_id: &str,
-    _title: &str,
-) -> libsql_rusqlite::Result<bool> {
-    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
-        std::io::Error::other(format!(
-            "Postgres pool required to ensure notify outbox for dispatch {dispatch_id}"
-        )),
-    )))
 }
 
 /// Ensure a pending status-reaction outbox row exists for a dispatch.
@@ -818,9 +868,9 @@ pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
 /// turn_bridge entirely (queue/API cancellation, orphan recovery).
 #[cfg(test)]
 pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
-) -> libsql_rusqlite::Result<bool> {
+) -> rusqlite::Result<bool> {
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0
          FROM dispatch_outbox
@@ -840,27 +890,15 @@ pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
     Ok(true)
 }
 
-#[cfg(not(test))]
-pub(crate) fn ensure_dispatch_status_reaction_outbox_on_conn(
-    _conn: &libsql_rusqlite::Connection,
-    dispatch_id: &str,
-) -> libsql_rusqlite::Result<bool> {
-    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
-        std::io::Error::other(format!(
-            "Postgres pool required to ensure status reaction outbox for dispatch {dispatch_id}"
-        )),
-    )))
-}
-
 #[cfg(test)]
 pub(crate) fn record_dispatch_status_event_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
     from_status: Option<&str>,
     to_status: &str,
     transition_source: &str,
     payload: Option<&serde_json::Value>,
-) -> libsql_rusqlite::Result<()> {
+) -> rusqlite::Result<()> {
     let (kanban_card_id, agent_id, dispatch_type): (
         Option<String>,
         Option<String>,
@@ -884,7 +922,7 @@ pub(crate) fn record_dispatch_status_event_on_conn(
             transition_source,
             payload_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        libsql_rusqlite::params![
+        rusqlite::params![
             dispatch_id,
             kanban_card_id,
             dispatch_type,
@@ -916,25 +954,9 @@ pub(crate) fn record_dispatch_status_event_on_conn(
     Ok(())
 }
 
-#[cfg(not(test))]
-pub(crate) fn record_dispatch_status_event_on_conn(
-    _conn: &libsql_rusqlite::Connection,
-    dispatch_id: &str,
-    _from_status: Option<&str>,
-    _to_status: &str,
-    _transition_source: &str,
-    _payload: Option<&serde_json::Value>,
-) -> libsql_rusqlite::Result<()> {
-    Err(libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
-        std::io::Error::other(format!(
-            "Postgres pool required to record dispatch status event for {dispatch_id}"
-        )),
-    )))
-}
-
 #[cfg(test)]
 fn set_dispatch_status_on_conn_with_sync(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
     to_status: &str,
     result: Option<&serde_json::Value>,
@@ -976,12 +998,7 @@ fn set_dispatch_status_on_conn_with_sync(
                          ELSE completed_at
                      END
                  WHERE id = ?3 AND status = ?4",
-                libsql_rusqlite::params![
-                    to_status,
-                    result.to_string(),
-                    dispatch_id,
-                    current_status
-                ],
+                rusqlite::params![to_status, result.to_string(), dispatch_id, current_status],
             )?,
             (Some(result), false) => conn.execute(
                 "UPDATE task_dispatches
@@ -989,12 +1006,7 @@ fn set_dispatch_status_on_conn_with_sync(
                      result = ?2,
                      updated_at = datetime('now')
                  WHERE id = ?3 AND status = ?4",
-                libsql_rusqlite::params![
-                    to_status,
-                    result.to_string(),
-                    dispatch_id,
-                    current_status
-                ],
+                rusqlite::params![to_status, result.to_string(), dispatch_id, current_status],
             )?,
             (None, true) => conn.execute(
                 "UPDATE task_dispatches
@@ -1005,14 +1017,14 @@ fn set_dispatch_status_on_conn_with_sync(
                          ELSE completed_at
                      END
                  WHERE id = ?2 AND status = ?3",
-                libsql_rusqlite::params![to_status, dispatch_id, current_status],
+                rusqlite::params![to_status, dispatch_id, current_status],
             )?,
             (None, false) => conn.execute(
                 "UPDATE task_dispatches
                  SET status = ?1,
                      updated_at = datetime('now')
                  WHERE id = ?2 AND status = ?3",
-                libsql_rusqlite::params![to_status, dispatch_id, current_status],
+                rusqlite::params![to_status, dispatch_id, current_status],
             )?,
         };
 
@@ -1071,13 +1083,21 @@ fn set_dispatch_status_on_conn_with_sync(
                     "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
                     _ => crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
                 };
-                crate::db::auto_queue::sync_dispatch_terminal_entries_on_conn(
-                    conn,
-                    dispatch_id,
-                    entry_status,
-                    transition_source,
-                    true,
+                let completed_at_sql = if entry_status == crate::db::auto_queue::ENTRY_STATUS_DONE {
+                    "COALESCE(completed_at, datetime('now'))"
+                } else {
+                    "datetime('now')"
+                };
+                conn.execute(
+                    &format!(
+                        "UPDATE auto_queue_entries
+                         SET status = ?1,
+                             completed_at = {completed_at_sql}
+                         WHERE dispatch_id = ?2 AND status = 'dispatched'"
+                    ),
+                    rusqlite::params![entry_status, dispatch_id],
                 )?;
+                let _ = transition_source;
             }
         }
         Ok(changed)
@@ -1098,24 +1118,9 @@ fn set_dispatch_status_on_conn_with_sync(
     }
 }
 
-#[cfg(not(test))]
-fn set_dispatch_status_on_conn_with_sync(
-    _conn: &libsql_rusqlite::Connection,
-    dispatch_id: &str,
-    _to_status: &str,
-    _result: Option<&serde_json::Value>,
-    _transition_source: &str,
-    _allowed_from: Option<&[&str]>,
-    _touch_completed_at: bool,
-    _sync_auto_queue_terminal_entries: bool,
-) -> Result<usize> {
-    Err(anyhow::anyhow!(
-        "Postgres pool required to set dispatch status for {dispatch_id}"
-    ))
-}
-
+#[cfg(test)]
 pub(crate) fn set_dispatch_status_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
     to_status: &str,
     result: Option<&serde_json::Value>,
@@ -1255,8 +1260,24 @@ fn set_dispatch_status_with_backends_and_sync(
     touch_completed_at: bool,
     sync_auto_queue_terminal_entries: bool,
 ) -> Result<usize> {
-    let _ = db;
     let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        if let Some(db) = db {
+            let conn = db
+                .lock()
+                .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+            return set_dispatch_status_on_conn_with_sync(
+                &conn,
+                dispatch_id,
+                to_status,
+                result,
+                transition_source,
+                allowed_from,
+                touch_completed_at,
+                sync_auto_queue_terminal_entries,
+            );
+        }
+        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to set dispatch status for {dispatch_id}"
         ));
@@ -1289,6 +1310,60 @@ fn set_dispatch_status_with_backends_and_sync(
     })
 }
 
+#[cfg(test)]
+fn set_dispatch_status_sqlite_for_tests(
+    db: &Db,
+    dispatch_id: &str,
+    to_status: &str,
+    result: Option<&serde_json::Value>,
+    allowed_from: Option<&[&str]>,
+    touch_completed_at: bool,
+) -> Result<usize> {
+    let conn = db
+        .separate_conn()
+        .map_err(|error| anyhow::anyhow!("open sqlite dispatch status connection: {error}"))?;
+    let current_status = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(current_status) = current_status else {
+        return Ok(0);
+    };
+    if let Some(allowed_from) = allowed_from
+        && !allowed_from
+            .iter()
+            .any(|allowed| *allowed == current_status.as_str())
+    {
+        return Ok(0);
+    }
+
+    let result_json = result.map(serde_json::Value::to_string);
+    let changed = if touch_completed_at {
+        conn.execute(
+            "UPDATE task_dispatches
+             SET status = ?1,
+                 result = COALESCE(?2, result),
+                 updated_at = datetime('now'),
+                 completed_at = CASE WHEN ?1 = 'completed' THEN datetime('now') ELSE completed_at END
+             WHERE id = ?3",
+            rusqlite::params![to_status, result_json, dispatch_id],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE task_dispatches
+             SET status = ?1,
+                 result = COALESCE(?2, result),
+                 updated_at = datetime('now')
+             WHERE id = ?3",
+            rusqlite::params![to_status, result_json, dispatch_id],
+        )?
+    };
+    Ok(changed)
+}
+
 pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     db: Option<&Db>,
     pg_pool: Option<&PgPool>,
@@ -1312,8 +1387,9 @@ pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn set_dispatch_status_without_queue_sync_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     dispatch_id: &str,
     to_status: &str,
     result: Option<&serde_json::Value>,
@@ -1346,8 +1422,21 @@ pub fn load_dispatch_row_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let _ = db;
     let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        {
+            if let Some(db) = db {
+                let conn = db
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+                if !dispatch_exists_on_conn(&conn, dispatch_id)? {
+                    return Ok(None);
+                }
+                return query_dispatch_row(&conn, dispatch_id).map(Some);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to load dispatch row {dispatch_id}"
         ));
@@ -1383,6 +1472,11 @@ fn complete_dispatch_inner_with_backends(
         crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
     let Some(pool) = engine.pg_pool() else {
+        #[cfg(test)]
+        if let Some(db) = db {
+            return complete_dispatch_inner_sqlite(db, engine, dispatch_id, result);
+        }
+        #[cfg(not(test))]
         let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to complete dispatch {dispatch_id}"
@@ -1498,6 +1592,126 @@ fn complete_dispatch_inner_with_backends(
     }
 
     Ok(dispatch)
+}
+
+#[cfg(test)]
+fn complete_dispatch_inner_sqlite(
+    db: &Db,
+    engine: &PolicyEngine,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let conn = db
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+
+    validate_dispatch_completion_evidence_on_conn(
+        &conn,
+        db,
+        engine.pg_pool(),
+        dispatch_id,
+        result,
+    )?;
+
+    let result_owned = maybe_inject_phase_gate_verdict_sqlite(&conn, dispatch_id, result);
+    let effective_result = result_owned.unwrap_or_else(|| result.clone());
+
+    let changed = set_dispatch_status_on_conn_with_sync(
+        &conn,
+        dispatch_id,
+        "completed",
+        Some(&effective_result),
+        effective_result
+            .get("completion_source")
+            .and_then(|value| value.as_str())
+            .unwrap_or("complete_dispatch"),
+        Some(&["pending", "dispatched"]),
+        true,
+        true,
+    )?;
+
+    if changed == 0 {
+        if dispatch_exists_on_conn(&conn, dispatch_id)? {
+            tracing::info!("skipping completion hooks because dispatch is already finalized");
+            return query_dispatch_row(&conn, dispatch_id);
+        }
+        return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
+    }
+
+    let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+    let kanban_card_id = dispatch
+        .get("kanban_card_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let dispatch_type = dispatch
+        .get("dispatch_type")
+        .and_then(|value| value.as_str());
+    let skip_dispatch_completed_hooks = matches!(dispatch_type, Some("implementation" | "rework"))
+        && auto_queue_review_disabled_for_dispatch_on_conn(&conn, dispatch_id);
+
+    let needs_review_dispatch = if skip_dispatch_completed_hooks {
+        false
+    } else if let Some(card_id) = kanban_card_id.as_deref() {
+        card_needs_review_dispatch_on_conn(&conn, card_id)?
+    } else {
+        false
+    };
+
+    if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
+        restore_auto_queue_mainline_after_review_skip_on_conn(&conn, card_id, dispatch_id)?;
+    }
+
+    drop(conn);
+
+    if skip_dispatch_completed_hooks {
+        return Ok(dispatch);
+    }
+
+    crate::kanban::fire_event_hooks_with_backends(
+        Some(db),
+        engine,
+        "on_dispatch_completed",
+        "OnDispatchCompleted",
+        json!({
+            "dispatch_id": dispatch_id,
+            "kanban_card_id": kanban_card_id,
+            "result": effective_result,
+        }),
+    );
+
+    crate::kanban::drain_hook_side_effects_with_backends(Some(db), engine);
+
+    if needs_review_dispatch {
+        let cid = kanban_card_id.as_deref().unwrap_or("unknown");
+        tracing::warn!(
+            "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
+            cid
+        );
+        let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
+        crate::kanban::drain_hook_side_effects_with_backends(Some(db), engine);
+    }
+
+    Ok(dispatch)
+}
+
+#[cfg(test)]
+fn maybe_inject_phase_gate_verdict_sqlite(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let context_raw: Option<String> = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let ctx: serde_json::Value = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())?;
+    let phase_gate_ctx = ctx.get("phase_gate").and_then(|value| value.as_object())?;
+    infer_phase_gate_verdict(dispatch_id, phase_gate_ctx, result)
 }
 
 /// #699: inject `verdict = context.phase_gate.pass_verdict` into a phase-gate

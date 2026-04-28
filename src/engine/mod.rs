@@ -19,6 +19,7 @@ use rquickjs::{Context, Function, Persistent, Runtime};
 use sqlx::Row;
 
 use crate::config::Config;
+#[cfg(test)]
 use crate::db::Db;
 
 use hooks::Hook;
@@ -139,13 +140,8 @@ impl PolicyEngineActor {
         rx: mpsc::Receiver<EngineCommand>,
     ) {
         let _ = thread_id.set(thread::current().id());
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .ok();
-        let _runtime_guard = runtime.as_ref().map(|rt| rt.enter());
-
+        // Keep policy hooks outside a Tokio runtime so synchronous PG bridge calls
+        // use their isolated bridge pools instead of contending for the shared pool.
         while let Ok(command) = rx.recv() {
             // We popped a command off the channel, so approximate queue depth
             // should drop. saturating_sub guards against any accidental skew.
@@ -237,6 +233,7 @@ impl Drop for PolicyEngineActor {
 
 #[derive(Clone)]
 struct PolicyEngineRuntimeDeps {
+    #[cfg(test)]
     legacy_db: Option<Db>,
     pg_pool: Option<sqlx::PgPool>,
 }
@@ -271,7 +268,7 @@ pub struct PolicyInfo {
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
     pub fn new(config: &Config) -> Result<Self> {
-        Self::new_with_backends_and_label(config, None, None, "main")
+        Self::new_with_pg_and_label(config, None, "main")
     }
 
     /// Create a dedicated policy engine for the tick loop (#747).
@@ -284,27 +281,47 @@ impl PolicyEngine {
     /// Both engines load the same policies directory (so any policy that
     /// registers `onTick*` hooks is executed by this engine).
     pub fn new_for_tick(config: &Config, pg_pool: Option<sqlx::PgPool>) -> Result<Self> {
-        Self::new_with_backends_and_label(config, None, pg_pool, "tick")
+        Self::new_with_pg_and_label(config, pg_pool, "tick")
     }
 
     pub fn new_with_pg(config: &Config, pg_pool: Option<sqlx::PgPool>) -> Result<Self> {
-        Self::new_with_backends_and_label(config, None, pg_pool, "main")
+        Self::new_with_pg_and_label(config, pg_pool, "main")
     }
 
+    #[cfg(test)]
     pub fn new_with_legacy_db(config: &Config, db: Db) -> Result<Self> {
-        Self::new_with_backends_and_label(config, Some(db), None, "main")
+        Self::new_with_test_backends_and_label(config, Some(db), None, "main")
     }
 
-    fn new_with_backends_and_label(
+    fn new_with_pg_and_label(
+        config: &Config,
+        pg_pool: Option<sqlx::PgPool>,
+        label: &'static str,
+    ) -> Result<Self> {
+        let runtime_deps = Arc::new(PolicyEngineRuntimeDeps {
+            #[cfg(test)]
+            legacy_db: None,
+            pg_pool: pg_pool.clone(),
+        });
+        Self::new_with_runtime_deps(config, runtime_deps, label)
+    }
+
+    #[cfg(test)]
+    fn new_with_test_backends_and_label(
         config: &Config,
         legacy_db: Option<Db>,
         pg_pool: Option<sqlx::PgPool>,
         label: &'static str,
     ) -> Result<Self> {
-        let runtime_deps = Arc::new(PolicyEngineRuntimeDeps {
-            legacy_db: legacy_db.clone(),
-            pg_pool: pg_pool.clone(),
-        });
+        let runtime_deps = Arc::new(PolicyEngineRuntimeDeps { legacy_db, pg_pool });
+        Self::new_with_runtime_deps(config, runtime_deps, label)
+    }
+
+    fn new_with_runtime_deps(
+        config: &Config,
+        runtime_deps: Arc<PolicyEngineRuntimeDeps>,
+        label: &'static str,
+    ) -> Result<Self> {
         let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
@@ -313,9 +330,19 @@ impl PolicyEngine {
 
         // Register bridge ops (agentdesk.*)
         context.with(|ctx| {
+            #[cfg(test)]
+            {
+                return ops::register_globals_with_supervisor_and_test_backends(
+                    &ctx,
+                    runtime_deps.legacy_db.clone(),
+                    runtime_deps.pg_pool.clone(),
+                    supervisor_bridge.clone(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"));
+            }
+            #[cfg(not(test))]
             ops::register_globals_with_supervisor_and_pg(
                 &ctx,
-                runtime_deps.legacy_db.clone(),
                 runtime_deps.pg_pool.clone(),
                 supervisor_bridge.clone(),
             )
@@ -337,9 +364,21 @@ impl PolicyEngine {
 
             // Register bridge ops in the reload context too
             reload_ctx.with(|ctx| {
+                #[cfg(test)]
+                {
+                    return ops::register_globals_with_supervisor_and_test_backends(
+                        &ctx,
+                        runtime_deps.legacy_db.clone(),
+                        runtime_deps.pg_pool.clone(),
+                        supervisor_bridge.clone(),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
+                    });
+                }
+                #[cfg(not(test))]
                 ops::register_globals_with_supervisor_and_pg(
                     &ctx,
-                    runtime_deps.legacy_db.clone(),
                     runtime_deps.pg_pool.clone(),
                     supervisor_bridge.clone(),
                 )
@@ -433,6 +472,7 @@ impl PolicyEngine {
         self.runtime_deps.pg_pool.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_db(&self) -> Option<&Db> {
         self.runtime_deps.legacy_db.as_ref()
     }
@@ -520,77 +560,85 @@ impl PolicyEngine {
             return;
         }
 
-        let Some(legacy_db) = self.legacy_db() else {
+        #[cfg(not(test))]
+        {
             return;
-        };
+        }
 
-        // Record server boot time for orphan recovery grace period
-        if let Ok(conn) = legacy_db.separate_conn() {
-            conn.execute(
+        #[cfg(test)]
+        {
+            let Some(legacy_db) = self.legacy_db() else {
+                return;
+            };
+
+            // Record server boot time for orphan recovery grace period
+            if let Ok(conn) = legacy_db.separate_conn() {
+                conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_boot_at', datetime('now'))",
                 [],
             )
             .ok();
-        }
+            }
 
-        loop {
-            let hooks: Vec<(i64, String, String)> = {
-                let conn = match legacy_db.separate_conn() {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-                let mut stmt = match conn.prepare(
-                    "SELECT id, hook_name, payload FROM deferred_hooks \
+            loop {
+                let hooks: Vec<(i64, String, String)> = {
+                    let conn = match legacy_db.separate_conn() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    let mut stmt = match conn.prepare(
+                        "SELECT id, hook_name, payload FROM deferred_hooks \
                      WHERE status IN ('pending', 'processing') ORDER BY id ASC LIMIT 50",
-                ) {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let rows: Vec<(i64, String, String)> = stmt
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default();
-                if rows.is_empty() {
-                    return;
-                }
-                for (id, _, _) in &rows {
-                    let _ = conn.execute(
-                        "UPDATE deferred_hooks SET status = 'processing' WHERE id = ?1",
-                        [id],
-                    );
-                }
-                rows
-            };
-
-            // Fire each hook, delete only after successful execution.
-            // Supports both known Hook enum names and dynamic hook names.
-            for (id, hook_name, payload_str) in &hooks {
-                let payload: serde_json::Value =
-                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                let span = crate::logging::hook_span(hook_name, &payload);
-                let _guard = span.enter();
-                tracing::info!(deferred_hook_id = *id, "[startup] replaying deferred hook");
-
-                let fire_result = if let Some(hook) = Hook::from_str(hook_name) {
-                    self.fire_hook_inline(hook, payload)
-                } else {
-                    self.fire_hook_by_name_inline(hook_name, payload)
-                };
-
-                if let Err(e) = fire_result {
-                    tracing::warn!("[startup] deferred hook {hook_name} failed: {e}");
-                    if let Ok(conn) = legacy_db.separate_conn() {
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let rows: Vec<(i64, String, String)> = stmt
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                        .ok()
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default();
+                    if rows.is_empty() {
+                        return;
+                    }
+                    for (id, _, _) in &rows {
                         let _ = conn.execute(
-                            "UPDATE deferred_hooks SET status = 'pending' WHERE id = ?1",
+                            "UPDATE deferred_hooks SET status = 'processing' WHERE id = ?1",
                             [id],
                         );
                     }
-                    continue;
-                }
-                // Success — delete from DB
-                if let Ok(conn) = legacy_db.separate_conn() {
-                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                    rows
+                };
+
+                // Fire each hook, delete only after successful execution.
+                // Supports both known Hook enum names and dynamic hook names.
+                for (id, hook_name, payload_str) in &hooks {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                    let span = crate::logging::hook_span(hook_name, &payload);
+                    let _guard = span.enter();
+                    tracing::info!(deferred_hook_id = *id, "[startup] replaying deferred hook");
+
+                    let fire_result = if let Some(hook) = Hook::from_str(hook_name) {
+                        self.fire_hook_inline(hook, payload)
+                    } else {
+                        self.fire_hook_by_name_inline(hook_name, payload)
+                    };
+
+                    if let Err(e) = fire_result {
+                        tracing::warn!("[startup] deferred hook {hook_name} failed: {e}");
+                        if let Ok(conn) = legacy_db.separate_conn() {
+                            let _ = conn.execute(
+                                "UPDATE deferred_hooks SET status = 'pending' WHERE id = ?1",
+                                [id],
+                            );
+                        }
+                        continue;
+                    }
+                    // Success — delete from DB
+                    if let Ok(conn) = legacy_db.separate_conn() {
+                        let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                    }
                 }
             }
         }
@@ -803,7 +851,10 @@ impl PolicyEngine {
 
             for (card_id, old_status, new_status) in &transitions {
                 crate::kanban::fire_transition_hooks_with_backends(
+                    #[cfg(test)]
                     self.legacy_db(),
+                    #[cfg(not(test))]
+                    None,
                     self.pg_pool(),
                     self,
                     card_id,
@@ -1178,7 +1229,10 @@ impl PolicyEngine {
             Self::empty_intent_result()
         } else {
             intent::execute_intents_with_backends(
+                #[cfg(test)]
                 self.legacy_db(),
+                #[cfg(not(test))]
+                None,
                 self.pg_pool(),
                 Some(self),
                 intents,
@@ -1247,9 +1301,18 @@ impl PolicyEngine {
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
         let code_owned = code.to_string();
         inner.context.with(|ctx| {
-            let result: T = ctx
-                .eval(code_owned.as_bytes().to_vec())
-                .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
+            let result: T = ctx.eval(code_owned.as_bytes().to_vec()).map_err(|e| {
+                let exception_detail = ctx
+                    .catch()
+                    .into_exception()
+                    .map(|ex| {
+                        let msg = ex.message().unwrap_or_default();
+                        let stack = ex.stack().unwrap_or_default();
+                        format!("{msg}\n{stack}")
+                    })
+                    .unwrap_or_else(|| format!("{e}"));
+                anyhow::anyhow!("JS eval error: {exception_detail}")
+            })?;
             Ok(result)
         })
     }
@@ -1336,7 +1399,7 @@ mod tests {
     use super::*;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)

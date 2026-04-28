@@ -18,26 +18,6 @@ struct SlotClearTarget {
     runtime_targets: Vec<RuntimeSlotClearTarget>,
 }
 
-fn parse_slot_thread_channel_ids(raw_map: &str) -> Vec<u64> {
-    let mut thread_channel_ids: Vec<u64> = serde_json::from_str::<serde_json::Value>(raw_map)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| {
-            map.values()
-                .filter_map(|value| {
-                    value
-                        .as_str()
-                        .and_then(|raw| raw.trim().parse::<u64>().ok())
-                        .or_else(|| value.as_u64())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    thread_channel_ids.sort_unstable();
-    thread_channel_ids.dedup();
-    thread_channel_ids
-}
-
 fn parse_slot_thread_channel_ids_from_value(value: &serde_json::Value) -> Vec<u64> {
     let mut thread_channel_ids = value
         .as_object()
@@ -55,66 +35,6 @@ fn parse_slot_thread_channel_ids_from_value(value: &serde_json::Value) -> Vec<u6
     thread_channel_ids.sort_unstable();
     thread_channel_ids.dedup();
     thread_channel_ids
-}
-
-fn build_slot_clear_target(
-    conn: &libsql_rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> SlotClearTarget {
-    let raw_map: String = conn
-        .query_row(
-            "SELECT COALESCE(thread_id_map, '{}')
-             FROM auto_queue_slots
-             WHERE agent_id = ?1 AND slot_index = ?2",
-            libsql_rusqlite::params![agent_id, slot_index],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "{}".to_string());
-
-    let thread_channel_ids = parse_slot_thread_channel_ids(&raw_map);
-
-    let runtime_targets = thread_channel_ids
-        .iter()
-        .filter_map(|thread_channel_id| {
-            let row: Option<(Option<String>, Option<String>)> = conn
-                .query_row(
-                    "SELECT provider, session_key
-                     FROM sessions
-                     WHERE thread_channel_id = ?1
-                     ORDER BY CASE status WHEN 'working' THEN 0 WHEN 'idle' THEN 1 ELSE 2 END,
-                              COALESCE(last_heartbeat, created_at) DESC,
-                              rowid DESC
-                     LIMIT 1",
-                    [thread_channel_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .ok();
-            let (provider_name, session_key) = row?;
-            let provider_name = provider_name
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| {
-                    session_key.as_deref().and_then(|key| {
-                        key.split_once(':').and_then(|(_, tmux_name)| {
-                            crate::services::provider::parse_provider_and_channel_from_tmux_name(
-                                tmux_name,
-                            )
-                            .map(|(provider, _)| provider.as_str().to_string())
-                        })
-                    })
-                })?;
-            Some(RuntimeSlotClearTarget {
-                provider_name,
-                thread_channel_id: *thread_channel_id,
-                session_key,
-            })
-        })
-        .collect();
-
-    SlotClearTarget {
-        thread_channel_ids,
-        runtime_targets,
-    }
 }
 
 async fn build_slot_clear_target_pg(
@@ -194,30 +114,6 @@ async fn build_slot_clear_target_pg(
     })
 }
 
-pub fn clear_slot_sessions_db(
-    conn: &libsql_rusqlite::Connection,
-    thread_channel_ids: &[u64],
-) -> usize {
-    thread_channel_ids
-        .iter()
-        .map(|thread_channel_id| {
-            conn.execute(
-                "UPDATE sessions
-                 SET status = 'idle',
-                     active_dispatch_id = NULL,
-                     session_info = 'Slot thread reset',
-                     claude_session_id = NULL,
-                     tokens = 0,
-                     last_heartbeat = datetime('now')
-                 WHERE thread_channel_id = ?1
-                   AND status IN ('working', 'idle')",
-                [thread_channel_id.to_string()],
-            )
-            .unwrap_or(0)
-        })
-        .sum()
-}
-
 pub async fn clear_slot_sessions_pg(
     pool: &PgPool,
     thread_channel_ids: &[u64],
@@ -245,33 +141,6 @@ pub async fn clear_slot_sessions_pg(
         cleared_sessions += result.rows_affected() as usize;
     }
     Ok(cleared_sessions)
-}
-
-pub fn clear_slot_threads_for_slot(
-    health_registry: Option<Arc<HealthRegistry>>,
-    conn: &libsql_rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> usize {
-    let target = build_slot_clear_target(conn, agent_id, slot_index);
-    let cleared = clear_slot_sessions_db(conn, &target.thread_channel_ids);
-
-    if let Some(registry) = health_registry {
-        let runtime_targets = target.runtime_targets;
-        tokio::spawn(async move {
-            for runtime_target in runtime_targets {
-                crate::services::discord::health::clear_provider_channel_runtime(
-                    &registry,
-                    &runtime_target.provider_name,
-                    poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
-                    runtime_target.session_key.as_deref(),
-                )
-                .await;
-            }
-        });
-    }
-
-    cleared
 }
 
 pub async fn clear_slot_threads_for_slot_pg(

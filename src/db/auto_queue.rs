@@ -1,4 +1,3 @@
-use libsql_rusqlite::{Connection, OptionalExtension}; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
@@ -37,18 +36,8 @@ pub struct EntryStatusUpdateResult {
 
 #[derive(Debug, Error)]
 pub enum EntryStatusUpdateError {
-    #[error("auto-queue entry not found: {entry_id}")]
-    NotFound { entry_id: String },
     #[error("unsupported auto-queue entry status: {status}")]
     UnsupportedStatus { status: String },
-    #[error("invalid auto-queue entry transition for {entry_id}: {from_status} -> {to_status}")]
-    InvalidTransition {
-        entry_id: String,
-        from_status: String,
-        to_status: String,
-    },
-    #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,28 +64,9 @@ pub enum ConsultationDispatchRecordError {
     MissingSource,
     #[error("consultation card not found: {card_id}")]
     CardNotFound { card_id: String },
-    #[error(transparent)]
-    EntryStatus(#[from] EntryStatusUpdateError),
-    #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 const SLOT_ALLOCATION_MAX_RETRIES: usize = 16;
-
-#[derive(Debug, Error)]
-pub enum SlotAllocationError {
-    #[error(
-        "slot allocation retry limit exceeded for run {run_id} agent {agent_id} group {thread_group} after {attempts} attempts"
-    )]
-    RetryLimitExceeded {
-        run_id: String,
-        agent_id: String,
-        thread_group: i64,
-        attempts: usize,
-    },
-    #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-}
 
 #[derive(Debug, Clone)]
 struct EntryStatusRow {
@@ -110,137 +80,6 @@ struct EntryStatusRow {
     thread_group: i64,
     batch_phase: i64,
     completed_at: Option<String>,
-}
-
-pub fn update_entry_status_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    new_status: &str,
-    trigger_source: &str,
-    options: &EntryStatusUpdateOptions,
-) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
-    let current = load_entry_status_row(conn, entry_id)?;
-    let normalized = normalize_entry_status(new_status)?;
-    update_entry_status_with_current_on_conn(
-        conn,
-        entry_id,
-        normalized,
-        trigger_source,
-        options,
-        current,
-    )
-}
-
-pub fn reactivate_done_entry_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    trigger_source: &str,
-    options: &EntryStatusUpdateOptions,
-) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
-    let current = load_entry_status_row(conn, entry_id)?;
-    if current.status != ENTRY_STATUS_DONE {
-        return update_entry_status_with_current_on_conn(
-            conn,
-            entry_id,
-            ENTRY_STATUS_DISPATCHED,
-            trigger_source,
-            options,
-            current,
-        );
-    }
-
-    let effective_dispatch_id = options
-        .dispatch_id
-        .clone()
-        .or_else(|| current.dispatch_id.clone());
-    let effective_slot_index = options.slot_index.or(current.slot_index);
-
-    conn.execute_batch("SAVEPOINT auto_queue_entry_done_reactivate")?;
-    let restore_result = (|| -> libsql_rusqlite::Result<usize> {
-        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        let rows_affected = conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'dispatched',
-                     dispatch_id = ?1,
-                     slot_index = ?2,
-                     dispatched_at = datetime('now'),
-                     completed_at = NULL
-                 WHERE id = ?3
-                   AND status = 'done'",
-            libsql_rusqlite::params![effective_dispatch_id, effective_slot_index, entry_id,], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        )?;
-
-        if rows_affected == 0 {
-            return Ok(0);
-        }
-
-        conn.execute(
-            "UPDATE auto_queue_runs
-                 SET status = 'active',
-                     completed_at = NULL
-                 WHERE id = ?1
-                   AND status = 'completed'",
-            [&current.run_id],
-        )?;
-
-        if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
-            record_entry_dispatch_history_on_conn(conn, entry_id, dispatch_id, trigger_source)?;
-        }
-
-        record_entry_transition_on_conn(
-            conn,
-            entry_id,
-            ENTRY_STATUS_DONE,
-            ENTRY_STATUS_DISPATCHED,
-            trigger_source,
-        )?;
-
-        Ok(rows_affected)
-    })();
-
-    let rows_affected = match restore_result {
-        Ok(rows_affected) => {
-            conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_done_reactivate")?;
-            rows_affected
-        }
-        Err(error) => {
-            let _ = conn.execute_batch(
-                "ROLLBACK TO SAVEPOINT auto_queue_entry_done_reactivate; \
-                 RELEASE SAVEPOINT auto_queue_entry_done_reactivate",
-            );
-            return Err(EntryStatusUpdateError::Sql(error));
-        }
-    };
-
-    if rows_affected == 0 {
-        let latest = load_entry_status_row(conn, entry_id)?;
-        if entry_status_row_matches_target(
-            &latest,
-            ENTRY_STATUS_DISPATCHED,
-            effective_dispatch_id.as_deref(),
-            effective_slot_index,
-        ) {
-            return Ok(EntryStatusUpdateResult {
-                run_id: latest.run_id,
-                from_status: latest.status,
-                to_status: ENTRY_STATUS_DISPATCHED.to_string(),
-                changed: false,
-            });
-        }
-
-        return Err(EntryStatusUpdateError::InvalidTransition {
-            entry_id: entry_id.to_string(),
-            from_status: latest.status,
-            to_status: ENTRY_STATUS_DISPATCHED.to_string(),
-        });
-    }
-
-    Ok(EntryStatusUpdateResult {
-        run_id: current.run_id,
-        from_status: ENTRY_STATUS_DONE.to_string(),
-        to_status: ENTRY_STATUS_DISPATCHED.to_string(),
-        changed: true,
-    })
 }
 
 pub async fn reactivate_done_entry_on_pg(
@@ -754,11 +593,7 @@ pub async fn update_entry_status_on_pg(
 ///
 /// Mirrors the pool-scoped helper's semantics — transition validation,
 /// dispatch-history bookkeeping, transition recording, and conditional run
-/// finalization — but operates inside a caller-owned transaction. Used by
-/// [`crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx`] (#815 P2)
-/// so the PG cancel path routes through the same shared helper as the SQLite
-/// path (`update_entry_status_on_conn`) instead of doing a raw
-/// `UPDATE auto_queue_entries`.
+/// finalization — but operates inside a caller-owned transaction.
 ///
 /// Unlike the pool-scoped helper this is single-shot: on stale-row mismatch
 /// it returns `changed: false` rather than re-reading state and looping. The
@@ -986,58 +821,8 @@ pub async fn update_entry_status_on_pg_tx(
 }
 
 /// Route dispatch-linked terminal transitions through the canonical entry
+/// Route dispatch-linked terminal transitions through the canonical entry
 /// helper so PG transition bookkeeping and run finalization stay consistent.
-///
-/// Some operator flows still need the historical dispatch link on the terminal
-/// row for audit/debug lineage. `preserve_dispatch_link` restores that pointer
-/// after the helper records the status change and finalizes the run.
-pub fn sync_dispatch_terminal_entries_on_conn(
-    conn: &Connection,
-    dispatch_id: &str,
-    new_status: &str,
-    trigger_source: &str,
-    preserve_dispatch_link: bool,
-) -> Result<usize, EntryStatusUpdateError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, dispatch_id, slot_index
-         FROM auto_queue_entries
-         WHERE dispatch_id = ?1
-           AND status = 'dispatched'",
-    )?;
-    let rows: Vec<(String, String, Option<i64>)> = stmt
-        .query_map([dispatch_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<Result<_, _>>()?;
-    drop(stmt);
-
-    let mut changed = 0usize;
-    for (entry_id, linked_dispatch_id, slot_index) in rows {
-        let result = update_entry_status_on_conn(
-            conn,
-            &entry_id,
-            new_status,
-            trigger_source,
-            &EntryStatusUpdateOptions::default(),
-        )?;
-        if result.changed {
-            if preserve_dispatch_link {
-                conn.execute(
-                    "UPDATE auto_queue_entries
-                     SET dispatch_id = ?1,
-                         slot_index = ?2
-                     WHERE id = ?3",
-                    libsql_rusqlite::params![linked_dispatch_id, slot_index, entry_id],
-                )?;
-            }
-            changed += 1;
-        }
-    }
-
-    Ok(changed)
-}
-
-/// Transaction-scoped PG twin of [`sync_dispatch_terminal_entries_on_conn`].
 pub async fn sync_dispatch_terminal_entries_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
@@ -1116,7 +901,7 @@ async fn load_entry_status_row_pg_tx(
 ) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
-                kanban_card_id,
+                COALESCE(kanban_card_id, '') AS kanban_card_id,
                 agent_id,
                 status,
                 dispatch_id,
@@ -1170,289 +955,6 @@ async fn load_entry_status_row_pg_tx(
     })
 }
 
-fn update_entry_status_with_current_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    normalized: &str,
-    trigger_source: &str,
-    options: &EntryStatusUpdateOptions,
-    mut current: EntryStatusRow,
-) -> Result<EntryStatusUpdateResult, EntryStatusUpdateError> {
-    loop {
-        let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
-            .run(&current.run_id)
-            .entry(entry_id)
-            .card(&current.card_id)
-            .maybe_dispatch(current.dispatch_id.as_deref())
-            .agent(&current.agent_id)
-            .thread_group(current.thread_group)
-            .batch_phase(current.batch_phase)
-            .maybe_slot_index(current.slot_index);
-
-        if !is_allowed_entry_transition(&current.status, normalized, trigger_source) {
-            crate::auto_queue_log!(
-                warn,
-                "entry_status_transition_blocked",
-                log_ctx.clone(),
-                "[auto-queue] blocked invalid entry transition {} {} -> {} (source: {})",
-                entry_id,
-                current.status,
-                normalized,
-                trigger_source
-            );
-            return Err(EntryStatusUpdateError::InvalidTransition {
-                entry_id: entry_id.to_string(),
-                from_status: current.status,
-                to_status: normalized.to_string(),
-            });
-        }
-
-        let effective_dispatch_id = options
-            .dispatch_id
-            .clone()
-            .or_else(|| current.dispatch_id.clone());
-        let effective_slot_index = options.slot_index.or(current.slot_index);
-        let metadata_change = match normalized {
-            ENTRY_STATUS_PENDING => {
-                current.dispatch_id.is_some()
-                    || current.slot_index.is_some()
-                    || current.completed_at.is_some()
-            }
-            ENTRY_STATUS_DISPATCHED => {
-                effective_dispatch_id != current.dispatch_id
-                    || effective_slot_index != current.slot_index
-                    || current.completed_at.is_some()
-            }
-            ENTRY_STATUS_DONE
-            | ENTRY_STATUS_SKIPPED
-            | ENTRY_STATUS_FAILED
-            | ENTRY_STATUS_USER_CANCELLED => false,
-            _ => false,
-        };
-        let changed = current.status != normalized || metadata_change;
-
-        if !changed {
-            return Ok(EntryStatusUpdateResult {
-                run_id: current.run_id,
-                from_status: current.status,
-                to_status: normalized.to_string(),
-                changed: false,
-            });
-        }
-
-        conn.execute_batch("SAVEPOINT auto_queue_entry_status_transition")?;
-        let transition_result = (|| -> libsql_rusqlite::Result<usize> {
-            // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            let rows_affected = match normalized {
-                ENTRY_STATUS_PENDING => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'pending',
-                             dispatch_id = NULL,
-                             slot_index = NULL,
-                             dispatched_at = NULL,
-                             completed_at = NULL,
-                             retry_count = CASE
-                                 WHEN ?3 = 'failed' THEN 0
-                                 ELSE retry_count
-                             END
-                         WHERE id = ?1
-                           AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?,
-                ENTRY_STATUS_DISPATCHED => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'dispatched',
-                             dispatch_id = ?1,
-                             slot_index = ?2,
-                             dispatched_at = datetime('now'),
-                             completed_at = NULL
-                         WHERE id = ?3
-                           AND status = ?4",
-                    libsql_rusqlite::params![
-                        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                        effective_dispatch_id,
-                        effective_slot_index,
-                        entry_id,
-                        current.status
-                    ],
-                )?,
-                ENTRY_STATUS_DONE => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'done',
-                             completed_at = datetime('now')
-                         WHERE id = ?1
-                           AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?,
-                ENTRY_STATUS_SKIPPED => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'skipped',
-                             dispatch_id = NULL,
-                             slot_index = NULL,
-                             dispatched_at = NULL,
-                             completed_at = datetime('now')
-                         WHERE id = ?1
-                           AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?,
-                ENTRY_STATUS_FAILED => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'failed',
-                             dispatch_id = NULL,
-                             slot_index = NULL,
-                             dispatched_at = NULL,
-                             completed_at = datetime('now')
-                         WHERE id = ?1
-                           AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?,
-                ENTRY_STATUS_USER_CANCELLED => conn.execute(
-                    "UPDATE auto_queue_entries
-                         SET status = 'user_cancelled',
-                             dispatch_id = NULL,
-                             slot_index = NULL,
-                             dispatched_at = NULL,
-                             completed_at = datetime('now')
-                         WHERE id = ?1
-                           AND status = ?2",
-                    libsql_rusqlite::params![entry_id, current.status], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?,
-                _ => unreachable!(),
-            };
-
-            if rows_affected == 0 {
-                return Ok(0);
-            }
-
-            if normalized == ENTRY_STATUS_DISPATCHED {
-                if let Some(previous_dispatch_id) = current
-                    .dispatch_id
-                    .as_deref()
-                    .filter(|value| Some(*value) != effective_dispatch_id.as_deref())
-                {
-                    record_entry_dispatch_history_on_conn(
-                        conn,
-                        entry_id,
-                        previous_dispatch_id,
-                        trigger_source,
-                    )?;
-                }
-                if let Some(dispatch_id) = effective_dispatch_id.as_deref() {
-                    record_entry_dispatch_history_on_conn(
-                        conn,
-                        entry_id,
-                        dispatch_id,
-                        trigger_source,
-                    )?;
-                }
-            }
-
-            record_entry_transition_on_conn(
-                conn,
-                entry_id,
-                &current.status,
-                normalized,
-                trigger_source,
-            )?;
-
-            // #815 P1: `user_cancelled` is a NON-run-finalizing terminal status —
-            // see the matching PG-side comment in `update_entry_status_on_pg` for
-            // the full rationale. Only system-terminal statuses finalize the run.
-            if matches!(
-                normalized,
-                ENTRY_STATUS_DONE | ENTRY_STATUS_SKIPPED | ENTRY_STATUS_FAILED
-            ) {
-                maybe_finalize_run_after_terminal_entry(conn, &current.run_id, normalized)?;
-            }
-
-            Ok(rows_affected)
-        })();
-        let rows_affected = match transition_result {
-            Ok(rows_affected) => {
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_status_transition")?;
-                rows_affected
-            }
-            Err(error) => {
-                let _ = conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT auto_queue_entry_status_transition; \
-                     RELEASE SAVEPOINT auto_queue_entry_status_transition",
-                );
-                return Err(EntryStatusUpdateError::Sql(error));
-            }
-        };
-
-        if rows_affected == 0 {
-            let latest = load_entry_status_row(conn, entry_id)?;
-            if entry_status_row_matches_target(
-                &latest,
-                normalized,
-                effective_dispatch_id.as_deref(),
-                effective_slot_index,
-            ) {
-                return Ok(EntryStatusUpdateResult {
-                    run_id: latest.run_id,
-                    from_status: latest.status,
-                    to_status: normalized.to_string(),
-                    changed: false,
-                });
-            }
-
-            if !is_allowed_entry_transition(&latest.status, normalized, trigger_source) {
-                let stale_log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
-                    .run(&latest.run_id)
-                    .entry(entry_id)
-                    .card(&latest.card_id)
-                    .maybe_dispatch(latest.dispatch_id.as_deref())
-                    .agent(&latest.agent_id)
-                    .thread_group(latest.thread_group)
-                    .batch_phase(latest.batch_phase)
-                    .maybe_slot_index(latest.slot_index);
-                crate::auto_queue_log!(
-                    warn,
-                    "entry_status_stale_transition_blocked",
-                    stale_log_ctx,
-                    "[auto-queue] stale entry transition blocked {} {} -> {} (source: {})",
-                    entry_id,
-                    latest.status,
-                    normalized,
-                    trigger_source
-                );
-                return Err(EntryStatusUpdateError::InvalidTransition {
-                    entry_id: entry_id.to_string(),
-                    from_status: latest.status,
-                    to_status: normalized.to_string(),
-                });
-            }
-
-            current = latest;
-            continue;
-        }
-
-        return Ok(EntryStatusUpdateResult {
-            run_id: current.run_id,
-            from_status: current.status,
-            to_status: normalized.to_string(),
-            changed: true,
-        });
-    }
-}
-
-fn record_entry_dispatch_history_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    dispatch_id: &str,
-    trigger_source: &str,
-) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.execute(
-        "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
-            entry_id, dispatch_id, trigger_source
-        ) VALUES (?1, ?2, ?3)",
-        libsql_rusqlite::params![entry_id, dispatch_id, trigger_source], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )?;
-    Ok(())
-}
-
 async fn record_entry_dispatch_history_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
@@ -1463,7 +965,10 @@ async fn record_entry_dispatch_history_on_pg(
         "INSERT INTO auto_queue_entry_dispatch_history (
              entry_id, dispatch_id, trigger_source
          )
-         VALUES ($1, $2, $3)
+         SELECT $1, $2, $3
+         WHERE EXISTS (
+             SELECT 1 FROM task_dispatches WHERE id = $2
+         )
          ON CONFLICT DO NOTHING",
     )
     .bind(entry_id)
@@ -1475,21 +980,6 @@ async fn record_entry_dispatch_history_on_pg(
         format!("record dispatch history for auto-queue entry {entry_id} ({dispatch_id}): {error}")
     })?;
     Ok(())
-}
-
-pub fn list_entry_dispatch_history(
-    conn: &Connection,
-    entry_id: &str,
-) -> libsql_rusqlite::Result<Vec<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut stmt = conn.prepare(
-        "SELECT dispatch_id
-         FROM auto_queue_entry_dispatch_history
-         WHERE entry_id = ?1
-         ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map([entry_id], |row| row.get::<_, String>(0))?;
-    rows.collect()
 }
 
 pub async fn list_entry_dispatch_history_pg(
@@ -1559,48 +1049,6 @@ pub async fn rebind_slot_for_group_agent_pg(
                 "bind rebound postgres slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
             )
         })
-}
-
-fn bind_slot_index_for_group_entries(
-    conn: &Connection,
-    run_id: &str,
-    agent_id: &str,
-    thread_group: i64,
-    slot_index: i64,
-) -> libsql_rusqlite::Result<usize> {
-    // SQLite-only compatibility path: PG auto-queue slot ownership is authoritative in production.
-    // SQLite-only compatibility path for the legacy no-PG runtime.
-    conn.execute(
-        "UPDATE auto_queue_entries
-         SET slot_index = ?1
-         WHERE run_id = ?2
-           AND agent_id = ?3
-           AND COALESCE(thread_group, 0) = ?4
-           AND status IN ('pending', 'dispatched')
-           AND (slot_index IS NULL OR slot_index != ?1)",
-        libsql_rusqlite::params![slot_index, run_id, agent_id, thread_group],
-    )
-}
-
-pub fn release_slot_for_group_agent(
-    conn: &Connection,
-    run_id: &str,
-    thread_group: i64,
-    agent_id: &str,
-    slot_index: i64,
-) -> libsql_rusqlite::Result<usize> {
-    // SQLite-only compatibility path for the legacy no-PG runtime.
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = datetime('now')
-         WHERE agent_id = ?1
-           AND slot_index = ?2
-           AND assigned_run_id = ?3
-           AND COALESCE(assigned_thread_group, 0) = ?4",
-        libsql_rusqlite::params![agent_id, slot_index, run_id, thread_group],
-    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1746,7 +1194,7 @@ pub async fn get_status_entry_pg(
     let row = sqlx::query(
         "SELECT e.id,
                 e.agent_id,
-                e.kanban_card_id,
+                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -1792,7 +1240,7 @@ pub async fn list_status_entries_pg(
     let rows = sqlx::query(
         "SELECT e.id,
                 e.agent_id,
-                e.kanban_card_id,
+                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -1995,18 +1443,6 @@ pub async fn count_cards_by_status_pg(
     .await
 }
 
-fn run_slot_pool_size(conn: &Connection, run_id: &str) -> i64 {
-    conn.query_row(
-        "SELECT COALESCE(max_concurrent_threads, 1)
-         FROM auto_queue_runs
-         WHERE id = ?1",
-        [run_id],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(1)
-    .clamp(1, 10)
-}
-
 pub async fn run_slot_pool_size_pg(pool: &PgPool, run_id: &str) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, Option<i64>>(
         "SELECT COALESCE(max_concurrent_threads, 1)::BIGINT
@@ -2019,22 +1455,6 @@ pub async fn run_slot_pool_size_pg(pool: &PgPool, run_id: &str) -> Result<i64, s
     .flatten()
     .unwrap_or(1)
     .clamp(1, 10))
-}
-
-pub fn ensure_agent_slot_pool_rows(
-    conn: &Connection,
-    agent_id: &str,
-    slot_pool_size: i64,
-) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    for slot_index in 0..slot_pool_size.clamp(1, 32) {
-        conn.execute(
-            "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
-             VALUES (?1, ?2, '{}')",
-            libsql_rusqlite::params![agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        )?;
-    }
-    Ok(())
 }
 
 pub async fn ensure_agent_slot_pool_rows_pg(
@@ -2056,21 +1476,6 @@ pub async fn ensure_agent_slot_pool_rows_pg(
     Ok(())
 }
 
-pub fn clear_inactive_slot_assignments(conn: &Connection) {
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = datetime('now')
-         WHERE assigned_run_id IS NOT NULL
-           AND assigned_run_id NOT IN (
-               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-           )",
-        [],
-    )
-    .ok();
-}
-
 pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE auto_queue_slots
@@ -2087,19 +1492,6 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
     Ok(result.rows_affected())
 }
 
-pub fn release_run_slots(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = datetime('now')
-         WHERE assigned_run_id = ?1",
-        [run_id],
-    )?;
-    Ok(())
-}
-
 pub async fn release_run_slots_pg(pool: &PgPool, run_id: &str) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE auto_queue_slots
@@ -2112,19 +1504,6 @@ pub async fn release_run_slots_pg(pool: &PgPool, run_id: &str) -> Result<u64, sq
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
-}
-
-pub fn current_batch_phase(conn: &Connection, run_id: &str) -> Option<i64> {
-    conn.query_row(
-        "SELECT MIN(COALESCE(batch_phase, 0))
-         FROM auto_queue_entries
-         WHERE run_id = ?1
-           AND status IN ('pending', 'dispatched')",
-        [run_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .ok()
-    .flatten()
 }
 
 pub async fn current_batch_phase_pg(
@@ -2147,18 +1526,6 @@ pub fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> 
         Some(phase) => batch_phase == phase,
         None => true,
     }
-}
-
-pub fn run_has_blocking_phase_gate(conn: &Connection, run_id: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM auto_queue_phase_gates
-         WHERE run_id = ?1
-           AND status IN ('pending', 'failed')",
-        [run_id],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
 }
 
 #[allow(dead_code)]
@@ -2189,66 +1556,6 @@ fn consultation_metadata_object(
         .ok()
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default()
-}
-
-pub fn record_consultation_dispatch_on_conn(
-    conn: &mut Connection,
-    entry_id: &str,
-    card_id: &str,
-    dispatch_id: &str,
-    trigger_source: &str,
-    base_metadata_json: &str,
-) -> Result<ConsultationDispatchRecordResult, ConsultationDispatchRecordError> {
-    let dispatch_id = dispatch_id.trim();
-    if dispatch_id.is_empty() {
-        return Err(ConsultationDispatchRecordError::MissingDispatchId);
-    }
-    let trigger_source = trigger_source.trim();
-    if trigger_source.is_empty() {
-        return Err(ConsultationDispatchRecordError::MissingSource);
-    }
-
-    let tx = conn.transaction()?;
-    let mut metadata = consultation_metadata_object(base_metadata_json);
-    metadata.insert(
-        "consultation_status".to_string(),
-        serde_json::json!("pending"),
-    );
-    metadata.insert(
-        "consultation_dispatch_id".to_string(),
-        serde_json::json!(dispatch_id),
-    );
-    let metadata_json = serde_json::Value::Object(metadata).to_string();
-
-    let updated = tx.execute(
-        "UPDATE kanban_cards
-         SET metadata = ?1,
-             updated_at = datetime('now')
-         WHERE id = ?2",
-        libsql_rusqlite::params![&metadata_json, card_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )?;
-    if updated == 0 {
-        return Err(ConsultationDispatchRecordError::CardNotFound {
-            card_id: card_id.to_string(),
-        });
-    }
-
-    let entry_result = update_entry_status_on_conn(
-        &tx,
-        entry_id,
-        ENTRY_STATUS_DISPATCHED,
-        trigger_source,
-        &EntryStatusUpdateOptions {
-            dispatch_id: Some(dispatch_id.to_string()),
-            slot_index: None,
-        },
-    )?;
-
-    tx.commit()?;
-    Ok(ConsultationDispatchRecordResult {
-        metadata_json,
-        entry_status_changed: entry_result.changed,
-    })
 }
 
 pub async fn record_consultation_dispatch_on_pg(
@@ -2285,7 +1592,7 @@ pub async fn record_consultation_dispatch_on_pg(
 
     let updated = sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = $1,
+         SET metadata = $1::jsonb,
              updated_at = NOW()
          WHERE id = $2",
     )
@@ -2305,8 +1612,8 @@ pub async fn record_consultation_dispatch_on_pg(
         .to_string());
     }
 
-    let entry_result = update_entry_status_on_pg(
-        pool,
+    let entry_result = update_entry_status_on_pg_tx(
+        &mut tx,
         entry_id,
         ENTRY_STATUS_DISPATCHED,
         trigger_source,
@@ -2316,6 +1623,14 @@ pub async fn record_consultation_dispatch_on_pg(
         },
     )
     .await?;
+    if !entry_result.changed {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres consultation dispatch entry {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "stale postgres consultation dispatch entry {entry_id}: status update was not applied"
+        ));
+    }
 
     tx.commit()
         .await
@@ -2390,38 +1705,6 @@ fn dedupe_phase_gate_dispatch_ids(dispatch_ids: &[String]) -> Vec<String> {
     deduped
 }
 
-fn valid_phase_gate_dispatch_ids(
-    conn: &Connection,
-    dispatch_ids: &[String],
-) -> libsql_rusqlite::Result<Vec<String>> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    if dispatch_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let placeholders = std::iter::repeat_n("?", dispatch_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT id FROM task_dispatches WHERE id IN ({})",
-        placeholders
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let params = libsql_rusqlite::params_from_iter(dispatch_ids.iter().map(String::as_str)); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let mut rows = stmt.query(params)?;
-    let mut valid = std::collections::HashSet::new();
-    while let Some(row) = rows.next()? {
-        let dispatch_id: String = row.get(0)?;
-        valid.insert(dispatch_id);
-    }
-
-    Ok(dispatch_ids
-        .iter()
-        .filter(|dispatch_id| valid.contains(dispatch_id.as_str()))
-        .cloned()
-        .collect())
-}
-
 async fn valid_phase_gate_dispatch_ids_pg(
     pool: &PgPool,
     dispatch_ids: &[String],
@@ -2446,41 +1729,6 @@ async fn valid_phase_gate_dispatch_ids_pg(
         .filter(|dispatch_id| valid.contains(dispatch_id.as_str()))
         .cloned()
         .collect())
-}
-
-fn delete_stale_phase_gate_rows(
-    conn: &Connection,
-    run_id: &str,
-    phase: i64,
-    dispatch_ids: &[String],
-) -> libsql_rusqlite::Result<usize> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    if dispatch_ids.is_empty() {
-        return conn.execute(
-            "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-            libsql_rusqlite::params![run_id, phase], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        );
-    }
-
-    let placeholders = std::iter::repeat_n("?", dispatch_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "DELETE FROM auto_queue_phase_gates
-         WHERE run_id = ?1
-           AND phase = ?2
-           AND (dispatch_id IS NULL OR dispatch_id NOT IN ({}))",
-        placeholders
-    );
-    let mut values = vec![libsql_rusqlite::types::Value::from(run_id.to_string())]; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    values.push(libsql_rusqlite::types::Value::from(phase)); // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    values.extend(
-        dispatch_ids
-            .iter()
-            .cloned()
-            .map(libsql_rusqlite::types::Value::from), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    );
-    conn.execute(&sql, libsql_rusqlite::params_from_iter(values)) // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
 }
 
 async fn delete_stale_phase_gate_rows_pg(
@@ -2521,91 +1769,6 @@ async fn delete_stale_phase_gate_rows_pg(
 
     usize::try_from(rows_affected)
         .map_err(|error| format!("convert postgres phase-gate delete count for {run_id}: {error}"))
-}
-
-pub fn save_phase_gate_state_on_conn(
-    conn: &Connection,
-    run_id: &str,
-    phase: i64,
-    state: &PhaseGateStateWrite,
-) -> libsql_rusqlite::Result<PhaseGateSaveResult> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let dispatch_ids =
-        valid_phase_gate_dispatch_ids(conn, &dedupe_phase_gate_dispatch_ids(&state.dispatch_ids))?;
-    let removed_stale_rows = delete_stale_phase_gate_rows(conn, run_id, phase, &dispatch_ids)?;
-    let status = normalize_phase_gate_status(&state.status);
-    let verdict = normalize_optional_text(state.verdict.as_deref());
-    let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
-    let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
-    let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
-    let created_at = normalize_optional_text(state.created_at.as_deref());
-
-    if dispatch_ids.is_empty() {
-        conn.execute(
-            "INSERT INTO auto_queue_phase_gates (
-                run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                final_phase, anchor_card_id, failure_reason, created_at, updated_at
-             ) VALUES (
-                ?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9,
-                COALESCE(?10, CURRENT_TIMESTAMP), datetime('now')
-             )",
-            libsql_rusqlite::params![
-                // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                run_id,
-                phase,
-                status,
-                verdict,
-                pass_verdict,
-                state.next_phase,
-                if state.final_phase { 1 } else { 0 },
-                anchor_card_id,
-                failure_reason,
-                created_at
-            ],
-        )?;
-    } else {
-        for dispatch_id in &dispatch_ids {
-            conn.execute(
-                "INSERT INTO auto_queue_phase_gates (
-                    run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
-                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    COALESCE(?11, CURRENT_TIMESTAMP), datetime('now')
-                 )
-                 ON CONFLICT(dispatch_id) DO UPDATE SET
-                    run_id = excluded.run_id,
-                    phase = excluded.phase,
-                    status = excluded.status,
-                    verdict = excluded.verdict,
-                    pass_verdict = excluded.pass_verdict,
-                    next_phase = excluded.next_phase,
-                    final_phase = excluded.final_phase,
-                    anchor_card_id = excluded.anchor_card_id,
-                    failure_reason = excluded.failure_reason,
-                    updated_at = datetime('now')",
-                libsql_rusqlite::params![
-                    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                    run_id,
-                    phase,
-                    status,
-                    verdict,
-                    dispatch_id,
-                    pass_verdict,
-                    state.next_phase,
-                    if state.final_phase { 1 } else { 0 },
-                    anchor_card_id,
-                    failure_reason,
-                    created_at
-                ],
-            )?;
-        }
-    }
-
-    Ok(PhaseGateSaveResult {
-        persisted_dispatch_ids: dispatch_ids,
-        removed_stale_rows,
-    })
 }
 
 pub async fn save_phase_gate_state_on_pg(
@@ -2655,6 +1818,15 @@ pub async fn save_phase_gate_state_on_pg(
         })?;
     } else {
         for dispatch_id in &dispatch_ids {
+            sqlx::query("DELETE FROM auto_queue_phase_gates WHERE dispatch_id = $1")
+                .bind(dispatch_id)
+                .execute(pool)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "delete existing postgres phase-gate row for dispatch {dispatch_id}: {error}"
+                    )
+                })?;
             sqlx::query(
                 "INSERT INTO auto_queue_phase_gates (
                     run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
@@ -2662,18 +1834,7 @@ pub async fn save_phase_gate_state_on_pg(
                  ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     COALESCE($11::timestamptz, NOW()), NOW()
-                 )
-                 ON CONFLICT(dispatch_id) DO UPDATE SET
-                    run_id = EXCLUDED.run_id,
-                    phase = EXCLUDED.phase,
-                    status = EXCLUDED.status,
-                    verdict = EXCLUDED.verdict,
-                    pass_verdict = EXCLUDED.pass_verdict,
-                    next_phase = EXCLUDED.next_phase,
-                    final_phase = EXCLUDED.final_phase,
-                    anchor_card_id = EXCLUDED.anchor_card_id,
-                    failure_reason = EXCLUDED.failure_reason,
-                    updated_at = NOW()",
+                 )",
             )
             .bind(run_id)
             .bind(phase)
@@ -2702,19 +1863,6 @@ pub async fn save_phase_gate_state_on_pg(
     })
 }
 
-pub fn clear_phase_gate_state_on_conn(
-    conn: &Connection,
-    run_id: &str,
-    phase: i64,
-) -> libsql_rusqlite::Result<bool> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let deleted = conn.execute(
-        "DELETE FROM auto_queue_phase_gates WHERE run_id = ?1 AND phase = ?2",
-        libsql_rusqlite::params![run_id, phase], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )?;
-    Ok(deleted > 0)
-}
-
 pub async fn clear_phase_gate_state_on_pg(
     pool: &PgPool,
     run_id: &str,
@@ -2731,35 +1879,6 @@ pub async fn clear_phase_gate_state_on_pg(
             })?
             .rows_affected();
     Ok(deleted > 0)
-}
-
-pub fn group_has_pending_entries(
-    conn: &Connection,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> bool {
-    let mut stmt = match conn.prepare(
-        "SELECT COALESCE(batch_phase, 0)
-         FROM auto_queue_entries
-         WHERE run_id = ?1
-           AND COALESCE(thread_group, 0) = ?2
-           AND status = 'pending'
-         ORDER BY priority_rank ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return false,
-    };
-    stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
-        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        row.get::<_, i64>(0)
-    })
-    .ok()
-    .map(|rows| {
-        rows.filter_map(|row| row.ok())
-            .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase))
-    })
-    .unwrap_or(false)
 }
 
 pub async fn group_has_pending_entries_pg(
@@ -2785,45 +1904,6 @@ pub async fn group_has_pending_entries_pg(
         .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase)))
 }
 
-pub fn first_pending_entry_for_group(
-    conn: &Connection,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> Option<(String, String, String, i64)> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)
-             FROM auto_queue_entries e
-             WHERE e.run_id = ?1
-               AND COALESCE(e.thread_group, 0) = ?2
-               AND e.status = 'pending'
-             ORDER BY e.priority_rank ASC",
-        )
-        .ok()?;
-    stmt.query_map(libsql_rusqlite::params![run_id, thread_group], |row| {
-        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    })
-    .ok()
-    .and_then(|rows| {
-        rows.filter_map(|row| row.ok())
-            .find_map(|(entry_id, card_id, agent_id, batch_phase)| {
-                batch_phase_is_eligible(batch_phase, current_phase).then_some((
-                    entry_id,
-                    card_id,
-                    agent_id,
-                    batch_phase,
-                ))
-            })
-    })
-}
-
 pub async fn first_pending_entry_for_group_pg(
     pool: &PgPool,
     run_id: &str,
@@ -2831,7 +1911,7 @@ pub async fn first_pending_entry_for_group_pg(
     current_phase: Option<i64>,
 ) -> Result<Option<(String, String, String, i64)>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
+        "SELECT e.id, COALESCE(e.kanban_card_id, '') AS kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
          FROM auto_queue_entries e
          WHERE e.run_id = $1
            AND COALESCE(e.thread_group, 0) = $2
@@ -2856,57 +1936,6 @@ pub async fn first_pending_entry_for_group_pg(
     }
 
     Ok(None)
-}
-
-pub fn assigned_groups_with_pending_entries(
-    conn: &Connection,
-    run_id: &str,
-    current_phase: Option<i64>,
-) -> Vec<i64> {
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT s.assigned_thread_group, COALESCE(e.batch_phase, 0)
-         FROM auto_queue_slots s
-         JOIN auto_queue_entries e
-           ON e.run_id = ?1
-          AND e.agent_id = s.agent_id
-          AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-         WHERE s.assigned_run_id = ?1
-           AND s.assigned_thread_group IS NOT NULL
-           AND EXISTS (
-               SELECT 1
-               FROM auto_queue_entries e
-               WHERE e.run_id = ?1
-                 AND e.agent_id = s.agent_id
-                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-                 AND e.status = 'pending'
-           )
-           AND NOT EXISTS (
-               SELECT 1
-               FROM auto_queue_entries e
-               WHERE e.run_id = ?1
-                 AND e.agent_id = s.agent_id
-                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-                 AND e.status = 'dispatched'
-           )
-         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC, COALESCE(e.batch_phase, 0) ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    let mut seen = std::collections::HashSet::new();
-    stmt.query_map([run_id], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })
-    .ok()
-    .map(|rows| {
-        rows.filter_map(|row| row.ok())
-            .filter_map(|(thread_group, batch_phase)| {
-                (batch_phase_is_eligible(batch_phase, current_phase) && seen.insert(thread_group))
-                    .then_some(thread_group)
-            })
-            .collect()
-    })
-    .unwrap_or_default()
 }
 
 pub async fn assigned_groups_with_pending_entries_pg(
@@ -2962,243 +1991,6 @@ pub struct SlotAllocation {
     pub slot_index: i64,
     pub newly_assigned: bool,
     pub reassigned_from_other_group: bool,
-}
-
-pub fn allocate_slot_for_group_agent(
-    conn: &Connection,
-    run_id: &str,
-    thread_group: i64,
-    agent_id: &str,
-) -> Result<Option<SlotAllocation>, SlotAllocationError> {
-    let log_ctx = crate::services::auto_queue::AutoQueueLogContext::new()
-        .run(run_id)
-        .agent(agent_id)
-        .thread_group(thread_group);
-    ensure_agent_slot_rows(conn, run_id, agent_id).map_err(|error| {
-        crate::auto_queue_log!(
-            warn,
-            "slot_allocate_prepare_failed",
-            log_ctx.clone(),
-            "[auto-queue] failed to prepare slot rows for run {run_id} agent {agent_id} group {thread_group}: {error}"
-        );
-        SlotAllocationError::Sql(error)
-    })?;
-
-    for attempt in 1..=SLOT_ALLOCATION_MAX_RETRIES {
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT slot_index
-                 FROM auto_queue_slots
-                 WHERE agent_id = ?1
-                   AND assigned_run_id = ?2
-                   AND COALESCE(assigned_thread_group, 0) = ?3
-                 LIMIT 1",
-                libsql_rusqlite::params![agent_id, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_existing_lookup_failed",
-                    log_ctx.clone(),
-                    "[auto-queue] failed to inspect existing slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                );
-                SlotAllocationError::Sql(error)
-            })?;
-        if let Some(slot_index) = existing {
-            bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
-            .map_err(|error| {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_existing_bind_failed",
-                    log_ctx.clone().slot_index(slot_index),
-                    "[auto-queue] failed to bind existing slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                );
-                SlotAllocationError::Sql(error)
-            })?;
-            return Ok(Some(SlotAllocation {
-                slot_index,
-                newly_assigned: false,
-                reassigned_from_other_group: false,
-            }));
-        }
-
-        let reusable_slot: Option<i64> = conn
-            .query_row(
-                "SELECT s.slot_index
-                 FROM auto_queue_slots s
-                 WHERE s.agent_id = ?1
-                   AND s.assigned_run_id = ?2
-                   AND COALESCE(s.assigned_thread_group, -1) != ?3
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM auto_queue_entries e
-                       WHERE e.run_id = ?2
-                         AND e.agent_id = s.agent_id
-                         AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-                         AND e.status IN ('pending', 'dispatched')
-                   )
-                 ORDER BY s.slot_index ASC
-                 LIMIT 1",
-                libsql_rusqlite::params![agent_id, run_id, thread_group], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_reusable_lookup_failed",
-                    log_ctx.clone(),
-                    "[auto-queue] failed to inspect reusable slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                );
-                SlotAllocationError::Sql(error)
-            })?;
-        if let Some(slot_index) = reusable_slot {
-            let rebound = conn
-                .execute(
-                    "UPDATE auto_queue_slots
-                     SET assigned_thread_group = ?1,
-                         updated_at = datetime('now')
-                     WHERE agent_id = ?2
-                       AND slot_index = ?3
-                       AND assigned_run_id = ?4
-                       AND COALESCE(assigned_thread_group, -1) != ?1
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM auto_queue_entries e
-                           WHERE e.run_id = ?4
-                             AND e.agent_id = auto_queue_slots.agent_id
-                             AND COALESCE(e.thread_group, 0) = COALESCE(auto_queue_slots.assigned_thread_group, 0)
-                             AND e.status IN ('pending', 'dispatched')
-                       )",
-                    libsql_rusqlite::params![thread_group, agent_id, slot_index, run_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )
-                .map_err(|error| {
-                    crate::auto_queue_log!(
-                        warn,
-                        "slot_allocate_rebind_failed",
-                        log_ctx.clone().slot_index(slot_index),
-                        "[auto-queue] failed to rebind slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                    );
-                    SlotAllocationError::Sql(error)
-                })?;
-            if rebound == 0 {
-                if attempt == SLOT_ALLOCATION_MAX_RETRIES {
-                    crate::auto_queue_log!(
-                        warn,
-                        "slot_allocate_rebind_retry_limit_reached",
-                        log_ctx.clone().slot_index(slot_index),
-                        "[auto-queue] slot rebind retry limit reached for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
-                    );
-                    return Err(SlotAllocationError::RetryLimitExceeded {
-                        run_id: run_id.to_string(),
-                        agent_id: agent_id.to_string(),
-                        thread_group,
-                        attempts: attempt,
-                    });
-                }
-                continue;
-            }
-
-            bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
-                .map_err(|error| {
-                    crate::auto_queue_log!(
-                        warn,
-                        "slot_allocate_rebind_bind_failed",
-                        log_ctx.clone().slot_index(slot_index),
-                        "[auto-queue] failed to bind rebound slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                    );
-                    SlotAllocationError::Sql(error)
-                })?;
-            return Ok(Some(SlotAllocation {
-                slot_index,
-                newly_assigned: false,
-                reassigned_from_other_group: true,
-            }));
-        }
-
-        let free_slot: Option<i64> = conn
-            .query_row(
-                "SELECT slot_index
-                 FROM auto_queue_slots
-                 WHERE agent_id = ?1
-                   AND assigned_run_id IS NULL
-                 ORDER BY slot_index ASC
-                 LIMIT 1",
-                [agent_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_free_lookup_failed",
-                    log_ctx.clone(),
-                    "[auto-queue] failed to inspect free slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                );
-                SlotAllocationError::Sql(error)
-            })?;
-        let Some(slot_index) = free_slot else {
-            return Ok(None);
-        };
-
-        let claimed = conn
-            .execute(
-                "UPDATE auto_queue_slots
-                 SET assigned_run_id = ?1,
-                     assigned_thread_group = ?2,
-                     updated_at = datetime('now')
-                 WHERE agent_id = ?3
-                   AND slot_index = ?4
-                   AND assigned_run_id IS NULL",
-                libsql_rusqlite::params![run_id, thread_group, agent_id, slot_index], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            )
-            .map_err(|error| {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_claim_failed",
-                    log_ctx.clone().slot_index(slot_index),
-                    "[auto-queue] failed to claim slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
-                );
-                SlotAllocationError::Sql(error)
-            })?;
-        if claimed == 0 {
-            if attempt == SLOT_ALLOCATION_MAX_RETRIES {
-                crate::auto_queue_log!(
-                    warn,
-                    "slot_allocate_retry_limit_reached",
-                    log_ctx.clone().slot_index(slot_index),
-                    "[auto-queue] slot allocation CAS retry limit reached for run {run_id} agent {agent_id} group {thread_group} after {attempt} attempts"
-                );
-                return Err(SlotAllocationError::RetryLimitExceeded {
-                    run_id: run_id.to_string(),
-                    agent_id: agent_id.to_string(),
-                    thread_group,
-                    attempts: attempt,
-                });
-            }
-            continue;
-        }
-
-        bind_slot_index_for_group_entries(conn, run_id, agent_id, thread_group, slot_index)
-        .map_err(|error| {
-            crate::auto_queue_log!(
-                warn,
-                "slot_allocate_bind_failed",
-                log_ctx.clone().slot_index(slot_index),
-                "[auto-queue] failed to bind claimed slot {slot_index} for run {run_id} agent {agent_id} group {thread_group}: {error}"
-            );
-            SlotAllocationError::Sql(error)
-        })?;
-        return Ok(Some(SlotAllocation {
-            slot_index,
-            newly_assigned: true,
-            reassigned_from_other_group: false,
-        }));
-    }
-
-    unreachable!("slot allocation loop must return within bounded retries");
 }
 
 async fn bind_slot_index_for_group_entries_pg(
@@ -3448,53 +2240,12 @@ pub async fn release_slot_for_group_agent_pg(
     Ok(result.rows_affected())
 }
 
-pub fn slot_has_active_dispatch(conn: &Connection, agent_id: &str, slot_index: i64) -> bool {
-    slot_has_active_dispatch_excluding(conn, agent_id, slot_index, None)
-}
-
 pub async fn slot_has_active_dispatch_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
 ) -> Result<bool, sqlx::Error> {
     slot_has_active_dispatch_excluding_pg(pool, agent_id, slot_index, None).await
-}
-
-pub fn slot_has_active_dispatch_excluding(
-    conn: &Connection,
-    agent_id: &str,
-    slot_index: i64,
-    exclude_dispatch_id: Option<&str>,
-) -> bool {
-    let exclude_id = exclude_dispatch_id.unwrap_or("");
-    let auto_queue_active: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0
-             FROM auto_queue_entries
-             WHERE agent_id = ?1
-               AND slot_index = ?2
-               AND status = 'dispatched'
-               AND COALESCE(dispatch_id, '') != ?3",
-            libsql_rusqlite::params![agent_id, slot_index, exclude_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if auto_queue_active {
-        return true;
-    }
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM task_dispatches
-         WHERE to_agent_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2
-           AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
-           AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL
-           AND id != ?3",
-        libsql_rusqlite::params![agent_id, slot_index, exclude_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
 }
 
 pub async fn slot_has_active_dispatch_excluding_pg(
@@ -3526,9 +2277,9 @@ pub async fn slot_has_active_dispatch_excluding_pg(
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND status IN ('pending', 'dispatched')
-           AND COALESCE(NULLIF(COALESCE(context, '{}'::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
-           AND COALESCE((COALESCE(context, '{}'::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-           AND COALESCE(context, '{}'::jsonb)->'phase_gate' IS NULL
+           AND COALESCE(NULLIF((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
+           AND COALESCE(((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(context, ''), '{}')::jsonb)->'phase_gate' IS NULL
            AND id != $3",
     )
     .bind(agent_id)
@@ -3536,29 +2287,6 @@ pub async fn slot_has_active_dispatch_excluding_pg(
     .bind(exclude_id)
     .fetch_one(pool)
     .await
-}
-
-pub fn sync_run_group_metadata(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let thread_group_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
-             FROM auto_queue_entries
-             WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0)
-        .max(1);
-
-    conn.execute(
-        "UPDATE auto_queue_runs
-         SET thread_group_count = ?1,
-             max_concurrent_threads = ?1
-         WHERE id = ?2",
-        libsql_rusqlite::params![thread_group_count, run_id], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )?;
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -3607,50 +2335,11 @@ pub async fn sync_run_group_metadata_pg_tx(
     Ok(())
 }
 
-fn load_entry_status_row(
-    conn: &Connection,
-    entry_id: &str,
-) -> Result<EntryStatusRow, EntryStatusUpdateError> {
-    conn.query_row(
-        "SELECT run_id,
-                kanban_card_id,
-                agent_id,
-                status,
-                dispatch_id,
-                COALESCE(retry_count, 0),
-                slot_index,
-                COALESCE(thread_group, 0),
-                COALESCE(batch_phase, 0),
-                completed_at
-         FROM auto_queue_entries
-         WHERE id = ?1",
-        [entry_id],
-        |row| {
-            Ok(EntryStatusRow {
-                run_id: row.get(0)?,
-                card_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                status: row.get(3)?,
-                dispatch_id: row.get(4)?,
-                retry_count: row.get(5)?,
-                slot_index: row.get(6)?,
-                thread_group: row.get(7)?,
-                batch_phase: row.get(8)?,
-                completed_at: row.get(9)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| EntryStatusUpdateError::NotFound {
-        entry_id: entry_id.to_string(),
-    })
-}
-
 async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
-                kanban_card_id,
-                agent_id,
+                COALESCE(kanban_card_id, '') AS kanban_card_id,
+                COALESCE(agent_id, '') AS agent_id,
                 status,
                 dispatch_id,
                 COALESCE(retry_count, 0)::BIGINT AS retry_count,
@@ -3773,40 +2462,6 @@ fn entry_status_row_matches_target(
         }
         _ => false,
     }
-}
-
-fn maybe_finalize_run_after_terminal_entry(
-    conn: &Connection,
-    run_id: &str,
-    new_status: &str,
-) -> libsql_rusqlite::Result<bool> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    // `done` completion is finalized by the policy-side OnCardTerminal flow so it
-    // can always create or pass through a phase gate, even for single-phase runs.
-    if new_status == ENTRY_STATUS_DONE {
-        return Ok(false);
-    }
-    // #815 P1: never finalize on `user_cancelled` — it must leave the run in a
-    // resumable state so the operator can flip the entry back to `pending`.
-    if new_status == ENTRY_STATUS_USER_CANCELLED {
-        return Ok(false);
-    }
-    if run_has_blocking_phase_gate(conn, run_id) {
-        return Ok(false);
-    }
-
-    let remaining: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM auto_queue_entries
-         WHERE run_id = ?1 AND status IN ('pending', 'dispatched')",
-        [run_id],
-        |row| row.get(0),
-    )?;
-    if remaining > 0 {
-        return Ok(false);
-    }
-
-    release_run_slots(conn, run_id)?;
-    complete_run_on_conn(conn, run_id)
 }
 
 async fn maybe_finalize_run_after_terminal_entry_pg(
@@ -3944,33 +2599,6 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
     Ok(updated > 0)
 }
 
-pub fn complete_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let updated = conn.execute(
-        "UPDATE auto_queue_runs
-         SET status = 'completed',
-             completed_at = datetime('now')
-         WHERE id = ?1 AND status IN ('active', 'paused', 'generated', 'pending')",
-        [run_id],
-    )?;
-    if updated == 0 {
-        return Ok(false);
-    }
-
-    if let Err(error) = queue_run_completion_notify_on_conn(conn, run_id) {
-        crate::auto_queue_log!(
-            warn,
-            "run_completion_notify_failed",
-            crate::services::auto_queue::AutoQueueLogContext::new().run(run_id),
-            "[auto-queue] failed to queue completion notify for run {}: {}",
-            run_id,
-            error
-        );
-    }
-
-    Ok(true)
-}
-
 pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
     let mut tx = pool
         .begin()
@@ -4000,46 +2628,6 @@ pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Str
         .await
         .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
     Ok(true)
-}
-
-fn queue_run_completion_notify_on_conn(
-    conn: &Connection,
-    run_id: &str,
-) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let (repo, agent_id): (Option<String>, Option<String>) = conn.query_row(
-        "SELECT repo, agent_id FROM auto_queue_runs WHERE id = ?1",
-        [run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let targets = completion_notify_targets_on_conn(conn, run_id, agent_id.as_deref());
-    if targets.is_empty() {
-        return Ok(());
-    }
-
-    let entry_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    let repo_label = repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("(global)");
-    let short_run_id = &run_id[..8.min(run_id.len())];
-    let content = format!("자동큐 완료: {repo_label} / run {short_run_id} / {entry_count}개");
-
-    for channel_id in targets {
-        conn.execute(
-            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-            libsql_rusqlite::params![format!("channel:{channel_id}"), &content], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-        )?;
-    }
-
-    Ok(())
 }
 
 async fn queue_run_completion_notify_on_pg(
@@ -4093,47 +2681,6 @@ async fn queue_run_completion_notify_on_pg(
     }
 
     Ok(())
-}
-
-fn completion_notify_targets_on_conn(
-    conn: &Connection,
-    run_id: &str,
-    run_agent_id: Option<&str>,
-) -> Vec<String> {
-    let mut targets = Vec::new();
-
-    if let Some(agent_id) = run_agent_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        && let Ok(channel_id) = conn.query_row(
-            "SELECT discord_channel_id FROM agents WHERE id = ?1",
-            [agent_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        && let Some(channel_id) = channel_id
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    {
-        targets.push(channel_id);
-    }
-
-    if targets.is_empty()
-        && let Ok(mut stmt) = conn.prepare(
-            "SELECT DISTINCT a.discord_channel_id
-             FROM auto_queue_entries e
-             JOIN agents a ON a.id = e.agent_id
-             WHERE e.run_id = ?1
-               AND a.discord_channel_id IS NOT NULL
-               AND TRIM(a.discord_channel_id) != ''",
-        )
-        && let Ok(rows) = stmt.query_map([run_id], |row| row.get::<_, String>(0))
-    {
-        targets.extend(rows.filter_map(|row| row.ok()));
-    }
-
-    targets.sort();
-    targets.dedup();
-    targets
 }
 
 async fn completion_notify_targets_on_pg(
@@ -4198,28 +2745,6 @@ async fn completion_notify_targets_on_pg(
     Ok(targets)
 }
 
-fn record_entry_transition_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    from_status: &str,
-    to_status: &str,
-    trigger_source: &str,
-) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    ensure_entry_transition_audit_schema(conn)?;
-    conn.execute(
-        "INSERT INTO auto_queue_entry_transitions (
-             entry_id,
-             from_status,
-             to_status,
-             trigger_source
-         )
-         VALUES (?1, ?2, ?3, ?4)",
-        libsql_rusqlite::params![entry_id, from_status, to_status, trigger_source], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    )?;
-    Ok(())
-}
-
 async fn record_entry_transition_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
@@ -4244,24 +2769,6 @@ async fn record_entry_transition_on_pg(
     .await
     .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))?;
     Ok(())
-}
-
-fn ensure_entry_transition_audit_schema(conn: &Connection) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS auto_queue_entry_transitions (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id       TEXT NOT NULL,
-            from_status    TEXT,
-            to_status      TEXT NOT NULL,
-            trigger_source TEXT NOT NULL,
-            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_entry
-            ON auto_queue_entry_transitions(entry_id);
-        CREATE INDEX IF NOT EXISTS idx_aq_entry_transitions_created
-            ON auto_queue_entry_transitions(created_at);",
-    )
 }
 
 fn auto_queue_run_record_from_pg_row(
@@ -4326,15 +2833,6 @@ fn auto_queue_run_history_record_from_pg_row(
         pending_count: row.try_get("pending_count")?,
         dispatched_count: row.try_get("dispatched_count")?,
     })
-}
-
-fn ensure_agent_slot_rows(
-    conn: &Connection,
-    run_id: &str,
-    agent_id: &str,
-) -> libsql_rusqlite::Result<()> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
 }
 
 #[cfg(test)]
@@ -4519,10 +3017,13 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed run");
-        sqlx::query("INSERT INTO agents (id, discord_channel_id) VALUES ('agent-1', '123')")
-            .execute(&pool)
-            .await
-            .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-1', 'Agent 1', 'claude', '123')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
         sqlx::query(
             "INSERT INTO auto_queue_slots
                 (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
@@ -4548,7 +3049,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed shared run");
-        sqlx::query("INSERT INTO agents (id, discord_channel_id) VALUES ('agent-1', '999')")
+        sqlx::query("INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '999')")
             .execute(&pool)
             .await
             .expect("seed agent");
@@ -4845,7 +3346,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         let completed_at: Option<DateTime<Utc>> =
             row.try_get("completed_at").expect("completed_at");
         assert_eq!(status, ENTRY_STATUS_PENDING);
@@ -5054,7 +3555,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         assert_eq!(status, ENTRY_STATUS_DISPATCHED);
         assert_eq!(dispatch_id.as_deref(), Some("dispatch-restored"));
         assert_eq!(slot_index, Some(0));
@@ -5109,7 +3610,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         let completed_at: Option<DateTime<Utc>> =
             row.try_get("completed_at").expect("completed_at");
         assert_eq!(status, ENTRY_STATUS_DISPATCHED);
@@ -5296,7 +3797,7 @@ mod tests {
             "single-slot pool must allow only one concurrent group allocation"
         );
 
-        let assignments: Vec<(Option<String>, Option<i32>)> = sqlx::query(
+        let assignments: Vec<(Option<String>, Option<i64>)> = sqlx::query(
             "SELECT assigned_run_id, assigned_thread_group
              FROM auto_queue_slots
              WHERE agent_id = 'agent-1'
@@ -5310,7 +3811,7 @@ mod tests {
             (
                 row.try_get::<Option<String>, _>("assigned_run_id")
                     .expect("assigned_run_id"),
-                row.try_get::<Option<i32>, _>("assigned_thread_group")
+                row.try_get::<Option<i64>, _>("assigned_thread_group")
                     .expect("assigned_thread_group"),
             )
         })
@@ -5392,7 +3893,7 @@ mod tests {
         .expect("slot row");
         let assigned_run_id: Option<String> =
             row.try_get("assigned_run_id").expect("assigned_run_id");
-        let assigned_thread_group: Option<i32> = row
+        let assigned_thread_group: Option<i64> = row
             .try_get("assigned_thread_group")
             .expect("assigned_thread_group");
         let thread_id_map: Option<String> = row.try_get("thread_id_map").expect("thread_id_map");
@@ -5403,7 +3904,7 @@ mod tests {
                 .expect("thread_id_map json");
         assert_eq!(parsed["123"], "thread-slot-0");
 
-        let slot_index: Option<i32> =
+        let slot_index: Option<i64> =
             sqlx::query_scalar("SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next'")
                 .fetch_one(&pool)
                 .await
@@ -5468,7 +3969,7 @@ mod tests {
         .expect("slot row");
         let assigned_run_id: Option<String> =
             row.try_get("assigned_run_id").expect("assigned_run_id");
-        let assigned_thread_group: Option<i32> = row
+        let assigned_thread_group: Option<i64> = row
             .try_get("assigned_thread_group")
             .expect("assigned_thread_group");
         let thread_id_map: Option<String> = row.try_get("thread_id_map").expect("thread_id_map");

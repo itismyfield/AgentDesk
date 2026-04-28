@@ -54,7 +54,7 @@ pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bo
 /// in the consumed row's context (as `_answer`), and a notification is sent
 /// to the source agent's Discord channel so its session can process the reply.
 pub(super) async fn try_handle_pending_dm_reply(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     msg: &serenity::Message,
 ) -> bool {
@@ -68,7 +68,7 @@ pub(super) async fn try_handle_pending_dm_reply(
     let user_id_str = msg.author.id.get().to_string();
     let username = msg.author.name.clone();
     let answer_owned = answer.to_string();
-    match consume_pending_dm_reply(db, pg_pool, &user_id_str, &answer_owned).await {
+    match consume_pending_dm_reply(pg_pool, &user_id_str, &answer_owned).await {
         Some(info) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -80,7 +80,6 @@ pub(super) async fn try_handle_pending_dm_reply(
 
             // Notify the source agent's Discord channel (inline, not fire-and-forget)
             if let Err(e) = notify_source_agent(
-                info.sqlite.as_ref(),
                 pg_pool,
                 &info.source_agent,
                 info.id,
@@ -113,7 +112,6 @@ pub(super) async fn try_handle_pending_dm_reply(
 /// Prefers the stored `channel_id` from the pending row (alt/thread channels);
 /// falls back to `agents.discord_channel_id` only if none was stored.
 async fn notify_source_agent(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     source_agent: &str,
     reply_id: i64,
@@ -129,25 +127,11 @@ async fn notify_source_agent(
     let channel_id: u64 = if let Some(ch) = stored_channel_id {
         resolve_channel_to_u64(ch)?
     } else {
-        let raw = if let Some(pg_pool) = pg_pool {
-            crate::db::agents::resolve_agent_primary_channel_pg(pg_pool, source_agent)
-                .await
-                .map_err(|e| format!("agent lookup failed for {source_agent}: {e}"))?
-                .ok_or("agent has no primary channel")?
-        } else {
-            let db = db
-                .cloned()
-                .ok_or("sqlite db unavailable during agent lookup")?;
-            let agent_name = source_agent.to_string();
-            let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
-                let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
-                crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_name)
-                    .map_err(|e| format!("{e}"))
-            })
+        let pg_pool = pg_pool.ok_or("postgres pool unavailable during agent lookup")?;
+        let raw = crate::db::agents::resolve_agent_primary_channel_pg(pg_pool, source_agent)
             .await
-            .map_err(|e| format!("join: {e}"))??;
-            ch_opt.ok_or("agent has no primary channel")?
-        };
+            .map_err(|e| format!("agent lookup failed for {source_agent}: {e}"))?
+            .ok_or("agent has no primary channel")?;
         resolve_channel_to_u64(&raw)?
     };
 
@@ -214,7 +198,7 @@ fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
 /// Retry DM reply notifications that previously failed (`_notify_failed` in context).
 /// Called from the 5-min tick loop.
 pub async fn retry_failed_dm_notifications(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
     let entries =
@@ -241,7 +225,6 @@ pub async fn retry_failed_dm_notifications(
         }
 
         match notify_source_agent(
-            db,
             pg_pool,
             &entry.source_agent,
             entry.id,
@@ -279,11 +262,9 @@ struct ConsumedDmReply {
     answer: String,
     context: serde_json::Value,
     channel_id: Option<String>,
-    sqlite: Option<crate::db::Db>,
 }
 
 async fn consume_pending_dm_reply(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     user_id: &str,
     answer: &str,
@@ -318,7 +299,6 @@ async fn consume_pending_dm_reply(
         answer: answer.to_string(),
         context: notification_context,
         channel_id: row.channel_id,
-        sqlite: db.cloned(),
     })
 }
 

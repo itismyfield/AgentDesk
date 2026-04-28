@@ -1,14 +1,15 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, params};
+#[cfg(test)]
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 #[cfg(test)]
 use sqlx::Row as SqlxRow;
 
 use crate::db::Db;
-use crate::db::session_agent_resolution::{
-    resolve_agent_id_for_session, resolve_agent_id_for_session_pg,
-};
+#[cfg(test)]
+use crate::db::session_agent_resolution::resolve_agent_id_for_session;
+use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +105,7 @@ struct PreparedSessionTranscript {
     duration_ms: Option<i64>,
 }
 
+#[cfg(test)]
 pub fn persist_turn(db: &Db, entry: PersistSessionTranscript<'_>) -> Result<bool> {
     let mut conn = db
         .lock()
@@ -117,8 +119,19 @@ pub async fn persist_turn_db(
     entry: PersistSessionTranscript<'_>,
 ) -> Result<bool> {
     let Some(pool) = pg_pool else {
-        let db = db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
-        return persist_turn(db, entry);
+        #[cfg(test)]
+        {
+            let db =
+                db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
+            return persist_turn(db, entry);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = db;
+            return Err(anyhow!(
+                "postgres pool is required; sqlite transcript backend is unavailable in production"
+            ));
+        }
     };
 
     let prepared = prepare_persist_entry_pg(pool, db, &entry).await?;
@@ -130,6 +143,7 @@ pub async fn persist_turn_db(
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn persist_turn_on_conn(
     conn: &mut Connection,
     entry: PersistSessionTranscript<'_>,
@@ -252,6 +266,7 @@ fn prepare_persist_entry_base(
     }))
 }
 
+#[cfg(test)]
 fn prepare_persist_entry(
     conn: &Connection,
     entry: &PersistSessionTranscript<'_>,
@@ -291,6 +306,7 @@ async fn prepare_persist_entry_pg(
     )
     .await;
 
+    #[cfg(test)]
     if prepared.agent_id.is_none() {
         if let Some(db) = db {
             let conn = db
@@ -316,22 +332,30 @@ pub fn dispatch_has_assistant_response_db(
     dispatch_id: &str,
 ) -> Result<bool> {
     let Some(pool) = pg_pool else {
-        let Some(db) = db else {
-            return Ok(false);
-        };
-        let conn = db
-            .read_conn()
-            .map_err(|e| anyhow!("db read lock failed while checking transcript evidence: {e}"))?;
-        return conn
-            .query_row(
-                "SELECT COUNT(*) > 0
+        #[cfg(test)]
+        {
+            let Some(db) = db else {
+                return Ok(false);
+            };
+            let conn = db.read_conn().map_err(|e| {
+                anyhow!("db read lock failed while checking transcript evidence: {e}")
+            })?;
+            return conn
+                .query_row(
+                    "SELECT COUNT(*) > 0
                  FROM session_transcripts
                  WHERE dispatch_id = ?1
                    AND TRIM(assistant_message) <> ''",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| anyhow!("session transcript lookup failed: {e}"));
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| anyhow!("session transcript lookup failed: {e}"));
+        }
+        #[cfg(not(test))]
+        {
+            let _ = db;
+            return Ok(false);
+        }
     };
 
     let dispatch_id = dispatch_id.to_string();

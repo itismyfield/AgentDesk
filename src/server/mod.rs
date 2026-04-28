@@ -140,58 +140,12 @@ fn is_five_min_policy_tick(count: u64) -> bool {
     count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
 }
 
-pub(crate) struct RunInputs {
-    /// #1237 (843f): the runtime no longer carries an `AppState.db` (SQLite
-    /// legacy compatibility handle) — the only remaining `Db` source is
-    /// `engine.legacy_db()`, populated by `PolicyEngine::new_with_legacy_db`
-    /// in test fixtures. Production runtimes set this to `None` and the
-    /// remaining SQLite-backed call sites are tracked under #1238 (843g).
-    legacy_db: Option<crate::db::Db>,
+pub(crate) async fn run(
+    config: Config,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<PgPool>,
-}
-
-pub(crate) trait IntoRunInputs {
-    fn into_run_inputs(self) -> RunInputs;
-}
-
-impl IntoRunInputs for (PolicyEngine, Option<Arc<HealthRegistry>>, Option<PgPool>) {
-    fn into_run_inputs(self) -> RunInputs {
-        let (engine, health_registry, pg_pool) = self;
-        let legacy_db = engine.legacy_db().cloned();
-        RunInputs {
-            legacy_db,
-            engine,
-            health_registry,
-            pg_pool,
-        }
-    }
-}
-
-impl IntoRunInputs for (crate::db::Db, PolicyEngine, Option<Arc<HealthRegistry>>) {
-    fn into_run_inputs(self) -> RunInputs {
-        let (legacy_db, engine, health_registry) = self;
-        let pg_pool = engine.pg_pool().cloned();
-        RunInputs {
-            legacy_db: Some(legacy_db),
-            engine,
-            health_registry,
-            pg_pool,
-        }
-    }
-}
-
-pub(crate) async fn run<A, B, C>(config: Config, a: A, b: B, c: C) -> Result<()>
-where
-    (A, B, C): IntoRunInputs,
-{
-    let RunInputs {
-        legacy_db,
-        engine,
-        health_registry,
-        pg_pool,
-    } = (a, b, c).into_run_inputs();
+) -> Result<()> {
     let pg_pool = match pg_pool {
         Some(pool) => Some(pool),
         None => crate::db::postgres::connect_and_migrate(&config)
@@ -226,7 +180,7 @@ where
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
-    crate::pipeline::refresh_override_health_report(legacy_db.as_ref(), pg_pool.as_ref()).await;
+    crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
             &config,
@@ -236,7 +190,7 @@ where
     };
     let startup_pool = startup_pg_pool.as_ref().or(pg_pool.as_ref());
     crate::reconcile::reconcile_boot_runtime(
-        legacy_db.as_ref(),
+        None,
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
     )
@@ -299,7 +253,6 @@ where
         .nest(
             "/api",
             routes::api_router_with_pg(
-                legacy_db,
                 engine.clone(),
                 config.clone(),
                 broadcast_tx.clone(),
@@ -309,8 +262,6 @@ where
             ),
         )
         .fallback_service(dashboard_service);
-    // ^^ #1237 (843f): legacy_db is Option<Db>; routes::api_router_with_pg
-    // signature accepts the optional handle and forwards to AppState.
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -373,20 +324,20 @@ async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
         if is_five_min_policy_tick(count) {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
             refresh_memory_health_for_five_min_tick().await;
-            if let Some(db) = engine.legacy_db() {
-                if let Err(error) =
-                    crate::services::api_friction::process_api_friction_patterns(db, None, None)
-                        .await
-                {
-                    tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
-                }
+            if let Err(error) = crate::services::api_friction::process_api_friction_patterns(
+                pg_pool.as_deref().or_else(|| engine.pg_pool()),
+                None,
+                None,
+            )
+            .await
+            {
+                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
             }
             // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
             // compute + persist + alert on threshold breach.
             let slo_pool = pg_pool.as_deref().or_else(|| engine.pg_pool());
-            let slo_db = engine.legacy_db();
             let now_ms = chrono::Utc::now().timestamp_millis();
-            let _ = crate::services::slo::run_aggregation_tick(slo_db, slo_pool, now_ms).await;
+            let _ = crate::services::slo::run_aggregation_tick(None, slo_pool, now_ms).await;
 
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick", "legacy").await;
@@ -569,12 +520,12 @@ fn record_tick_hook_execution(
         // always ZERO, which is fine.
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![key_status, status],
+            [key_status.as_str(), status],
         )
         .ok();
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            libsql_rusqlite::params![key_skip_ms, now_ms],
+            [key_skip_ms.as_str(), now_ms.as_str()],
         )
         .ok();
         // The global last-skip marker is useful for at-a-glance health.
@@ -596,12 +547,13 @@ fn record_tick_hook_execution(
             // overdue on `/api/cron-jobs` instead of looking "recent".
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![key_ms, now_ms],
+                [key_ms.as_str(), now_ms.as_str()],
             )
             .ok();
+            let elapsed_ms = execution.elapsed.as_millis().to_string();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![key_duration, execution.elapsed.as_millis().to_string()],
+                [key_duration.as_str(), elapsed_ms.as_str()],
             )
             .ok();
             conn.execute(
@@ -960,7 +912,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-            libsql_rusqlite::params![target, content],
+            [target, content],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -3187,6 +3139,7 @@ where
         } else {
             let error_text = format!("{status}: {err_text}");
             if let Ok(conn) = sqlite_db.lock() {
+                let row_id = row.id.to_string();
                 conn.execute(
                     "UPDATE message_outbox
                         SET status = 'failed',
@@ -3194,7 +3147,7 @@ where
                             claimed_at = NULL,
                             claim_owner = NULL
                       WHERE id = ?2",
-                    libsql_rusqlite::params![error_text, row.id],
+                    [error_text.as_str(), row_id.as_str()],
                 )
                 .ok();
             }

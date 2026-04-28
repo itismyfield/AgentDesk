@@ -39,6 +39,11 @@ agents:
         name: "td-cdx"
         workspace: "~/.adk/release/workspaces/ch-td"
         prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+      opencode:
+        id: "323456789012345678"
+        name: "td-oc"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
     keywords:
       - "아키텍처"
       - "코드"
@@ -86,6 +91,7 @@ review:
 runtime:
   requested_timeout_min: 45
   in_progress_stale_min: 120
+  long_turn_alert_interval_min: 30
   context_compact_percent: 60
   context_compact_percent_codex: 75
   context_compact_percent_claude: 70
@@ -137,10 +143,12 @@ onboarding:
     "-cc": claude
     "-cdx": codex
     "-gem": gemini
+    "-oc": opencode
     "-qw": qwen
   provider_options:
     - claude
     - codex
+    - opencode
   default_provider: claude
 
 # Dashboard edits still write runtime overrides into kv_meta.

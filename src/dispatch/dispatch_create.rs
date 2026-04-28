@@ -72,7 +72,7 @@ fn inject_work_dispatch_baseline_commit(dispatch_type: &str, context: &mut serde
 
 #[cfg(test)]
 fn load_existing_thread_for_channel(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     channel_id: u64,
 ) -> Result<Option<String>> {
@@ -181,7 +181,7 @@ async fn load_existing_thread_for_channel_pg(
 
 #[cfg(test)]
 fn lookup_active_dispatch_id(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     dispatch_type: &str,
 ) -> Option<String> {
@@ -190,7 +190,7 @@ fn lookup_active_dispatch_id(
          WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
          AND status IN ('pending', 'dispatched') \
          ORDER BY rowid DESC LIMIT 1",
-        libsql_rusqlite::params![card_id, dispatch_type],
+        rusqlite::params![card_id, dispatch_type],
         |row| row.get(0),
     )
     .ok()
@@ -219,10 +219,10 @@ async fn lookup_active_dispatch_id_pg(
 }
 
 #[cfg(test)]
-fn is_single_active_dispatch_violation(error: &libsql_rusqlite::Error) -> bool {
+fn is_single_active_dispatch_violation(error: &rusqlite::Error) -> bool {
     matches!(
         error,
-        libsql_rusqlite::Error::SqliteFailure(_, Some(message))
+        rusqlite::Error::SqliteFailure(_, Some(message))
             if message.contains("UNIQUE constraint failed")
                 && message.contains("task_dispatches.kanban_card_id")
     )
@@ -247,7 +247,7 @@ fn is_single_active_dispatch_violation_pg(error: &sqlx::Error) -> bool {
 
 #[cfg(test)]
 fn validate_dispatch_target_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_type: &str,
@@ -1267,7 +1267,7 @@ fn create_dispatch_with_options_sqlite_test(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn apply_dispatch_attached_intents(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_id: &str,
@@ -1621,7 +1621,7 @@ pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn apply_dispatch_attached_intents_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     to_agent_id: &str,
     dispatch_id: &str,
@@ -1687,7 +1687,7 @@ fn apply_dispatch_attached_intents_on_conn(
             parent_dispatch_id, chain_depth, created_at, updated_at
         )
          VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
-        libsql_rusqlite::params![
+        rusqlite::params![
             dispatch_id,
             card_id,
             to_agent_id,
@@ -1725,8 +1725,83 @@ fn apply_dispatch_attached_intents_on_conn(
         ensure_dispatch_notify_outbox_on_conn(conn, dispatch_id, to_agent_id, card_id, title)?;
     }
     for intent in &decision.intents {
-        transition::execute_intent_on_conn(conn, intent)?;
+        apply_sqlite_transition_intent_for_tests(conn, intent)?;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn apply_sqlite_transition_intent_for_tests(
+    conn: &rusqlite::Connection,
+    intent: &crate::engine::transition::TransitionIntent,
+) -> Result<()> {
+    use crate::engine::transition::TransitionIntent;
+
+    match intent {
+        TransitionIntent::UpdateStatus { card_id, to, .. } => {
+            conn.execute(
+                "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![to, card_id],
+            )?;
+        }
+        TransitionIntent::SetLatestDispatchId {
+            card_id,
+            dispatch_id,
+        } => {
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![dispatch_id, card_id],
+            )?;
+        }
+        TransitionIntent::SetReviewStatus {
+            card_id,
+            review_status,
+        } => {
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![review_status, card_id],
+            )?;
+        }
+        TransitionIntent::ApplyClock { card_id, clock, .. } => {
+            if let Some(clock) = clock {
+                let sql = if clock.mode.as_deref() == Some("coalesce") {
+                    format!(
+                        "UPDATE kanban_cards SET {field} = COALESCE({field}, datetime('now')), updated_at = datetime('now') WHERE id = ?1",
+                        field = clock.set
+                    )
+                } else {
+                    format!(
+                        "UPDATE kanban_cards SET {field} = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
+                        field = clock.set
+                    )
+                };
+                conn.execute(&sql, [card_id])?;
+            }
+        }
+        TransitionIntent::ClearTerminalFields { card_id } => {
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL, \
+                 review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
+                 review_round = NULL, deferred_dod_json = NULL, updated_at = datetime('now') WHERE id = ?1",
+                [card_id],
+            )?;
+        }
+        TransitionIntent::AuditLog {
+            card_id,
+            from,
+            to,
+            source,
+            message,
+        } => {
+            crate::kanban::log_audit_on_conn(conn, card_id, from, to, source, message);
+        }
+        TransitionIntent::CancelDispatch { dispatch_id } => {
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(conn, dispatch_id, None)
+                .ok();
+        }
+        TransitionIntent::SyncAutoQueue { .. } | TransitionIntent::SyncReviewState { .. } => {}
+    }
+
     Ok(())
 }
 
@@ -1995,13 +2070,13 @@ mod tests {
         conn.execute(
             "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
              VALUES (?1, ?2, '111', '222')",
-            libsql_rusqlite::params![agent_id, format!("Agent {agent_id}")],
+            rusqlite::params![agent_id, format!("Agent {agent_id}")],
         )
         .expect("seed sqlite agent");
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
              VALUES (?1, 'Test Card', ?2, ?3)",
-            libsql_rusqlite::params![card_id, status, agent_id],
+            rusqlite::params![card_id, status, agent_id],
         )
         .expect("seed sqlite card");
     }

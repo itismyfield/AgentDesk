@@ -222,7 +222,7 @@ mod tests {
     use std::sync::Arc;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -237,7 +237,7 @@ mod tests {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         AppState {
-            db: Some(db),
+            legacy_db_override: Some(db),
             pg_pool: Some(pg_pool),
             engine,
             config: Arc::new(crate::config::Config::default()),

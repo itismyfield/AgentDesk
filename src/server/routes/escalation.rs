@@ -221,15 +221,6 @@ fn store_override_pg(pool: &sqlx::PgPool, settings: &EscalationSettings) -> Resu
     )
 }
 
-fn clear_override(conn: &libsql_rusqlite::Connection) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM kv_meta WHERE key = ?1",
-        [ESCALATION_SETTINGS_OVERRIDE_KEY],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
 fn clear_override_pg(pool: &sqlx::PgPool) -> Result<(), String> {
     crate::utils::async_bridge::block_on_pg_result(
         pool,
@@ -1393,12 +1384,6 @@ async fn deliver_pm_fallback(
     }
 }
 
-pub fn seed_escalation_defaults(conn: &libsql_rusqlite::Connection, config: &Config) {
-    if config.runtime.reset_overrides_on_restart {
-        let _ = clear_override(conn);
-    }
-}
-
 pub async fn seed_escalation_defaults_pg(
     pool: &sqlx::PgPool,
     config: &Config,
@@ -1569,10 +1554,7 @@ mod tests {
     }
 
     fn test_db() -> crate::db::Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
+        crate::db::test_db()
     }
 
     fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {

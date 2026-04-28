@@ -15,7 +15,6 @@
 //!   avoid the dedupe/unique-index deadlock) and mints a fresh generation,
 //!   resetting retry_count and last_error.
 
-use crate::db::Db;
 use crate::dispatch::{DispatchCreateOptions, apply_dispatch_attached_intents_on_pg_tx};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde::Deserialize;
@@ -25,7 +24,6 @@ use uuid::Uuid;
 
 pub(super) fn register_review_automation_ops<'js>(
     ctx: &Ctx<'js>,
-    _db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;

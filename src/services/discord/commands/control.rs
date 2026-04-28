@@ -43,7 +43,9 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
         ProviderKind::Codex | ProviderKind::Qwen => {
             ManagedSessionClearBehavior::ResetManagedProcess
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionClearBehavior::Noop,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => {
+            ManagedSessionClearBehavior::Noop
+        }
     }
 }
 
@@ -53,7 +55,9 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
         ProviderKind::Codex | ProviderKind::Qwen => {
             ManagedSessionResetBehavior::ResetManagedProcess
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => {
+            ManagedSessionResetBehavior::Noop
+        }
     }
 }
 
@@ -248,7 +252,7 @@ pub(in crate::services::discord) async fn notify_turn_stop(
     let sqlite_runtime_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.sqlite.as_ref()
+        shared.legacy_sqlite()
     };
     crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         sqlite_runtime_db,
@@ -411,7 +415,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     let sqlite_runtime_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.sqlite.as_ref()
+        shared.legacy_sqlite()
     };
     crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         sqlite_runtime_db,

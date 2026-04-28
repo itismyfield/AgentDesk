@@ -1,6 +1,5 @@
 //! GitHub issue state sync: keep kanban cards consistent with GitHub issue state.
 
-use crate::db::Db;
 use chrono::{Duration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
@@ -89,7 +88,7 @@ fn fetch_issue_batch(
 
 fn recent_closed_search_query(today: NaiveDate) -> String {
     let cutoff = today - Duration::days(RECENTLY_CLOSED_LOOKBACK_DAYS);
-    format!("closed:>{}", cutoff.format("%Y-%m-%d"))
+    format!("closed:>{} sort:updated-desc", cutoff.format("%Y-%m-%d"))
 }
 
 fn merge_unique_issues(target: &mut Vec<GhIssue>, extras: Vec<GhIssue>) {
@@ -128,145 +127,23 @@ fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
 ///
 /// Returns (closed_count, inconsistency_count).
 pub fn sync_github_issues_for_repo(
-    db: &Db,
+    _db: &crate::db::Db,
     engine: &crate::engine::PolicyEngine,
     repo: &str,
     issues: &[GhIssue],
 ) -> Result<SyncResult, String> {
-    let mut result = SyncResult::default();
-
-    // Collect cards to close (need to drop conn before calling transition_status)
-    let mut cards_to_close: Vec<(String, i64)> = Vec::new();
-
-    {
-        let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
-        for issue in issues {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, status FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-                )
-                .map_err(|e| format!("prepare: {e}"))?;
-
-            let cards: Vec<(String, String)> = stmt
-                .query_map(libsql_rusqlite::params![issue.number, repo], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(|e| format!("query: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect();
-
-            for (card_id, card_status) in &cards {
-                // Sync issue body → card description (only if changed)
-                if let Some(ref body) = issue.body {
-                    let trimmed = body.trim_end();
-                    let _ = conn.execute(
-                        "UPDATE kanban_cards SET description = ?1 WHERE id = ?2 AND (description IS NULL OR description != ?1)",
-                        libsql_rusqlite::params![trimmed, card_id],
-                    );
-                }
-
-                // Pipeline-driven: terminal states are "done" equivalents
-                let is_terminal = crate::pipeline::try_get()
-                    .map(|p| p.is_terminal(&card_status))
-                    .unwrap_or(card_status == "done" || card_status == "cancelled");
-                if issue.state == "CLOSED" && !is_terminal {
-                    cards_to_close.push((card_id.clone(), issue.number));
-                } else if issue.state == "OPEN" && is_terminal {
-                    result.inconsistency_count += 1;
-                    tracing::warn!(
-                        "[github-sync] {repo}#{}: card {} is 'done' but issue is OPEN",
-                        issue.number,
-                        card_id
-                    );
-                }
-            }
-        }
-
-        // Update last_synced_at
-        conn.execute(
-            "UPDATE github_repos SET last_synced_at = datetime('now') WHERE id = ?1",
-            [repo],
-        )
-        .map_err(|e| format!("update last_synced_at: {e}"))?;
-    } // conn dropped here
-
-    // Process closures via central state machine (outside conn lock)
-    // Pipeline-driven: resolve terminal state
-    crate::pipeline::ensure_loaded();
-    let terminal = crate::pipeline::try_get()
-        .map(|p| {
-            p.states
-                .iter()
-                .find(|s| s.terminal)
-                .map(|s| s.id.as_str())
-                .unwrap_or("done")
-        })
-        .unwrap_or("done");
-    for (card_id, issue_number) in &cards_to_close {
-        let _ = crate::kanban::transition_status_with_opts(
-            db,
-            engine,
-            card_id,
-            terminal,
-            "github-sync",
-            crate::engine::transition::ForceIntent::SystemRecovery,
-        );
-        result.closed_count += 1;
-        tracing::info!(
-            "[github-sync] {repo}#{}: card {} → {} (issue closed)",
-            issue_number,
-            card_id,
-            terminal
-        );
-    }
-
-    let mainline_issue_numbers = mainline_issue_numbers_for_repo(repo);
-    if !mainline_issue_numbers.is_empty() {
-        let mut mainline_cards_to_close: Vec<(String, i64)> = Vec::new();
-        {
-            let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
-            for issue_number in &mainline_issue_numbers {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT id, status FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-                    )
-                    .map_err(|e| format!("prepare: {e}"))?;
-
-                let cards: Vec<(String, String)> = stmt
-                    .query_map(libsql_rusqlite::params![*issue_number, repo], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(|e| format!("query: {e}"))?
-                    .filter_map(|r| r.ok())
-                    .collect();
-
-                for (card_id, card_status) in cards {
-                    if matches!(card_status.as_str(), "in_progress" | "review") {
-                        mainline_cards_to_close.push((card_id, *issue_number));
-                    }
-                }
-            }
-        }
-
-        for (card_id, issue_number) in &mainline_cards_to_close {
-            let _ = crate::kanban::transition_status_with_opts(
-                db,
-                engine,
-                card_id,
-                terminal,
-                "github-sync-mainline",
-                crate::engine::transition::ForceIntent::SystemRecovery,
-            );
-            tracing::info!(
-                "[github-sync] {repo}#{}: card {} → {} (mainline commit matched issue)",
-                issue_number,
-                card_id,
-                terminal
-            );
-        }
-    }
-
-    Ok(result)
+    let pool = engine
+        .pg_pool()
+        .ok_or_else(|| "postgres backend required for GitHub issue sync".to_string())?;
+    let repo = repo.to_string();
+    let issues = issues.to_vec();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            sync_github_issues_for_repo_pg(&bridge_pool, &repo, &issues).await
+        },
+        |error| error,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -569,7 +446,7 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // `update_entry_status_on_pg_tx` — see explicit sweep at the end for why
     // we still fall back to `maybe_finalize_run_if_ready_pg` for those runs.
     let dispatched_rows = sqlx::query(
-        "SELECT id
+        "SELECT id, run_id
          FROM auto_queue_entries
          WHERE kanban_card_id = $1 AND status = 'dispatched'",
     )
@@ -578,10 +455,15 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     .await
     .map_err(|error| format!("load dispatched auto-queue entries for {card_id}: {error}"))?;
 
+    let mut done_run_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     for row in dispatched_rows {
         let entry_id: String = row
             .try_get("id")
             .map_err(|error| format!("read dispatched auto-queue entry id: {error}"))?;
+        if let Ok(Some(run_id)) = row.try_get::<Option<String>, _>("run_id") {
+            done_run_ids.insert(run_id);
+        }
         sqlx::query(
             "UPDATE auto_queue_entries
              SET status = 'done',
@@ -646,7 +528,33 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
         let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
     }
 
+    // PG GitHub sync does not receive a PolicyEngine, so it cannot fire the
+    // `OnCardTerminal` phase-gate policy path. Review-disabled runs explicitly
+    // opt out of that gate, so complete them here once the last dispatched
+    // entry has been marked done.
+    for run_id in done_run_ids {
+        if auto_queue_run_review_disabled_on_pg(tx, &run_id).await? {
+            let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
+        }
+    }
+
     Ok(())
+}
+
+async fn auto_queue_run_review_disabled_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let review_mode = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT review_mode FROM auto_queue_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue review mode for run {run_id}: {error}"))?
+    .flatten();
+
+    Ok(review_mode.as_deref().unwrap_or("enabled") == "disabled")
 }
 
 async fn record_auto_queue_transition_on_pg(
@@ -732,8 +640,19 @@ pub(crate) async fn sync_review_state_on_pg(
 
 /// Sync all registered repos (orchestration function).
 #[allow(dead_code)]
-pub fn sync_all_repos(db: &Db, engine: &crate::engine::PolicyEngine) -> Result<SyncResult, String> {
-    let repos = super::list_repos(db)?;
+pub fn sync_all_repos(
+    db: &crate::db::Db,
+    engine: &crate::engine::PolicyEngine,
+) -> Result<SyncResult, String> {
+    let _ = db;
+    let pool = engine
+        .pg_pool()
+        .ok_or_else(|| "postgres backend required for GitHub repo sync".to_string())?;
+    let repos = crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        |bridge_pool| async move { super::list_repos_pg(&bridge_pool).await },
+        |error| error,
+    )?;
     let mut total = SyncResult::default();
 
     for repo in &repos {
@@ -770,20 +689,6 @@ pub struct SyncResult {
 mod tests {
     use super::*;
     use crate::github::test_utils::RecordingAdapter;
-
-    fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        crate::db::wrap_conn(conn)
-    }
-
-    fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
-        let mut config = crate::config::Config::default();
-        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
-        config.policies.hot_reload = false;
-        crate::engine::PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
-    }
 
     struct TestPostgresDb {
         _lock: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -950,172 +855,10 @@ mod tests {
                     "--state".to_string(),
                     "closed".to_string(),
                     "--search".to_string(),
-                    "closed:>2026-03-13".to_string(),
+                    "closed:>2026-03-13 sort:updated-desc".to_string(),
                 ],
             ]
         );
-    }
-
-    #[test]
-    fn sync_closes_card_when_issue_closed() {
-        let db = test_db();
-
-        // Register repo and create a card linked to issue #5
-        {
-            let conn = db.lock().unwrap();
-            conn.execute("INSERT INTO github_repos (id) VALUES ('owner/repo')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_number, created_at, updated_at)
-                 VALUES ('c1', 'owner/repo', 'Fix bug', 'in_progress', 'medium', 5, datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
-
-        let issues = vec![GhIssue {
-            number: 5,
-            state: "CLOSED".to_string(),
-            title: "Fix bug".to_string(),
-            labels: vec![],
-            body: None,
-        }];
-
-        let result =
-            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
-        assert_eq!(result.closed_count, 1);
-        assert_eq!(result.inconsistency_count, 0);
-
-        // Verify card is now done
-        let conn = db.lock().unwrap();
-        let status: String = conn
-            .query_row("SELECT status FROM kanban_cards WHERE id = 'c1'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(status, "done");
-    }
-
-    #[test]
-    fn sync_flags_inconsistency_when_open_issue_has_done_card() {
-        let db = test_db();
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute("INSERT INTO github_repos (id) VALUES ('owner/repo')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_number, created_at, updated_at)
-                 VALUES ('c1', 'owner/repo', 'Feature', 'done', 'medium', 10, datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
-
-        let issues = vec![GhIssue {
-            number: 10,
-            state: "OPEN".to_string(),
-            title: "Feature".to_string(),
-            labels: vec![],
-            body: None,
-        }];
-
-        let result =
-            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
-        assert_eq!(result.closed_count, 0);
-        assert_eq!(result.inconsistency_count, 1);
-    }
-
-    #[test]
-    fn sync_skips_already_done_cards() {
-        let db = test_db();
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute("INSERT INTO github_repos (id) VALUES ('owner/repo')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_number, created_at, updated_at)
-                 VALUES ('c1', 'owner/repo', 'Done thing', 'done', 'medium', 7, datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
-
-        let issues = vec![GhIssue {
-            number: 7,
-            state: "CLOSED".to_string(),
-            title: "Done thing".to_string(),
-            labels: vec![],
-            body: None,
-        }];
-
-        let result =
-            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
-        assert_eq!(result.closed_count, 0);
-        assert_eq!(result.inconsistency_count, 0);
-    }
-
-    #[test]
-    fn sync_and_triage_flow_can_run_with_mock_adapter() {
-        let db = test_db();
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute("INSERT INTO github_repos (id) VALUES ('owner/repo')", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_number, created_at, updated_at)
-                 VALUES ('closed-card', 'owner/repo', 'Already linked', 'in_progress', 'medium', 7, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-
-        let adapter = RecordingAdapter::with_sync_responses(vec![
-            Ok(
-                r#"[
-                    {"number":7,"state":"CLOSED","title":"Already linked","labels":[],"body":"Closed body"},
-                    {"number":9,"state":"OPEN","title":"New issue","labels":[{"name":"high"}],"body":"Open body"}
-                ]"#
-                .to_string(),
-            ),
-            Ok(
-                r#"[
-                    {"number":7,"state":"CLOSED","title":"Already linked","labels":[],"body":"Closed body"},
-                    {"number":210,"state":"CLOSED","title":"Older issue closed recently","labels":[],"body":"Closed later"}
-                ]"#
-                .to_string(),
-            ),
-        ]);
-
-        let issues = fetch_issues_with_cutoff(
-            &adapter,
-            "owner/repo",
-            NaiveDate::from_ymd_opt(2026, 4, 12).unwrap(),
-        )
-        .unwrap();
-        let triaged = crate::github::triage::triage_new_issues(&db, "owner/repo", &issues).unwrap();
-        let synced =
-            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
-
-        assert_eq!(triaged, 1);
-        assert_eq!(synced.closed_count, 1);
-
-        let conn = db.lock().unwrap();
-        let new_card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE github_issue_number = 9",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let closed_card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = 'closed-card'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(new_card_status, "backlog");
-        assert_eq!(closed_card_status, "done");
     }
 
     #[tokio::test]

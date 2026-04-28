@@ -12,7 +12,6 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["full"] }
 
 # Database
-libsql_rusqlite = { package = "libsql-rusqlite", version = "0.33", features = ["bundled"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros", "chrono", "json", "uuid"] }
 
 # Discord
@@ -69,6 +68,7 @@ rand = "0.8"
 libc = "0.2"
 
 [dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 

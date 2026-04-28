@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
@@ -2135,50 +2134,8 @@ pub(super) async fn enqueue_background_trigger_response_to_notify_outbox(
         };
     }
 
-    // PG is not configured — use the SQLite outbox (legacy / test setups).
-    let Some(db) = db else {
-        return false;
-    };
-    // Call `enqueue` directly (instead of `enqueue_with_db`) so we can
-    // distinguish a dedupe-skip (`Ok(false)` — an EARLIER retry already wrote
-    // the row, so this call is conceptually successful) from a genuine SQL
-    // error (`Err(_)` — caller must fall back to direct send). The legacy
-    // `enqueue_with_db` collapses both into `false`, which would spuriously
-    // trigger the direct-send fallback on a dedupe and write the same
-    // message twice.
-    match db.separate_conn() {
-        Ok(conn) => {
-            match crate::services::message_outbox::enqueue(
-                &conn,
-                crate::services::message_outbox::OutboxMessage {
-                    target: target.as_str(),
-                    content,
-                    bot: "notify",
-                    source: "system",
-                    reason_code: Some("bg_trigger.auto_turn"),
-                    session_key: Some(session_key.as_str()),
-                },
-            ) {
-                Ok(_inserted_or_deduped) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        "background-trigger outbox enqueue failed for channel {}: {}",
-                        channel_id,
-                        error
-                    );
-                    false
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                "background-trigger outbox connection failed for channel {}: {}",
-                channel_id,
-                error
-            );
-            false
-        }
-    }
+    let _ = (db, session_key);
+    false
 }
 
 /// #897 counter-model review P1 #2: Find permanently-failed notify-bot
@@ -2276,55 +2233,8 @@ async fn reconcile_failed_bg_trigger_enqueues_for_channel(
         };
     }
 
-    // PG is not configured — use the SQLite outbox (legacy/test setups).
-    let db = db?;
-    let conn = db.separate_conn().ok()?;
-
-    let rows: Vec<(i64, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, COALESCE(session_key, '') FROM message_outbox
-                 WHERE target = ?1
-                   AND bot = 'notify'
-                   AND source = 'system'
-                   AND reason_code = 'bg_trigger.auto_turn'
-                   AND status = 'failed'",
-            )
-            .ok()?;
-        stmt.query_map(libsql_rusqlite::params![target.as_str()], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect()
-    };
-    if rows.is_empty() {
-        return None;
-    }
-
-    let mut min_offset: Option<u64> = None;
-    for (_, session_key) in &rows {
-        if let Some(offset) = parse_bg_trigger_offset_from_session_key(session_key) {
-            min_offset = Some(min_offset.map(|m| m.min(offset)).unwrap_or(offset));
-        }
-    }
-
-    for (id, _) in &rows {
-        let _ = conn.execute(
-            "DELETE FROM message_outbox WHERE id = ?1",
-            libsql_rusqlite::params![id],
-        );
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::warn!(
-        "  [{ts}] ♻ reconciled {} failed bg_trigger outbox row(s) for channel {} (min offset: {:?}) [sqlite]",
-        rows.len(),
-        channel_id,
-        min_offset,
-    );
-
-    min_offset
+    let _ = db;
+    None
 }
 
 /// Pure helper: extract the `data_start_offset` encoded in a
@@ -2714,16 +2624,8 @@ fn load_restored_session_cwd(
         .flatten();
     }
 
-    let conn = db?.read_conn().ok()?;
-    session_keys.iter().find_map(|session_key| {
-        conn.query_row(
-            "SELECT cwd FROM sessions WHERE session_key = ?1",
-            [session_key.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|path| !path.is_empty() && std::path::Path::new(path).is_dir())
-    })
+    let _ = (db, session_keys);
+    None
 }
 
 fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: SessionTranscriptEvent) {
@@ -2803,20 +2705,8 @@ fn load_restored_provider_session_id(
         .flatten();
     }
 
-    db.and_then(|db| {
-        db.read_conn().ok().and_then(|conn| {
-            session_keys.iter().find_map(|session_key| {
-                conn.query_row(
-                    "SELECT claude_session_id FROM sessions WHERE session_key = ?1 AND provider = ?2",
-                    [session_key.as_str(), provider.as_str()],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-                .filter(|session_id| !session_id.is_empty())
-            })
-        })
-    })
+    let _ = (db, session_keys);
+    None
 }
 
 fn recovery_handled_channel_key(channel_id: u64) -> String {
@@ -2827,7 +2717,7 @@ fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
     if shared.pg_pool.is_some() {
         None
     } else {
-        shared.sqlite.as_ref()
+        shared.legacy_sqlite()
     }
 }
 
@@ -2870,19 +2760,8 @@ fn load_human_alert_target(shared: &SharedData) -> Option<String> {
         .and_then(|channel| normalize_human_alert_target(&channel));
     }
 
-    sqlite_runtime_db(shared)
-        .and_then(|db| db.read_conn().ok())
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-        })
-        .and_then(|channel| normalize_human_alert_target(&channel))
+    let _ = shared;
+    None
 }
 
 fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
@@ -2912,38 +2791,6 @@ fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> St
     );
 
     serde_json::Value::Object(metadata).to_string()
-}
-
-fn update_card_ready_failure_marker_sqlite(
-    db: &crate::db::Db,
-    card_id: &str,
-    reason: &str,
-) -> Result<bool, String> {
-    let conn = db
-        .separate_conn()
-        .map_err(|error| format!("open sqlite card metadata DB: {error}"))?;
-    let existing_metadata = conn
-        .query_row(
-            "SELECT metadata FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(|error| format!("load sqlite card metadata for {card_id}: {error}"))?
-        .flatten();
-    let metadata_json =
-        merge_card_label_metadata(existing_metadata.as_deref(), READY_FOR_INPUT_STUCK_LABEL);
-    let updated = conn
-        .execute(
-            "UPDATE kanban_cards
-             SET metadata = ?1,
-                 blocked_reason = ?2,
-                 updated_at = datetime('now')
-             WHERE id = ?3",
-            libsql_rusqlite::params![metadata_json, reason, card_id],
-        )
-        .map_err(|error| format!("update sqlite ready marker for {card_id}: {error}"))?;
-    Ok(updated > 0)
 }
 
 async fn update_card_ready_failure_marker_pg(
@@ -2998,18 +2845,8 @@ fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<Strin
         .flatten();
     }
 
-    sqlite_runtime_db(shared)
-        .and_then(|db| db.read_conn().ok())
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .ok()
-            .flatten()
-        })
+    let _ = (shared, dispatch_id);
+    None
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -3048,8 +2885,6 @@ pub(super) async fn fail_dispatch_for_ready_for_input_stall(
         card_marked = if let Some(pool) = shared.pg_pool.as_ref() {
             update_card_ready_failure_marker_pg(pool, card_id_ref, READY_FOR_INPUT_STUCK_REASON)
                 .await?
-        } else if let Some(db) = sqlite_runtime_db(shared.as_ref()) {
-            update_card_ready_failure_marker_sqlite(db, card_id_ref, READY_FOR_INPUT_STUCK_REASON)?
         } else {
             false
         };
@@ -3111,20 +2946,8 @@ pub(super) fn recovery_handled_channel_exists(shared: &SharedData, channel_id: u
         .unwrap_or(false);
     }
 
-    shared
-        .sqlite
-        .as_ref()
-        .and_then(|db| {
-            db.lock().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
-                    [key],
-                    |row| row.get::<_, bool>(0),
-                )
-                .ok()
-            })
-        })
-        .unwrap_or(false)
+    let _ = (shared, key);
+    false
 }
 
 pub(super) async fn store_recovery_handled_channels(shared: &SharedData, channel_ids: &[u64]) {
@@ -3182,18 +3005,7 @@ pub(super) async fn store_recovery_handled_channels(shared: &SharedData, channel
         return;
     }
 
-    if let Some(db) = shared.sqlite.as_ref()
-        && let Ok(conn) = db.lock()
-    {
-        for channel_id in channel_ids {
-            let key = recovery_handled_channel_key(*channel_id);
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                libsql_rusqlite::params![key, chrono::Utc::now().timestamp().to_string()],
-            )
-            .ok();
-        }
-    }
+    let _ = shared;
 }
 
 pub(super) async fn clear_recovery_handled_channels(shared: &SharedData) {
@@ -3216,15 +3028,7 @@ pub(super) async fn clear_recovery_handled_channels(shared: &SharedData) {
         return;
     }
 
-    if let Some(db) = shared.sqlite.as_ref()
-        && let Ok(conn) = db.lock()
-    {
-        conn.execute(
-            "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
-            [],
-        )
-        .ok();
-    }
+    let _ = shared;
 }
 
 // Tmux watcher output is activity, but reusing hook_session here would also
@@ -3286,37 +3090,8 @@ pub(super) fn refresh_session_heartbeat_from_tmux_output(
         .unwrap_or(false);
     }
 
-    let Some(db) = db else {
-        return false;
-    };
-    let Ok(conn) = db.lock() else {
-        return false;
-    };
-    let updated = conn
-        .execute(
-            "UPDATE sessions
-             SET last_heartbeat = datetime('now')
-             WHERE session_key = ?1 OR session_key = ?2",
-            [session_keys[0].as_str(), session_keys[1].as_str()],
-        )
-        .unwrap_or(0);
-    if updated > 0 {
-        return true;
-    }
-
-    thread_channel_id.is_some_and(|thread_channel_id| {
-        let thread_channel_id = thread_channel_id.to_string();
-        conn.execute(
-            "UPDATE sessions
-             SET last_heartbeat = datetime('now')
-             WHERE provider = ?1
-               AND thread_channel_id = ?2
-               AND status IN ('idle', 'working')",
-            [provider.as_str(), thread_channel_id.as_str()],
-        )
-        .unwrap_or(0)
-            > 0
-    })
+    let _ = (db, provider, thread_channel_id, session_keys);
+    false
 }
 
 fn maybe_refresh_watcher_activity_heartbeat(
@@ -3395,7 +3170,7 @@ async fn resolve_watcher_dispatch_id(
         .await)
         .or_else(|| {
             resolve_dispatched_thread_dispatch_from_db(
-                shared.sqlite.as_ref(),
+                shared.legacy_sqlite(),
                 shared.pg_pool.as_ref(),
                 channel_id.get(),
             )
@@ -4441,9 +4216,10 @@ pub(super) async fn tmux_output_watcher_with_restore(
             }
         };
 
-        let poll_decision = if data.is_empty() {
+        let bytes_available = data.len().saturating_add(all_data.len());
+        let poll_decision = if bytes_available == 0 {
             watcher_output_poll_decision(
-                data.len(),
+                bytes_available,
                 Some(tmux_liveness_decision(
                     cancel.load(Ordering::Relaxed),
                     shared.shutting_down.load(Ordering::Relaxed),
@@ -4451,7 +4227,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 )),
             )
         } else {
-            watcher_output_poll_decision(data.len(), None)
+            watcher_output_poll_decision(bytes_available, None)
         };
         match poll_decision {
             WatcherOutputPollDecision::DrainOutput => {}
@@ -4497,7 +4273,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             );
         }
         maybe_refresh_watcher_activity_heartbeat(
-            shared.sqlite.as_ref(),
+            shared.legacy_sqlite(),
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             &watcher_provider,
@@ -4563,6 +4339,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             monitor_auto_turn_claimed = start.acquired;
             monitor_auto_turn_deferred = monitor_auto_turn_deferred || start.deferred;
             if !start.acquired {
+                all_data.clear();
                 continue;
             }
             ensure_monitor_auto_turn_inflight(
@@ -4593,6 +4370,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let mut was_paused = paused.load(Ordering::Relaxed) || epoch_changed;
         if was_paused && !monitor_auto_turn_deferred {
             // A Discord turn took over — discard what we read
+            all_data.clear();
             continue;
         }
         if !found_result {
@@ -4639,7 +4417,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         maybe_refresh_watcher_activity_heartbeat(
-                            shared.sqlite.as_ref(),
+                            shared.legacy_sqlite(),
                             shared.pg_pool.as_ref(),
                             &shared.token_hash,
                             &watcher_provider,
@@ -4799,7 +4577,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                 crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
-                                        shared.sqlite.as_ref(),
+                                        shared.legacy_sqlite(),
                                         shared.pg_pool.as_ref(),
                                         watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
                                     )
@@ -5156,6 +4934,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 &mut monitor_auto_turn_finished,
             )
             .await;
+            all_data.clear();
             continue;
         }
 
@@ -6176,7 +5955,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
             super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
 
-            if has_assistant_response && (shared.sqlite.is_some() || shared.pg_pool.is_some()) {
+            if has_assistant_response
+                && (shared.legacy_sqlite().is_some() || shared.pg_pool.is_some())
+            {
                 let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
                 let channel_id_text = channel_id.get().to_string();
                 let resolved_did = inflight_state
@@ -6190,13 +5971,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     .await)
                     .or_else(|| {
                         resolve_dispatched_thread_dispatch_from_db(
-                            shared.sqlite.as_ref(),
+                            shared.legacy_sqlite(),
                             shared.pg_pool.as_ref(),
                             channel_id.get(),
                         )
                     });
                 if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                    shared.sqlite.as_ref(),
+                    shared.legacy_sqlite(),
                     shared.pg_pool.as_ref(),
                     crate::db::session_transcripts::PersistSessionTranscript {
                         turn_id: &turn_id,
@@ -6220,7 +6001,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 }
 
                 super::turn_bridge::persist_turn_analytics_row_with_handles(
-                    shared.sqlite.as_ref(),
+                    shared.legacy_sqlite(),
                     shared.pg_pool.as_ref(),
                     &provider_kind,
                     channel_id,
@@ -6253,7 +6034,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             .await)
             .or_else(|| {
                 resolve_dispatched_thread_dispatch_from_db(
-                    shared.sqlite.as_ref(),
+                    shared.legacy_sqlite(),
                     shared.pg_pool.as_ref(),
                     channel_id.get(),
                 )
@@ -6287,10 +6068,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
                         );
                         false
-                    } else if let (Some(db), Some(engine)) = (&shared.sqlite, &shared.engine) {
+                    } else if let (Some(db), Some(engine)) =
+                        (shared.legacy_sqlite(), &shared.engine)
+                    {
                         let mut work_completion_context =
                             super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.sqlite.as_ref(),
+                                shared.legacy_sqlite(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_completed",
@@ -6332,7 +6115,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                 );
                                 let mut fallback_result =
                                     super::turn_bridge::build_work_dispatch_completion_result(
-                                        shared.sqlite.as_ref(),
+                                        shared.legacy_sqlite(),
                                         shared.pg_pool.as_ref(),
                                         did,
                                         "watcher_db_fallback",
@@ -6354,7 +6137,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                 if completed {
                                     let _ =
                                         super::turn_bridge::queue_dispatch_followup_with_handles(
-                                            shared.sqlite.as_ref(),
+                                            shared.legacy_sqlite(),
                                             shared.pg_pool.as_ref(),
                                             did,
                                             "watcher_completed_fallback",
@@ -6367,7 +6150,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     } else {
                         let mut fallback_result =
                             super::turn_bridge::build_work_dispatch_completion_result(
-                                shared.sqlite.as_ref(),
+                                shared.legacy_sqlite(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_db_fallback",
@@ -6388,7 +6171,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             );
                         if completed {
                             let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
-                                shared.sqlite.as_ref(),
+                                shared.legacy_sqlite(),
                                 shared.pg_pool.as_ref(),
                                 did,
                                 "watcher_completed_runtime_fallback",
@@ -6661,16 +6444,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         .flatten()
                         .flatten()
                     } else {
-                        sqlite_runtime_db(shared.as_ref()).and_then(|db| {
-                            db.lock().ok().and_then(|conn| {
-                                conn.query_row(
-                                    "SELECT value FROM kv_meta WHERE key = ?1",
-                                    [&cooldown_key],
-                                    |row| row.get(0),
-                                )
-                                .ok()
-                            })
-                        })
+                        None
                     }
                 }
             };
@@ -6716,14 +6490,6 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         .bind(&now_text)
                         .execute(pg_pool)
                         .await;
-                    } else if let Some(db) = sqlite_runtime_db(shared.as_ref())
-                        && let Ok(conn) = db.lock()
-                    {
-                        conn.execute(
-                            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                            [cooldown_key.as_str(), now_text.as_str()],
-                        )
-                        .ok();
                     }
                 }
                 // Notify: auto-compact triggered
@@ -6764,7 +6530,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             .and_then(|s| s.channel_name.clone())
     };
     let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-        shared.sqlite.as_ref(),
+        shared.legacy_sqlite(),
         shared.pg_pool.as_ref(),
         &shared.token_hash,
         &provider,
@@ -7689,7 +7455,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let sqlite_settings_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.sqlite.as_ref()
+            shared.legacy_sqlite()
         };
         for (channel_id, channel_name) in &owned_sessions {
             let persisted_path = load_last_session_path(
@@ -7720,7 +7486,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 &tmux_name,
             );
             let db_cwd = load_restored_session_cwd(
-                shared.sqlite.as_ref(),
+                shared.legacy_sqlite(),
                 shared.pg_pool.as_ref(),
                 &session_keys,
             );
@@ -7869,7 +7635,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
             let dispatch_protection = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                shared.sqlite.as_ref(),
+                shared.legacy_sqlite(),
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
@@ -10911,64 +10677,8 @@ mod tests {
         );
     }
 
-    /// #897 P1 #2 end-to-end: after a bg_trigger row transitions to
-    /// `status='failed'`, `reconcile_failed_bg_trigger_enqueues_for_channel`
-    /// must (a) report the minimum offset so the watcher can roll back and
-    /// (b) delete the row so it doesn't accumulate. Combined with the
-    /// dedupe lookup's `status != 'failed'` filter, this lets a subsequent
-    /// enqueue at the same session_key land as a fresh row.
-    #[tokio::test]
-    async fn reconcile_failed_bg_trigger_rows_returns_min_offset_and_deletes_them() {
-        let db = crate::db::test_db();
-        let channel = ChannelId::new(777_444_111);
-
-        // Seed three bg_trigger rows at different offsets, mark two as
-        // failed and leave one pending. Only the failed pair should be
-        // reconciled; the pending row stays.
-        for (offset, status) in [
-            (1_000u64, "failed"),
-            (5_000u64, "failed"),
-            (9_000u64, "pending"),
-        ] {
-            let session_key = build_bg_trigger_session_key(channel.get(), offset, "c");
-            let target = format!("channel:{}", channel.get());
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO message_outbox
-                 (target, content, bot, source, reason_code, session_key, status)
-                 VALUES (?1, 'c', 'notify', 'system', 'bg_trigger.auto_turn', ?2, ?3)",
-                libsql_rusqlite::params![target.as_str(), session_key.as_str(), status],
-            )
-            .unwrap();
-        }
-
-        let min =
-            super::reconcile_failed_bg_trigger_enqueues_for_channel(None, Some(&db), channel).await;
-        assert_eq!(
-            min,
-            Some(1_000),
-            "smallest failed offset must be returned so watermark rollback lands there"
-        );
-
-        // Failed rows deleted; pending row still present.
-        let (failed_left, pending_left): (i64, i64) = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
-                 FROM message_outbox WHERE target = ?1",
-                [format!("channel:{}", channel.get()).as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(failed_left, 0, "reconciled rows must be deleted");
-        assert_eq!(pending_left, 1, "pending rows must be preserved");
-    }
-
-    /// #897 P1 #2: when there are no failed rows the reconciler returns
-    /// `None` (no rollback needed) without side effects.
+    /// #897 P1 #2: without a Postgres outbox, the reconciler returns
+    /// `None` and leaves direct-send fallback decisions to the caller.
     #[tokio::test]
     async fn reconcile_returns_none_when_no_failed_rows() {
         let db = crate::db::test_db();

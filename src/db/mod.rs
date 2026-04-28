@@ -4,33 +4,136 @@ pub mod cancel_tombstones;
 pub mod kanban;
 pub mod memento_feedback_stats;
 pub mod postgres;
+#[cfg(test)]
 pub(crate) mod schema;
 pub(crate) mod session_agent_resolution;
 pub mod session_transcripts;
 pub mod table_metadata;
 pub mod turns;
 
-use anyhow::Result;
-use libsql_rusqlite::Connection; // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-use std::path::Path;
+#[cfg(test)]
+use rusqlite::Connection;
+#[cfg(not(test))]
+use std::sync::Arc;
+#[cfg(test)]
 use std::sync::{Arc, Mutex, MutexGuard};
-
-use crate::config::Config;
 
 /// Thread-safe SQLite handle keyed by DB path.
 /// A lightweight mutex serializes write openings while readers and separate
 /// writers reopen their own connections against the same WAL-backed store.
-pub struct DbPool {
+#[cfg(test)]
+pub struct TestSqliteDb {
     path: std::path::PathBuf,
     write_gate: Mutex<()>,
 }
 
+#[cfg(not(test))]
+#[derive(Debug)]
+pub enum LegacySqliteDisabled {}
+
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+pub struct LegacySqliteError;
+
+#[cfg(not(test))]
+impl std::fmt::Display for LegacySqliteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "legacy sqlite backend is unavailable in production")
+    }
+}
+
+#[cfg(not(test))]
+impl std::error::Error for LegacySqliteError {}
+
+#[cfg(not(test))]
+pub struct LegacySqliteConnection;
+
+#[cfg(not(test))]
+pub struct LegacySqliteStatement;
+
+#[cfg(not(test))]
+pub struct LegacySqliteRows;
+
+#[cfg(not(test))]
+pub struct LegacySqliteRow;
+
+#[cfg(not(test))]
+impl LegacySqliteDisabled {
+    pub fn lock(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn read_conn(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn separate_conn(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+}
+
+#[cfg(not(test))]
+impl LegacySqliteConnection {
+    pub fn execute<P>(&self, _sql: &str, _params: P) -> Result<usize, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn execute_batch(&self, _sql: &str) -> Result<(), LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn prepare(&self, _sql: &str) -> Result<LegacySqliteStatement, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn query_row<P, F, T>(&self, _sql: &str, _params: P, _f: F) -> Result<T, LegacySqliteError>
+    where
+        F: FnOnce(&LegacySqliteRow) -> Result<T, LegacySqliteError>,
+    {
+        Err(LegacySqliteError)
+    }
+}
+
+#[cfg(not(test))]
+impl LegacySqliteStatement {
+    pub fn query<P>(&mut self, _params: P) -> Result<LegacySqliteRows, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+
+    pub fn query_map<P, F, T>(
+        &mut self,
+        _params: P,
+        _f: F,
+    ) -> Result<std::vec::IntoIter<Result<T, LegacySqliteError>>, LegacySqliteError>
+    where
+        F: FnMut(&LegacySqliteRow) -> Result<T, LegacySqliteError>,
+    {
+        Err(LegacySqliteError)
+    }
+}
+
+#[cfg(not(test))]
+impl LegacySqliteRows {
+    pub fn next(&mut self) -> Result<Option<LegacySqliteRow>, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+}
+
+#[cfg(not(test))]
+impl LegacySqliteRow {
+    pub fn get<I, T: Default>(&self, _idx: I) -> Result<T, LegacySqliteError> {
+        Err(LegacySqliteError)
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub enum DbLockError {
     Poisoned,
-    Open(libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    Open(rusqlite::Error),
 }
 
+#[cfg(test)]
 impl std::fmt::Display for DbLockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -40,16 +143,19 @@ impl std::fmt::Display for DbLockError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for DbLockError {}
 
 /// Fresh SQLite write connection guarded by the per-DB write gate.
 /// The connection field is declared before the gate so the connection is
 /// dropped before the mutex unlocks, keeping write serialization intact.
+#[cfg(test)]
 pub struct DbWriteGuard<'a> {
     conn: Connection,
     _write_gate: MutexGuard<'a, ()>,
 }
 
+#[cfg(test)]
 impl std::ops::Deref for DbWriteGuard<'_> {
     type Target = Connection;
 
@@ -58,13 +164,15 @@ impl std::ops::Deref for DbWriteGuard<'_> {
     }
 }
 
+#[cfg(test)]
 impl std::ops::DerefMut for DbWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.conn
     }
 }
 
-impl DbPool {
+#[cfg(test)]
+impl TestSqliteDb {
     /// Acquire the write connection (exclusive).
     /// Backward compatible with existing `db.lock()` calls.
     pub fn lock(&self) -> std::result::Result<DbWriteGuard<'_>, DbLockError> {
@@ -78,43 +186,40 @@ impl DbPool {
 
     /// Open a new read-only connection for non-blocking reads.
     /// SQLite WAL mode allows concurrent readers without blocking writers.
-    pub fn read_conn(&self) -> std::result::Result<Connection, libsql_rusqlite::Error> {
-        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    pub fn read_conn(&self) -> std::result::Result<Connection, rusqlite::Error> {
         open_read_only_connection(&self.path)
     }
 
     /// Open a new read-write connection that bypasses the Mutex.
     /// Used by the policy engine (QuickJS) to avoid blocking request handlers.
     /// SQLite WAL serializes concurrent writers via busy_timeout.
-    pub fn separate_conn(&self) -> std::result::Result<Connection, libsql_rusqlite::Error> {
-        // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    pub fn separate_conn(&self) -> std::result::Result<Connection, rusqlite::Error> {
         open_write_connection(&self.path)
     }
 }
 
+#[cfg(test)]
 pub(crate) fn open_read_only_connection(
-    path: &Path,
-) -> std::result::Result<Connection, libsql_rusqlite::Error> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    path: &std::path::Path,
+) -> std::result::Result<Connection, rusqlite::Error> {
     let conn = Connection::open_with_flags(
         path,
-        libsql_rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            | libsql_rusqlite::OpenFlags::SQLITE_OPEN_URI, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )?;
     conn.execute_batch("PRAGMA query_only=ON; PRAGMA busy_timeout=5000;")?;
     Ok(conn)
 }
 
+#[cfg(test)]
 pub(crate) fn open_write_connection(
-    path: &Path,
-) -> std::result::Result<Connection, libsql_rusqlite::Error> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+    path: &std::path::Path,
+) -> std::result::Result<Connection, rusqlite::Error> {
     let conn = Connection::open_with_flags(
         path,
-        libsql_rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            | libsql_rusqlite::OpenFlags::SQLITE_OPEN_CREATE // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            | libsql_rusqlite::OpenFlags::SQLITE_OPEN_URI // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-            | libsql_rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX, // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
@@ -122,7 +227,11 @@ pub(crate) fn open_write_connection(
     Ok(conn)
 }
 
-pub type Db = Arc<DbPool>;
+#[cfg(test)]
+pub type Db = Arc<TestSqliteDb>;
+
+#[cfg(not(test))]
+pub type Db = Arc<LegacySqliteDisabled>;
 
 /// Create an in-memory Db for tests.
 /// The wrapped Db uses a unique file-backed SQLite path so `read_conn()` and
@@ -136,7 +245,7 @@ pub fn test_db() -> Db {
 /// Wrap a raw Connection into a Db (for tests and migration).
 /// The source connection is checkpointed into a unique temp SQLite file so
 /// subsequent connections can reopen the same store without a resident anchor.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn wrap_conn(conn: Connection) -> Db {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -152,32 +261,10 @@ pub fn wrap_conn(conn: Connection) -> Db {
     schema::migrate(&reopened).expect("failed to migrate wrapped sqlite db");
     drop(reopened);
 
-    Arc::new(DbPool {
+    Arc::new(TestSqliteDb {
         path,
         write_gate: Mutex::new(()),
     })
-}
-
-pub fn init(config: &Config) -> Result<Db> {
-    let db_path = config.data.dir.join(&config.data.db_name);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let conn = Connection::open(&db_path)?;
-
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-    )?;
-    schema::migrate(&conn)?;
-
-    tracing::info!(
-        "Legacy SQLite compatibility DB initialized at {}",
-        db_path.display()
-    );
-    Ok(Arc::new(DbPool {
-        path: db_path,
-        write_gate: Mutex::new(()),
-    }))
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ use crate::services::discord::runtime_store::atomic_write;
 use crate::services::provider::ProviderKind;
 
 const CODEX_SYNC_STATE_FILE: &str = "codex-mcp-sync-state.json";
+const OPENCODE_SYNC_STATE_FILE: &str = "opencode-mcp-sync-state.json";
 const MEMENTO_SERVER_NAME: &str = "memento";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,12 @@ struct ResolvedMcpServer {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CodexMcpSyncState {
+    #[serde(default)]
+    managed_servers: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OpenCodeMcpSyncState {
     #[serde(default)]
     managed_servers: Vec<String>,
 }
@@ -41,6 +48,10 @@ pub(crate) fn provider_has_mcp_server(provider: &ProviderKind, server_name: &str
         }
         ProviderKind::Codex => {
             runtime_config_contains_server(normalized) || codex_config_contains_server(normalized)
+        }
+        ProviderKind::OpenCode => {
+            runtime_config_contains_server(normalized)
+                || opencode_config_contains_server(normalized)
         }
         _ => false,
     }
@@ -110,6 +121,62 @@ pub(crate) fn sync_codex_mcp_servers(config: &Config) -> Result<(), String> {
     };
     let serialized = serde_json::to_string_pretty(&next_state)
         .map_err(|error| format!("Failed to serialize Codex MCP sync state: {error}"))?;
+    atomic_write(&sync_state_path, &serialized)?;
+    Ok(())
+}
+
+pub(crate) fn sync_opencode_mcp_servers(config: &Config) -> Result<(), String> {
+    let runtime_root = crate::config::runtime_root()
+        .ok_or_else(|| "AGENTDESK_ROOT_DIR is unavailable".to_string())?;
+    let sync_state_path =
+        crate::runtime_layout::config_dir(&runtime_root).join(OPENCODE_SYNC_STATE_FILE);
+    let desired = resolved_mcp_servers(config);
+    let previous = load_opencode_sync_state_from_path(&sync_state_path);
+    let desired_names = desired.keys().cloned().collect::<BTreeSet<_>>();
+    let previous_names = previous
+        .managed_servers
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+    if desired_names.is_empty() && previous_names.is_empty() {
+        return Ok(());
+    }
+
+    let Some(config_path) = opencode_config_path() else {
+        return Err("OpenCode config path unavailable".to_string());
+    };
+    let mut root = load_opencode_config_value(&config_path)?;
+    let root_object = root.as_object_mut().ok_or_else(|| {
+        format!(
+            "OpenCode config must be a JSON object: {}",
+            config_path.display()
+        )
+    })?;
+
+    let mcp_value = root_object
+        .entry("mcp".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let mcp_servers = mcp_value
+        .as_object_mut()
+        .ok_or_else(|| "OpenCode config field `mcp` must be a JSON object".to_string())?;
+
+    for removed in previous_names.difference(&desired_names) {
+        mcp_servers.remove(removed);
+    }
+
+    for server in desired.values() {
+        mcp_servers.insert(server.name.clone(), opencode_mcp_entry(server));
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)
+        .map_err(|error| format!("Failed to serialize OpenCode config: {error}"))?;
+    atomic_write(&config_path, &serialized)?;
+
+    let next_state = OpenCodeMcpSyncState {
+        managed_servers: desired_names.into_iter().collect(),
+    };
+    let serialized = serde_json::to_string_pretty(&next_state)
+        .map_err(|error| format!("Failed to serialize OpenCode MCP sync state: {error}"))?;
     atomic_write(&sync_state_path, &serialized)?;
     Ok(())
 }
@@ -230,6 +297,13 @@ fn load_codex_sync_state_from_path(path: &Path) -> CodexMcpSyncState {
         .unwrap_or_default()
 }
 
+fn load_opencode_sync_state_from_path(path: &Path) -> OpenCodeMcpSyncState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<OpenCodeMcpSyncState>(&raw).ok())
+        .unwrap_or_default()
+}
+
 fn claude_global_mcp_config_contains_server(server_name: &str) -> bool {
     let Some(path) = current_home_dir().map(|home| home.join(".claude").join(".mcp.json")) else {
         return false;
@@ -256,6 +330,74 @@ fn codex_config_contains_server(server_name: &str) -> bool {
     raw.lines()
         .filter_map(parse_codex_mcp_section_name)
         .any(|candidate| candidate == server_name)
+}
+
+fn opencode_config_path() -> Option<PathBuf> {
+    current_home_dir().map(|home| home.join(".config").join("opencode").join("opencode.json"))
+}
+
+fn load_opencode_config_value(path: &Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Value::Object(Map::new())),
+        Ok(raw) => serde_json::from_str::<Value>(&raw).map_err(|error| {
+            format!(
+                "Failed to parse OpenCode config {}: {error}",
+                path.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
+        Err(error) => Err(format!(
+            "Failed to read OpenCode config {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn opencode_mcp_entry(server: &ResolvedMcpServer) -> Value {
+    let mut entry = Map::new();
+    entry.insert("type".to_string(), Value::String("remote".to_string()));
+    entry.insert("url".to_string(), Value::String(server.url.clone()));
+    entry.insert("enabled".to_string(), Value::Bool(true));
+    if let Some(token_env_var) = server
+        .bearer_token_env_var
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut headers = Map::new();
+        headers.insert(
+            "Authorization".to_string(),
+            Value::String(format!("Bearer {{env:{token_env_var}}}")),
+        );
+        entry.insert("headers".to_string(), Value::Object(headers));
+    }
+    Value::Object(entry)
+}
+
+fn opencode_config_contains_server(server_name: &str) -> bool {
+    let Some(path) = opencode_config_path() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    ["mcp", "mcpServers"].iter().any(|field| {
+        value
+            .get(field)
+            .and_then(Value::as_object)
+            .and_then(|servers| servers.get(server_name))
+            .is_some_and(opencode_mcp_entry_enabled)
+    })
+}
+
+fn opencode_mcp_entry_enabled(value: &Value) -> bool {
+    value
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn parse_codex_mcp_section_name(line: &str) -> Option<String> {
@@ -310,6 +452,7 @@ fn run_codex_command_vec(codex_bin: &str, args: &[String]) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::fs;
     use std::path::Path;
 
@@ -392,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_has_memento_mcp_reflects_runtime_config_for_claude_and_codex() {
+    fn provider_has_memento_mcp_reflects_runtime_config_for_claude_codex_and_opencode() {
         with_test_env(|temp_root| {
             let runtime_root = temp_root.join(".adk").join("release");
             let config_path = crate::runtime_layout::config_file_path(&runtime_root);
@@ -408,6 +551,7 @@ mod tests {
 
             assert!(provider_has_memento_mcp(&ProviderKind::Claude));
             assert!(provider_has_memento_mcp(&ProviderKind::Codex));
+            assert!(provider_has_memento_mcp(&ProviderKind::OpenCode));
         });
     }
 
@@ -442,6 +586,25 @@ mod tests {
             crate::config::save_to_path(&config_path, &config).unwrap();
 
             assert!(provider_has_mcp_server(&ProviderKind::Codex, "manual"));
+        });
+    }
+
+    #[test]
+    fn provider_has_mcp_server_detects_manual_opencode_config() {
+        with_test_env(|temp_root| {
+            let opencode_dir = temp_root.join(".config").join("opencode");
+            fs::create_dir_all(&opencode_dir).unwrap();
+            fs::write(
+                opencode_dir.join("opencode.json"),
+                r#"{"mcp":{"memento":{"type":"remote","url":"http://localhost:57332/mcp","enabled":true},"disabled":{"enabled":false}}}"#,
+            )
+            .unwrap();
+
+            assert!(provider_has_memento_mcp(&ProviderKind::OpenCode));
+            assert!(!provider_has_mcp_server(
+                &ProviderKind::OpenCode,
+                "disabled"
+            ));
         });
     }
 
@@ -627,6 +790,82 @@ exit 1
 
             assert!(provider_has_memento_mcp(&ProviderKind::Codex));
             assert!(codex_config_contains_server("manual"));
+        });
+    }
+
+    #[test]
+    fn sync_opencode_mcp_servers_updates_managed_servers_without_touching_others() {
+        with_test_env(|temp_root| {
+            let runtime_root = temp_root.join(".adk").join("release");
+            let opencode_dir = temp_root.join(".config").join("opencode");
+            fs::create_dir_all(&opencode_dir).unwrap();
+            fs::write(
+                opencode_dir.join("opencode.json"),
+                r#"{"$schema":"https://opencode.ai/config.json","mcp":{"manual":{"type":"local","command":["manual"]},"old":{"type":"remote","url":"http://old.local/mcp"}},"provider":{"custom":{}}}"#,
+            )
+            .unwrap();
+            let sync_state_path =
+                crate::runtime_layout::config_dir(&runtime_root).join(OPENCODE_SYNC_STATE_FILE);
+            fs::write(
+                &sync_state_path,
+                serde_json::to_string(&OpenCodeMcpSyncState {
+                    managed_servers: vec!["old".to_string()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "memento".to_string(),
+                McpServerConfig {
+                    url: "http://localhost:57332/mcp".to_string(),
+                    auth: Some(crate::config::McpServerAuthConfig {
+                        auth_type: McpServerAuthType::Bearer,
+                        token_env_var: Some("MEMENTO_ACCESS_KEY".to_string()),
+                    }),
+                },
+            );
+
+            sync_opencode_mcp_servers(&config).unwrap();
+
+            let rendered = fs::read_to_string(opencode_dir.join("opencode.json")).unwrap();
+            let value: Value = serde_json::from_str(&rendered).unwrap();
+            assert!(value["mcp"]["manual"].is_object());
+            assert_eq!(value["mcp"]["memento"]["type"], json!("remote"));
+            assert_eq!(
+                value["mcp"]["memento"]["headers"]["Authorization"],
+                json!("Bearer {env:MEMENTO_ACCESS_KEY}")
+            );
+            assert!(value["provider"]["custom"].is_object());
+            assert!(value["mcp"]["old"].is_null());
+
+            let state = load_opencode_sync_state_from_path(&sync_state_path);
+            assert_eq!(state.managed_servers, vec!["memento".to_string()]);
+            assert!(provider_has_memento_mcp(&ProviderKind::OpenCode));
+        });
+    }
+
+    #[test]
+    fn sync_opencode_mcp_servers_rejects_malformed_config_without_overwrite() {
+        with_test_env(|temp_root| {
+            let opencode_dir = temp_root.join(".config").join("opencode");
+            fs::create_dir_all(&opencode_dir).unwrap();
+            let config_path = opencode_dir.join("opencode.json");
+            fs::write(&config_path, "{not-json").unwrap();
+
+            let mut config = Config::default();
+            config.mcp_servers.insert(
+                "memento".to_string(),
+                McpServerConfig {
+                    url: "http://localhost:57332/mcp".to_string(),
+                    auth: None,
+                },
+            );
+
+            let err = sync_opencode_mcp_servers(&config).unwrap_err();
+            assert!(err.contains("Failed to parse OpenCode config"));
+            assert_eq!(fs::read_to_string(config_path).unwrap(), "{not-json");
         });
     }
 }

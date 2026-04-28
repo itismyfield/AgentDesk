@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 
@@ -10,7 +9,7 @@ use sqlx::PgPool;
 
 pub(super) fn register_kv_ops<'js>(
     ctx: &Ctx<'js>,
-    _db: Option<Db>,
+    db: Option<crate::db::Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -76,9 +75,14 @@ pub(super) fn register_kv_ops<'js>(
     // Replaces direct SQL INSERT/UPDATE on card_review_state from JS policies.
     // All review-state mutations go through this single entrypoint.
     {
+        let db_rs = db.clone();
         let pg_rs = pg_pool.clone();
         let sync_raw = Function::new(ctx.clone(), move |json_str: String| -> String {
-            crate::engine::ops::review_state_sync_with_backends(None, pg_rs.as_ref(), &json_str)
+            crate::engine::ops::review_state_sync_with_backends(
+                db_rs.as_ref(),
+                pg_rs.as_ref(),
+                &json_str,
+            )
         })?;
 
         let _: rquickjs::Value = ctx.eval(

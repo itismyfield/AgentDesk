@@ -6,29 +6,17 @@ use sqlx::PgPool;
 // agentdesk.message.queue(target, content, bot?, source?)
 // Enqueues a message for async delivery — avoids self-referential HTTP deadlock (#120)
 
-pub(super) fn register_message_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_message_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let msg_obj = Object::new(ctx.clone())?;
 
     // __queue_raw(target, content, bot, source) → json_string
-    let db_clone = db.clone();
     let pg_clone = pg_pool.clone();
     let queue_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(
             move |target: String, content: String, bot: String, source: String| -> String {
-                message_queue_raw(
-                    db_clone.as_ref(),
-                    pg_clone.as_ref(),
-                    &target,
-                    &content,
-                    &bot,
-                    &source,
-                )
+                message_queue_raw(pg_clone.as_ref(), &target, &content, &bot, &source)
             },
         ),
     )?;
@@ -92,14 +80,13 @@ pub(crate) fn queue_message(
 }
 
 fn message_queue_raw(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
     bot: &str,
     source: &str,
 ) -> String {
-    match queue_message(db, pg_pool, target, content, bot, source) {
+    match queue_message(None, pg_pool, target, content, bot, source) {
         Ok(id) => {
             tracing::info!(
                 target,

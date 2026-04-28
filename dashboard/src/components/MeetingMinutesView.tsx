@@ -53,7 +53,7 @@ import {
 
 const STORAGE_KEY = STORAGE_KEYS.meetingChannelId;
 const FIXED_PARTICIPANTS_STORAGE_KEY = STORAGE_KEYS.meetingFixedParticipants;
-const MEETING_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
+const MEETING_PROVIDERS = ["claude", "codex", "gemini", "opencode", "qwen"] as const;
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
   codex: "Codex",

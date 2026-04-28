@@ -7,80 +7,20 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::db::agents::{AgentChannelBindings, load_all_agent_channel_bindings_pg};
+use crate::db::agents::load_all_agent_channel_bindings_pg;
 
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/discord/bindings
 /// (Legacy alias: /api/discord-bindings — kept for backward-compat, deprecated via #1065.)
 ///
-/// Reads agent channel bindings, preferring Postgres when available
-/// (codex P2 round 2 on #1306). Falls back to the legacy `Db` for older
-/// deployments still on SQLite. #1238 will retire the SQLite branch.
+/// Reads agent channel bindings from Postgres.
 pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool_ref() {
         return list_bindings_pg(pool).await;
     }
-    let Some(legacy_db) = state.legacy_db().or_else(|| state.engine.legacy_db()) else {
-        return (StatusCode::OK, Json(json!({"bindings": []})));
-    };
-    let conn = match legacy_db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
 
-    let mut stmt = match conn.prepare(
-        "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-         FROM agents
-         WHERE discord_channel_id IS NOT NULL
-            OR discord_channel_alt IS NOT NULL
-            OR discord_channel_cc IS NOT NULL
-            OR discord_channel_cdx IS NOT NULL
-         ORDER BY id",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("prepare: {e}")})),
-            );
-        }
-    };
-
-    let rows = stmt
-        .query_map([], |row| {
-            let bindings = AgentChannelBindings {
-                provider: row.get(1)?,
-                discord_channel_id: row.get(2)?,
-                discord_channel_alt: row.get(3)?,
-                discord_channel_cc: row.get(4)?,
-                discord_channel_cdx: row.get(5)?,
-            };
-            Ok(json!({
-                "agentId": row.get::<_, String>(0)?,
-                "channelId": bindings.primary_channel(),
-                "counterModelChannelId": bindings.counter_model_channel(),
-                "provider": bindings.provider,
-                "discord_channel_id": bindings.discord_channel_id,
-                "discord_channel_alt": bindings.discord_channel_alt,
-                "discord_channel_cc": bindings.discord_channel_cc,
-                "discord_channel_cdx": bindings.discord_channel_cdx,
-                "source": "config",
-            }))
-        })
-        .ok();
-
-    let bindings: Vec<serde_json::Value> = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    };
-
-    (StatusCode::OK, Json(json!({"bindings": bindings})))
+    (StatusCode::OK, Json(json!({"bindings": []})))
 }
 
 async fn list_bindings_pg(pool: &sqlx::PgPool) -> (StatusCode, Json<serde_json::Value>) {

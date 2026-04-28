@@ -19,7 +19,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────
 
-const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
+const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "opencode", "qwen"] as const;
 
 function providerSuffix(provider: CommandBotEntry["provider"]) {
   switch (provider) {
@@ -29,6 +29,8 @@ function providerSuffix(provider: CommandBotEntry["provider"]) {
       return "cdx";
     case "gemini":
       return "gm";
+    case "opencode":
+      return "oc";
     case "qwen":
       return "qw";
   }
@@ -42,6 +44,8 @@ function providerLabel(provider: CommandBotEntry["provider"]) {
       return "Codex";
     case "gemini":
       return "Gemini";
+    case "opencode":
+      return "OpenCode";
     case "qwen":
       return "Qwen";
   }
@@ -55,6 +59,8 @@ function providerCliName(provider: CommandBotEntry["provider"]) {
       return "Codex CLI";
     case "gemini":
       return "Gemini CLI";
+    case "opencode":
+      return "OpenCode";
     case "qwen":
       return "Qwen Code";
   }
@@ -68,6 +74,8 @@ function providerInstallHint(provider: CommandBotEntry["provider"], isKo: boolea
       return isKo ? "설치: npm install -g @openai/codex" : "Install: npm install -g @openai/codex";
     case "gemini":
       return isKo ? "설치: npm install -g @google/gemini-cli" : "Install: npm install -g @google/gemini-cli";
+    case "opencode":
+      return isKo ? "설치: npm install -g opencode-ai" : "Install: npm install -g opencode-ai";
     case "qwen":
       return isKo ? "설치: npm install -g @qwen-code/qwen-code@latest" : "Install: npm install -g @qwen-code/qwen-code@latest";
   }
@@ -81,6 +89,8 @@ function providerLoginHint(provider: CommandBotEntry["provider"], isKo: boolean)
       return isKo ? "로그인: codex login" : "Login: codex login";
     case "gemini":
       return isKo ? "로그인: gemini" : "Login: gemini";
+    case "opencode":
+      return isKo ? "로그인: opencode 실행 후 provider 인증 확인" : "Login: run opencode, then verify provider auth";
     case "qwen":
       return isKo ? "로그인: qwen 실행 후 /auth" : "Login: run qwen, then /auth";
   }
@@ -90,6 +100,8 @@ function providerLoginCommand(provider: CommandBotEntry["provider"]) {
   switch (provider) {
     case "gemini":
       return "gemini";
+    case "opencode":
+      return "opencode";
     case "qwen":
       return "qwen -> /auth";
     default:
@@ -1500,8 +1512,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("실행 봇", "Command Bot")}
               </span>
               <Tip text={tr(
-                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, Gemini CLI, 또는 Qwen Code를 실행하여\n에이전트가 작업합니다.",
-                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, Gemini CLI, or Qwen Code.",
+                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, Gemini CLI, OpenCode, 또는 Qwen Code를 실행하여\n에이전트가 작업합니다.",
+                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, Gemini CLI, OpenCode, or Qwen Code.",
               )} />
             </div>
 

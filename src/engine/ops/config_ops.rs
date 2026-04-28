@@ -1,12 +1,13 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use sqlx::PgPool;
 
 // ── Config ops ───────────────────────────────────────────────────
 
 pub(super) fn register_config_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    db: Option<crate::db::Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
@@ -23,22 +24,11 @@ pub(super) fn register_config_ops<'js>(
                 if let Some(pool) = pg_c.as_ref() {
                     return config_get_raw_pg(pool, &key);
                 }
-                if let Some(db_c) = db_c.as_ref() {
-                    let conn = match db_c.separate_conn() {
-                        Ok(c) => c,
-                        Err(_) => return "null".to_string(),
-                    };
-                    return match conn.query_row(
-                        "SELECT value FROM kv_meta WHERE key = ?1",
-                        [&key],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        Ok(val) => {
-                            serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())
-                        }
-                        Err(_) => "null".to_string(),
-                    };
+                #[cfg(test)]
+                if let Some(db) = db_c.as_ref() {
+                    return config_get_raw_sqlite(db, &key);
                 }
+                let _ = &db_c;
                 "null".to_string()
             }),
         )?,
@@ -59,6 +49,25 @@ pub(super) fn register_config_ops<'js>(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+fn config_get_raw_sqlite(db: &crate::db::Db, key: &str) -> String {
+    let value = db
+        .read_conn()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten();
+    value
+        .and_then(|value| serde_json::to_string(&value).ok())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn config_get_raw_pg(pool: &PgPool, key: &str) -> String {

@@ -18,10 +18,16 @@ use super::{
     AppState, skill_usage_analytics::collect_skill_usage_pg, skills_api::sync_skills_from_disk_pg,
 };
 
-const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[(
-    "qwen",
-    "No Qwen rate-limit telemetry source is implemented yet.",
-)];
+const UNSUPPORTED_RATE_LIMIT_PROVIDERS: &[(&str, &str)] = &[
+    (
+        "opencode",
+        "No OpenCode rate-limit telemetry source is implemented yet.",
+    ),
+    (
+        "qwen",
+        "No Qwen rate-limit telemetry source is implemented yet.",
+    ),
+];
 const UNSUPPORTED_RATE_LIMIT_USAGE_LOOKBACK_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 // Issue #1243: small in-process TTL cache shared across the read-mostly
@@ -1354,7 +1360,8 @@ pub(super) async fn build_rate_limit_provider_payloads_pg(
             "claude" => 0,
             "codex" => 1,
             "gemini" => 2,
-            "qwen" => 3,
+            "opencode" => 3,
+            "qwen" => 4,
             _ => 9,
         }
     });
@@ -1752,6 +1759,35 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0]["provider"], json!("qwen"));
+        assert_eq!(providers[0]["unsupported"], json!(true));
+        assert_eq!(providers[0]["buckets"], json!([]));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn build_rate_limit_provider_payloads_pg_shows_recent_unsupported_opencode_only_when_used()
+     {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
+             VALUES ($1, $2, 'completed', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
+        )
+        .bind("opencode-session-1")
+        .bind("opencode")
+        .bind(1_700_000_000_i64)
+        .bind(1_700_000_050_i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let providers = build_rate_limit_provider_payloads_pg(&pool, 1_700_000_100).await;
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], json!("opencode"));
         assert_eq!(providers[0]["unsupported"], json!(true));
         assert_eq!(providers[0]["buckets"], json!([]));
 

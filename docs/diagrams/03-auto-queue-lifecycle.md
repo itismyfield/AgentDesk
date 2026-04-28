@@ -132,7 +132,7 @@ partition "For each dispatchable group" {
   else (no)
   endif
 
-  :allocate_slot_for_group_agent()
+  :allocate_slot_for_group_agent_pg()
   auto_queue_slots table;
 
   if (Free slot available?) then (yes)

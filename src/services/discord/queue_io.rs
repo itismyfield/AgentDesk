@@ -289,6 +289,9 @@ mod tests {
     }
 
     /// save_pending_queues + load_pending_queues round-trip with token_hash namespacing.
+    /// Loading is intentionally non-destructive: startup restore may still reject
+    /// an item after parsing it, so disk must remain the fallback until the
+    /// mailbox later persists a changed queue.
     #[test]
     fn save_pending_queues_roundtrip() {
         let _lock = lock_test_env();
@@ -319,11 +322,13 @@ mod tests {
             .join("discord_pending_queue")
             .join("claude")
             .join(token_hash);
-        let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-        assert!(
-            remaining.is_empty(),
-            "load must delete queue files after reading"
-        );
+        assert!(dir.join("1.json").exists());
+        assert!(dir.join("2.json").exists());
+
+        let (restored_again, _restored_overrides_again) =
+            load_pending_queues(&provider, token_hash);
+        assert_eq!(restored_again.get(&ch1).map(|v| v.len()), Some(1));
+        assert_eq!(restored_again.get(&ch2).map(|v| v.len()), Some(2));
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }

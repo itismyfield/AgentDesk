@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use clap::Args;
-use libsql_rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 
@@ -1854,7 +1854,7 @@ fn load_audit_logs(conn: &Connection) -> Result<Vec<AuditLogRow>, String> {
             })
         })
         .map_err(|e| format!("query audit_logs export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect audit_logs export: {e}"))
 }
 
@@ -1897,7 +1897,7 @@ fn load_session_transcripts(conn: &Connection) -> Result<Vec<SessionTranscriptRo
             })
         })
         .map_err(|e| format!("query session_transcripts export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect session_transcripts export: {e}"))
 }
 
@@ -1924,7 +1924,7 @@ fn load_all_offices(conn: &Connection) -> Result<Vec<OfficeRow>, String> {
             })
         })
         .map_err(|e| format!("query offices export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect offices export: {e}"))
 }
 
@@ -1951,7 +1951,7 @@ fn load_all_departments(conn: &Connection) -> Result<Vec<DepartmentRow>, String>
             })
         })
         .map_err(|e| format!("query departments export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect departments export: {e}"))
 }
 
@@ -1973,7 +1973,7 @@ fn load_all_office_agents(conn: &Connection) -> Result<Vec<OfficeAgentRow>, Stri
             })
         })
         .map_err(|e| format!("query office_agents export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect office_agents export: {e}"))
 }
 
@@ -1997,7 +1997,7 @@ fn load_all_github_repos(conn: &Connection) -> Result<Vec<GithubRepoRow>, String
             })
         })
         .map_err(|e| format!("query github_repos export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect github_repos export: {e}"))
 }
 
@@ -2073,7 +2073,7 @@ fn load_all_agents(conn: &Connection) -> Result<Vec<AgentRow>, String> {
             })
         })
         .map_err(|e| format!("query agents export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect agents export: {e}"))
 }
 
@@ -2154,7 +2154,7 @@ fn load_all_kanban_cards(conn: &Connection) -> Result<Vec<KanbanCardRow>, String
             })
         })
         .map_err(|e| format!("query kanban_cards export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect kanban_cards export: {e}"))
 }
 
@@ -2179,7 +2179,7 @@ fn load_all_kanban_audit_logs(conn: &Connection) -> Result<Vec<KanbanAuditLogRow
             })
         })
         .map_err(|e| format!("query kanban_audit_logs export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect kanban_audit_logs export: {e}"))
 }
 
@@ -2236,7 +2236,7 @@ fn load_all_card_retrospectives(conn: &Connection) -> Result<Vec<CardRetrospecti
             })
         })
         .map_err(|e| format!("query card_retrospectives export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect card_retrospectives export: {e}"))
 }
 
@@ -2277,7 +2277,7 @@ fn load_all_card_review_state(conn: &Connection) -> Result<Vec<CardReviewStateRo
             })
         })
         .map_err(|e| format!("query card_review_state export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect card_review_state export: {e}"))
 }
 
@@ -2322,7 +2322,7 @@ fn load_all_auto_queue_runs(conn: &Connection) -> Result<Vec<AutoQueueRunRow>, S
             })
         })
         .map_err(|e| format!("query auto_queue_runs export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_runs export: {e}"))
 }
 
@@ -2369,7 +2369,7 @@ fn load_all_auto_queue_entries(conn: &Connection) -> Result<Vec<AutoQueueEntryRo
             })
         })
         .map_err(|e| format!("query auto_queue_entries export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_entries export: {e}"))
 }
 
@@ -2395,7 +2395,7 @@ fn load_all_auto_queue_entry_transitions(
             })
         })
         .map_err(|e| format!("query auto_queue_entry_transitions export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_entry_transitions export: {e}"))
 }
 
@@ -2420,7 +2420,7 @@ fn load_all_auto_queue_entry_dispatch_history(
             })
         })
         .map_err(|e| format!("query auto_queue_entry_dispatch_history export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_entry_dispatch_history export: {e}"))
 }
 
@@ -2465,7 +2465,7 @@ fn load_all_auto_queue_phase_gates(
             })
         })
         .map_err(|e| format!("query auto_queue_phase_gates export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_phase_gates export: {e}"))
 }
 
@@ -2490,7 +2490,7 @@ fn load_all_auto_queue_slots(conn: &Connection) -> Result<Vec<AutoQueueSlotRow>,
             })
         })
         .map_err(|e| format!("query auto_queue_slots export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect auto_queue_slots export: {e}"))
 }
 
@@ -2539,7 +2539,7 @@ fn load_all_task_dispatches(conn: &Connection) -> Result<Vec<TaskDispatchRow>, S
             })
         })
         .map_err(|e| format!("query task_dispatches export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect task_dispatches export: {e}"))
 }
 
@@ -2574,7 +2574,7 @@ fn load_all_dispatch_events(conn: &Connection) -> Result<Vec<DispatchEventRow>, 
             })
         })
         .map_err(|e| format!("query dispatch_events export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect dispatch_events export: {e}"))
 }
 
@@ -2596,7 +2596,7 @@ fn load_all_dispatch_queue(conn: &Connection) -> Result<Vec<DispatchQueueRow>, S
             })
         })
         .map_err(|e| format!("query dispatch_queue export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect dispatch_queue export: {e}"))
 }
 
@@ -2620,7 +2620,7 @@ fn load_all_review_decisions(conn: &Connection) -> Result<Vec<ReviewDecisionRow>
             })
         })
         .map_err(|e| format!("query review_decisions export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect review_decisions export: {e}"))
 }
 
@@ -2649,7 +2649,7 @@ fn load_all_review_tuning_outcomes(
             })
         })
         .map_err(|e| format!("query review_tuning_outcomes export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect review_tuning_outcomes export: {e}"))
 }
 
@@ -2694,7 +2694,7 @@ fn load_all_sessions(conn: &Connection) -> Result<Vec<SessionRow>, String> {
             })
         })
         .map_err(|e| format!("query sessions export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect sessions export: {e}"))
 }
 
@@ -2751,7 +2751,7 @@ fn load_all_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>,
             })
         })
         .map_err(|e| format!("query dispatch_outbox export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect dispatch_outbox export: {e}"))
 }
 
@@ -2790,7 +2790,7 @@ fn load_all_session_termination_events(
             })
         })
         .map_err(|e| format!("query session_termination_events export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect session_termination_events export: {e}"))
 }
 
@@ -2841,7 +2841,7 @@ fn load_all_turns(conn: &Connection) -> Result<Vec<TurnRow>, String> {
             })
         })
         .map_err(|e| format!("query turns export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect turns export: {e}"))
 }
 
@@ -2886,15 +2886,15 @@ fn load_all_meetings(conn: &Connection) -> Result<Vec<MeetingRow>, String> {
             })
         })
         .map_err(|e| format!("query meetings export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect meetings export: {e}"))
 }
 
 fn sqlite_meeting_timestamp_to_pg_text(
-    row: &libsql_rusqlite::Row<'_>,
+    row: &rusqlite::Row<'_>,
     idx: usize,
 ) -> Option<String> {
-    use libsql_rusqlite::types::ValueRef;
+    use rusqlite::types::ValueRef;
 
     match row.get_ref(idx).ok()? {
         ValueRef::Null => None,
@@ -2946,7 +2946,7 @@ fn load_all_meeting_transcripts(conn: &Connection) -> Result<Vec<MeetingTranscri
             })
         })
         .map_err(|e| format!("query meeting_transcripts export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect meeting_transcripts export: {e}"))
 }
 
@@ -2972,7 +2972,7 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<MessageRow>, String> {
             })
         })
         .map_err(|e| format!("query messages export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect messages export: {e}"))
 }
 
@@ -3036,7 +3036,7 @@ fn load_all_message_outbox(conn: &Connection) -> Result<Vec<MessageOutboxRow>, S
             })
         })
         .map_err(|e| format!("query message_outbox export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect message_outbox export: {e}"))
 }
 
@@ -3063,7 +3063,7 @@ fn load_all_pending_dm_replies(conn: &Connection) -> Result<Vec<PendingDmReplyRo
             })
         })
         .map_err(|e| format!("query pending_dm_replies export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect pending_dm_replies export: {e}"))
 }
 
@@ -3108,7 +3108,7 @@ fn load_all_pipeline_stages(conn: &Connection) -> Result<Vec<PipelineStageRow>, 
             })
         })
         .map_err(|e| format!("query pipeline_stages export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect pipeline_stages export: {e}"))
 }
 
@@ -3151,7 +3151,7 @@ fn load_all_pr_tracking(conn: &Connection) -> Result<Vec<PrTrackingRow>, String>
             })
         })
         .map_err(|e| format!("query pr_tracking export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect pr_tracking export: {e}"))
 }
 
@@ -3175,7 +3175,7 @@ fn load_all_skills(conn: &Connection) -> Result<Vec<SkillRow>, String> {
             })
         })
         .map_err(|e| format!("query skills export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect skills export: {e}"))
 }
 
@@ -3198,7 +3198,7 @@ fn load_all_skill_usage(conn: &Connection) -> Result<Vec<SkillUsageRow>, String>
             })
         })
         .map_err(|e| format!("query skill_usage export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect skill_usage export: {e}"))
 }
 
@@ -3224,7 +3224,7 @@ fn load_all_runtime_decisions(conn: &Connection) -> Result<Vec<RuntimeDecisionRo
             })
         })
         .map_err(|e| format!("query runtime_decisions export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect runtime_decisions export: {e}"))
 }
 
@@ -3245,7 +3245,7 @@ fn load_all_kv_meta(conn: &Connection) -> Result<Vec<KvMetaRow>, String> {
             })
         })
         .map_err(|e| format!("query kv_meta export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect kv_meta export: {e}"))
 }
 
@@ -3308,7 +3308,7 @@ fn load_all_api_friction_events(conn: &Connection) -> Result<Vec<ApiFrictionEven
             })
         })
         .map_err(|e| format!("query api_friction_events export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect api_friction_events export: {e}"))
 }
 
@@ -3353,7 +3353,7 @@ fn load_all_api_friction_issues(conn: &Connection) -> Result<Vec<ApiFrictionIssu
             })
         })
         .map_err(|e| format!("query api_friction_issues export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect api_friction_issues export: {e}"))
 }
 
@@ -3392,7 +3392,7 @@ fn load_all_memento_feedback_turn_stats(
             })
         })
         .map_err(|e| format!("query memento_feedback_turn_stats export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect memento_feedback_turn_stats export: {e}"))
 }
 
@@ -3413,7 +3413,7 @@ fn load_all_rate_limit_cache(conn: &Connection) -> Result<Vec<RateLimitCacheRow>
             })
         })
         .map_err(|e| format!("query rate_limit_cache export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect rate_limit_cache export: {e}"))
 }
 
@@ -3436,7 +3436,7 @@ fn load_all_deferred_hooks(conn: &Connection) -> Result<Vec<DeferredHookRow>, St
             })
         })
         .map_err(|e| format!("query deferred_hooks export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect deferred_hooks export: {e}"))
 }
 
@@ -3486,7 +3486,7 @@ fn load_active_task_dispatches(conn: &Connection) -> Result<Vec<TaskDispatchRow>
             })
         })
         .map_err(|e| format!("query task_dispatches export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect task_dispatches export: {e}"))
 }
 
@@ -3532,7 +3532,7 @@ fn load_live_sessions(conn: &Connection) -> Result<Vec<SessionRow>, String> {
             })
         })
         .map_err(|e| format!("query sessions export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect sessions export: {e}"))
 }
 
@@ -3590,7 +3590,7 @@ fn load_open_dispatch_outbox(conn: &Connection) -> Result<Vec<DispatchOutboxRow>
             })
         })
         .map_err(|e| format!("query dispatch_outbox export: {e}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
+    rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("collect dispatch_outbox export: {e}"))
 }
 
@@ -6007,7 +6007,7 @@ mod tests {
         load_sqlite_cutover_snapshot, orphan_skip_warnings, sqlite_cutover_counts,
         write_archive_files,
     };
-    use libsql_rusqlite::Connection;
+    use rusqlite::Connection;
     use sqlx::{PgPool, Row};
     use std::path::Path;
     use tempfile::TempDir;
@@ -7657,7 +7657,7 @@ mod tests {
             "INSERT INTO session_transcripts (
                 turn_id, session_key, channel_id, provider, user_message, assistant_message, events_json
              ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
-            libsql_rusqlite::params!["discord:null:1", "session-null", "123", "codex", "[]"],
+            rusqlite::params!["discord:null:1", "session-null", "123", "codex", "[]"],
         )
         .unwrap();
 

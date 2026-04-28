@@ -27,7 +27,7 @@ pub(crate) enum Commands {
         /// Discord channel ID for restart completion report
         #[arg(long)]
         report_channel_id: Option<u64>,
-        /// Provider for restart report (claude, codex, gemini, or qwen)
+        /// Provider for restart report (claude, codex, gemini, opencode, or qwen)
         #[arg(long, value_enum)]
         report_provider: Option<ReportProvider>,
         /// Existing message ID to edit for restart report
@@ -362,6 +362,8 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: MigrateAction,
     },
+    /// Provider CLI safe migration management
+    ProviderCli(super::provider_cli::ProviderCliArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -590,6 +592,8 @@ pub(crate) enum ReportProvider {
     Claude,
     Codex,
     Gemini,
+    #[value(name = "opencode", alias = "open-code")]
+    OpenCode,
     Qwen,
 }
 

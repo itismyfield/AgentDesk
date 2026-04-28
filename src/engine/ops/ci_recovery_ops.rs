@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
@@ -24,57 +23,47 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 pub(super) fn register_ci_recovery_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let obj = Object::new(ctx.clone())?;
 
     // setBlockedReason
-    let db_sbr = db.clone();
     let pg_sbr = pg_pool.clone();
     obj.set(
         "__setBlockedReasonRaw",
         Function::new(
             ctx.clone(),
             move |card_id: String, reason: Option<String>| -> String {
-                set_blocked_reason_raw(
-                    db_sbr.as_ref(),
-                    pg_sbr.as_ref(),
-                    &card_id,
-                    reason.as_deref(),
-                )
+                set_blocked_reason_raw(pg_sbr.as_ref(), &card_id, reason.as_deref())
             },
         )?,
     )?;
 
     // getCardStatus
-    let db_gcs = db.clone();
     let pg_gcs = pg_pool.clone();
     obj.set(
         "__getCardStatusRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
-            get_card_status_raw(db_gcs.as_ref(), pg_gcs.as_ref(), &card_id)
+            get_card_status_raw(pg_gcs.as_ref(), &card_id)
         })?,
     )?;
 
     // getReworkCardInfo
-    let db_grc = db.clone();
     let pg_grc = pg_pool.clone();
     obj.set(
         "__getReworkCardInfoRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
-            get_rework_card_info_raw(db_grc.as_ref(), pg_grc.as_ref(), &card_id)
+            get_rework_card_info_raw(pg_grc.as_ref(), &card_id)
         })?,
     )?;
 
     // listWaitingForCi
-    let db_lwc = db.clone();
     let pg_lwc = pg_pool.clone();
     obj.set(
         "__listWaitingForCiRaw",
         Function::new(ctx.clone(), move || -> String {
-            list_waiting_for_ci_raw(db_lwc.as_ref(), pg_lwc.as_ref())
+            list_waiting_for_ci_raw(pg_lwc.as_ref())
         })?,
     )?;
 
@@ -119,12 +108,7 @@ pub(super) fn register_ci_recovery_ops<'js>(
     Ok(())
 }
 
-fn set_blocked_reason_raw(
-    _db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
-    card_id: &str,
-    reason: Option<&str>,
-) -> String {
+fn set_blocked_reason_raw(pg_pool: Option<&PgPool>, card_id: &str, reason: Option<&str>) -> String {
     tracing::debug!(
         target: "policy.ci_recovery",
         card_id = %card_id,
@@ -164,7 +148,7 @@ fn set_blocked_reason_pg(pool: &PgPool, card_id: &str, reason: Option<&str>) -> 
     }
 }
 
-fn get_card_status_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
+fn get_card_status_raw(pg_pool: Option<&PgPool>, card_id: &str) -> String {
     if let Some(pool) = pg_pool {
         return get_card_status_pg(pool, card_id);
     }
@@ -196,7 +180,7 @@ fn get_card_status_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-fn get_rework_card_info_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>, card_id: &str) -> String {
+fn get_rework_card_info_raw(pg_pool: Option<&PgPool>, card_id: &str) -> String {
     if let Some(pool) = pg_pool {
         return get_rework_card_info_pg(pool, card_id);
     }
@@ -247,7 +231,7 @@ fn get_rework_card_info_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-fn list_waiting_for_ci_raw(_db: Option<&Db>, pg_pool: Option<&PgPool>) -> String {
+fn list_waiting_for_ci_raw(pg_pool: Option<&PgPool>) -> String {
     if let Some(pool) = pg_pool {
         return list_waiting_for_ci_pg(pool);
     }

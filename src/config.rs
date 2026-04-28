@@ -250,6 +250,8 @@ pub struct AgentChannels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<AgentChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qwen: Option<AgentChannel>,
 }
 
@@ -265,14 +267,20 @@ impl AgentChannels {
                 .as_ref()
                 .and_then(AgentChannel::target)
                 .is_none()
+            && self
+                .opencode
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .is_none()
             && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
     }
 
-    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
+    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 5] {
         [
             ("claude", self.claude.as_ref()),
             ("codex", self.codex.as_ref()),
             ("gemini", self.gemini.as_ref()),
+            ("opencode", self.opencode.as_ref()),
             ("qwen", self.qwen.as_ref()),
         ]
     }
@@ -676,6 +684,8 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_progress_stale_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_turn_alert_interval_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_codex: Option<u64>,
@@ -725,6 +735,7 @@ impl RuntimeSettingsConfig {
     pub fn is_empty(&self) -> bool {
         self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
+            && self.long_turn_alert_interval_min.is_none()
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
@@ -1623,6 +1634,7 @@ mod tests {
                 claude: Some("123456789012345678".into()),
                 codex: None,
                 gemini: None,
+                opencode: None,
                 qwen: None,
             },
             keywords: Vec::new(),
@@ -1642,6 +1654,7 @@ mod tests {
         config.runtime = RuntimeSettingsConfig {
             requested_timeout_min: Some(55),
             in_progress_stale_min: Some(180),
+            long_turn_alert_interval_min: Some(30),
             context_compact_percent: Some(70),
             context_compact_percent_codex: Some(82),
             context_compact_percent_claude: Some(74),
@@ -1815,6 +1828,7 @@ mod tests {
         assert_eq!(loaded.review.max_rounds, Some(4));
         assert_eq!(loaded.runtime.requested_timeout_min, Some(55));
         assert_eq!(loaded.runtime.in_progress_stale_min, Some(180));
+        assert_eq!(loaded.runtime.long_turn_alert_interval_min, Some(30));
         assert_eq!(loaded.runtime.context_compact_percent, Some(70));
         assert_eq!(loaded.runtime.context_compact_percent_codex, Some(82));
         assert_eq!(loaded.runtime.context_compact_percent_claude, Some(74));
@@ -1979,6 +1993,10 @@ mod tests {
         assert_eq!(
             config.provider_from_channel_suffix("any-qw").as_deref(),
             Some("qwen")
+        );
+        assert_eq!(
+            config.provider_from_channel_suffix("any-oc").as_deref(),
+            Some("opencode")
         );
         assert_eq!(config.provider_from_channel_suffix(""), None);
     }

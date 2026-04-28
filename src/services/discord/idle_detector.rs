@@ -299,7 +299,8 @@ async fn fetch_last_heartbeat(
         }
     }
 
-    if let Some(db) = shared.sqlite.as_ref() {
+    #[cfg(test)]
+    if let Some(db) = shared.legacy_sqlite() {
         let db = db.clone();
         let provider_name_clone = provider_name.clone();
         let thread_channel_id_clone = thread_channel_id.clone();

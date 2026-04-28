@@ -1,4 +1,3 @@
-use crate::db::Db;
 use crate::services::discord_dm_reply_store::PendingDmReplyRecord;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::{PgPool, Row};
@@ -9,11 +8,7 @@ use std::future::Future;
 // agentdesk.dmReply.consume(userId)
 // agentdesk.dmReply.pending(userId)
 
-pub(super) fn register_dm_reply_ops<'js>(
-    ctx: &Ctx<'js>,
-    _db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_dm_reply_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dm_obj = Object::new(ctx.clone())?;
 
@@ -484,7 +479,7 @@ mod tests {
             let globals = ctx.globals();
             let ad = Object::new(ctx.clone()).expect("agentdesk object");
             globals.set("agentdesk", ad).expect("install agentdesk");
-            register_dm_reply_ops(&ctx, None, Some(pg_pool.clone())).expect("register dmReply ops");
+            register_dm_reply_ops(&ctx, Some(pg_pool.clone())).expect("register dmReply ops");
 
             let raw: String = ctx
                 .eval(

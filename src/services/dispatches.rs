@@ -2,7 +2,6 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::Row;
 
-use crate::db::Db;
 use crate::dispatch;
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
@@ -12,7 +11,6 @@ const VALID_DISPATCH_STATUSES: &[&str] =
 
 #[derive(Clone)]
 pub struct DispatchService {
-    db: Db,
     engine: PolicyEngine,
 }
 
@@ -36,8 +34,8 @@ pub struct UpdateDispatchInput {
 }
 
 impl DispatchService {
-    pub fn new(db: Db, engine: PolicyEngine) -> Self {
-        Self { db, engine }
+    pub fn new(engine: PolicyEngine) -> Self {
+        Self { engine }
     }
 
     pub fn list_dispatches(
@@ -58,7 +56,7 @@ impl DispatchService {
     }
 
     pub fn get_dispatch(&self, id: &str) -> ServiceResult<Value> {
-        dispatch::load_dispatch_row_pg_first(&self.db, self.engine.pg_pool(), id)
+        dispatch::load_dispatch_row_with_backends(None, self.engine.pg_pool(), id)
             .map_err(|error| {
                 ServiceError::internal(format!("{error}"))
                     .with_code(ErrorCode::Database)
@@ -99,9 +97,13 @@ impl DispatchService {
                     .is_some(),
         };
 
-        let result = dispatch::create_dispatch_with_options(
-            &self.db,
-            self.engine.pg_pool(),
+        let pool = self.engine.pg_pool().ok_or_else(|| {
+            ServiceError::internal("Postgres pool required to create dispatch")
+                .with_code(ErrorCode::Database)
+                .with_operation("create_dispatch.pg_pool")
+        })?;
+        let result = dispatch::create_dispatch_with_options_pg_only(
+            pool,
             &self.engine,
             &input.kanban_card_id,
             &to_agent_id,
@@ -151,7 +153,7 @@ impl DispatchService {
             // a verdict, leaving review_state in `reviewing` until timeouts [C]
             // escalated the card to dilemma_pending (see #925 incident).
             if let Ok(Some(row)) =
-                crate::dispatch::load_dispatch_row_pg_first(&self.db, self.engine.pg_pool(), id)
+                crate::dispatch::load_dispatch_row_with_backends(None, self.engine.pg_pool(), id)
             {
                 let dtype = row
                     .get("dispatch_type")
@@ -172,8 +174,9 @@ impl DispatchService {
                 }
             }
 
-            let dispatch = dispatch::finalize_dispatch(&self.db, &self.engine, id, "api", context)
-                .map_err(|error| {
+            let dispatch =
+                dispatch::finalize_dispatch_with_backends(None, &self.engine, id, "api", context)
+                    .map_err(|error| {
                     let message = format!("{error}");
                     if message.contains("not found") {
                         ServiceError::not_found(message)
@@ -189,11 +192,25 @@ impl DispatchService {
                             .with_context("dispatch_id", id)
                     }
                 })?;
-            crate::services::dispatches_followup::queue_dispatch_followup_sync(
-                &self.db,
-                self.engine.pg_pool(),
-                id,
-            );
+            if let Some(pg_pool) = self.engine.pg_pool() {
+                let dispatch_id = id.to_string();
+                if let Err(error) = crate::utils::async_bridge::block_on_pg_result(
+                    pg_pool,
+                    move |bridge_pool| async move {
+                        crate::services::dispatches_followup::queue_dispatch_followup_pg(
+                            &bridge_pool,
+                            &dispatch_id,
+                        )
+                        .await
+                    },
+                    |error| error,
+                ) {
+                    tracing::warn!(
+                        dispatch_id = %id,
+                        "failed to enqueue postgres followup: {error}"
+                    );
+                }
+            }
             return Ok(dispatch);
         }
 
@@ -211,8 +228,8 @@ impl DispatchService {
         }
 
         if let Some(status) = input.status {
-            let changed = dispatch::set_dispatch_status_pg_first(
-                &self.db,
+            let changed = dispatch::set_dispatch_status_with_backends(
+                None,
                 self.engine.pg_pool(),
                 id,
                 &status,
@@ -257,7 +274,7 @@ impl DispatchService {
                 .with_context("dispatch_id", id));
         }
 
-        dispatch::load_dispatch_row_pg_first(&self.db, self.engine.pg_pool(), id)
+        dispatch::load_dispatch_row_with_backends(None, self.engine.pg_pool(), id)
             .map_err(|error| {
                 ServiceError::internal(format!("{error}"))
                     .with_code(ErrorCode::Database)

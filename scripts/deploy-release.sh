@@ -28,6 +28,7 @@ CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonc
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
+POLICIES_STAGED=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -177,6 +178,9 @@ _cleanup_on_exit() {
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
     fi
+    if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
+        rm -rf "$POLICIES_STAGED" 2>/dev/null || true
+    fi
     _finalize_detached_helper "$status"
 }
 
@@ -219,6 +223,7 @@ export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}"
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
+export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
 EOF
@@ -262,6 +267,11 @@ echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 if [ ! -d "$REPO/skills" ]; then
     echo "✗ Managed skills not found in workspace — aborting deploy"
     echo "  expected: $REPO/skills"
+    exit 1
+fi
+if [ ! -d "$REPO/policies" ]; then
+    echo "✗ Policies not found in workspace — aborting deploy"
+    echo "  expected: $REPO/policies"
     exit 1
 fi
 
@@ -340,6 +350,14 @@ SKILLS_STAGED="$ADK_REL/skills.new"
 rm -rf "$SKILLS_STAGED"
 mkdir -p "$SKILLS_STAGED"
 rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
+
+# Stage policies before stopping release so the runtime never sees a partial
+# modular policy tree.
+echo "▸ Staging policies..."
+POLICIES_STAGED="$ADK_REL/policies.new"
+rm -rf "$POLICIES_STAGED"
+mkdir -p "$POLICIES_STAGED"
+rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
 # Wait for active turns to finish before stopping the server.
 # dcserver SIGTERM preserves turn state (#43e3cacc): tmux sessions stay alive
@@ -447,6 +465,12 @@ rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
+
+rm -rf "$ADK_REL/policies.old"
+[ -d "$ADK_REL/policies" ] && mv "$ADK_REL/policies" "$ADK_REL/policies.old"
+mv "$POLICIES_STAGED" "$ADK_REL/policies"
+POLICIES_STAGED=""
+rm -rf "$ADK_REL/policies.old"
 
 if [ -n "${PROMPTS_STAGED:-}" ] && [ -d "$PROMPTS_STAGED" ]; then
     rm -rf "$ADK_REL/config/agents.old"

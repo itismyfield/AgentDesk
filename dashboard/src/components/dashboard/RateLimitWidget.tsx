@@ -171,10 +171,10 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
     zh: "Provider 状态",
   });
   const tooltip = t({
-    ko: "Claude/Codex/Gemini/Qwen provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. 지원되지 않는 provider 는 별도 상태로 표시됩니다.",
-    en: "Quick view of Claude/Codex/Gemini/Qwen provider bucket usage and cache freshness. Unsupported providers are shown with a separate state.",
-    ja: "Claude/Codex/Gemini/Qwen provider の bucket 使用量と cache freshness を素早く確認します。未対応 provider は別状態で表示します。",
-    zh: "快速查看 Claude/Codex/Gemini/Qwen provider bucket 使用量与缓存新鲜度。未支持的 provider 会以单独状态显示。",
+    ko: "Claude/Codex/Gemini/OpenCode/Qwen provider 버킷 사용량과 stale 캐시 여부를 빠르게 보여줍니다. 지원되지 않는 provider 는 별도 상태로 표시됩니다.",
+    en: "Quick view of Claude/Codex/Gemini/OpenCode/Qwen provider bucket usage and cache freshness. Unsupported providers are shown with a separate state.",
+    ja: "Claude/Codex/Gemini/OpenCode/Qwen provider の bucket 使用量と cache freshness を素早く確認します。未対応 provider は別状態で表示します。",
+    zh: "快速查看 Claude/Codex/Gemini/OpenCode/Qwen provider bucket 使用量与缓存新鲜度。未支持的 provider 会以单独状态显示。",
   });
 
   useEffect(() => {

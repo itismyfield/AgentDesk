@@ -734,7 +734,7 @@ pub(super) async fn auto_restore_session_force(
         let sqlite_settings_db = if shared.pg_pool.is_some() {
             None
         } else {
-            shared.sqlite.as_ref()
+            shared.legacy_sqlite()
         };
         let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref())
             .or_else(|| {
@@ -787,21 +787,28 @@ pub(super) async fn auto_restore_session_force(
                 .flatten();
             }
 
-            shared.sqlite.as_ref().and_then(|db| {
-                db.lock().ok().and_then(|conn| {
-                    session_keys.iter().find_map(|session_key| {
-                        conn.query_row(
-                            "SELECT cwd FROM sessions WHERE session_key = ?1",
-                            [session_key],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                        .filter(|p| {
-                            !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref())
+            #[cfg(test)]
+            {
+                shared.legacy_sqlite().and_then(|db| {
+                    db.lock().ok().and_then(|conn| {
+                        session_keys.iter().find_map(|session_key| {
+                            conn.query_row(
+                                "SELECT cwd FROM sessions WHERE session_key = ?1",
+                                [session_key],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .ok()
+                            .filter(|p| {
+                                !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref())
+                            })
                         })
                     })
                 })
-            })
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
         });
         let persisted_path = load_last_session_path(
             sqlite_settings_db,

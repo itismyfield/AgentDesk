@@ -1,5 +1,6 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
+#[cfg(test)]
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 
@@ -7,40 +8,55 @@ pub(crate) const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_
 
 pub(super) fn register_review_ops<'js>(
     ctx: &Ctx<'js>,
-    _db: Option<Db>,
+    db: Option<crate::db::Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let review_obj = Object::new(ctx.clone())?;
 
+    let db_verdict = db.clone();
     let pg_verdict = pg_pool.clone();
     review_obj.set(
         "__getVerdictRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             match pg_verdict.as_ref() {
                 Some(pool) => review_get_verdict_raw_pg(pool, &card_id),
-                None => json!({
-                    "error": "postgres backend is required for review.getVerdict"
-                })
-                .to_string(),
+                None => {
+                    #[cfg(test)]
+                    if let Some(db) = db_verdict.as_ref() {
+                        return review_get_verdict_raw_sqlite(db, &card_id);
+                    }
+                    json!({
+                        "error": "postgres backend is required for review.getVerdict"
+                    })
+                    .to_string()
+                }
             }
         })?,
     )?;
 
+    let db_entry = db.clone();
     let pg_entry = pg_pool.clone();
     review_obj.set(
         "__entryContextRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             match pg_entry.as_ref() {
                 Some(pool) => review_entry_context_raw_pg(pool, &card_id),
-                None => json!({
-                    "error": "postgres backend is required for review.entryContext"
-                })
-                .to_string(),
+                None => {
+                    #[cfg(test)]
+                    if let Some(db) = db_entry.as_ref() {
+                        return review_entry_context_raw_sqlite(db, &card_id);
+                    }
+                    json!({
+                        "error": "postgres backend is required for review.entryContext"
+                    })
+                    .to_string()
+                }
             }
         })?,
     )?;
 
+    let db_record = db.clone();
     let pg_record = pg_pool.clone();
     review_obj.set(
         "__recordEntryRaw",
@@ -49,25 +65,38 @@ pub(super) fn register_review_ops<'js>(
             move |card_id: String, opts_json: String| -> String {
                 match pg_record.as_ref() {
                     Some(pool) => review_record_entry_raw_pg(pool, &card_id, &opts_json),
-                    None => json!({
-                        "error": "postgres backend is required for review.recordEntry"
-                    })
-                    .to_string(),
+                    None => {
+                        #[cfg(test)]
+                        if let Some(db) = db_record.as_ref() {
+                            return review_record_entry_raw_sqlite(db, &card_id, &opts_json);
+                        }
+                        json!({
+                            "error": "postgres backend is required for review.recordEntry"
+                        })
+                        .to_string()
+                    }
                 }
             },
         )?,
     )?;
 
+    let db_active_work = db;
     let pg_active_work = pg_pool;
     review_obj.set(
         "__hasActiveWorkRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             match pg_active_work.as_ref() {
                 Some(pool) => review_has_active_work_raw_pg(pool, &card_id),
-                None => json!({
-                    "error": "postgres backend is required for review.hasActiveWork"
-                })
-                .to_string(),
+                None => {
+                    #[cfg(test)]
+                    if let Some(db) = db_active_work.as_ref() {
+                        return review_has_active_work_raw_sqlite(db, &card_id);
+                    }
+                    json!({
+                        "error": "postgres backend is required for review.hasActiveWork"
+                    })
+                    .to_string()
+                }
             }
         })?,
     )?;
@@ -127,6 +156,273 @@ fn metadata_requests_review_round_advance(metadata_raw: Option<&str>) -> bool {
         .and_then(|metadata| metadata.get(ADVANCE_REVIEW_ROUND_HINT_KEY).cloned())
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn review_get_verdict_raw_sqlite(db: &crate::db::Db, card_id: &str) -> String {
+    if card_id.trim().is_empty() {
+        return json!({ "error": "review.getVerdict requires card_id" }).to_string();
+    }
+    let result = (|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| format!("open sqlite review.getVerdict connection: {error}"))?;
+        let review = conn
+            .query_row(
+                "SELECT kc.id,
+                        COALESCE(rs.review_round, 0) AS review_round,
+                        COALESCE(rs.state, 'idle') AS state,
+                        rs.pending_dispatch_id,
+                        rs.last_verdict,
+                        rs.last_decision,
+                        rs.decided_by,
+                        rs.decided_at,
+                        rs.review_entered_at,
+                        rs.updated_at,
+                        (
+                            SELECT json_extract(td.result, '$.verdict')
+                            FROM task_dispatches td
+                            WHERE td.kanban_card_id = kc.id
+                              AND td.dispatch_type = 'review'
+                              AND td.status = 'completed'
+                            ORDER BY COALESCE(td.completed_at, td.updated_at) DESC
+                            LIMIT 1
+                        ) AS latest_dispatch_verdict
+                 FROM kanban_cards kc
+                 LEFT JOIN card_review_state rs ON rs.card_id = kc.id
+                 WHERE kc.id = ?1",
+                [card_id],
+                |row| {
+                    let last_verdict: Option<String> = row.get(4)?;
+                    let latest_dispatch_verdict: Option<String> = row.get(10)?;
+                    let verdict = last_verdict.clone().or(latest_dispatch_verdict.clone());
+                    let source = if last_verdict.is_some() {
+                        "review_state"
+                    } else if latest_dispatch_verdict.is_some() {
+                        "dispatch_result"
+                    } else {
+                        "none"
+                    };
+                    Ok(json!({
+                        "card_id": row.get::<_, String>(0)?,
+                        "review_round": row.get::<_, i64>(1)?,
+                        "state": row.get::<_, String>(2)?,
+                        "verdict": verdict,
+                        "pending_dispatch_id": row.get::<_, Option<String>>(3)?,
+                        "decision": row.get::<_, Option<String>>(5)?,
+                        "decided_by": row.get::<_, Option<String>>(6)?,
+                        "decided_at": row.get::<_, Option<String>>(7)?,
+                        "review_entered_at": row.get::<_, Option<String>>(8)?,
+                        "updated_at": row.get::<_, Option<String>>(9)?,
+                        "source": source,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("load sqlite review verdict for {card_id}: {error}"))?;
+        Ok::<_, String>(json!({ "review": review }).to_string())
+    })();
+    result.unwrap_or_else(|error| json!({ "error": error }).to_string())
+}
+
+#[cfg(test)]
+fn review_entry_context_raw_sqlite(db: &crate::db::Db, card_id: &str) -> String {
+    if card_id.trim().is_empty() {
+        return json!({ "error": "review.entryContext requires card_id" }).to_string();
+    }
+    let result = (|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| format!("open sqlite review.entryContext connection: {error}"))?;
+        let entry = conn
+            .query_row(
+                "SELECT COALESCE(kc.review_round, 0) AS current_round,
+                        (
+                            SELECT COUNT(*)
+                            FROM task_dispatches td
+                            WHERE td.kanban_card_id = kc.id
+                              AND td.dispatch_type IN ('implementation', 'rework')
+                              AND td.status = 'completed'
+                        ) AS completed_work_count,
+                        (
+                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))
+                            FROM task_dispatches td
+                            WHERE td.kanban_card_id = kc.id
+                              AND td.dispatch_type IN ('implementation', 'rework')
+                              AND td.status = 'completed'
+                        ) AS latest_work_completed_at,
+                        (
+                            SELECT MAX(COALESCE(td.completed_at, td.updated_at))
+                            FROM task_dispatches td
+                            WHERE td.kanban_card_id = kc.id
+                              AND td.dispatch_type = 'review'
+                              AND td.status = 'completed'
+                        ) AS latest_review_completed_at,
+                        kc.metadata
+                 FROM kanban_cards kc
+                 WHERE kc.id = ?1",
+                [card_id],
+                |row| {
+                    let current_round: i64 = row.get(0)?;
+                    let completed_work_count: i64 = row.get(1)?;
+                    let latest_work_completed_at: Option<String> = row.get(2)?;
+                    let latest_review_completed_at: Option<String> = row.get(3)?;
+                    let metadata_raw: Option<String> = row.get(4)?;
+                    let should_advance_round = current_round == 0
+                        || completed_work_count > current_round
+                        || matches!(
+                            (
+                                latest_work_completed_at.as_deref(),
+                                latest_review_completed_at.as_deref()
+                            ),
+                            (Some(work), Some(review)) if work > review
+                        )
+                        || metadata_requests_review_round_advance(metadata_raw.as_deref());
+                    let next_round = if should_advance_round {
+                        current_round + 1
+                    } else {
+                        current_round
+                    };
+                    Ok(json!({
+                        "card_id": card_id,
+                        "current_round": current_round,
+                        "completed_work_count": completed_work_count,
+                        "should_advance_round": should_advance_round,
+                        "next_round": next_round,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("load sqlite review entry context for {card_id}: {error}"))?;
+        Ok::<_, String>(json!({ "entry": entry }).to_string())
+    })();
+    result.unwrap_or_else(|error| json!({ "error": error }).to_string())
+}
+
+#[cfg(test)]
+fn review_record_entry_raw_sqlite(db: &crate::db::Db, card_id: &str, opts_json: &str) -> String {
+    if card_id.trim().is_empty() {
+        return json!({ "error": "review.recordEntry requires card_id" }).to_string();
+    }
+    let opts: serde_json::Value = if opts_json.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_str(opts_json) {
+            Ok(opts) => opts,
+            Err(error) => {
+                return json!({ "error": format!("invalid review.recordEntry opts: {error}") })
+                    .to_string();
+            }
+        }
+    };
+    let result = (|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| format!("open sqlite review.recordEntry connection: {error}"))?;
+        let review_round = opts.get("review_round").and_then(|value| value.as_i64());
+        let exclude_status = opts
+            .get("exclude_status")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty());
+
+        let changed = match (review_round, exclude_status) {
+            (Some(round), Some(exclude)) => conn.execute(
+                "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now')
+                 WHERE id = ?2 AND status != ?3",
+                rusqlite::params![round, card_id, exclude],
+            ),
+            (Some(round), None) => conn.execute(
+                "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now')
+                 WHERE id = ?2",
+                rusqlite::params![round, card_id],
+            ),
+            (None, Some(exclude)) => conn.execute(
+                "UPDATE kanban_cards SET updated_at = datetime('now')
+                 WHERE id = ?1 AND status != ?2",
+                rusqlite::params![card_id, exclude],
+            ),
+            (None, None) => conn.execute(
+                "UPDATE kanban_cards SET updated_at = datetime('now') WHERE id = ?1",
+                rusqlite::params![card_id],
+            ),
+        }
+        .map_err(|error| format!("update sqlite review entry for {card_id}: {error}"))?;
+
+        clear_review_round_advance_hint_sqlite(&conn, card_id)?;
+        Ok::<_, String>(
+            json!({
+                "ok": true,
+                "rows_affected": changed,
+                "changed": changed > 0,
+            })
+            .to_string(),
+        )
+    })();
+    result.unwrap_or_else(|error| json!({ "error": error }).to_string())
+}
+
+#[cfg(test)]
+fn review_has_active_work_raw_sqlite(db: &crate::db::Db, card_id: &str) -> String {
+    if card_id.trim().is_empty() {
+        return json!({ "error": "review.hasActiveWork requires card_id" }).to_string();
+    }
+    let result = (|| {
+        let conn = db
+            .separate_conn()
+            .map_err(|error| format!("open sqlite review.hasActiveWork connection: {error}"))?;
+        let active_count = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+                   AND dispatch_type IN ('implementation', 'rework')
+                   AND status IN ('pending', 'dispatched')",
+                [card_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| format!("load sqlite active work for {card_id}: {error}"))?;
+        Ok::<_, String>(json!({ "has_active_work": active_count > 0 }).to_string())
+    })();
+    result.unwrap_or_else(|error| json!({ "error": error }).to_string())
+}
+
+#[cfg(test)]
+fn clear_review_round_advance_hint_sqlite(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Result<(), String> {
+    let metadata_raw: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("load sqlite review metadata for {card_id}: {error}"))?
+        .flatten();
+    let Some(raw) = metadata_raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(());
+    };
+    if object.remove(ADVANCE_REVIEW_ROUND_HINT_KEY).is_none() {
+        return Ok(());
+    }
+    let stored_metadata = if object.is_empty() {
+        None
+    } else {
+        Some(metadata.to_string())
+    };
+    conn.execute(
+        "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![stored_metadata, card_id],
+    )
+    .map_err(|error| format!("clear sqlite review hint metadata for {card_id}: {error}"))?;
+    Ok(())
 }
 
 fn review_get_verdict_raw_pg(pool: &PgPool, card_id: &str) -> String {

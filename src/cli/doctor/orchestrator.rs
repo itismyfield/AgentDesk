@@ -7,7 +7,8 @@ use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Se
 use super::{health, mailbox};
 use crate::cli::dcserver;
 use crate::config;
-use crate::db::schema;
+#[cfg(test)]
+use crate::db::{open_write_connection, schema};
 use crate::services::provider::ProviderKind;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -872,6 +873,7 @@ fn provider_check_id(provider: &ProviderKind) -> &'static str {
         ProviderKind::Claude => "provider_claude",
         ProviderKind::Codex => "provider_codex",
         ProviderKind::Gemini => "provider_gemini",
+        ProviderKind::OpenCode => "provider_opencode",
         ProviderKind::Qwen => "provider_qwen",
         ProviderKind::Unsupported(_) => "provider_unsupported",
     }
@@ -901,6 +903,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
 
 fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let configured = configured_provider_names(cfg, snapshot);
+    let opencode_configured = configured.contains("opencode");
     let qwen_configured = configured.contains("qwen");
     vec![
         check_runtime_path(),
@@ -915,6 +918,9 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
             configured.contains("gemini"),
             snapshot,
         ),
+        check_provider_cli(ProviderKind::OpenCode, opencode_configured, snapshot),
+        check_opencode_mcp_config(opencode_configured),
+        check_opencode_serve_health_probe(opencode_configured),
         check_provider_cli(ProviderKind::Qwen, qwen_configured, snapshot),
         check_qwen_settings_files(qwen_configured),
         check_qwen_auth_hints(qwen_configured),
@@ -922,6 +928,81 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
         check_provider_bindings(cfg, snapshot),
         check_credential_permissions(cfg),
     ]
+}
+
+fn check_opencode_mcp_config(configured: bool) -> Check {
+    let available = crate::services::mcp_config::provider_has_memento_mcp(&ProviderKind::OpenCode);
+    if available {
+        Check::ok(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "memento MCP is visible through runtime config or ~/.config/opencode/opencode.json",
+        )
+        .with_expected_actual("memento MCP configured", "memento MCP configured")
+    } else if configured {
+        Check::warn(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "memento MCP not visible for OpenCode",
+            "runtime mcp_servers 또는 ~/.config/opencode/opencode.json top-level mcp에 memento 서버를 설정하세요.",
+        )
+        .with_expected_actual("memento MCP configured", "memento MCP missing")
+        .with_next_steps(vec![
+            "agentdesk doctor --json".to_string(),
+            "jq '.mcp' ~/.config/opencode/opencode.json".to_string(),
+        ])
+    } else {
+        Check::ok(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "OpenCode is not configured",
+        )
+        .with_expected_actual("OpenCode configured if needed", "OpenCode not configured")
+    }
+}
+
+fn check_opencode_serve_health_probe(configured: bool) -> Check {
+    if !configured {
+        return Check::ok(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            "OpenCode is not configured",
+        )
+        .with_expected_actual(
+            "OpenCode serve probe required when configured",
+            "not configured",
+        );
+    }
+
+    let working_dir = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    match crate::services::opencode::probe_serve_health(&working_dir) {
+        Ok(detail) => Check::ok(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            detail,
+        )
+        .with_expected_actual("opencode serve /global/health returns 200", "healthy"),
+        Err(error) => Check::fail(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            error,
+            "opencode serve가 정상 기동되는지 CLI 설치, 설정 파일, provider/model 인증 상태를 확인하세요.",
+        )
+        .with_expected_actual("opencode serve /global/health returns 200", "probe failed")
+        .with_next_steps(vec![
+            "opencode --version".to_string(),
+            "opencode serve --hostname 127.0.0.1 --port 0".to_string(),
+            format!("tail -n 200 {}", dcserver_log_hint()),
+        ]),
+    }
 }
 
 fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
@@ -1662,28 +1743,19 @@ fn apply_safe_fixes(cfg: &config::Config, options: &DoctorOptions) -> Vec<FixAct
             "rerun with --fix --repair-sqlite-cache to allow SQLite schema mutation",
         ));
     } else {
-        match libsql_rusqlite::Connection::open(&db_path) {
-            Ok(conn) => match schema::migrate(&conn) {
-                Ok(()) => actions.push(
-                    FixAction::ok(
-                        "db_schema",
-                        "DB Schema",
-                        format!("ensured schema at {}", db_path.display()),
-                    )
-                    .with_safety_gate("explicit_db_repair_allowed"),
-                ),
-                Err(e) => actions.push(FixAction::fail(
-                    "db_schema",
-                    "DB Schema",
-                    format!("migration failed for {}: {}", db_path.display(), e),
-                )),
-            },
-            Err(e) => actions.push(FixAction::fail(
+        actions.push(
+            FixAction::skipped(
                 "db_schema",
                 "DB Schema",
-                format!("cannot open {}: {}", db_path.display(), e),
-            )),
-        }
+                format!(
+                    "legacy SQLite schema repair retired at {}; Postgres is source-of-truth",
+                    db_path.display()
+                ),
+                FixSafety::ExplicitDbRepairRequired,
+                "restore the retired cutover tooling from history only for an approved emergency re-cutover",
+            )
+            .with_safety_gate("explicit_db_repair_allowed"),
+        );
     }
 
     if !options.repair_sqlite_cache {
@@ -2253,6 +2325,7 @@ fn check_provider_cli(
         ProviderKind::Claude => "claude CLI",
         ProviderKind::Codex => "codex CLI",
         ProviderKind::Gemini => "gemini CLI",
+        ProviderKind::OpenCode => "opencode CLI",
         ProviderKind::Qwen => "qwen CLI",
         ProviderKind::Unsupported(_) => "provider CLI",
     };
@@ -2867,72 +2940,18 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
             "legacy SQLite integrity check demoted",
         );
     }
-    if !db_path.exists() {
-        return Check::fail(
-            "db_integrity",
-            CheckGroup::Core,
-            "DB File",
-            format!("{} — not found", db_path.display()),
-            "agentdesk doctor --fix 로 DB 파일과 기본 스키마를 생성할 수 있습니다.",
-        )
-        .with_path(db_path.display().to_string())
-        .with_expected_actual("database file exists", "database file missing")
-        .with_next_steps(vec!["agentdesk doctor --fix".to_string()]);
-    }
-    match libsql_rusqlite::Connection::open(&db_path) {
-        Ok(conn) => {
-            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
-                Ok(result) if result == "ok" => {
-                    let size = std::fs::metadata(&db_path)
-                        .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
-                        .unwrap_or_default();
-                    Check::ok(
-                        "db_integrity",
-                        CheckGroup::Core,
-                        "DB Integrity",
-                        format!("ok — {size}"),
-                    )
-                    .with_path(db_path.display().to_string())
-                    .with_expected_actual("PRAGMA integrity_check = ok", "ok")
-                }
-                Ok(result) => Check::fail(
-                    "db_integrity",
-                    CheckGroup::Core,
-                    "DB Integrity",
-                    format!("issues: {result}"),
-                    "DB 손상이 의심됩니다. 백업 후 schema migrate/복구 절차를 검토하세요.",
-                )
-                .with_path(db_path.display().to_string())
-                .with_expected_actual("PRAGMA integrity_check = ok", result)
-                .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
-                Err(e) => Check::fail(
-                    "db_integrity",
-                    CheckGroup::Core,
-                    "DB Integrity",
-                    format!("check failed: {e}"),
-                    "DB 연결 또는 권한 문제를 확인하세요.",
-                )
-                .with_path(db_path.display().to_string())
-                .with_expected_actual(
-                    "database integrity check runs",
-                    format!("integrity check error: {e}"),
-                ),
-            }
-        }
-        Err(e) => Check::fail(
-            "db_integrity",
-            CheckGroup::Core,
-            "DB File",
-            format!("cannot open: {e}"),
-            "DB 파일 권한과 data 디렉터리 상태를 확인하세요.",
-        )
-        .with_path(db_path.display().to_string())
-        .with_expected_actual(
-            "database opens successfully",
-            format!("database open failed: {e}"),
-        )
-        .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
-    }
+    return Check::warn(
+        "db_integrity",
+        CheckGroup::Core,
+        "Legacy SQLite DB",
+        format!("retired from normal builds: {}", db_path.display()),
+        "Postgres is the AgentDesk source-of-truth; legacy SQLite integrity checks are no longer compiled.",
+    )
+    .with_subsystem("sqlite_cache")
+    .with_fix_safety(FixSafety::ReadOnly)
+    .with_security_exposure(SecurityExposure::LocalPath)
+    .with_path(db_path.display().to_string())
+    .with_expected_actual("Postgres source-of-truth active", "SQLite check retired");
 }
 
 fn check_postgres_connection(cfg: &config::Config) -> Check {
@@ -3152,75 +3171,18 @@ fn check_github_repo_registry(cfg: &config::Config) -> Check {
             "legacy SQLite registry check demoted",
         );
     }
-    if !db_path.exists() {
-        return Check::warn(
-            "github_repo_registry",
-            CheckGroup::Core,
-            "GitHub Repo Registry",
-            format!("{} — skipped (DB missing)", db_path.display()),
-            "DB 파일이 없어서 config.github.repos와 github_repos 비교를 건너뒀습니다.",
-        )
-        .with_path(db_path.display().to_string())
-        .with_expected_actual("github_repos matches config.github.repos", "db unavailable");
-    }
-
-    let (configured, invalid_config) = normalized_config_repo_ids(cfg);
-    let db_repos = match open_registered_github_repo_ids(&db_path) {
-        Ok(repos) => repos,
-        Err(error) => {
-            return Check::warn(
-                "github_repo_registry",
-                CheckGroup::Core,
-                "GitHub Repo Registry",
-                format!("{} — skipped ({error})", db_path.display()),
-                "DB repo registry를 읽지 못했습니다. DB 상태와 권한을 확인하세요.",
-            )
-            .with_path(db_path.display().to_string())
-            .with_expected_actual(
-                "github_repos matches config.github.repos",
-                format!("registry read failed: {error}"),
-            );
-        }
-    };
-
-    let missing_in_db: Vec<String> = configured.difference(&db_repos).cloned().collect();
-    let extra_in_db: Vec<String> = db_repos.difference(&configured).cloned().collect();
-
-    if missing_in_db.is_empty() && extra_in_db.is_empty() && invalid_config.is_empty() {
-        return Check::ok(
-            "github_repo_registry",
-            CheckGroup::Core,
-            "GitHub Repo Registry",
-            format!("config={} db={}", configured.len(), db_repos.len()),
-        )
-        .with_path(db_path.display().to_string())
-        .with_expected_actual(
-            "github_repos matches config.github.repos",
-            format!("config={} db={}", configured.len(), db_repos.len()),
-        );
-    }
-
-    let mut detail_parts = vec![format!("config={} db={}", configured.len(), db_repos.len())];
-    if !missing_in_db.is_empty() {
-        detail_parts.push(format!("missing_in_db={}", missing_in_db.join(",")));
-    }
-    if !extra_in_db.is_empty() {
-        detail_parts.push(format!("extra_in_db={}", extra_in_db.join(",")));
-    }
-    if !invalid_config.is_empty() {
-        detail_parts.push(format!("invalid_config={}", invalid_config.join(",")));
-    }
-    let detail = detail_parts.join(" ");
-
-    Check::warn(
+    return Check::warn(
         "github_repo_registry",
         CheckGroup::Core,
-        "GitHub Repo Registry",
-        detail.clone(),
-        "서버 시작 시 config.github.repos를 github_repos에 seed해야 합니다. 누락 repo는 서버 재기동으로 복구되고, extra row는 stale registry인지 점검하세요.",
+        "Legacy SQLite GitHub Repo Registry",
+        "retired from normal builds",
+        "Postgres is the AgentDesk source-of-truth; legacy SQLite github_repos comparison is no longer compiled.",
     )
+    .with_subsystem("sqlite_cache")
+    .with_fix_safety(FixSafety::ReadOnly)
+    .with_security_exposure(SecurityExposure::OperationalMetadata)
     .with_path(db_path.display().to_string())
-    .with_expected_actual("github_repos matches config.github.repos", detail)
+    .with_expected_actual("Postgres source-of-truth active", "SQLite registry check retired");
 }
 
 fn normalized_config_repo_ids(cfg: &config::Config) -> (BTreeSet<String>, Vec<String>) {
@@ -3242,9 +3204,9 @@ fn normalized_config_repo_ids(cfg: &config::Config) -> (BTreeSet<String>, Vec<St
     (valid, invalid.into_iter().collect())
 }
 
+#[cfg(test)]
 fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet<String>, String> {
-    let conn =
-        libsql_rusqlite::Connection::open(db_path).map_err(|e| format!("cannot open: {e}"))?;
+    let conn = open_write_connection(db_path).map_err(|e| format!("cannot open: {e}"))?;
     let mut stmt = conn
         .prepare("SELECT id FROM github_repos ORDER BY id")
         .map_err(|e| format!("prepare: {e}"))?;
@@ -3567,7 +3529,7 @@ mod tests {
     };
     use crate::cli::doctor::contract::{FixSafety, RunContext, Severity};
     use crate::config::{AgentChannel, AgentChannels, AgentDef, ServerConfig};
-    use crate::db::schema;
+    use crate::db::{open_write_connection, schema};
     use crate::services::provider::ProviderKind;
     use serde_json::json;
     use std::path::Path;
@@ -3624,7 +3586,7 @@ mod tests {
     }
 
     fn write_github_repo_registry(db_path: &Path, repos: &[&str]) {
-        let conn = libsql_rusqlite::Connection::open(db_path).unwrap();
+        let conn = open_write_connection(db_path).unwrap();
         schema::migrate(&conn).unwrap();
         for repo in repos {
             conn.execute(

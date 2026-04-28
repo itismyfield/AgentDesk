@@ -70,7 +70,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                 }
 
                 if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                    shared.sqlite.as_ref(),
+                    shared.legacy_sqlite(),
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     &provider,
@@ -191,7 +191,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         }
 
         if let Some(protection) = super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-            shared.sqlite.as_ref(),
+            shared.legacy_sqlite(),
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             &provider,

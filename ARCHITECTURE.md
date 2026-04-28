@@ -33,6 +33,8 @@ src/
 │   │   ├── postgres_cutover.rs
 │   │   ├── source.rs
 │   │   └── tests.rs
+│   ├── provider_cli/
+│   │   └── mod.rs
 │   ├── args.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -174,6 +176,7 @@ src/
 │   │   ├── offices.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
+│   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
@@ -279,6 +282,7 @@ src/
 │   │   ├── queue_io.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── recovery_engine.rs
+│   │   ├── response_sanitizer.rs
 │   │   ├── restart_ctrl.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
@@ -321,6 +325,20 @@ src/
 │   │   ├── mod.rs
 │   │   ├── shell.rs
 │   │   └── tmux.rs
+│   ├── provider_cli/
+│   │   ├── canary.rs
+│   │   ├── context.rs
+│   │   ├── diagnostics.rs
+│   │   ├── io.rs
+│   │   ├── mod.rs
+│   │   ├── orchestration.rs
+│   │   ├── paths.rs
+│   │   ├── registry.rs
+│   │   ├── retention.rs
+│   │   ├── session_guard.rs
+│   │   ├── smoke.rs
+│   │   ├── snapshot.rs
+│   │   └── upgrade.rs
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── agent_protocol.rs
@@ -339,6 +357,7 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── opencode.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs

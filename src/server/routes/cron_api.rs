@@ -33,22 +33,7 @@ async fn read_kv_str(state: &AppState, key: &str) -> String {
         }
     }
 
-    // TODO(#1238 / 843g): the runtime is PG-only and the kv_meta SQLite
-    // fallback is never reached. Tests still hit this branch through
-    // `AppState::test_state` which sets `db: Some(test_db)`.
-    state
-        .db
-        .as_ref()
-        .and_then(|db| db.lock().ok())
-        .and_then(|conn| {
-            conn.query_row::<String, _, _>(
-                "SELECT value FROM kv_meta WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+    "unknown".to_string()
 }
 
 /// Build cron job list — 3-tier tick jobs (#127) + legacy per-policy entries.

@@ -5,9 +5,12 @@ use sqlx::PgPool;
 
 pub(super) fn register_queue_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    #[cfg(test)] db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
+    #[cfg(not(test))]
+    let db: Option<Db> = None;
+
     #[cfg(not(test))]
     let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;

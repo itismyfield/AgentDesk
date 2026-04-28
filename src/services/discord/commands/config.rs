@@ -327,7 +327,7 @@ pub(in crate::services::discord) async fn current_working_dir(
     let sqlite_settings_db = if shared.pg_pool.is_some() {
         None
     } else {
-        shared.sqlite.as_ref()
+        shared.legacy_sqlite()
     };
     load_last_session_path(
         sqlite_settings_db,
@@ -534,6 +534,7 @@ fn provider_card_color(provider: &ProviderKind) -> u32 {
         ProviderKind::Claude => 0xD97706,
         ProviderKind::Codex => 0x10B981,
         ProviderKind::Gemini => 0x3B82F6,
+        ProviderKind::OpenCode => 0x8B5CF6,
         ProviderKind::Qwen => 0x0EA5A4,
         ProviderKind::Unsupported(_) => 0x5865F2,
     }

@@ -45,8 +45,8 @@ fn build_record(
     }
 }
 
-/// Initialize the audit DB handle. Call during startup and after PG is available.
-pub fn init_audit_db(_db: crate::db::Db, pg_pool: Option<sqlx::PgPool>) {
+/// Initialize audit persistence. Call during startup and after PG is available.
+pub fn init_audit_db(pg_pool: Option<sqlx::PgPool>) {
     let Ok(mut runtime) = audit_runtime_slot().lock() else {
         return;
     };

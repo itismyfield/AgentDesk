@@ -13,7 +13,7 @@ export interface BotInfo {
 }
 
 export interface CommandBotEntry {
-  provider: "claude" | "codex" | "gemini" | "qwen";
+  provider: "claude" | "codex" | "gemini" | "opencode" | "qwen";
   token: string;
   botInfo: BotInfo | null;
 }

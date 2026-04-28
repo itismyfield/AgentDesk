@@ -1,8 +1,6 @@
-use std::collections::BTreeSet;
-
-use libsql_rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 
 use crate::db::Db;
 use crate::services::discord::settings::{
@@ -146,13 +144,10 @@ struct PreparedEventRow {
     workaround: Option<String>,
     suggested_fix: Option<String>,
     docs_category: Option<String>,
-    keywords_json_text: String,
     keywords_json_value: serde_json::Value,
-    payload_json_text: String,
     payload_json_value: serde_json::Value,
     card_id: Option<String>,
     repo_id: String,
-    github_issue_number_sqlite: Option<i64>,
     github_issue_number_pg: Option<i32>,
     task_summary: Option<String>,
     agent_id: Option<String>,
@@ -201,45 +196,22 @@ pub(crate) async fn record_api_friction_reports(
         return Ok(ApiFrictionRecordResult::default());
     }
 
-    let inserted_events: Vec<EventMemoryDraft> = if let Some(pg_pool) = pg_pool {
-        let source_context =
-            load_source_context_pg(pg_pool, context.dispatch_id, context.session_key).await?;
-        let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
-        persist_event_rows_pg(pg_pool, &context, &prepared_rows).await?;
-
-        // Temporary dual-write: policy-tick aggregation still reads SQLite-only state.
-        // Keep SQLite mirrored while PG remains the runtime authority for capture.
-        if let Some(db) = db {
-            let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
-            persist_event_rows(&mut conn, &context, &prepared_rows)?;
-        }
-
-        prepared_rows
-            .into_iter()
-            .map(|row| EventMemoryDraft {
-                event_id: row.event_id,
-                request: row.request,
-            })
-            .collect()
-    } else {
-        let db = db.ok_or_else(|| "no runtime database handle for API friction".to_string())?;
-        let mut conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
-        let source_context = load_source_context(
-            &mut conn,
-            context.dispatch_id,
-            context.session_key,
-            context.channel_id,
-        )?;
-        let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
-        persist_event_rows(&mut conn, &context, &prepared_rows)?;
-        prepared_rows
-            .into_iter()
-            .map(|row| EventMemoryDraft {
-                event_id: row.event_id,
-                request: row.request,
-            })
-            .collect()
-    };
+    let _ = db;
+    let pg_pool = pg_pool.ok_or_else(|| {
+        "postgres pool is required for API friction capture; sqlite fallback is unavailable"
+            .to_string()
+    })?;
+    let source_context =
+        load_source_context_pg(pg_pool, context.dispatch_id, context.session_key).await?;
+    let prepared_rows = prepare_event_rows(&source_context, &context, reports)?;
+    persist_event_rows_pg(pg_pool, &context, &prepared_rows).await?;
+    let inserted_events: Vec<EventMemoryDraft> = prepared_rows
+        .into_iter()
+        .map(|row| EventMemoryDraft {
+            event_id: row.event_id,
+            request: row.request,
+        })
+        .collect();
 
     let memory_backend = match resolve_memory_backend_for_friction(memory_settings) {
         Some(settings) => Some(MementoBackend::new(settings)),
@@ -255,7 +227,7 @@ pub(crate) async fn record_api_friction_reports(
         let Some(backend) = memory_backend.as_ref() else {
             mark_event_memory_status(
                 db,
-                pg_pool,
+                Some(pg_pool),
                 &memory_draft.event_id,
                 "skipped_backend",
                 Some("memento backend is not active for API friction".to_string()),
@@ -268,13 +240,14 @@ pub(crate) async fn record_api_friction_reports(
             Ok(token_usage) => {
                 result.memory_stored_count += 1;
                 result.token_usage.saturating_add_assign(token_usage);
-                mark_event_memory_status(db, pg_pool, &memory_draft.event_id, "stored", None).await;
+                mark_event_memory_status(db, Some(pg_pool), &memory_draft.event_id, "stored", None)
+                    .await;
             }
             Err(error) => {
                 result.memory_errors.push(error.clone());
                 mark_event_memory_status(
                     db,
-                    pg_pool,
+                    Some(pg_pool),
                     &memory_draft.event_id,
                     "failed",
                     Some(error),
@@ -287,37 +260,21 @@ pub(crate) async fn record_api_friction_reports(
     Ok(result)
 }
 
-#[cfg(test)]
-pub(crate) fn list_api_friction_patterns(
-    db: &Db,
-    min_events: Option<usize>,
-    limit: Option<usize>,
-) -> Result<Vec<ApiFrictionPattern>, String> {
-    let conn = db
-        .read_conn()
-        .map_err(|err| format!("db read_conn: {err}"))?;
-    load_pattern_candidates(
-        &conn,
-        min_events.unwrap_or(API_FRICTION_MIN_REPEAT_COUNT),
-        limit.unwrap_or(DEFAULT_PATTERN_LIMIT),
-    )
-}
-
 pub(crate) async fn process_api_friction_patterns(
-    db: &Db,
+    pg_pool: Option<&PgPool>,
     min_events: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ApiFrictionProcessSummary, String> {
-    let patterns = {
-        let conn = db
-            .read_conn()
-            .map_err(|err| format!("db read_conn: {err}"))?;
-        load_pattern_candidates(
-            &conn,
-            min_events.unwrap_or(API_FRICTION_MIN_REPEAT_COUNT),
-            limit.unwrap_or(DEFAULT_PATTERN_LIMIT),
-        )?
-    };
+    let pg_pool = pg_pool.ok_or_else(|| {
+        "postgres pool is required for API friction processing; sqlite fallback is unavailable"
+            .to_string()
+    })?;
+    let patterns = load_pattern_candidates_pg(
+        pg_pool,
+        min_events.unwrap_or(API_FRICTION_MIN_REPEAT_COUNT),
+        limit.unwrap_or(DEFAULT_PATTERN_LIMIT),
+    )
+    .await?;
 
     let mut summary = ApiFrictionProcessSummary {
         processed_patterns: patterns.len(),
@@ -338,21 +295,19 @@ pub(crate) async fn process_api_friction_patterns(
             "api-friction: {} — {}",
             pattern.endpoint, pattern.friction_type
         );
-        let issue_body = build_issue_body(db, &pattern)?;
+        let issue_body = build_issue_body_pg(pg_pool, &pattern).await?;
 
         match crate::github::create_issue(&pattern.repo_id, &issue_title, &issue_body).await {
             Ok(issue) => {
-                {
-                    let conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
-                    conn.execute(
-                        "INSERT INTO api_friction_issues (
+                sqlx::query(
+                    "INSERT INTO api_friction_issues (
                             fingerprint, repo_id, endpoint, friction_type, title, body, issue_number,
                             issue_url, event_count, first_event_at, last_event_at, last_error,
                             created_at, updated_at
                          ) VALUES (
-                            ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                            ?8, ?9, ?10, ?11, NULL,
-                            datetime('now'), datetime('now')
+                            $1, $2, $3, $4, $5, $6, $7,
+                            $8, $9, $10::timestamptz, $11::timestamptz, NULL,
+                            NOW(), NOW()
                          )
                          ON CONFLICT(fingerprint) DO UPDATE SET
                             repo_id = excluded.repo_id,
@@ -366,23 +321,29 @@ pub(crate) async fn process_api_friction_patterns(
                             first_event_at = excluded.first_event_at,
                             last_event_at = excluded.last_event_at,
                             last_error = NULL,
-                            updated_at = datetime('now')",
-                        params![
-                            pattern.fingerprint,
-                            pattern.repo_id,
-                            pattern.endpoint,
-                            pattern.friction_type,
-                            issue_title,
-                            issue_body,
-                            issue.number,
-                            issue.url,
-                            pattern.event_count as i64,
-                            pattern.first_seen_at,
-                            pattern.last_seen_at,
-                        ],
+                            updated_at = NOW()",
+                )
+                .bind(&pattern.fingerprint)
+                .bind(&pattern.repo_id)
+                .bind(&pattern.endpoint)
+                .bind(&pattern.friction_type)
+                .bind(&issue_title)
+                .bind(&issue_body)
+                .bind(i32::try_from(issue.number).map_err(|_| {
+                    format!("github issue number exceeds postgres integer: {}", issue.number)
+                })?)
+                .bind(&issue.url)
+                .bind(i32::try_from(pattern.event_count).map_err(|_| {
+                    format!(
+                        "api_friction event_count exceeds postgres integer: {}",
+                        pattern.event_count
                     )
-                    .map_err(|err| format!("upsert api_friction_issues: {err}"))?;
-                }
+                })?)
+                .bind(&pattern.first_seen_at)
+                .bind(&pattern.last_seen_at)
+                .execute(pg_pool)
+                .await
+                .map_err(|err| format!("upsert api_friction_issues: {err}"))?;
 
                 summary.created_issues.push(ProcessedApiFrictionIssue {
                     fingerprint: pattern.fingerprint,
@@ -395,17 +356,15 @@ pub(crate) async fn process_api_friction_patterns(
                 });
             }
             Err(error) => {
-                {
-                    let conn = db.lock().map_err(|err| format!("db lock: {err}"))?;
-                    conn.execute(
-                        "INSERT INTO api_friction_issues (
+                sqlx::query(
+                    "INSERT INTO api_friction_issues (
                             fingerprint, repo_id, endpoint, friction_type, title, body, issue_number,
                             issue_url, event_count, first_event_at, last_event_at, last_error,
                             created_at, updated_at
                          ) VALUES (
-                            ?1, ?2, ?3, ?4, ?5, ?6, NULL,
-                            NULL, ?7, ?8, ?9, ?10,
-                            datetime('now'), datetime('now')
+                            $1, $2, $3, $4, $5, $6, NULL,
+                            NULL, $7, $8::timestamptz, $9::timestamptz, $10,
+                            NOW(), NOW()
                          )
                          ON CONFLICT(fingerprint) DO UPDATE SET
                             repo_id = excluded.repo_id,
@@ -417,22 +376,26 @@ pub(crate) async fn process_api_friction_patterns(
                             first_event_at = excluded.first_event_at,
                             last_event_at = excluded.last_event_at,
                             last_error = excluded.last_error,
-                            updated_at = datetime('now')",
-                        params![
-                            pattern.fingerprint,
-                            pattern.repo_id,
-                            pattern.endpoint,
-                            pattern.friction_type,
-                            issue_title,
-                            issue_body,
-                            pattern.event_count as i64,
-                            pattern.first_seen_at,
-                            pattern.last_seen_at,
-                            error,
-                        ],
+                            updated_at = NOW()",
+                )
+                .bind(&pattern.fingerprint)
+                .bind(&pattern.repo_id)
+                .bind(&pattern.endpoint)
+                .bind(&pattern.friction_type)
+                .bind(&issue_title)
+                .bind(&issue_body)
+                .bind(i32::try_from(pattern.event_count).map_err(|_| {
+                    format!(
+                        "api_friction event_count exceeds postgres integer: {}",
+                        pattern.event_count
                     )
-                    .map_err(|err| format!("record api_friction_issues failure: {err}"))?;
-                }
+                })?)
+                .bind(&pattern.first_seen_at)
+                .bind(&pattern.last_seen_at)
+                .bind(&error)
+                .execute(pg_pool)
+                .await
+                .map_err(|err| format!("record api_friction_issues failure: {err}"))?;
 
                 summary.failed_patterns.push(ApiFrictionPatternFailure {
                     fingerprint: pattern.fingerprint,
@@ -577,80 +540,6 @@ fn resolve_memory_backend_for_friction(
     (resolved.backend == MemoryBackendKind::Memento).then_some(resolved)
 }
 
-fn load_source_context(
-    conn: &mut Connection,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    _channel_id: u64,
-) -> Result<SourceContext, String> {
-    if let Some(dispatch_id) = dispatch_id
-        && let Some(context) = conn
-            .query_row(
-                "SELECT td.kanban_card_id,
-                        kc.repo_id,
-                        kc.github_issue_number,
-                        COALESCE(NULLIF(TRIM(kc.title), ''), NULLIF(TRIM(td.title), '')),
-                        td.to_agent_id
-                 FROM task_dispatches td
-                 LEFT JOIN kanban_cards kc
-                   ON kc.id = td.kanban_card_id
-                 WHERE td.id = ?1",
-                [dispatch_id],
-                |row| {
-                    Ok(SourceContext {
-                        card_id: row.get(0)?,
-                        repo_id: row.get(1)?,
-                        issue_number: row.get(2)?,
-                        task_summary: row.get(3)?,
-                        agent_id: row.get(4)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|err| format!("load task_dispatches source context: {err}"))?
-    {
-        return Ok(context);
-    }
-
-    if let Some(session_key) = session_key
-        && let Some(context) = conn
-            .query_row(
-                "SELECT agent_id, active_dispatch_id, session_info
-                 FROM sessions
-                 WHERE session_key = ?1",
-                [session_key],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|err| format!("load sessions source context: {err}"))?
-    {
-        let (agent_id, active_dispatch_id, session_info) = context;
-        if let Some(active_dispatch_id) = active_dispatch_id {
-            let mut active = load_source_context(conn, Some(active_dispatch_id.as_str()), None, 0)?;
-            if active.agent_id.is_none() {
-                active.agent_id = agent_id;
-            }
-            if active.task_summary.is_none() {
-                active.task_summary = session_info;
-            }
-            return Ok(active);
-        }
-        return Ok(SourceContext {
-            agent_id,
-            task_summary: session_info,
-            ..SourceContext::default()
-        });
-    }
-
-    Ok(SourceContext::default())
-}
-
 async fn load_dispatch_source_context_pg(
     pg_pool: &PgPool,
     dispatch_id: &str,
@@ -748,12 +637,8 @@ fn prepare_event_rows(
         .map(|report| {
             let fingerprint = build_fingerprint(&report.endpoint, &report.friction_type);
             let event_id = uuid::Uuid::new_v4().to_string();
-            let payload_json_text = serde_json::to_string(report)
-                .map_err(|err| format!("serialize api_friction payload: {err}"))?;
             let payload_json_value = serde_json::to_value(report)
                 .map_err(|err| format!("serialize api_friction payload: {err}"))?;
-            let keywords_json_text = serde_json::to_string(&report.keywords)
-                .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
             let keywords_json_value = serde_json::to_value(&report.keywords)
                 .map_err(|err| format!("serialize api_friction keywords: {err}"))?;
             let repo_id = source_context
@@ -770,13 +655,10 @@ fn prepare_event_rows(
                 workaround: report.workaround.clone(),
                 suggested_fix: report.suggested_fix.clone(),
                 docs_category: report.docs_category.clone(),
-                keywords_json_text,
                 keywords_json_value,
-                payload_json_text,
                 payload_json_value,
                 card_id: source_context.card_id.clone(),
                 repo_id,
-                github_issue_number_sqlite: source_context.issue_number,
                 github_issue_number_pg: source_context
                     .issue_number
                     .and_then(|value| i32::try_from(value).ok()),
@@ -791,59 +673,6 @@ fn prepare_event_rows(
             })
         })
         .collect()
-}
-
-fn persist_event_rows(
-    conn: &mut Connection,
-    context: &ApiFrictionRecordContext<'_>,
-    rows: &[PreparedEventRow],
-) -> Result<(), String> {
-    let tx = conn
-        .transaction()
-        .map_err(|err| format!("begin api_friction transaction: {err}"))?;
-
-    for row in rows {
-        tx.execute(
-            "INSERT INTO api_friction_events (
-                id, fingerprint, endpoint, friction_type, summary, workaround, suggested_fix,
-                docs_category, keywords_json, payload_json, session_key, channel_id, provider,
-                dispatch_id, card_id, repo_id, github_issue_number, task_summary, agent_id,
-                memory_backend, memory_status, memory_error, created_at
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                ?8, ?9, ?10, ?11, ?12, ?13,
-                ?14, ?15, ?16, ?17, ?18, ?19,
-                ?20, 'pending', NULL, datetime('now')
-             )",
-            params![
-                row.event_id,
-                row.fingerprint,
-                row.endpoint,
-                row.friction_type,
-                row.summary,
-                row.workaround,
-                row.suggested_fix,
-                row.docs_category,
-                row.keywords_json_text,
-                row.payload_json_text,
-                context.session_key,
-                context.channel_id.to_string(),
-                context.provider,
-                context.dispatch_id,
-                row.card_id,
-                row.repo_id,
-                row.github_issue_number_sqlite,
-                row.task_summary,
-                row.agent_id,
-                "memento",
-            ],
-        )
-        .map_err(|err| format!("insert api_friction_events: {err}"))?;
-    }
-
-    tx.commit()
-        .map_err(|err| format!("commit api_friction transaction: {err}"))?;
-    Ok(())
 }
 
 async fn persist_event_rows_pg(
@@ -997,7 +826,7 @@ fn build_fingerprint(endpoint: &str, friction_type: &str) -> String {
 }
 
 async fn mark_event_memory_status(
-    db: Option<&Db>,
+    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     event_id: &str,
     status: &str,
@@ -1015,123 +844,136 @@ async fn mark_event_memory_status(
         .execute(pg_pool)
         .await;
     }
-
-    let Some(db) = db else {
-        return;
-    };
-    let Ok(conn) = db.lock() else {
-        return;
-    };
-    let _ = conn.execute(
-        "UPDATE api_friction_events
-         SET memory_status = ?1, memory_error = ?2
-         WHERE id = ?3",
-        params![status, error, event_id],
-    );
 }
 
-fn load_pattern_candidates(
-    conn: &Connection,
+async fn load_pattern_candidates_pg(
+    pg_pool: &PgPool,
     min_events: usize,
     limit: usize,
 ) -> Result<Vec<ApiFrictionPattern>, String> {
     let min_events = min_events.max(API_FRICTION_MIN_REPEAT_COUNT) as i64;
     let limit = limit.clamp(1, 100) as i64;
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.fingerprint,
-                    COUNT(*) AS event_count,
-                    MIN(e.created_at) AS first_seen_at,
-                    MAX(e.created_at) AS last_seen_at,
-                    i.issue_number,
-                    i.issue_url,
-                    i.last_error
-             FROM api_friction_events e
-             LEFT JOIN api_friction_issues i
-               ON i.fingerprint = e.fingerprint
-             GROUP BY e.fingerprint
-             HAVING COUNT(*) >= ?1
-             ORDER BY event_count DESC, last_seen_at DESC
-             LIMIT ?2",
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT e.fingerprint,
+                COUNT(*)::BIGINT AS event_count,
+                MIN(e.created_at)::TEXT AS first_seen_at,
+                MAX(e.created_at)::TEXT AS last_seen_at,
+                i.issue_number::BIGINT,
+                i.issue_url,
+                i.last_error
+         FROM api_friction_events e
+         LEFT JOIN api_friction_issues i
+           ON i.fingerprint = e.fingerprint
+         GROUP BY e.fingerprint, i.issue_number, i.issue_url, i.last_error
+         HAVING COUNT(*) >= $1
+         ORDER BY event_count DESC, last_seen_at DESC
+         LIMIT $2",
+    )
+    .bind(min_events)
+    .bind(limit)
+    .fetch_all(pg_pool)
+    .await
+    .map_err(|err| format!("query api_friction pattern aggregate: {err}"))?;
+
+    let mut patterns = Vec::with_capacity(rows.len());
+    for (
+        fingerprint,
+        event_count,
+        first_seen_at,
+        last_seen_at,
+        issue_number,
+        issue_url,
+        last_error,
+    ) in rows
+    {
+        let latest = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                Option<String>,
+            ),
+        >(
+            "SELECT endpoint,
+                    friction_type,
+                    docs_category,
+                    summary,
+                    workaround,
+                    suggested_fix,
+                    COALESCE(repo_id, $2),
+                    task_summary
+             FROM api_friction_events
+             WHERE fingerprint = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
         )
-        .map_err(|err| format!("prepare api_friction pattern aggregate: {err}"))?;
+        .bind(&fingerprint)
+        .bind(DEFAULT_API_FRICTION_REPO)
+        .fetch_one(pg_pool)
+        .await
+        .map_err(|err| format!("load latest api_friction pattern row: {err}"))?;
 
-    let rows = stmt
-        .query_map(params![min_events, limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        })
-        .map_err(|err| format!("query api_friction pattern aggregate: {err}"))?;
-
-    let mut patterns = Vec::new();
-    for row in rows {
         let (
-            fingerprint,
-            event_count,
-            first_seen_at,
-            last_seen_at,
-            issue_number,
-            issue_url,
-            last_error,
-        ) = row.map_err(|err| format!("collect api_friction pattern aggregate: {err}"))?;
-        let latest = conn
-            .query_row(
-                "SELECT endpoint, friction_type, docs_category, summary, workaround, suggested_fix,
-                        COALESCE(repo_id, ?2), task_summary
-                 FROM api_friction_events
-                 WHERE fingerprint = ?1
-                 ORDER BY created_at DESC, rowid DESC
-                 LIMIT 1",
-                params![fingerprint, DEFAULT_API_FRICTION_REPO],
-                |row| {
-                    Ok(ApiFrictionPattern {
-                        fingerprint: String::new(),
-                        endpoint: row.get(0)?,
-                        friction_type: row.get(1)?,
-                        docs_category: row.get(2)?,
-                        summary: row.get(3)?,
-                        workaround: row.get(4)?,
-                        suggested_fix: row.get(5)?,
-                        repo_id: row.get(6)?,
-                        event_count: 0,
-                        first_seen_at: String::new(),
-                        last_seen_at: String::new(),
-                        task_summary: row.get(7)?,
-                        github_issue_number: None,
-                        issue_url: None,
-                        last_error: None,
-                    })
-                },
-            )
-            .map_err(|err| format!("load latest api_friction pattern row: {err}"))?;
+            endpoint,
+            friction_type,
+            docs_category,
+            summary,
+            workaround,
+            suggested_fix,
+            repo_id,
+            task_summary,
+        ) = latest;
 
         patterns.push(ApiFrictionPattern {
             fingerprint,
+            endpoint,
+            friction_type,
+            docs_category,
+            summary,
+            workaround,
+            suggested_fix,
+            repo_id,
             event_count: event_count as usize,
             first_seen_at,
             last_seen_at,
+            task_summary,
             github_issue_number: issue_number,
             issue_url,
             last_error,
-            ..latest
         });
     }
 
     Ok(patterns)
 }
 
-fn build_issue_body(db: &Db, pattern: &ApiFrictionPattern) -> Result<String, String> {
-    let conn = db
-        .read_conn()
-        .map_err(|err| format!("db read_conn: {err}"))?;
-    let evidence = load_pattern_evidence(&conn, &pattern.fingerprint)?;
+async fn build_issue_body_pg(
+    pg_pool: &PgPool,
+    pattern: &ApiFrictionPattern,
+) -> Result<String, String> {
+    let evidence = load_pattern_evidence_pg(pg_pool, &pattern.fingerprint).await?;
+    build_issue_body_from_evidence(pattern, evidence)
+}
+
+fn build_issue_body_from_evidence(
+    pattern: &ApiFrictionPattern,
+    evidence: Vec<PatternEvidence>,
+) -> Result<String, String> {
     let mut lines = vec![
         "## Summary".to_string(),
         format!("- Endpoint/Surface: `{}`", pattern.endpoint),
@@ -1206,35 +1048,44 @@ struct PatternEvidence {
     summary: String,
 }
 
-fn load_pattern_evidence(
-    conn: &Connection,
+async fn load_pattern_evidence_pg(
+    pg_pool: &PgPool,
     fingerprint: &str,
 ) -> Result<Vec<PatternEvidence>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT repo_id, github_issue_number, card_id, dispatch_id, summary
-             FROM api_friction_events
-             WHERE fingerprint = ?1
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT ?2",
-        )
-        .map_err(|err| format!("prepare api_friction evidence: {err}"))?;
-    let rows = stmt
-        .query_map(
-            params![fingerprint, MAX_ISSUE_EVIDENCE_ITEMS as i64],
-            |row| {
-                Ok(PatternEvidence {
-                    repo_id: row.get(0)?,
-                    issue_number: row.get(1)?,
-                    card_id: row.get(2)?,
-                    dispatch_id: row.get(3)?,
-                    summary: row.get(4)?,
-                })
-            },
-        )
-        .map_err(|err| format!("query api_friction evidence: {err}"))?;
-    rows.collect::<libsql_rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("collect api_friction evidence: {err}"))
+    sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            String,
+        ),
+    >(
+        "SELECT repo_id, github_issue_number::BIGINT, card_id, dispatch_id, summary
+         FROM api_friction_events
+         WHERE fingerprint = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT $2",
+    )
+    .bind(fingerprint)
+    .bind(MAX_ISSUE_EVIDENCE_ITEMS as i64)
+    .fetch_all(pg_pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(repo_id, issue_number, card_id, dispatch_id, summary)| PatternEvidence {
+                    repo_id,
+                    issue_number,
+                    card_id,
+                    dispatch_id,
+                    summary,
+                },
+            )
+            .collect()
+    })
+    .map_err(|err| format!("query api_friction evidence: {err}"))
 }
 
 #[cfg(test)]
@@ -1422,38 +1273,67 @@ mod tests {
         assert_eq!(extracted.parse_errors.len(), 1);
     }
 
-    #[test]
-    fn list_api_friction_patterns_counts_repeated_rows() {
-        let db = crate::db::test_db();
-        let conn = db.lock().unwrap();
-        conn.execute(
+    #[tokio::test]
+    async fn list_api_friction_patterns_counts_repeated_rows() {
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
             "INSERT INTO api_friction_events (
                 id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
                 channel_id, provider, repo_id, memory_backend, memory_status, created_at
              ) VALUES (
-                'event-1', 'api-docs-kanban::docs-bypass', '/api/docs/kanban', 'docs-bypass', 'first',
-                '[]', '{}', '1', 'codex', 'itismyfield/AgentDesk', 'memento', 'stored', datetime('now', '-2 minutes')
+                $1, $2, $3, $4, $5,
+                '[]'::jsonb, '{}'::jsonb, $6, $7, $8, $9, $10, NOW() - INTERVAL '2 minutes'
              )",
-            [],
         )
+        .bind("event-1")
+        .bind("api-docs-kanban::docs-bypass")
+        .bind("/api/docs/kanban")
+        .bind("docs-bypass")
+        .bind("first")
+        .bind("1")
+        .bind("codex")
+        .bind("itismyfield/AgentDesk")
+        .bind("memento")
+        .bind("stored")
+        .execute(&pg_pool)
+        .await
         .unwrap();
-        conn.execute(
+        sqlx::query(
             "INSERT INTO api_friction_events (
                 id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
                 channel_id, provider, repo_id, memory_backend, memory_status, created_at
              ) VALUES (
-                'event-2', 'api-docs-kanban::docs-bypass', '/api/docs/kanban', 'docs-bypass', 'second',
-                '[]', '{}', '1', 'codex', 'itismyfield/AgentDesk', 'memento', 'stored', datetime('now', '-1 minutes')
+                $1, $2, $3, $4, $5,
+                '[]'::jsonb, '{}'::jsonb, $6, $7, $8, $9, $10, NOW() - INTERVAL '1 minute'
              )",
-            [],
         )
+        .bind("event-2")
+        .bind("api-docs-kanban::docs-bypass")
+        .bind("/api/docs/kanban")
+        .bind("docs-bypass")
+        .bind("second")
+        .bind("1")
+        .bind("codex")
+        .bind("itismyfield/AgentDesk")
+        .bind("memento")
+        .bind("stored")
+        .execute(&pg_pool)
+        .await
         .unwrap();
-        drop(conn);
 
-        let patterns = list_api_friction_patterns(&db, None, None).unwrap();
+        let patterns = load_pattern_candidates_pg(
+            &pg_pool,
+            API_FRICTION_MIN_REPEAT_COUNT,
+            DEFAULT_PATTERN_LIMIT,
+        )
+        .await
+        .unwrap();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].event_count, 2);
         assert_eq!(patterns[0].summary, "second");
+        pg_pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
@@ -1713,49 +1593,72 @@ mod tests {
         let _mock_gh =
             install_mock_gh_issue_create("https://github.com/itismyfield/AgentDesk/issues/999");
 
+        let pg_db = TestPostgresDb::create().await;
+        let pg_pool = pg_db.connect_and_migrate().await;
         let db = crate::db::test_db();
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO api_friction_events (
-                    id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
-                    channel_id, provider, repo_id, memory_backend, memory_status, created_at
-                 ) VALUES (
-                    'event-1', 'api-docs-kanban::docs-bypass', '/api/docs/kanban', 'docs-bypass', 'first',
-                    '[]', '{}', '1', 'codex', 'itismyfield/AgentDesk', 'memento', 'stored', datetime('now', '-2 minutes')
-                 )",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO api_friction_events (
-                    id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
-                    channel_id, provider, repo_id, memory_backend, memory_status, created_at
-                 ) VALUES (
-                    'event-2', 'api-docs-kanban::docs-bypass', '/api/docs/kanban', 'docs-bypass', 'second',
-                    '[]', '{}', '1', 'codex', 'itismyfield/AgentDesk', 'memento', 'stored', datetime('now', '-1 minutes')
-                 )",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO api_friction_events (
+                id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
+                channel_id, provider, repo_id, memory_backend, memory_status, created_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, '[]'::jsonb, '{}'::jsonb,
+                $6, $7, $8, $9, $10, NOW() - INTERVAL '2 minutes'
+             )",
+        )
+        .bind("event-1")
+        .bind("api-docs-kanban::docs-bypass")
+        .bind("/api/docs/kanban")
+        .bind("docs-bypass")
+        .bind("first")
+        .bind("1")
+        .bind("codex")
+        .bind("itismyfield/AgentDesk")
+        .bind("memento")
+        .bind("stored")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO api_friction_events (
+                id, fingerprint, endpoint, friction_type, summary, keywords_json, payload_json,
+                channel_id, provider, repo_id, memory_backend, memory_status, created_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, '[]'::jsonb, '{}'::jsonb,
+                $6, $7, $8, $9, $10, NOW() - INTERVAL '1 minute'
+             )",
+        )
+        .bind("event-2")
+        .bind("api-docs-kanban::docs-bypass")
+        .bind("/api/docs/kanban")
+        .bind("docs-bypass")
+        .bind("second")
+        .bind("1")
+        .bind("codex")
+        .bind("itismyfield/AgentDesk")
+        .bind("memento")
+        .bind("stored")
+        .execute(&pg_pool)
+        .await
+        .unwrap();
 
-        let summary = process_api_friction_patterns(&db, None, None)
+        let summary = process_api_friction_patterns(Some(&pg_pool), None, None)
             .await
             .unwrap();
         drop(lock);
 
         assert_eq!(summary.created_issues.len(), 1, "{summary:?}");
         assert!(summary.failed_patterns.is_empty(), "{summary:?}");
-        let conn = db.lock().unwrap();
-        let issue_number: i64 = conn
-            .query_row(
-                "SELECT issue_number FROM api_friction_issues WHERE fingerprint = 'api-docs-kanban::docs-bypass'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let issue_number: i64 = sqlx::query_scalar(
+            "SELECT issue_number::BIGINT
+             FROM api_friction_issues
+             WHERE fingerprint = 'api-docs-kanban::docs-bypass'",
+        )
+        .fetch_one(&pg_pool)
+        .await
+        .unwrap();
         assert_eq!(issue_number, 999);
+        pg_pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

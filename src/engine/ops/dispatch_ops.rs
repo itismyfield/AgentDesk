@@ -11,9 +11,12 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 pub(super) fn register_dispatch_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<Db>,
+    #[cfg(test)] db: Option<Db>,
     pg_pool: Option<PgPool>,
 ) -> JsResult<()> {
+    #[cfg(not(test))]
+    let db: Option<Db> = None;
+
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
@@ -396,7 +399,7 @@ fn dispatch_create_raw_sqlite_test(
                      SET state = 'suggestion_pending',
                          pending_dispatch_id = excluded.pending_dispatch_id,
                          updated_at = datetime('now')",
-                    libsql_rusqlite::params![card_id, dispatch_id],
+                    rusqlite::params![card_id, dispatch_id],
                 ) {
                     return format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'"));
                 }
@@ -508,7 +511,7 @@ fn dispatch_set_retry_count_raw_sqlite_test(db: &Db, dispatch_id: &str, count: i
     };
     match conn.execute(
         "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
-        libsql_rusqlite::params![count, dispatch_id],
+        rusqlite::params![count, dispatch_id],
     ) {
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
         Err(error) => format!(r#"{{"error":"{}"}}"#, error.to_string().replace('"', "'")),

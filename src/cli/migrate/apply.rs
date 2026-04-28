@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{self, AgentChannels, AgentDef as RuntimeAgentDef};
 use crate::db;
-use crate::db::agents::sync_agents_from_config;
 use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::discord::org_writer::{self, OrgAgentUpdate, OrgChannelBindingUpdate};
@@ -680,7 +679,7 @@ pub(super) fn apply_import_plan(
                 Some(&session_map),
             )?;
 
-            let db_path = apply_db_import(
+            let db_target = apply_db_import(
                 &config,
                 plan,
                 &session_map,
@@ -688,14 +687,9 @@ pub(super) fn apply_import_plan(
                 runtime_root,
                 &mut warnings,
             )?;
-            written_paths.push(db_path.display().to_string());
+            written_paths.push(db_target.clone());
             for state in apply_agents.values_mut() {
-                update_task_state(
-                    state,
-                    "db_upsert",
-                    "completed",
-                    vec![db_path.display().to_string()],
-                );
+                update_task_state(state, "db_upsert", "completed", vec![db_target.clone()]);
             }
             mark_phase_completed(&mut phase_status, "apply_db");
         }
@@ -1665,30 +1659,37 @@ fn apply_db_import(
     args: &OpenClawMigrateArgs,
     runtime_root: &Path,
     warnings: &mut Vec<String>,
-) -> Result<PathBuf, String> {
+) -> Result<String, String> {
     fs::create_dir_all(&config.data.dir).map_err(|e| {
         format!(
             "Failed to create data directory '{}': {e}",
             config.data.dir.display()
         )
     })?;
-    let db = db::init(config).map_err(|e| format!("Failed to initialize DB: {e}"))?;
-    sync_agents_from_config(&db, &config.agents)
-        .map_err(|e| format!("Failed to sync imported agents into DB: {e}"))?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Failed to create PostgreSQL import runtime: {e}"))?;
+    runtime.block_on(async {
+        let pool = db::postgres::connect_and_migrate(config)
+            .await
+            .map_err(|e| format!("Failed to initialize PostgreSQL: {e}"))?
+            .ok_or_else(|| "PostgreSQL is required for OpenClaw DB import.".to_string())?;
+        db::postgres::sync_agents_from_config_pg(&pool, &config.agents)
+            .await
+            .map_err(|e| format!("Failed to sync imported agents into PostgreSQL: {e}"))?;
 
-    if args.with_sessions {
-        upsert_imported_sessions(&db, plan, session_map, args, runtime_root)?;
-    }
+        if args.with_sessions {
+            upsert_imported_sessions_pg(&pool, plan, session_map, args, runtime_root).await?;
+        }
 
-    warnings.push(format!(
-        "Imported agents were synced into '{}'.",
-        config.data.dir.join(&config.data.db_name).display()
-    ));
-    Ok(config.data.dir.join(&config.data.db_name))
+        Ok::<(), String>(())
+    })?;
+
+    warnings.push("Imported agents were synced into PostgreSQL.".to_string());
+    Ok("postgresql".to_string())
 }
 
-fn upsert_imported_sessions(
-    db: &db::Db,
+async fn upsert_imported_sessions_pg(
+    pool: &sqlx::PgPool,
     plan: &ImportPlan,
     session_map: &[SessionMapEntry],
     args: &OpenClawMigrateArgs,
@@ -1704,9 +1705,6 @@ fn upsert_imported_sessions(
         .map(|agent| (agent.final_role_id.as_str(), agent))
         .collect::<BTreeMap<_, _>>();
 
-    let conn = db
-        .lock()
-        .map_err(|e| format!("DB lock error during session import: {e}"))?;
     for session in &plan.sessions {
         let Some(agent) = agent_lookup.get(session.final_role_id.as_str()) else {
             continue;
@@ -1753,9 +1751,9 @@ fn upsert_imported_sessions(
         let thread_channel_id = session.thread_id.clone();
         let last_heartbeat = None::<String>;
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, claude_session_id, last_heartbeat)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?10)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, NULL, CAST($10 AS timestamptz))
              ON CONFLICT(session_key) DO UPDATE SET
                status = excluded.status,
                provider = excluded.provider,
@@ -1766,20 +1764,20 @@ fn upsert_imported_sessions(
                agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
                thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
                claude_session_id = excluded.claude_session_id,
-               last_heartbeat = excluded.last_heartbeat",
-            libsql_rusqlite::params![
-                session_map.db_session_key,
-                session.final_role_id,
-                provider,
-                status,
-                session_info,
-                model,
-                0,
-                cwd,
-                thread_channel_id,
-                last_heartbeat,
-            ],
+               last_heartbeat = excluded.last_heartbeat"
         )
+        .bind(&session_map.db_session_key)
+        .bind(&session.final_role_id)
+        .bind(&provider)
+        .bind(status)
+        .bind(&session_info)
+        .bind(&model)
+        .bind(0_i64)
+        .bind(&cwd)
+        .bind(&thread_channel_id)
+        .bind(&last_heartbeat)
+        .execute(pool)
+        .await
         .map_err(|e| format!("Failed to upsert imported session '{}': {e}", session.session_key))?;
     }
 

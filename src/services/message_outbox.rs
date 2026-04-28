@@ -1,4 +1,3 @@
-use libsql_rusqlite::{Connection, OptionalExtension};
 use sqlx::PgPool;
 
 use crate::db::Db;
@@ -64,62 +63,6 @@ fn warn_lifecycle_enqueue_failure(
     );
 }
 
-pub(crate) fn enqueue(
-    conn: &Connection,
-    message: OutboxMessage<'_>,
-) -> libsql_rusqlite::Result<bool> {
-    let reason_code = message
-        .reason_code
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let session_key = normalized_session_key(message.target, message.session_key);
-
-    if let (Some(reason_code), Some(session_key)) = (reason_code, session_key.as_deref()) {
-        let lookback = format!("-{} seconds", LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS);
-        let duplicate_id: Option<i64> = conn
-            .query_row(
-                "SELECT id
-                 FROM message_outbox
-                 WHERE target = ?1
-                   AND reason_code = ?2
-                   AND session_key = ?3
-                   AND status != 'failed'
-                   AND created_at >= datetime('now', ?4)
-                 ORDER BY id DESC
-                 LIMIT 1",
-                libsql_rusqlite::params![message.target, reason_code, session_key, lookback],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(existing_id) = duplicate_id {
-            tracing::info!(
-                target = message.target,
-                reason_code,
-                session_key,
-                existing_id,
-                "suppressed duplicate lifecycle notification"
-            );
-            return Ok(false);
-        }
-    }
-
-    conn.execute(
-        "INSERT INTO message_outbox
-         (target, content, bot, source, reason_code, session_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        libsql_rusqlite::params![
-            message.target,
-            message.content,
-            message.bot,
-            message.source,
-            reason_code,
-            session_key,
-        ],
-    )?;
-
-    Ok(true)
-}
-
 pub(crate) fn enqueue_lifecycle_notification_best_effort(
     db: Option<&Db>,
     pg_pool: Option<&PgPool>,
@@ -165,30 +108,8 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
         }
     }
 
-    let Some(db) = db else {
-        return false;
-    };
-    let message = OutboxMessage {
-        target,
-        content,
-        bot: "notify",
-        source: "system",
-        reason_code: Some(reason_code),
-        session_key,
-    };
-    match db.separate_conn() {
-        Ok(conn) => enqueue(&conn, message).unwrap_or(false),
-        Err(error) => {
-            warn_lifecycle_enqueue_failure(
-                "sqlite",
-                target,
-                session_key,
-                reason_code,
-                format!("open connection: {error}"),
-            );
-            false
-        }
-    }
+    let _ = db;
+    false
 }
 
 pub(crate) async fn enqueue_outbox_pg(
@@ -249,9 +170,9 @@ pub(crate) async fn enqueue_outbox_pg(
     Ok(true)
 }
 
-// When PG is configured, its outbox is authoritative; falling back to SQLite
-// would write rows no release worker is polling. In that mode, insert failures
-// must surface to the caller so it can choose a visible fallback.
+// PG outbox rows are authoritative for the release runtime. Without a PG pool,
+// callers should choose a visible direct-send fallback instead of staging an
+// undrained legacy row.
 pub(crate) async fn enqueue_outbox_best_effort(
     pg_pool: Option<&PgPool>,
     db: Option<&Db>,
@@ -267,22 +188,8 @@ pub(crate) async fn enqueue_outbox_best_effort(
         };
     }
 
-    let Some(db) = db else {
-        return false;
-    };
-    match db.separate_conn() {
-        Ok(conn) => match enqueue(&conn, message) {
-            Ok(enqueued) => enqueued,
-            Err(error) => {
-                warn_outbox_enqueue_failure("sqlite", message, &error);
-                false
-            }
-        },
-        Err(error) => {
-            warn_outbox_enqueue_failure("sqlite", message, format!("open connection: {error}"));
-            false
-        }
-    }
+    let _ = db;
+    false
 }
 
 pub(crate) async fn enqueue_lifecycle_notification_pg(
@@ -345,17 +252,9 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OutboxMessage, enqueue, warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure,
-    };
+    use super::{OutboxMessage, warn_lifecycle_enqueue_failure, warn_outbox_enqueue_failure};
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
-
-    fn test_conn() -> libsql_rusqlite::Connection {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::schema::migrate(&conn).unwrap();
-        conn
-    }
 
     #[derive(Clone)]
     struct TestLogWriter {
@@ -388,80 +287,6 @@ mod tests {
         let result = tracing::subscriber::with_default(subscriber, run);
         let captured = buffer.lock().unwrap().clone();
         (result, String::from_utf8_lossy(&captured).to_string())
-    }
-
-    #[test]
-    fn lifecycle_notifications_dedupe_same_target_reason_and_session() {
-        let conn = test_conn();
-        let message = OutboxMessage {
-            target: "channel:123",
-            content: "🔴 세션 종료",
-            bot: "notify",
-            source: "system",
-            reason_code: Some("lifecycle.force_kill"),
-            session_key: Some("session-a"),
-        };
-
-        assert!(enqueue(&conn, message).unwrap());
-        assert!(!enqueue(&conn, message).unwrap());
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn lifecycle_notifications_keep_distinct_reason_or_session() {
-        let conn = test_conn();
-
-        assert!(
-            enqueue(
-                &conn,
-                OutboxMessage {
-                    target: "channel:123",
-                    content: "A",
-                    bot: "notify",
-                    source: "system",
-                    reason_code: Some("lifecycle.force_kill"),
-                    session_key: Some("session-a"),
-                },
-            )
-            .unwrap()
-        );
-        assert!(
-            enqueue(
-                &conn,
-                OutboxMessage {
-                    target: "channel:123",
-                    content: "B",
-                    bot: "notify",
-                    source: "system",
-                    reason_code: Some("lifecycle.auto_cleanup"),
-                    session_key: Some("session-a"),
-                },
-            )
-            .unwrap()
-        );
-        assert!(
-            enqueue(
-                &conn,
-                OutboxMessage {
-                    target: "channel:123",
-                    content: "C",
-                    bot: "notify",
-                    source: "system",
-                    reason_code: Some("lifecycle.force_kill"),
-                    session_key: Some("session-b"),
-                },
-            )
-            .unwrap()
-        );
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 3);
     }
 
     #[test]

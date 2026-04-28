@@ -161,7 +161,11 @@ fi
 # Policies
 if [ -d "policies" ]; then
   mkdir -p "$STAGING/policies"
-  cp policies/*.js "$STAGING/policies/"
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "policies/" "$STAGING/policies/"
+  else
+    cp -R "policies/." "$STAGING/policies/"
+  fi
 fi
 
 # Managed skills

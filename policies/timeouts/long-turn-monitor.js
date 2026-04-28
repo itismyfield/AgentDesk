@@ -29,8 +29,10 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
   timeouts._section_L = function() {
       // ─── [L] Inflight 장시간 턴 감지 (#130) ──────────────────
       // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
-      // Prevents alarm fatigue while still notifying at key thresholds.
-      var ALERT_THRESHOLDS = [30, 60, 120]; // minutes
+      // Notify at every configured-minute multiple while storing the last
+      // alerted threshold minute to avoid repeating the same bucket.
+      var configuredAlertInterval = parseInt(agentdesk.config.get("long_turn_alert_interval_min"), 10);
+      var ALERT_INTERVAL_MINUTES = configuredAlertInterval > 0 ? configuredAlertInterval : 30;
       var WATCHDOG_EXTENSION_MINUTES = 60;
       var WATCHDOG_EXTENSION_COOLDOWN_MINUTES = 20;
       var WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES = 5;
@@ -45,16 +47,23 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           var startedAtMs = parseLocalTimestampMs(inf.started_at);
           if (startedAtMs <= 0) continue;
           var elapsedMin = (Date.now() - startedAtMs) / 60000;
-          // Find the highest threshold that elapsed time exceeds
-          var currentTier = -1;
-          for (var t = ALERT_THRESHOLDS.length - 1; t >= 0; t--) {
-            if (elapsedMin >= ALERT_THRESHOLDS[t]) { currentTier = t; break; }
-          }
-          if (currentTier < 0) continue; // under 30min, skip
+          var currentThreshold = Math.floor(elapsedMin / ALERT_INTERVAL_MINUTES) * ALERT_INTERVAL_MINUTES;
+          if (currentThreshold < ALERT_INTERVAL_MINUTES) continue; // under 30min, skip
           // Check if we already alerted at this tier
           var tierKey = "long_turn_tier:" + inf.provider + ":" + inf.channel_id;
           var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
-          var lastAlertedTier = lastTier.length > 0 ? parseInt(lastTier[0].value, 10) : -1;
+          var lastAlertedThreshold = -1;
+          if (lastTier.length > 0) {
+            var rawLastTier = parseInt(lastTier[0].value, 10);
+            if (!isNaN(rawLastTier)) {
+              // Backward compatibility for pre-30-minute cadence values:
+              // old tier index 0/1/2 meant 30/60/120 minutes.
+              if (rawLastTier === 0) lastAlertedThreshold = 30;
+              else if (rawLastTier === 1) lastAlertedThreshold = 60;
+              else if (rawLastTier === 2) lastAlertedThreshold = 120;
+              else lastAlertedThreshold = rawLastTier;
+            }
+          }
           var updatedAtMs = parseLocalTimestampMs(inf.updated_at);
           var updatedAgeMin = updatedAtMs > 0 ? (Date.now() - updatedAtMs) / 60000 : null;
           var recentProgress = updatedAgeMin !== null && updatedAgeMin <= WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES;
@@ -91,7 +100,7 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           } else {
             extensionLine = "\nwatchdog: progress timestamp 없음 — 연장 안 함";
           }
-          if (currentTier <= lastAlertedTier) continue; // already alerted at this tier or higher
+          if (currentThreshold <= lastAlertedThreshold) continue; // already alerted at this threshold or higher
           // Resolve agent_id: prefer dispatch target, fallback to channel owner (#130)
           var agentId = "?";
           if (inf.dispatch_id) {
@@ -117,15 +126,15 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
             "session_key: " + (inf.session_key || "?") + "\n" +
             "dispatch_id: " + (inf.dispatch_id || "?") + "\n" +
             "tmux: " + (inf.tmux_session_name || "?") + "\n" +
-            "경과: " + Math.round(elapsedMin) + "분 (" + ALERT_THRESHOLDS[currentTier] + "분 단계)\n" +
+            "경과: " + Math.round(elapsedMin) + "분 (" + currentThreshold + "분 단계)\n" +
             "provider: " + (inf.provider || "?") +
             extensionLine
           );
           agentdesk.db.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            [tierKey, "" + currentTier]
+            [tierKey, "" + currentThreshold]
           );
-          agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min (tier " + currentTier + ")");
+          agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min (" + currentThreshold + "min threshold)");
         }
         // Clean up tier keys for inflights that no longer exist
         var tierKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'");

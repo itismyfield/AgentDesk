@@ -543,6 +543,17 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_agent_pg(pool: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     fn seed_card(db: &db::Db, card_id: &str, status: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -550,6 +561,18 @@ mod tests {
              VALUES (?1, 'Test Card', ?2, 'agent-1', datetime('now'), datetime('now'))",
             sqlite_params![card_id, status],
         )
+        .unwrap();
+    }
+
+    async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ($1, 'Test Card', $2, 'agent-1', NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .execute(pool)
+        .await
         .unwrap();
     }
 
@@ -574,6 +597,54 @@ mod tests {
             "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = ?2",
             sqlite_params![dispatch_id, card_id],
         )
+        .unwrap();
+    }
+
+    async fn seed_dispatch_pg(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        dtype: &str,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches \
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ($1, $2, 'agent-1', $3, $4, 'Test Dispatch', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(dtype)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind(dispatch_id)
+            .bind(card_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn seed_assistant_response_for_dispatch_pg(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        message: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO session_transcripts \
+             (turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message, events_json) \
+             VALUES ($1, 'integration-test-session', '111', 'agent-1', 'codex', $2, 'Implement the task', $3, '[]'::jsonb) \
+             ON CONFLICT (turn_id) DO UPDATE SET \
+                dispatch_id = EXCLUDED.dispatch_id, \
+                assistant_message = EXCLUDED.assistant_message",
+        )
+        .bind(format!("integration-test:{dispatch_id}"))
+        .bind(dispatch_id)
+        .bind(message)
+        .execute(pool)
+        .await
         .unwrap();
     }
 
@@ -745,6 +816,16 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_repo_pg(pool: &sqlx::PgPool, repo_id: &str) {
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES ($1, $1, true)",
+        )
+        .bind(repo_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     fn seed_card_with_repo(
         db: &db::Db,
         card_id: &str,
@@ -770,6 +851,30 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_card_with_repo_pg(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+        status: &str,
+        repo_id: &str,
+        issue_number: i64,
+        active_thread_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO kanban_cards \
+             (id, title, status, assigned_agent_id, repo_id, github_issue_number, github_issue_url, active_thread_id, created_at, updated_at) \
+             VALUES ($1, 'Codex Card', $2, 'agent-1', $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .bind(repo_id)
+        .bind(issue_number)
+        .bind(format!("https://github.com/{repo_id}/issues/{issue_number}"))
+        .bind(active_thread_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     fn seed_thread_session(db: &db::Db, session_key: &str, thread_channel_id: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -777,6 +882,22 @@ mod tests {
              VALUES (?1, 'agent-1', 'codex', 'idle', ?2, datetime('now'))",
             sqlite_params![session_key, thread_channel_id],
         )
+        .unwrap();
+    }
+
+    async fn seed_thread_session_pg(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        thread_channel_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat) \
+             VALUES ($1, 'agent-1', 'codex', 'idle', $2, NOW())",
+        )
+        .bind(session_key)
+        .bind(thread_channel_id)
+        .execute(pool)
+        .await
         .unwrap();
     }
 
@@ -1263,6 +1384,33 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_pr_tracking_pg(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+        repo_id: &str,
+        worktree_path: Option<&str>,
+        branch: &str,
+        pr_number: Option<i64>,
+        head_sha: Option<&str>,
+        state: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO pr_tracking \
+             (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(repo_id)
+        .bind(worktree_path)
+        .bind(branch)
+        .bind(pr_number)
+        .bind(head_sha)
+        .bind(state)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     /// #743: Seed a create-pr dispatch + pr_tracking row with matching
     /// dispatch_generation stamps so success-path stale guard in
     /// onDispatchCompleted accepts the completion.
@@ -1329,6 +1477,26 @@ mod tests {
             |row| row.get(0),
         )
         .ok()
+    }
+
+    async fn set_kv_pg(pool: &sqlx::PgPool, key: &str, value: &str) {
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn kv_value_pg(pool: &sqlx::PgPool, key: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
     }
 
     fn pr_tracking_branch(db: &db::Db, card_id: &str) -> Option<String> {
@@ -1411,6 +1579,13 @@ mod tests {
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    async fn message_outbox_rows_pg(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT target, content FROM message_outbox ORDER BY id ASC")
+            .fetch_all(pool)
+            .await
             .unwrap()
     }
 
@@ -1680,6 +1855,14 @@ mod tests {
         .unwrap()
     }
 
+    async fn get_card_status_pg(pool: &sqlx::PgPool, card_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     fn get_dispatch_status(db: &db::Db, dispatch_id: &str) -> String {
         let conn = db.lock().unwrap();
         conn.query_row(
@@ -1700,7 +1883,7 @@ mod tests {
         seed_dispatch(&db, "d-s1", "card-s1", "implementation", "pending");
 
         let state = AppState {
-            db: Some(db.clone()),
+            legacy_db_override: Some(db.clone()),
             pg_pool: None,
             engine: test_engine(&db),
             config: std::sync::Arc::new(crate::config::Config::default()),
@@ -1799,152 +1982,184 @@ mod tests {
 
     // ── Scenario 4: Card status full cycle ──────────────────────────
 
-    #[test]
-    fn scenario_4_card_status_full_cycle() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-s4", "backlog");
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_4_card_status_full_cycle() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-s4", "backlog").await;
 
         // backlog → ready
-        assert!(kanban::transition_status(&db, &engine, "card-s4", "ready").is_ok());
-        assert_eq!(get_card_status(&db, "card-s4"), "ready");
+        assert!(
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
+                &engine,
+                "card-s4",
+                "ready",
+                "test",
+                crate::engine::transition::ForceIntent::None,
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(get_card_status_pg(&pool, "card-s4").await, "ready");
 
         // ready → requested (free transition, no dispatch needed — #255 preflight state)
-        assert!(kanban::transition_status(&db, &engine, "card-s4", "requested").is_ok());
-        assert_eq!(get_card_status(&db, "card-s4"), "requested");
+        assert!(
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
+                &engine,
+                "card-s4",
+                "requested",
+                "test",
+                crate::engine::transition::ForceIntent::None,
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(get_card_status_pg(&pool, "card-s4").await, "requested");
 
         // requested → in_progress (needs dispatch — gated transition)
-        seed_dispatch(&db, "d-s4-impl", "card-s4", "implementation", "pending");
-        assert!(kanban::transition_status(&db, &engine, "card-s4", "in_progress").is_ok());
-        assert_eq!(get_card_status(&db, "card-s4"), "in_progress");
+        seed_dispatch_pg(&pool, "d-s4-impl", "card-s4", "implementation", "pending").await;
+        assert!(
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
+                &engine,
+                "card-s4",
+                "in_progress",
+                "test",
+                crate::engine::transition::ForceIntent::None,
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(get_card_status_pg(&pool, "card-s4").await, "in_progress");
 
         // Verify started_at
-        {
-            let conn = db.lock().unwrap();
-            let started_at: Option<String> = conn
-                .query_row(
-                    "SELECT started_at FROM kanban_cards WHERE id = 'card-s4'",
-                    [],
-                    |row| row.get(0),
-                )
+        let started_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT started_at FROM kanban_cards WHERE id = 'card-s4'")
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            assert!(started_at.is_some(), "started_at must be set");
-        }
+        assert!(started_at.is_some(), "started_at must be set");
 
         // in_progress → review
-        assert!(kanban::transition_status(&db, &engine, "card-s4", "review").is_ok());
-        assert_eq!(get_card_status(&db, "card-s4"), "review");
+        assert!(
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
+                &engine,
+                "card-s4",
+                "review",
+                "test",
+                crate::engine::transition::ForceIntent::None,
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(get_card_status_pg(&pool, "card-s4").await, "review");
 
         // review → done (force)
         assert!(
-            kanban::transition_status_with_opts(
-                &db,
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
                 &engine,
                 "card-s4",
                 "done",
                 "test",
                 crate::engine::transition::ForceIntent::OperatorOverride,
             )
+            .await
             .is_ok()
         );
-        assert_eq!(get_card_status(&db, "card-s4"), "done");
+        assert_eq!(get_card_status_pg(&pool, "card-s4").await, "done");
 
         // Verify done cleanup
-        {
-            let conn = db.lock().unwrap();
-            let review_status: Option<String> = conn
-                .query_row(
-                    "SELECT review_status FROM kanban_cards WHERE id = 'card-s4'",
-                    [],
-                    |row| row.get(0),
-                )
+        let review_status: Option<String> =
+            sqlx::query_scalar("SELECT review_status FROM kanban_cards WHERE id = 'card-s4'")
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            assert_eq!(review_status, None, "review_status cleared on done");
+        assert_eq!(review_status, None, "review_status cleared on done");
 
-            let completed_at: Option<String> = conn
-                .query_row(
-                    "SELECT completed_at FROM kanban_cards WHERE id = 'card-s4'",
-                    [],
-                    |row| row.get(0),
-                )
+        let completed_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT completed_at FROM kanban_cards WHERE id = 'card-s4'")
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            assert!(completed_at.is_some(), "completed_at set on done");
-        }
+        assert!(completed_at.is_some(), "completed_at set on done");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "SQLite retrospective runtime path removed in #868; PG retrospective persistence is covered in services::retrospectives tests."]
-    fn terminal_transition_records_card_retrospective_from_latest_completed_dispatch() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_repo(&db, "test/repo");
-        seed_card_with_repo(&db, "card-retro-e2e", "review", "test/repo", 418, None);
+    async fn terminal_transition_records_card_retrospective_from_latest_completed_dispatch() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_repo_pg(&pool, "test/repo").await;
+        seed_card_with_repo_pg(&pool, "card-retro-e2e", "review", "test/repo", 418, None).await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET review_round = 2,
-                     review_notes = 'canonical thread_links only'
-                 WHERE id = 'card-retro-e2e'",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO card_review_state (card_id, state, review_round) \
-                 VALUES ('card-retro-e2e', 'reviewing', 2)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
-                    created_at, updated_at, completed_at
-                 ) VALUES (
-                    'dispatch-retro-e2e', 'card-retro-e2e', 'agent-1', 'implementation', 'completed', 'Done', ?1,
-                    datetime('now', '-37 minutes'), datetime('now'), datetime('now')
-                 )",
-                [json!({
-                    "summary": "Discord 링크 생성은 canonical thread_links만 사용하도록 정리"
-                })
-                .to_string()],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET review_round = 2,
+                 review_notes = 'canonical thread_links only'
+             WHERE id = 'card-retro-e2e'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO card_review_state (card_id, state, review_round) \
+             VALUES ('card-retro-e2e', 'reviewing', 2) \
+             ON CONFLICT (card_id) DO UPDATE SET \
+                state = EXCLUDED.state, review_round = EXCLUDED.review_round",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+             ) VALUES (
+                'dispatch-retro-e2e', 'card-retro-e2e', 'agent-1', 'implementation', 'completed', 'Done', $1,
+                NOW() - INTERVAL '37 minutes', NOW(), NOW()
+             )",
+        )
+        .bind(json!({
+            "summary": "Discord 링크 생성은 canonical thread_links만 사용하도록 정리"
+        })
+        .to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
 
         assert!(
-            kanban::transition_status_with_opts(
-                &db,
+            kanban::transition_status_with_opts_pg_only(
+                &pool,
                 &engine,
                 "card-retro-e2e",
                 "done",
                 "test",
                 crate::engine::transition::ForceIntent::OperatorOverride,
             )
+            .await
             .is_ok()
         );
-        assert_eq!(get_card_status(&db, "card-retro-e2e"), "done");
+        assert_eq!(get_card_status_pg(&pool, "card-retro-e2e").await, "done");
 
-        let conn = db.lock().unwrap();
-        let stored: (String, String, i64, String, String) = conn
-            .query_row(
-                "SELECT topic, content, review_round, terminal_status, sync_status
-                 FROM card_retrospectives
-                 WHERE card_id = 'card-retro-e2e'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .unwrap();
+        let stored: (String, String, i64, String, String) = sqlx::query_as(
+            "SELECT topic, content, review_round::BIGINT, terminal_status, sync_status
+             FROM card_retrospectives
+             WHERE card_id = 'card-retro-e2e'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(stored.0, "issue-418");
         assert!(stored.1.contains("AgentDesk 이슈 #418"));
         assert!(stored.1.contains("canonical thread_links"));
@@ -1958,6 +2173,9 @@ mod tests {
             "unexpected sync status: {}",
             stored.4
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // ── Scenario 5: Timeout recovery ────────────────────────────────
@@ -2222,88 +2440,109 @@ mod tests {
         );
     }
 
-    #[test]
-    fn active_manual_intervention_preserves_pending_escalation_bundle() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-force-enter", "requested");
-        db.lock()
-            .unwrap()
-            .execute(
-                "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-enter'",
-                [],
-            )
-            .unwrap();
-        set_kv(
-            &db,
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_manual_intervention_preserves_pending_escalation_bundle() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-force-enter", "requested").await;
+        sqlx::query(
+            "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-enter'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_kv_pg(
+            &pool,
             "pm_pending:card-force-enter",
             r#"{"title":"Test Card","reasons":["manual intervention"]}"#,
-        );
-        set_kv(
-            &db,
+        )
+        .await;
+        set_kv_pg(
+            &pool,
             "pm_decision_sent:card-force-enter",
             r#"{"sent_at":123,"status":"blocked:Needs PM review"}"#,
-        );
+        )
+        .await;
 
-        kanban::transition_status_with_opts(
-            &db,
+        kanban::transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-force-enter",
             "backlog",
             "test",
             crate::engine::transition::ForceIntent::OperatorOverride,
         )
+        .await
         .unwrap();
 
-        assert!(kv_value(&db, "pm_pending:card-force-enter").is_some());
-        assert!(kv_value(&db, "pm_decision_sent:card-force-enter").is_some());
+        assert!(
+            kv_value_pg(&pool, "pm_pending:card-force-enter")
+                .await
+                .is_some()
+        );
+        assert!(
+            kv_value_pg(&pool, "pm_decision_sent:card-force-enter")
+                .await
+                .is_some()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn resolving_manual_intervention_clears_escalation_cooldown_keys() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-force-leave", "requested");
-        db.lock()
-            .unwrap()
-            .execute(
-                "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-leave'",
-                [],
-            )
-            .unwrap();
-        set_kv(
-            &db,
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolving_manual_intervention_clears_escalation_cooldown_keys() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-force-leave", "requested").await;
+        sqlx::query(
+            "UPDATE kanban_cards SET blocked_reason = 'Needs PM review' WHERE id = 'card-force-leave'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        set_kv_pg(
+            &pool,
             "pm_pending:card-force-leave",
             r#"{"title":"Test Card","reasons":["manual intervention"]}"#,
-        );
-        set_kv(
-            &db,
+        )
+        .await;
+        set_kv_pg(
+            &pool,
             "pm_decision_sent:card-force-leave",
             r#"{"sent_at":123,"status":"blocked:Needs PM review"}"#,
-        );
+        )
+        .await;
 
-        kanban::transition_status_with_opts_and_on_conn(
-            &db,
+        kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
+            &pool,
             &engine,
             "card-force-leave",
             "backlog",
             "test",
             crate::engine::transition::ForceIntent::OperatorOverride,
             crate::kanban::AllowedOnConnMutation::TestOnlyManualInterventionCleanup,
-            |conn| {
-                conn.execute(
-                    "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = 'card-force-leave'",
-                    [],
-                )?;
-                Ok(())
-            },
         )
+        .await
         .unwrap();
 
-        assert!(kv_value(&db, "pm_pending:card-force-leave").is_none());
-        assert!(kv_value(&db, "pm_decision_sent:card-force-leave").is_none());
+        assert!(
+            kv_value_pg(&pool, "pm_pending:card-force-leave")
+                .await
+                .is_none()
+        );
+        assert!(
+            kv_value_pg(&pool, "pm_decision_sent:card-force-leave")
+                .await
+                .is_none()
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2339,7 +2578,7 @@ mod tests {
         // onTick1min is now a thin localhost API trigger. In the unit harness there is
         // no Axum server, so exercise the authoritative activate route directly.
         let state = AppState {
-            db: Some(db.clone()),
+            legacy_db_override: Some(db.clone()),
             pg_pool: None,
             engine: engine.clone(),
             config: std::sync::Arc::new(crate::config::Config::default()),
@@ -2760,12 +2999,12 @@ mod tests {
 
             if expected_retry_count < 3 {
                 let conn = db.lock().unwrap();
-                crate::db::auto_queue::update_entry_status_on_conn(
-                    &conn,
-                    "entry-aq-orphan",
-                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                    "test_rearm_orphan_dispatch",
-                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                conn.execute(
+                    "UPDATE auto_queue_entries
+                     SET status = 'dispatched',
+                         dispatched_at = datetime('now')
+                     WHERE id = 'entry-aq-orphan'",
+                    [],
                 )
                 .unwrap();
                 conn.execute(
@@ -3334,7 +3573,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let slot_thread_group_final: Option<i32> = sqlx::query_scalar(
+        let slot_thread_group_final: Option<i64> = sqlx::query_scalar(
             "SELECT assigned_thread_group FROM auto_queue_slots
              WHERE agent_id = 'agent-1' AND slot_index = 0",
         )
@@ -4230,11 +4469,12 @@ mod tests {
 
     // ── Scenario 9: QA pipeline override with custom qa_test state (#136) ──
 
-    #[test]
-    fn scenario_9_qa_pipeline_override_transitions() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_9_qa_pipeline_override_transitions() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
         crate::pipeline::ensure_loaded();
 
         // Store QA pipeline as repo override
@@ -4276,19 +4516,17 @@ mod tests {
             }
         });
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO github_repos (id, display_name, pipeline_config) VALUES ('repo-qa', 'test/qa', ?1)",
-                [qa_override.to_string()],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, pipeline_config) \
+             VALUES ('repo-qa', 'test/qa', $1::jsonb)",
+        )
+        .bind(qa_override.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Resolve and validate
-        let conn = db.lock().unwrap();
-        let effective = crate::pipeline::resolve_for_card(&conn, Some("repo-qa"), None);
-        drop(conn);
+        let effective = crate::pipeline::resolve_for_card_pg(&pool, Some("repo-qa"), None).await;
         assert!(effective.validate().is_ok(), "QA pipeline must be valid");
 
         // Key assertion: review → qa_test transition exists (not review → done)
@@ -4326,41 +4564,33 @@ mod tests {
         );
 
         // Test actual card transition through qa_test
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, repo_id, assigned_agent_id, created_at, updated_at) \
-                 VALUES ('card-qa', 'QA Card', 'qa_test', 'repo-qa', 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES ('d-qa', 'card-qa', 'agent-1', 'implementation', 'dispatched', 'QA test', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET latest_dispatch_id = 'd-qa' WHERE id = 'card-qa'",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, repo_id, assigned_agent_id, created_at, updated_at) \
+             VALUES ('card-qa', 'QA Card', 'qa_test', 'repo-qa', 'agent-1', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_dispatch_pg(&pool, "d-qa", "card-qa", "implementation", "dispatched").await;
 
         // Force transition qa_test → in_progress (simulating QA failure)
-        let result = kanban::transition_status_with_opts(
-            &db,
+        let result = kanban::transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-qa",
             "in_progress",
             "qa-fail",
             crate::engine::transition::ForceIntent::SystemRecovery,
-        );
+        )
+        .await;
         assert!(
             result.is_ok(),
             "qa_test → in_progress force transition must work"
         );
-        assert_eq!(get_card_status(&db, "card-qa"), "in_progress");
+        assert_eq!(get_card_status_pg(&pool, "card-qa").await, "in_progress");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // ── Scenario 10: Multi-dispatchable pipeline — kickoff resolves from card's current state ──
@@ -4499,6 +4729,19 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok()
+    }
+
+    async fn get_review_state_pg(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+    ) -> Option<(String, Option<String>, Option<String>)> {
+        sqlx::query_as(
+            "SELECT state, last_verdict, last_decision FROM card_review_state WHERE card_id = $1",
+        )
+        .bind(card_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
     }
 
     /// #158: Typed bridge (review_state_sync) writes card_review_state correctly.
@@ -4737,16 +4980,18 @@ mod tests {
     }
 
     /// #158: Full review cycle — card transitions sync card_review_state via single entrypoint.
-    #[test]
-    fn scenario_158d_review_cycle_syncs_canonical_state() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_158d_review_cycle_syncs_canonical_state() {
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-158d", "in_progress");
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-158d", "in_progress").await;
 
         // Create implementation dispatch and complete it to trigger review transition
-        seed_dispatch(&db, "d-158d", "card-158d", "implementation", "pending");
-        seed_assistant_response_for_dispatch(&db, "d-158d", "implemented review target");
+        seed_dispatch_pg(&pool, "d-158d", "card-158d", "implementation", "pending").await;
+        seed_assistant_response_for_dispatch_pg(&pool, "d-158d", "implemented review target").await;
 
         let result = dispatch::complete_dispatch(
             &db,
@@ -4761,10 +5006,11 @@ mod tests {
         );
 
         // Card should be in review
-        assert_eq!(get_card_status(&db, "card-158d"), "review");
+        assert_eq!(get_card_status_pg(&pool, "card-158d").await, "review");
 
         // card_review_state must be "reviewing" (synced via single entrypoint during transition)
-        let (state, _, _) = get_review_state(&db, "card-158d")
+        let (state, _, _) = get_review_state_pg(&pool, "card-158d")
+            .await
             .expect("card_review_state must exist after review transition");
         assert_eq!(
             state, "reviewing",
@@ -4773,23 +5019,28 @@ mod tests {
 
         // Force card to done — review state must reset to idle
         assert!(
-            kanban::transition_status_with_opts(
-                &db,
+            kanban::transition_status_with_opts_pg(
+                Some(&db),
+                &pool,
                 &engine,
                 "card-158d",
                 "done",
                 "test",
                 crate::engine::transition::ForceIntent::OperatorOverride,
             )
+            .await
             .is_ok()
         );
-        assert_eq!(get_card_status(&db, "card-158d"), "done");
+        assert_eq!(get_card_status_pg(&pool, "card-158d").await, "done");
 
-        let (state2, _, _) = get_review_state(&db, "card-158d").unwrap();
+        let (state2, _, _) = get_review_state_pg(&pool, "card-158d").await.unwrap();
         assert_eq!(
             state2, "idle",
             "canonical review state must be 'idle' after terminal transition"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// #158: review-automation.js OnReviewEnter hook uses reviewState.sync bridge.
@@ -5665,7 +5916,7 @@ mod tests {
         }
 
         let state = AppState {
-            db: Some(db.clone()),
+            legacy_db_override: Some(db.clone()),
             pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
@@ -5790,7 +6041,7 @@ mod tests {
         }
 
         let state = AppState {
-            db: Some(db.clone()),
+            legacy_db_override: Some(db.clone()),
             pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
@@ -5868,7 +6119,7 @@ mod tests {
         }
 
         let state = AppState {
-            db: Some(db.clone()),
+            legacy_db_override: Some(db.clone()),
             pg_pool: None,
             engine,
             config: std::sync::Arc::new(crate::config::Config::default()),
@@ -10488,8 +10739,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn scenario_208_merge_guard_blocks_unresolved_codex_comments() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_208_merge_guard_blocks_unresolved_codex_comments() {
         let gh = install_mock_gh(&[
             MockGhReply {
                 key: "pr:view",
@@ -10524,15 +10775,25 @@ mod tests {
         ]);
 
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_repo(&db, "test/repo");
-        seed_card_with_repo(&db, "card-208-guard", "review", "test/repo", 210, None);
-        seed_thread_session(&db, "s-208-guard", "thread-guard");
-        set_kv(&db, "merge_automation_enabled", "true");
-        set_kv(&db, "merge_allowed_authors", "itismyfield");
-        seed_pr_tracking(
-            &db,
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_repo_pg(&pool, "test/repo").await;
+        seed_card_with_repo_pg(
+            &pool,
+            "card-208-guard",
+            "review",
+            "test/repo",
+            210,
+            Some("thread-guard"),
+        )
+        .await;
+        seed_thread_session_pg(&pool, "s-208-guard", "thread-guard").await;
+        set_kv_pg(&pool, "merge_automation_enabled", "true").await;
+        set_kv_pg(&pool, "merge_allowed_authors", "itismyfield").await;
+        seed_pr_tracking_pg(
+            &pool,
             "card-208-guard",
             "test/repo",
             None,
@@ -10540,21 +10801,24 @@ mod tests {
             Some(325),
             Some("ddd4444"),
             "merge",
-        );
+        )
+        .await;
 
         assert!(
-            kanban::transition_status_with_opts(
-                &db,
+            kanban::transition_status_with_opts_pg(
+                Some(&db),
+                &pool,
                 &engine,
                 "card-208-guard",
                 "done",
                 "test",
                 crate::engine::transition::ForceIntent::OperatorOverride,
             )
+            .await
             .is_ok()
         );
 
-        assert_eq!(get_card_status(&db, "card-208-guard"), "done");
+        assert_eq!(get_card_status_pg(&pool, "card-208-guard").await, "done");
 
         let log = gh_log(&gh);
         assert!(log.contains("pr view 325"));
@@ -10563,20 +10827,20 @@ mod tests {
             "merge guard must prevent gh pr merge when unresolved Codex comments exist"
         );
 
-        let messages = message_outbox_rows(&db);
+        let messages = message_outbox_rows_pg(&pool).await;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, "thread-guard");
         assert!(messages[0].1.contains("merge를 차단했습니다"));
 
-        let conn = db.lock().unwrap();
-        let blocked: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM kv_meta WHERE key = 'merge_blocked:card-208-guard'",
-                [],
-                |row| row.get(0),
-            )
+        let blocked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM kv_meta WHERE key = $1")
+            .bind("merge_blocked:card-208-guard")
+            .fetch_one(&pool)
+            .await
             .unwrap();
         assert_eq!(blocked, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // ── #256: Consultation dispatch does not advance card from requested ────
@@ -10619,52 +10883,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn requested_preflight_preserves_existing_metadata_keys() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-preflight-meta", "ready");
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requested_preflight_preserves_existing_metadata_keys() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_agent_pg(&pool).await;
+        seed_card_pg(&pool, "card-preflight-meta", "ready").await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET description = ?1, metadata = ?2 WHERE id = ?3",
-                sqlite_params![
-                    "too short",
-                    serde_json::json!({
-                        "deps": "#42",
-                        "triage_label": "needs-spec"
-                    })
-                    .to_string(),
-                    "card-preflight-meta"
-                ],
+        sqlx::query("UPDATE kanban_cards SET description = $1, metadata = $2::jsonb WHERE id = $3")
+            .bind("too short")
+            .bind(
+                serde_json::json!({
+                    "deps": "#42",
+                    "triage_label": "needs-spec"
+                })
+                .to_string(),
             )
+            .bind("card-preflight-meta")
+            .execute(&pool)
+            .await
             .unwrap();
-        }
 
-        let result = kanban::transition_status(&db, &engine, "card-preflight-meta", "requested");
+        let result = kanban::transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-preflight-meta",
+            "requested",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "ready -> requested preflight should succeed"
         );
 
-        let metadata_json: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT metadata FROM kanban_cards WHERE id = 'card-preflight-meta'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        let metadata: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM kanban_cards WHERE id = $1")
+                .bind("card-preflight-meta")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(metadata["deps"], "#42");
         assert_eq!(metadata["triage_label"], "needs-spec");
         assert_eq!(metadata["preflight_status"], "consult_required");
         assert!(metadata["preflight_summary"].is_string());
         assert!(metadata["preflight_checked_at"].is_string());
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     // #1238: migrated to PG fixtures. The OnTick triage policy reads

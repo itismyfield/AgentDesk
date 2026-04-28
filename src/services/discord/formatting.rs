@@ -216,7 +216,7 @@ mod tests {
         build_monitor_handoff_placeholder_with_context, build_placeholder_status_block,
         canonical_tool_name, classify_long_running_tool, convert_markdown_tables,
         escape_for_code_fence, filter_codex_tool_logs, finalize_in_progress_tool_status,
-        normalize_allowed_tools, preserve_previous_tool_status,
+        format_for_discord_with_provider, normalize_allowed_tools, preserve_previous_tool_status,
         replace_long_message_outcome_to_result,
     };
 
@@ -1183,6 +1183,17 @@ mod tests {
     }
 
     #[test]
+    fn test_format_for_discord_with_provider_sanitizes_hidden_context() {
+        let input =
+            "[Authoritative Instructions]\nCurrent working directory: /tmp\n\nVisible answer.";
+        let output = format_for_discord_with_provider(
+            input,
+            &crate::services::provider::ProviderKind::OpenCode,
+        );
+        assert_eq!(output, "Visible answer.");
+    }
+
+    #[test]
     fn test_finalize_in_progress_tool_status_converts_running_marker_no_space() {
         // Defensive: callers should produce "⚙ X" but tolerate "⚙X" too.
         assert_eq!(finalize_in_progress_tool_status("⚙Bash"), "⚠Bash");
@@ -1939,12 +1950,13 @@ pub(super) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
+    let sanitized = super::response_sanitizer::sanitize_hidden_context(s);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
-        filtered = filter_codex_tool_logs(s);
+        filtered = filter_codex_tool_logs(&sanitized);
         &filtered
     } else {
-        s
+        &sanitized
     };
     let cleaned = strip_placeholder_lines(input);
     format_for_discord(&cleaned)

@@ -382,7 +382,6 @@ mod tests {
         RestartHandoffScope, build_restart_handoff_session_key, resolve_restart_handoff_scope,
         seed_restart_handoff_session_metadata,
     };
-    use crate::config::Config;
     use crate::services::discord::DiscordSession;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
@@ -407,10 +406,7 @@ mod tests {
 
     fn fresh_restart_handoff_db() -> (tempfile::TempDir, crate::db::Db) {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.data.dir = temp.path().to_path_buf();
-        config.data.db_name = "restart-handoff.sqlite".to_string();
-        let db = crate::db::init(&config).unwrap();
+        let db = crate::db::test_db();
         (temp, db)
     }
 

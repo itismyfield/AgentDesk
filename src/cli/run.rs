@@ -393,6 +393,7 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
                 super::direct::run_async(super::migrate::cmd_migrate_postgres_cutover(args))
             }
         }),
+        Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
     }
 }
 
@@ -421,6 +422,7 @@ fn build_restart_report_context(
                 ReportProvider::Claude => ProviderKind::Claude,
                 ReportProvider::Codex => ProviderKind::Codex,
                 ReportProvider::Gemini => ProviderKind::Gemini,
+                ReportProvider::OpenCode => ProviderKind::OpenCode,
                 ReportProvider::Qwen => ProviderKind::Qwen,
             };
             Ok(Some(RestartReportContext {

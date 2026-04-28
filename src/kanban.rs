@@ -1,6 +1,6 @@
 //! Central kanban state machine.
 //!
-//! ALL card status transitions MUST go through `transition_status()`.
+//! ALL card status transitions MUST go through the Postgres transition helpers.
 //! This ensures hooks fire, auto-queue syncs, and notifications are sent.
 //!
 //! ## Pipeline-Driven Transitions (#106 P5)
@@ -18,43 +18,14 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::Row as SqlxRow;
 
-/// Transition a kanban card to a new status.
-///
-/// This is the ONLY correct way to change a card's status.
-/// It handles:
-/// 1. Dispatch validation (C: dispatch required for non-free transitions)
-/// 2. DB UPDATE with appropriate timestamp fields
-/// 3. Audit logging (D: all transitions logged)
-/// 4. OnCardTransition hook
-/// 5. OnReviewEnter hook (when → review)
-/// 6. OnCardTerminal hook (when → done)
-/// 7. auto_queue_entries sync (when → done)
-///
-/// `source`: who initiated the transition (e.g., "api", "policy", "agentdesk")
-/// `force`: administrative override to bypass dispatch validation
-pub fn transition_status(
-    db: &Db,
-    engine: &PolicyEngine,
-    card_id: &str,
-    new_status: &str,
-) -> Result<TransitionResult> {
-    transition_status_with_opts(
-        db,
-        engine,
-        card_id,
-        new_status,
-        "system",
-        crate::engine::transition::ForceIntent::None,
-    )
-}
-
+#[cfg(test)]
 fn clear_escalation_alert_state_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM kv_meta WHERE key IN (?1, ?2)",
-        libsql_rusqlite::params![
+        rusqlite::params![
             format!("pm_pending:{card_id}"),
             format!("pm_decision_sent:{card_id}")
         ],
@@ -62,29 +33,15 @@ fn clear_escalation_alert_state_on_conn(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-
-    execute_intent_on_conn(
-        conn,
-        &TransitionIntent::SetLatestDispatchId {
-            card_id: card_id.to_string(),
-            dispatch_id: None,
-        },
-    )?;
-    execute_intent_on_conn(
-        conn,
-        &TransitionIntent::SetReviewStatus {
-            card_id: card_id.to_string(),
-            review_status: None,
-        },
-    )?;
     conn.execute(
         "UPDATE kanban_cards \
-         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
+         SET latest_dispatch_id = NULL, review_status = NULL, \
+             review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
              review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
              updated_at = datetime('now') \
          WHERE id = ?1",
@@ -134,8 +91,9 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
 /// blobs (titles, prompts, completion evidence like `completed_commit`) are
 /// preserved so audit history remains intact. Rows whose JSON is malformed or
 /// already lacks the keys are left untouched.
+#[cfg(test)]
 fn strip_stale_worktree_metadata_from_dispatches_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
     const STALE_KEYS: &[&str] = &[
@@ -172,7 +130,7 @@ fn strip_stale_worktree_metadata_from_dispatches_on_conn(
 
         conn.execute(
             "UPDATE task_dispatches SET context = ?1, result = ?2, updated_at = datetime('now') WHERE id = ?3",
-            libsql_rusqlite::params![context_value, result_value, dispatch_id],
+            rusqlite::params![context_value, result_value, dispatch_id],
         )?;
     }
     Ok(())
@@ -553,8 +511,9 @@ async fn cleanup_force_transition_revert_fields_on_pg_tx(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn log_audit_on_conn(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     from: &str,
     to: &str,
@@ -599,300 +558,6 @@ impl AllowedOnConnMutation {
             }
         }
     }
-}
-
-fn transition_status_with_opts_inner<F>(
-    db: &Db,
-    engine: &PolicyEngine,
-    card_id: &str,
-    new_status: &str,
-    source: &str,
-    force_intent: crate::engine::transition::ForceIntent,
-    caller: &str,
-    on_conn_policy: Option<AllowedOnConnMutation>,
-    on_conn_after_intents: F,
-) -> Result<TransitionResult>
-where
-    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
-{
-    use crate::engine::transition::{
-        self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
-    };
-
-    // ── 1. Assemble TransitionContext (DB reads) ──
-    let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-
-    let (
-        old_status,
-        review_status,
-        latest_dispatch_id,
-        card_repo_id,
-        card_agent_id,
-        review_entered_at,
-        blocked_reason,
-    ): (
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = conn
-        .query_row(
-            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id, review_entered_at, blocked_reason \
-             FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
-
-    if old_status == new_status {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
-    }
-
-    crate::pipeline::ensure_loaded();
-    let effective =
-        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref());
-
-    // Pre-evaluate gate checks (DB queries done before calling pure function)
-    let has_active_dispatch: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
-            [card_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    // Review verdict gate: check the latest completed review dispatch for this card.
-    // When the card has a current review_entered_at clock, ignore verdicts from
-    // earlier rounds. Legacy cards without review_entered_at keep the old behavior.
-    let latest_review_verdict: Option<String> = conn
-        .query_row(
-            "SELECT json_extract(result, '$.verdict') FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
-               AND (?2 IS NULL OR datetime(COALESCE(completed_at, updated_at)) >= datetime(?2)) \
-             ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC LIMIT 1",
-            libsql_rusqlite::params![card_id, review_entered_at.as_deref()],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-    let review_verdict_pass = matches!(
-        latest_review_verdict.as_deref(),
-        Some("pass") | Some("approved")
-    );
-    let review_verdict_rework = matches!(
-        latest_review_verdict.as_deref(),
-        Some("rework") | Some("improve") | Some("reject")
-    );
-
-    let ctx = TransitionContext {
-        card: CardState {
-            id: card_id.to_string(),
-            status: old_status.clone(),
-            review_status: review_status.clone(),
-            latest_dispatch_id: latest_dispatch_id.clone(),
-        },
-        pipeline: effective.clone(),
-        gates: GateSnapshot {
-            has_active_dispatch,
-            review_verdict_pass,
-            review_verdict_rework,
-        },
-    };
-
-    // ── 2. Pure decision (no I/O) ──
-    let decision = transition::decide_status_transition_with_caller(
-        &ctx,
-        new_status,
-        source,
-        force_intent,
-        caller,
-    );
-
-    // ── 3. Handle blocked decisions ──
-    if let TransitionOutcome::Blocked(ref reason) = decision.outcome {
-        // Execute audit log intents for blocked decisions
-        for intent in &decision.intents {
-            if let transition::TransitionIntent::AuditLog {
-                card_id: aid,
-                from,
-                to,
-                source: src,
-                message,
-            } = intent
-            {
-                log_audit(&conn, aid, from, to, src, message);
-            }
-        }
-        tracing::warn!(
-            "[kanban] Blocked transition {} → {} for card {} (source: {}): {}",
-            old_status,
-            new_status,
-            card_id,
-            source,
-            reason
-        );
-        return Err(anyhow::anyhow!("{}", reason));
-    }
-
-    if decision.outcome == TransitionOutcome::NoOp {
-        return Ok(TransitionResult {
-            changed: false,
-            from: old_status,
-            to: new_status.to_string(),
-        });
-    }
-
-    // ── 4. Execute intents atomically (DB writes, still holding lock) ──
-    let old_manual_intervention = crate::manual_intervention::requires_manual_intervention(
-        review_status.as_deref(),
-        blocked_reason.as_deref(),
-    );
-    conn.execute_batch("BEGIN")?;
-    let exec_result = (|| -> anyhow::Result<()> {
-        for intent in &decision.intents {
-            transition::execute_intent_on_conn(&conn, intent)?;
-        }
-        if let Some(policy) = on_conn_policy {
-            tracing::debug!(
-                card_id,
-                source,
-                caller,
-                on_conn_policy = policy.audit_value(),
-                rationale = policy.rationale(),
-                "[kanban] executing allowlisted on-conn mutation after transition intents"
-            );
-        }
-        on_conn_after_intents(&conn)?;
-        let (new_review_status, new_blocked_reason): (Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT review_status, blocked_reason FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-        let new_manual_intervention = crate::manual_intervention::requires_manual_intervention(
-            new_review_status.as_deref(),
-            new_blocked_reason.as_deref(),
-        );
-        if old_manual_intervention && !new_manual_intervention {
-            clear_escalation_alert_state_on_conn(&conn, card_id)?;
-        }
-        Ok(())
-    })();
-    if let Err(e) = exec_result {
-        conn.execute_batch("ROLLBACK").ok();
-        return Err(e);
-    }
-    conn.execute_batch("COMMIT")?;
-
-    drop(conn);
-
-    // ── 5. Post-transition side-effects (hooks, GitHub sync) ──
-    if effective.is_terminal(new_status) {
-        sync_terminal_card_state(db, card_id);
-    }
-    github_sync_on_transition(db, &effective, card_id, new_status);
-    fire_dynamic_hooks(
-        engine,
-        &effective,
-        card_id,
-        &old_status,
-        new_status,
-        Some(source),
-    );
-
-    if effective.is_terminal(new_status)
-        && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
-    {
-        crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-            engine.pg_pool().cloned(),
-        );
-    }
-
-    Ok(TransitionResult {
-        changed: true,
-        from: old_status,
-        to: new_status.to_string(),
-    })
-}
-
-/// Full transition with source tracking and force override.
-///
-/// #155: Uses the TransitionDecision + Executor pattern.
-/// 1. Assemble TransitionContext from DB
-/// 2. Call decide_status_transition (pure function — no I/O)
-/// 3. Execute decision intents via Executor
-/// 4. Fire post-transition hooks (GitHub sync, policy hooks)
-#[track_caller]
-pub fn transition_status_with_opts(
-    db: &Db,
-    engine: &PolicyEngine,
-    card_id: &str,
-    new_status: &str,
-    source: &str,
-    force_intent: crate::engine::transition::ForceIntent,
-) -> Result<TransitionResult> {
-    let caller = std::panic::Location::caller();
-    let caller = format!("{}:{}", caller.file(), caller.line());
-    transition_status_with_opts_inner(
-        db,
-        engine,
-        card_id,
-        new_status,
-        source,
-        force_intent,
-        &caller,
-        None,
-        |_conn| Ok(()),
-    )
-}
-
-/// Full transition with an extra DB mutation executed inside the same
-/// transaction as the canonical transition intents.
-#[track_caller]
-pub fn transition_status_with_opts_and_on_conn<F>(
-    db: &Db,
-    engine: &PolicyEngine,
-    card_id: &str,
-    new_status: &str,
-    source: &str,
-    force_intent: crate::engine::transition::ForceIntent,
-    on_conn_policy: AllowedOnConnMutation,
-    on_conn_after_intents: F,
-) -> Result<TransitionResult>
-where
-    F: FnOnce(&libsql_rusqlite::Connection) -> Result<()>,
-{
-    let caller = std::panic::Location::caller();
-    let caller = format!("{}:{}", caller.file(), caller.line());
-    transition_status_with_opts_inner(
-        db,
-        engine,
-        card_id,
-        new_status,
-        source,
-        force_intent,
-        &caller,
-        Some(on_conn_policy),
-        on_conn_after_intents,
-    )
 }
 
 async fn execute_allowed_cleanup_on_pg_tx(
@@ -1480,48 +1145,55 @@ fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
 }
 
 fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
-    let Ok(conn) = db.lock() else {
+    #[cfg(not(test))]
+    {
+        let _ = (db, card_id, cancel_implementation);
         return;
-    };
-
-    crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
-
-    let dispatch_types = if cancel_implementation {
-        "'implementation', 'review-decision', 'rework'"
-    } else {
-        "'review-decision', 'rework'"
-    };
-
-    let pending_followups: Vec<String> = conn
-        .prepare(&format!(
-            "SELECT id FROM task_dispatches \
-             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
-             AND status IN ('pending', 'dispatched')"
-        ))
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map([card_id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        })
-        .unwrap_or_default();
-
-    let mut cancelled = 0usize;
-    for dispatch_id in pending_followups {
-        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-            &conn,
-            &dispatch_id,
-            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-        )
-        .unwrap_or(0);
     }
 
-    if cancelled > 0 {
-        tracing::info!(
-            "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
-            cancelled,
-            card_id
-        );
+    #[cfg(test)]
+    {
+        let Ok(conn) = db.lock() else {
+            return;
+        };
+
+        let dispatch_types = if cancel_implementation {
+            "'implementation', 'review-decision', 'rework'"
+        } else {
+            "'review-decision', 'rework'"
+        };
+
+        let pending_followups: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type IN ({dispatch_types}) \
+             AND status IN ('pending', 'dispatched')"
+            ))
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([card_id], |row| row.get::<_, String>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default();
+
+        let mut cancelled = 0usize;
+        for dispatch_id in pending_followups {
+            cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                &dispatch_id,
+                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+            )
+            .unwrap_or(0);
+        }
+
+        if cancelled > 0 {
+            tracing::info!(
+                "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
+                cancelled,
+                card_id
+            );
+        }
     }
 }
 
@@ -1657,29 +1329,37 @@ fn resolve_effective_pipeline_for_hooks(
         };
     }
 
-    let Some(db) = db else {
-        return None;
-    };
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return None;
+        };
 
-    db.lock().ok().map(|conn| {
-        let repo_id: Option<String> = conn
-            .query_row(
-                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    })
+        db.lock().ok().map(|conn| {
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+        })
+    }
+    #[cfg(not(test))]
+    {
+        let _ = db;
+        None
+    }
 }
 
 pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
@@ -1756,72 +1436,83 @@ pub fn fire_transition_hooks_with_backends(
         fire_transition_hooks_pg(db, pg_pool, engine, card_id, from, to);
         return;
     }
-    let Some(db) = db else {
+
+    #[cfg(not(test))]
+    {
+        let _ = (db, engine, card_id, from, to);
         return;
-    };
-
-    // Audit log
-    if let Ok(conn) = db.lock() {
-        log_audit(&conn, card_id, from, to, "hook", "OK");
     }
 
-    // Resolve effective pipeline for this card (#135)
-    crate::pipeline::ensure_loaded();
-    let effective = db.lock().ok().map(|conn| {
-        let repo_id: Option<String> = conn
-            .query_row(
-                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        let agent_id: Option<String> = conn
-            .query_row(
-                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
-    });
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return;
+        };
 
-    if let Some(ref pipeline) = effective {
-        // Sync auto_queue_entries + GitHub on terminal status
-        if pipeline.is_terminal(to) {
-            sync_terminal_transition_followups(db, card_id);
+        // Audit log
+        if let Ok(conn) = db.lock() {
+            log_audit(&conn, card_id, from, to, "hook", "OK");
         }
 
-        github_sync_on_transition(db, pipeline, card_id, to);
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+        // Resolve effective pipeline for this card (#135)
+        crate::pipeline::ensure_loaded();
+        let effective = db.lock().ok().map(|conn| {
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+        });
 
-        // #119: Record true_negative for cards that passed review and reached terminal state
-        if pipeline.is_terminal(to) && record_true_negative_if_pass(db, engine.pg_pool(), card_id) {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
-                engine.pg_pool().cloned(),
-            );
+        if let Some(ref pipeline) = effective {
+            // Sync auto_queue_entries + GitHub on terminal status
+            if pipeline.is_terminal(to) {
+                sync_terminal_transition_followups(db, card_id);
+            }
+
+            github_sync_on_transition(db, pipeline, card_id, to);
+            fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+
+            // #119: Record true_negative for cards that passed review and reached terminal state
+            if pipeline.is_terminal(to)
+                && record_true_negative_if_pass(db, engine.pg_pool(), card_id)
+            {
+                crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(
+                    engine.pg_pool().cloned(),
+                );
+            }
         }
+
+        drain_hook_side_effects(db, engine);
     }
 
-    drain_hook_side_effects(db, engine);
-}
-
-fn fire_transition_hooks_pg(
-    db: Option<&Db>,
-    pg_pool: &sqlx::PgPool,
-    engine: &PolicyEngine,
-    card_id: &str,
-    from: &str,
-    to: &str,
-) {
-    let card_id_owned = card_id.to_string();
-    let from_owned = from.to_string();
-    let to_owned = to.to_string();
-    let effective = match crate::utils::async_bridge::block_on_pg_result(
-        pg_pool,
-        move |bridge_pool| async move {
-            sqlx::query(
+    fn fire_transition_hooks_pg(
+        db: Option<&Db>,
+        pg_pool: &sqlx::PgPool,
+        engine: &PolicyEngine,
+        card_id: &str,
+        from: &str,
+        to: &str,
+    ) {
+        let card_id_owned = card_id.to_string();
+        let from_owned = from.to_string();
+        let to_owned = to.to_string();
+        let effective = match crate::utils::async_bridge::block_on_pg_result(
+            pg_pool,
+            move |bridge_pool| async move {
+                sqlx::query(
                 "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result)
                  VALUES ($1, $2, $3, 'hook', 'OK')",
             )
@@ -1833,75 +1524,80 @@ fn fire_transition_hooks_pg(
             .map_err(|error| {
                 format!("insert postgres kanban audit for {card_id_owned}: {error}")
             })?;
-            sqlx::query(
-                "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
+                sqlx::query(
+                    "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
                  VALUES ('kanban_card', $1, $2, 'hook')",
-            )
-            .bind(&card_id_owned)
-            .bind(format!("{from_owned}->{to_owned} (OK)"))
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| format!("insert postgres audit log for {card_id_owned}: {error}"))?;
+                )
+                .bind(&card_id_owned)
+                .bind(format!("{from_owned}->{to_owned} (OK)"))
+                .execute(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("insert postgres audit log for {card_id_owned}: {error}")
+                })?;
 
-            crate::pipeline::ensure_loaded();
-            let row = sqlx::query(
-                "SELECT repo_id, assigned_agent_id
+                crate::pipeline::ensure_loaded();
+                let row = sqlx::query(
+                    "SELECT repo_id, assigned_agent_id
                  FROM kanban_cards
                  WHERE id = $1",
-            )
-            .bind(&card_id_owned)
-            .fetch_optional(&bridge_pool)
-            .await
-            .map_err(|error| {
-                format!("load postgres card transition context {card_id_owned}: {error}")
-            })?;
-            let (repo_id, agent_id) = if let Some(row) = row {
-                (
-                    row.try_get::<Option<String>, _>("repo_id")
-                        .map_err(|error| {
-                            format!("decode postgres repo_id for {card_id_owned}: {error}")
-                        })?,
-                    row.try_get::<Option<String>, _>("assigned_agent_id")
-                        .map_err(|error| {
-                            format!(
-                                "decode postgres assigned_agent_id for {card_id_owned}: {error}"
-                            )
-                        })?,
                 )
-            } else {
-                (None, None)
-            };
-            Ok(Some(
-                crate::pipeline::resolve_for_card_pg(
-                    &bridge_pool,
-                    repo_id.as_deref(),
-                    agent_id.as_deref(),
-                )
-                .await,
-            ))
-        },
-        |error| error,
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!("failed to fire postgres transition hooks for {card_id}: {error}");
-            None
-        }
-    };
+                .bind(&card_id_owned)
+                .fetch_optional(&bridge_pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres card transition context {card_id_owned}: {error}")
+                })?;
+                let (repo_id, agent_id) = if let Some(row) = row {
+                    (
+                        row.try_get::<Option<String>, _>("repo_id")
+                            .map_err(|error| {
+                                format!("decode postgres repo_id for {card_id_owned}: {error}")
+                            })?,
+                        row.try_get::<Option<String>, _>("assigned_agent_id")
+                            .map_err(|error| {
+                                format!(
+                                    "decode postgres assigned_agent_id for {card_id_owned}: {error}"
+                                )
+                            })?,
+                    )
+                } else {
+                    (None, None)
+                };
+                Ok(Some(
+                    crate::pipeline::resolve_for_card_pg(
+                        &bridge_pool,
+                        repo_id.as_deref(),
+                        agent_id.as_deref(),
+                    )
+                    .await,
+                ))
+            },
+            |error| error,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("failed to fire postgres transition hooks for {card_id}: {error}");
+                None
+            }
+        };
 
-    if let Some(ref pipeline) = effective {
-        if pipeline.is_terminal(to) {
-            let card_id_owned = card_id.to_string();
-            let terminal_followup = crate::utils::async_bridge::block_on_pg_result(
-                pg_pool,
-                move |bridge_pool| async move {
-                    let mut tx = bridge_pool.begin().await.map_err(|error| {
-                        format!("begin postgres terminal follow-up tx: {error}")
-                    })?;
-                    crate::github::sync::sync_auto_queue_terminal_on_pg(&mut tx, &card_id_owned)
+        if let Some(ref pipeline) = effective {
+            if pipeline.is_terminal(to) {
+                let card_id_owned = card_id.to_string();
+                let terminal_followup = crate::utils::async_bridge::block_on_pg_result(
+                    pg_pool,
+                    move |bridge_pool| async move {
+                        let mut tx = bridge_pool.begin().await.map_err(|error| {
+                            format!("begin postgres terminal follow-up tx: {error}")
+                        })?;
+                        crate::github::sync::sync_auto_queue_terminal_on_pg(
+                            &mut tx,
+                            &card_id_owned,
+                        )
                         .await
                         .map_err(|error| format!("{error}"))?;
-                    let dispatch_ids = sqlx::query_scalar::<_, String>(
+                        let dispatch_ids = sqlx::query_scalar::<_, String>(
                         "SELECT id
                          FROM task_dispatches
                          WHERE kanban_card_id = $1
@@ -1916,63 +1612,65 @@ fn fire_transition_hooks_pg(
                             "load postgres terminal follow-up dispatches {card_id_owned}: {error}"
                         )
                     })?;
-                    for dispatch_id in dispatch_ids {
-                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
-                            &mut tx,
-                            &dispatch_id,
-                            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
-                        )
-                        .await
-                        .map_err(|error| format!("{error}"))?;
-                    }
-                    tx.commit().await.map_err(|error| {
-                        format!("commit postgres terminal follow-up tx: {error}")
-                    })?;
+                        for dispatch_id in dispatch_ids {
+                            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+                                &mut tx,
+                                &dispatch_id,
+                                Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+                            )
+                            .await
+                            .map_err(|error| format!("{error}"))?;
+                        }
+                        tx.commit().await.map_err(|error| {
+                            format!("commit postgres terminal follow-up tx: {error}")
+                        })?;
+                        Ok(())
+                    },
+                    |error| error,
+                );
+                if let Err(error) = terminal_followup {
+                    tracing::warn!(
+                        "[kanban] failed postgres terminal follow-up sync for {}: {}",
+                        card_id,
+                        error
+                    );
+                }
+            }
+
+            let pg_pool_owned = pg_pool.clone();
+            let pipeline_owned = pipeline.clone();
+            let card_id_owned = card_id.to_string();
+            let to_owned = to.to_string();
+            let _ = crate::utils::async_bridge::block_on_pg_result(
+                pg_pool,
+                move |_bridge_pool| async move {
+                    github_sync_on_transition_pg(
+                        &pg_pool_owned,
+                        &pipeline_owned,
+                        &card_id_owned,
+                        &to_owned,
+                    )
+                    .await;
                     Ok(())
                 },
-                |error| error,
+                |_error| (),
             );
-            if let Err(error) = terminal_followup {
-                tracing::warn!(
-                    "[kanban] failed postgres terminal follow-up sync for {}: {}",
-                    card_id,
-                    error
-                );
+            fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
+
+            if pipeline.is_terminal(to)
+                && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
+            {
+                crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
+                    pg_pool.clone(),
+                ));
             }
-        }
-
-        let pg_pool_owned = pg_pool.clone();
-        let pipeline_owned = pipeline.clone();
-        let card_id_owned = card_id.to_string();
-        let to_owned = to.to_string();
-        let _ = crate::utils::async_bridge::block_on_pg_result(
-            pg_pool,
-            move |_bridge_pool| async move {
-                github_sync_on_transition_pg(
-                    &pg_pool_owned,
-                    &pipeline_owned,
-                    &card_id_owned,
-                    &to_owned,
-                )
-                .await;
-                Ok(())
-            },
-            |_error| (),
-        );
-        fire_dynamic_hooks(engine, pipeline, card_id, from, to, Some("hook"));
-
-        if pipeline.is_terminal(to)
-            && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
-        {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
-                pg_pool.clone(),
-            ));
         }
     }
 }
 
 /// Sync GitHub issue state when kanban card transitions (pipeline-driven).
 /// Terminal states → close issue. States with OnReviewEnter hook → comment.
+#[cfg(test)]
 fn github_sync_on_transition(
     db: &Db,
     pipeline: &crate::pipeline::PipelineConfig,
@@ -2004,6 +1702,7 @@ fn github_sync_on_transition(
     }
 }
 
+#[cfg(test)]
 fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(String, i64)> {
     let info: Option<(String, String, Option<i64>)> = db
         .lock()
@@ -2061,8 +1760,9 @@ fn github_sync_target_for_card(db: &Db, card_id: &str) -> Option<(String, i64)> 
 }
 
 /// Log a kanban state transition to audit_logs table.
+#[cfg(test)]
 fn log_audit(
-    conn: &libsql_rusqlite::Connection,
+    conn: &rusqlite::Connection,
     card_id: &str,
     from: &str,
     to: &str,
@@ -2083,7 +1783,7 @@ fn log_audit(
     .ok();
     conn.execute(
         "INSERT INTO kanban_audit_logs (card_id, from_status, to_status, source, result) VALUES (?1, ?2, ?3, ?4, ?5)",
-        libsql_rusqlite::params![card_id, from, to, source, result],
+        rusqlite::params![card_id, from, to, source, result],
     )
     .ok();
     conn.execute_batch(
@@ -2100,7 +1800,7 @@ fn log_audit(
     conn.execute(
         "INSERT INTO audit_logs (entity_type, entity_id, action, actor)
          VALUES ('kanban_card', ?1, ?2, ?3)",
-        libsql_rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
+        rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
     )
     .ok();
 }
@@ -2219,83 +1919,86 @@ fn record_true_negative_if_pass_with_backends(
         .unwrap_or(false);
     }
 
-    if let Some(db) = db
-        && let Ok(conn) = db.lock()
+    #[cfg(test)]
     {
-        // Check if the card's last review verdict was "pass" or "approved"
-        let last_verdict: Option<String> = conn
-            .query_row(
-                "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
+        if let Some(db) = db
+            && let Ok(conn) = db.lock()
+        {
+            // Check if the card's last review verdict was "pass" or "approved"
+            let last_verdict: Option<String> = conn
+                .query_row(
+                    "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
 
-        match last_verdict.as_deref() {
-            Some("pass") | Some("approved") => {
-                let review_round: Option<i64> = conn
-                    .query_row(
-                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .ok();
+            match last_verdict.as_deref() {
+                Some("pass") | Some("approved") => {
+                    let review_round: Option<i64> = conn
+                        .query_row(
+                            "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                            [card_id],
+                            |row| row.get(0),
+                        )
+                        .ok();
 
-                // Carry forward finding_categories from the review dispatch that found issues.
-                // The most recent review dispatch is typically the pass/approved one with
-                // empty items, so we walk backwards to find one with actual findings.
-                // This ensures that if TN is later corrected to FN on reopen, categories
-                // are already present.
-                let finding_cats: Option<String> = conn
-                    .prepare(
-                        "SELECT td.result FROM task_dispatches td \
+                    // Carry forward finding_categories from the review dispatch that found issues.
+                    // The most recent review dispatch is typically the pass/approved one with
+                    // empty items, so we walk backwards to find one with actual findings.
+                    // This ensures that if TN is later corrected to FN on reopen, categories
+                    // are already present.
+                    let finding_cats: Option<String> = conn
+                        .prepare(
+                            "SELECT td.result FROM task_dispatches td \
                          WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
                          AND td.status = 'completed' ORDER BY td.rowid DESC",
-                    )
-                    .ok()
-                    .and_then(|mut stmt| {
-                        let rows = stmt
-                            .query_map([card_id], |row| row.get::<_, Option<String>>(0))
-                            .ok()?;
-                        for row_result in rows {
-                            if let Ok(Some(result_str)) = row_result {
-                                if let Ok(v) =
-                                    serde_json::from_str::<serde_json::Value>(&result_str)
-                                {
-                                    if let Some(items) = v["items"].as_array() {
-                                        let cats: Vec<String> = items
-                                            .iter()
-                                            .filter_map(|it| {
-                                                it["category"].as_str().map(|s| s.to_string())
-                                            })
-                                            .collect();
-                                        if !cats.is_empty() {
-                                            return serde_json::to_string(&cats).ok();
+                        )
+                        .ok()
+                        .and_then(|mut stmt| {
+                            let rows = stmt
+                                .query_map([card_id], |row| row.get::<_, Option<String>>(0))
+                                .ok()?;
+                            for row_result in rows {
+                                if let Ok(Some(result_str)) = row_result {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(&result_str)
+                                    {
+                                        if let Some(items) = v["items"].as_array() {
+                                            let cats: Vec<String> = items
+                                                .iter()
+                                                .filter_map(|it| {
+                                                    it["category"].as_str().map(|s| s.to_string())
+                                                })
+                                                .collect();
+                                            if !cats.is_empty() {
+                                                return serde_json::to_string(&cats).ok();
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
 
-                let inserted = conn.execute(
+                    let inserted = conn.execute(
                     "INSERT INTO review_tuning_outcomes \
                      (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
                      VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', ?4)",
-                    libsql_rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass"), finding_cats],
+                    rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass"), finding_cats],
                 )
                 .map(|n| n > 0)
                 .unwrap_or(false);
-                if inserted {
-                    tracing::info!(
-                        "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
-                    );
+                    if inserted {
+                        tracing::info!(
+                            "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
+                        );
+                    }
+                    return inserted;
                 }
-                return inserted;
+                _ => {} // No review or non-pass verdict — nothing to record
             }
-            _ => {} // No review or non-pass verdict — nothing to record
         }
     }
     false
@@ -2309,7 +2012,7 @@ fn record_true_negative_if_pass_with_backends(
 /// which is the pass/approved dispatch with empty items. On reopen we look for the
 /// most recent review dispatch that actually reported findings (non-empty items array)
 /// to carry those categories forward into the FN record.
-pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
+pub fn correct_tn_to_fn_on_reopen(db: Option<&Db>, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
     if let Some(pool) = pg_pool {
         let card_id = card_id.to_string();
         let log_card_id = card_id.clone();
@@ -2430,10 +2133,16 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_
         return;
     }
 
-    if let Ok(conn) = db.lock() {
-        // Only correct the most recent TN (latest review_round) to avoid
-        // corrupting historical TN records from earlier rounds
-        let updated = conn
+    #[cfg(test)]
+    {
+        let Some(db) = db else {
+            return;
+        };
+
+        if let Ok(conn) = db.lock() {
+            // Only correct the most recent TN (latest review_round) to avoid
+            // corrupting historical TN records from earlier rounds
+            let updated = conn
             .execute(
                 "UPDATE review_tuning_outcomes SET outcome = 'false_negative' \
                  WHERE card_id = ?1 AND outcome = 'true_negative' \
@@ -2441,15 +2150,15 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_
                 [card_id],
             )
             .unwrap_or(0);
-        if updated > 0 {
-            tracing::info!(
-                "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen, latest round only)"
-            );
+            if updated > 0 {
+                tracing::info!(
+                    "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen, latest round only)"
+                );
 
-            // Backfill finding_categories if empty. The TN was recorded using the
-            // last review dispatch (the pass/approved one with empty items). Look
-            // for an earlier review dispatch that actually found issues.
-            let needs_backfill: bool = conn
+                // Backfill finding_categories if empty. The TN was recorded using the
+                // last review dispatch (the pass/approved one with empty items). Look
+                // for an earlier review dispatch that actually found issues.
+                let needs_backfill: bool = conn
                 .query_row(
                     "SELECT finding_categories IS NULL OR finding_categories = '' OR finding_categories = '[]' \
                      FROM review_tuning_outcomes \
@@ -2460,58 +2169,61 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, pg_pool: Option<&sqlx::PgPool>, card_
                 )
                 .unwrap_or(false);
 
-            if needs_backfill {
-                // Walk through review dispatches (most recent first) to find
-                // one with a non-empty items array containing categories
-                let finding_cats: Option<String> = conn
-                    .prepare(
-                        "SELECT td.result FROM task_dispatches td \
+                if needs_backfill {
+                    // Walk through review dispatches (most recent first) to find
+                    // one with a non-empty items array containing categories
+                    let finding_cats: Option<String> = conn
+                        .prepare(
+                            "SELECT td.result FROM task_dispatches td \
                          WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
                          AND td.status = 'completed' \
                          ORDER BY td.rowid DESC",
-                    )
-                    .ok()
-                    .and_then(|mut stmt| {
-                        let rows = stmt
-                            .query_map([card_id], |row| row.get::<_, Option<String>>(0))
-                            .ok()?;
-                        for row_result in rows {
-                            if let Ok(Some(result_str)) = row_result {
-                                if let Ok(v) =
-                                    serde_json::from_str::<serde_json::Value>(&result_str)
-                                {
-                                    if let Some(items) = v["items"].as_array() {
-                                        if !items.is_empty() {
-                                            let cats: Vec<String> = items
-                                                .iter()
-                                                .filter_map(|it| {
-                                                    it["category"].as_str().map(|s| s.to_string())
-                                                })
-                                                .collect();
-                                            if !cats.is_empty() {
-                                                return serde_json::to_string(&cats).ok();
+                        )
+                        .ok()
+                        .and_then(|mut stmt| {
+                            let rows = stmt
+                                .query_map([card_id], |row| row.get::<_, Option<String>>(0))
+                                .ok()?;
+                            for row_result in rows {
+                                if let Ok(Some(result_str)) = row_result {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(&result_str)
+                                    {
+                                        if let Some(items) = v["items"].as_array() {
+                                            if !items.is_empty() {
+                                                let cats: Vec<String> = items
+                                                    .iter()
+                                                    .filter_map(|it| {
+                                                        it["category"]
+                                                            .as_str()
+                                                            .map(|s| s.to_string())
+                                                    })
+                                                    .collect();
+                                                if !cats.is_empty() {
+                                                    return serde_json::to_string(&cats).ok();
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
 
-                if let Some(ref cats) = finding_cats {
-                    let backfilled = conn
+                    if let Some(ref cats) = finding_cats {
+                        let backfilled = conn
                         .execute(
                             "UPDATE review_tuning_outcomes SET finding_categories = ?1 \
                              WHERE card_id = ?2 AND outcome = 'false_negative' \
                              AND (finding_categories IS NULL OR finding_categories = '' OR finding_categories = '[]')",
-                            libsql_rusqlite::params![cats, card_id],
+                            rusqlite::params![cats, card_id],
                         )
                         .unwrap_or(0);
-                    if backfilled > 0 {
-                        tracing::info!(
-                            "[review-tuning] #119 backfilled {backfilled} FN finding_categories: card={card_id} categories={cats}"
-                        );
+                        if backfilled > 0 {
+                            tracing::info!(
+                                "[review-tuning] #119 backfilled {backfilled} FN finding_categories: card={card_id} categories={cats}"
+                            );
+                        }
                     }
                 }
             }
@@ -2528,7 +2240,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_db() -> Db {
-        let conn = libsql_rusqlite::Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         crate::db::wrap_conn(conn)
@@ -2546,6 +2258,160 @@ mod tests {
         config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    fn test_engine_with_pg_and_dir(pg_pool: sqlx::PgPool, dir: &std::path::Path) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = dir.to_path_buf();
+        config.policies.hot_reload = false;
+        PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    struct KanbanPgDatabase {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+        cleanup_armed: bool,
+    }
+
+    impl KanbanPgDatabase {
+        async fn create() -> Self {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = postgres_admin_database_url();
+            let database_name = format!("agentdesk_kanban_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", postgres_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(&admin_url, &database_name, "kanban tests")
+                .await
+                .expect("create kanban postgres test db");
+
+            Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+                cleanup_armed: true,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, "kanban tests")
+                .await
+                .expect("connect + migrate kanban postgres test db")
+        }
+
+        async fn drop(mut self) {
+            let drop_result = crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "kanban tests",
+            )
+            .await;
+            if drop_result.is_ok() {
+                self.cleanup_armed = false;
+            }
+            drop_result.expect("drop kanban postgres test db");
+        }
+    }
+
+    impl Drop for KanbanPgDatabase {
+        fn drop(&mut self) {
+            if !self.cleanup_armed {
+                return;
+            }
+            cleanup_test_postgres_db_from_drop(self.admin_url.clone(), self.database_name.clone());
+        }
+    }
+
+    fn cleanup_test_postgres_db_from_drop(admin_url: String, database_name: String) {
+        let cleanup_database_name = database_name.clone();
+        let thread_name = format!("kanban tests cleanup {cleanup_database_name}");
+        let spawn_result = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!(
+                            "kanban tests cleanup runtime failed for {database_name}: {error}"
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = runtime.block_on(crate::db::postgres::drop_test_database(
+                    &admin_url,
+                    &database_name,
+                    "kanban tests",
+                )) {
+                    eprintln!("kanban tests cleanup failed for {database_name}: {error}");
+                }
+            });
+
+        match spawn_result {
+            Ok(handle) => {
+                if handle.join().is_err() {
+                    eprintln!("kanban tests cleanup thread panicked for {cleanup_database_name}");
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "kanban tests cleanup thread spawn failed for {cleanup_database_name}: {error}"
+                );
+            }
+        }
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn postgres_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", postgres_base_database_url(), admin_db)
     }
 
     struct EnvVarGuard {
@@ -2589,7 +2455,7 @@ mod tests {
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
              VALUES (?1, 'Test Card', ?2, 'agent-1', datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![card_id, status],
+            rusqlite::params![card_id, status],
         ).unwrap();
     }
 
@@ -2598,7 +2464,7 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
              VALUES (?1, ?2, 'agent-1', 'implementation', ?3, 'Test Dispatch', datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![format!("dispatch-{}-{}", card_id, dispatch_status), card_id, dispatch_status],
+            rusqlite::params![format!("dispatch-{}-{}", card_id, dispatch_status), card_id, dispatch_status],
         ).unwrap();
     }
 
@@ -2613,19 +2479,109 @@ mod tests {
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
              VALUES (?1, ?2, 'agent-1', ?3, ?4, 'Typed Dispatch', datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![dispatch_id, card_id, dispatch_type, dispatch_status],
+            rusqlite::params![dispatch_id, card_id, dispatch_type, dispatch_status],
         )
         .unwrap();
     }
 
-    #[test]
-    fn completed_dispatch_only_does_not_authorize_transition() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-completed", "requested");
-        seed_dispatch(&db, "card-completed", "completed");
+    async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('agent-1', 'Agent 1', '123', '456')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("seed postgres agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES ($1, 'Test Card', $2, 'agent-1', NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed postgres card");
+    }
 
-        let result = transition_status(&db, &engine, "card-completed", "in_progress");
+    async fn seed_card_with_repo_pg(
+        pool: &sqlx::PgPool,
+        card_id: &str,
+        status: &str,
+        repo_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('agent-1', 'Agent 1', '123', '456')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("seed postgres agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, repo_id, created_at, updated_at
+             )
+             VALUES ($1, 'Test Card', $2, 'agent-1', $3, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .bind(repo_id)
+        .execute(pool)
+        .await
+        .expect("seed postgres card with repo");
+    }
+
+    async fn seed_dispatch_pg(pool: &sqlx::PgPool, card_id: &str, dispatch_status: &str) {
+        seed_dispatch_with_type_pg(
+            pool,
+            &format!("dispatch-{}-{}", card_id, dispatch_status),
+            card_id,
+            "implementation",
+            dispatch_status,
+        )
+        .await;
+    }
+
+    async fn seed_dispatch_with_type_pg(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        dispatch_type: &str,
+        dispatch_status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+             )
+             VALUES ($1, $2, 'agent-1', $3, $4, 'Typed Dispatch', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(dispatch_type)
+        .bind(dispatch_status)
+        .execute(pool)
+        .await
+        .expect("seed postgres dispatch");
+    }
+
+    #[tokio::test]
+    async fn completed_dispatch_only_does_not_authorize_transition() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-completed", "requested").await;
+        seed_dispatch_pg(&pool, "card-completed", "completed").await;
+
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-completed",
+            "in_progress",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_err(),
             "completed dispatch should NOT authorize transition"
@@ -2635,76 +2591,120 @@ mod tests {
             err.contains("active dispatch"),
             "error should mention active dispatch"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn pending_dispatch_authorizes_transition() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-pending", "requested");
-        seed_dispatch(&db, "card-pending", "pending");
+    #[tokio::test]
+    async fn pending_dispatch_authorizes_transition() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-pending", "requested").await;
+        seed_dispatch_pg(&pool, "card-pending", "pending").await;
 
-        let result = transition_status(&db, &engine, "card-pending", "in_progress");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-pending",
+            "in_progress",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "pending dispatch should authorize transition"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn dispatched_status_authorizes_transition() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-dispatched", "requested");
-        seed_dispatch(&db, "card-dispatched", "dispatched");
+    #[tokio::test]
+    async fn dispatched_status_authorizes_transition() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-dispatched", "requested").await;
+        seed_dispatch_pg(&pool, "card-dispatched", "dispatched").await;
 
-        let result = transition_status(&db, &engine, "card-dispatched", "in_progress");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-dispatched",
+            "in_progress",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "dispatched status should authorize transition"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn no_dispatch_blocks_non_free_transition() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-none", "requested");
+    #[tokio::test]
+    async fn no_dispatch_blocks_non_free_transition() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-none", "requested").await;
         // No dispatch at all
 
-        let result = transition_status(&db, &engine, "card-none", "in_progress");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-none",
+            "in_progress",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(result.is_err(), "no dispatch should block transition");
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn free_transition_works_without_dispatch() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-free", "backlog");
+    #[tokio::test]
+    async fn free_transition_works_without_dispatch() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-free", "backlog").await;
 
-        let result = transition_status(&db, &engine, "card-free", "ready");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-free",
+            "ready",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "backlog → ready should work without dispatch"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn force_overrides_dispatch_check() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-force", "requested");
+    #[tokio::test]
+    async fn force_overrides_dispatch_check() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-force", "requested").await;
         // No dispatch, but force=true
 
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-force",
             "in_progress",
             "pmd",
             crate::engine::transition::ForceIntent::OperatorOverride,
-        );
+        )
+        .await;
         assert!(result.is_ok(), "force=true should bypass dispatch check");
+        pg_db.drop().await;
     }
 
     #[test]
@@ -2734,117 +2734,131 @@ mod tests {
         assert_eq!(status, "cancelled");
     }
 
-    #[test]
-    fn stale_completed_review_verdict_does_not_open_current_done_gate() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-stale-review-pass", "review");
+    #[tokio::test]
+    async fn stale_completed_review_verdict_does_not_open_current_done_gate() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-stale-review-pass", "review").await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards
-                 SET review_entered_at = datetime('now')
-                 WHERE id = 'card-stale-review-pass'",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
-                    created_at, updated_at, completed_at
-                 ) VALUES (
-                    'review-stale-pass', 'card-stale-review-pass', 'agent-1', 'review', 'completed',
-                    'stale pass', ?1,
-                    datetime('now', '-30 minutes'), datetime('now', '-30 minutes'), datetime('now', '-30 minutes')
-                 )",
-                libsql_rusqlite::params![json!({"verdict": "pass"}).to_string()],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "UPDATE kanban_cards
+             SET review_entered_at = NOW()
+             WHERE id = 'card-stale-review-pass'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+             ) VALUES (
+                'review-stale-pass', 'card-stale-review-pass', 'agent-1', 'review', 'completed',
+                'stale pass', $1::jsonb,
+                NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '30 minutes'
+             )",
+        )
+        .bind(json!({"verdict": "pass"}).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result = transition_status(&db, &engine, "card-stale-review-pass", "done");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-stale-review-pass",
+            "done",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_err(),
             "completed review verdicts from older rounds must not satisfy the current review_passed gate"
         );
 
-        let status: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM kanban_cards WHERE id = 'card-stale-review-pass'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM kanban_cards WHERE id = 'card-stale-review-pass'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             status, "review",
             "stale review verdict must leave the card in review"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn legacy_review_without_review_entered_at_keeps_latest_pass_behavior() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-legacy-review-pass", "review");
+    #[tokio::test]
+    async fn legacy_review_without_review_entered_at_keeps_latest_pass_behavior() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-legacy-review-pass", "review").await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (
-                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
-                    created_at, updated_at, completed_at
-                 ) VALUES (
-                    'review-legacy-pass', 'card-legacy-review-pass', 'agent-1', 'review', 'completed',
-                    'legacy pass', ?1,
-                    datetime('now', '-10 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
-                 )",
-                libsql_rusqlite::params![json!({"verdict": "pass"}).to_string()],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+             ) VALUES (
+                'review-legacy-pass', 'card-legacy-review-pass', 'agent-1', 'review', 'completed',
+                'legacy pass', $1::jsonb,
+                NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes'
+             )",
+        )
+        .bind(json!({"verdict": "pass"}).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result = transition_status(&db, &engine, "card-legacy-review-pass", "done");
+        let result = transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-legacy-review-pass",
+            "done",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "cards without review_entered_at must preserve the legacy pass verdict behavior"
         );
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn transition_status_with_on_conn_rolls_back_on_cleanup_error() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_card(&db, "card-force-rollback", "requested");
-        seed_dispatch(&db, "card-force-rollback", "pending");
+    #[tokio::test]
+    async fn transition_status_with_on_conn_rolls_back_on_cleanup_error() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
+        seed_card_pg(&pool, "card-force-rollback", "requested").await;
+        seed_dispatch_pg(&pool, "card-force-rollback", "pending").await;
 
-        let result = transition_status_with_opts_and_on_conn(
-            &db,
+        let result = transition_status_with_opts_and_allowed_cleanup_pg_only(
+            &pool,
             &engine,
             "card-force-rollback",
             "in_progress",
             "pmd",
             crate::engine::transition::ForceIntent::OperatorOverride,
             AllowedOnConnMutation::TestOnlyRollbackGuard,
-            |_conn| Err(anyhow::anyhow!("cleanup failed")),
-        );
+        )
+        .await;
         assert!(result.is_err(), "cleanup failure must abort the transition");
 
-        let status: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM kanban_cards WHERE id = 'card-force-rollback'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'card-force-rollback'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             status, "requested",
             "cleanup failure must roll back the card status change"
         );
+        pg_db.drop().await;
     }
 
     #[test]
@@ -2890,11 +2904,11 @@ mod tests {
         assert_eq!(count, 1, "tick hook dispatch intent should be persisted");
     }
 
-    /// Regression test for #274: transition_status() fires custom state hooks
+    /// Regression test for #274: status transitions fire custom state hooks
     /// through try_fire_hook_by_name(), and dispatch.create() in that path must
     /// return with the dispatch row + notify outbox already materialized.
-    #[test]
-    fn transition_status_custom_on_enter_hook_materializes_dispatch_outbox() {
+    #[tokio::test]
+    async fn transition_status_custom_on_enter_hook_materializes_dispatch_outbox() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("ready-enter-hook.js"),
@@ -2916,15 +2930,14 @@ mod tests {
         )
         .unwrap();
 
-        let db = test_db();
-        let engine = test_engine_with_dir(&db, dir.path());
-        seed_card(&db, "card-ready-hook", "backlog");
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg_and_dir(pool.clone(), dir.path());
+        seed_card_pg(&pool, "card-ready-hook", "backlog").await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE agents SET pipeline_config = ?1 WHERE id = 'agent-1'",
-                [json!({
+        sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = 'agent-1'")
+            .bind(
+                json!({
                     "hooks": {
                         "ready": {
                             "on_enter": ["onCustomReadyEnter"],
@@ -2932,44 +2945,52 @@ mod tests {
                         }
                     }
                 })
-                .to_string()],
+                .to_string(),
             )
+            .execute(&pool)
+            .await
             .unwrap();
-        }
 
-        transition_status(&db, &engine, "card-ready-hook", "ready").unwrap();
+        transition_status_with_opts_pg_only(
+            &pool,
+            &engine,
+            "card-ready-hook",
+            "ready",
+            "system",
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await
+        .unwrap();
 
-        let conn = db.lock().unwrap();
-        let (dispatch_id, title): (String, String) = conn
-            .query_row(
-                "SELECT id, title FROM task_dispatches WHERE kanban_card_id = 'card-ready-hook'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("custom ready on_enter hook should create a dispatch");
+        let (dispatch_id, title): (String, String) = sqlx::query_as(
+            "SELECT id, title FROM task_dispatches WHERE kanban_card_id = 'card-ready-hook'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("custom ready on_enter hook should create a dispatch");
         assert_eq!(title, "Ready Hook Dispatch");
 
-        let notify_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
-                [&dispatch_id],
-                |row| row.get(0),
-            )
-            .expect("dispatch outbox query should succeed");
+        let notify_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = $1 AND action = 'notify'",
+        )
+        .bind(&dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .expect("dispatch outbox query should succeed");
         assert_eq!(
             notify_count, 1,
             "custom transition hook dispatch must enqueue exactly one notify outbox row"
         );
 
-        let (card_status, latest_dispatch_id): (String, String) = conn
-            .query_row(
-                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ready-hook'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("card should be updated by dispatch.create()");
+        let (card_status, latest_dispatch_id): (String, String) = sqlx::query_as(
+            "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ready-hook'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("card should be updated by dispatch.create()");
         assert_eq!(card_status, "in_progress");
         assert_eq!(latest_dispatch_id, dispatch_id);
+        pg_db.drop().await;
     }
 
     /// Regression guard for the known-hook path: try_fire_hook_by_name() must
@@ -3133,7 +3154,7 @@ mod tests {
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at)
              VALUES (?1, 'Test Card', ?2, 'agent-1', ?3, datetime('now'), datetime('now'))",
-            libsql_rusqlite::params![card_id, status, repo_id],
+            rusqlite::params![card_id, status, repo_id],
         ).unwrap();
     }
 
@@ -3165,18 +3186,61 @@ mod tests {
         let entry_b = "entry-b";
         conn.execute(
             "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES (?1, 'active', ?2, datetime('now'))",
-            libsql_rusqlite::params![run_id, agent_id],
+            rusqlite::params![run_id, agent_id],
         ).unwrap();
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
              VALUES (?1, ?2, 'card-q1', ?3, 'dispatched', 1)",
-            libsql_rusqlite::params![entry_a, run_id, agent_id],
+            rusqlite::params![entry_a, run_id, agent_id],
         ).unwrap();
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
              VALUES (?1, ?2, 'card-q2', ?3, 'pending', 2)",
-            libsql_rusqlite::params![entry_b, run_id, agent_id],
+            rusqlite::params![entry_b, run_id, agent_id],
         ).unwrap();
+        (run_id.to_string(), entry_a.to_string(), entry_b.to_string())
+    }
+
+    async fn seed_auto_queue_run_pg(
+        pool: &sqlx::PgPool,
+        agent_id: &str,
+    ) -> (String, String, String) {
+        let run_id = "run-1";
+        let entry_a = "entry-a";
+        let entry_b = "entry-b";
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, status, agent_id, created_at)
+             VALUES ($1, 'active', $2, NOW())",
+        )
+        .bind(run_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at
+             )
+             VALUES ($1, $2, 'card-q1', $3, 'dispatched', 1, NOW())",
+        )
+        .bind(entry_a)
+        .bind(run_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at
+             )
+             VALUES ($1, $2, 'card-q2', $3, 'pending', 2, NOW())",
+        )
+        .bind(entry_b)
+        .bind(run_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
         (run_id.to_string(), entry_a.to_string(), entry_b.to_string())
     }
 
@@ -3251,126 +3315,120 @@ mod tests {
 
     /// #110: Rust transition_status marks auto_queue_entries as done,
     /// and this single update is sufficient (no JS triple-update).
-    #[test]
-    fn transition_to_done_marks_auto_queue_entry() {
-        let db = test_db();
-        ensure_auto_queue_tables(&db);
-        let engine = test_engine(&db);
+    #[tokio::test]
+    async fn transition_to_done_marks_auto_queue_entry() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
         // Seed cards for the queue
-        seed_card(&db, "card-q1", "review");
-        seed_card(&db, "card-q2", "ready");
-        seed_dispatch(&db, "card-q1", "pending");
-        let (_run_id, entry_a, _entry_b) = seed_auto_queue_run(&db, "agent-1");
+        seed_card_pg(&pool, "card-q1", "review").await;
+        seed_card_pg(&pool, "card-q2", "ready").await;
+        seed_dispatch_pg(&pool, "card-q1", "pending").await;
+        let (_run_id, entry_a, _entry_b) = seed_auto_queue_run_pg(&pool, "agent-1").await;
 
         // Transition card-q1 to done
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-q1",
             "done",
             "review",
             crate::engine::transition::ForceIntent::OperatorOverride,
-        );
+        )
+        .await;
         assert!(result.is_ok(), "transition to done should succeed");
 
         // Verify: entry_a should be 'done' (set by Rust transition_status)
-        let entry_status: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = ?1",
-                [&entry_a],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = $1")
+                .bind(&entry_a)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             entry_status, "done",
             "Rust must mark auto_queue_entry as done"
         );
+        pg_db.drop().await;
     }
 
     #[tokio::test]
     async fn run_completion_waits_for_phase_gate_then_enqueues_notify_to_main_channel() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         let db = test_db();
-        ensure_auto_queue_tables(&db);
-        let engine = test_engine(&db);
+        let engine = test_engine_with_pg(pool.clone());
 
-        seed_card_with_repo(&db, "card-notify", "review", "repo-1");
-        seed_dispatch(&db, "card-notify", "pending");
+        seed_card_with_repo_pg(&pool, "card-notify", "review", "repo-1").await;
+        seed_dispatch_pg(&pool, "card-notify", "pending").await;
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (
-                    id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count, created_at
-                 ) VALUES (?1, ?2, ?3, 'active', 1, ?4, 1, datetime('now'))",
-                libsql_rusqlite::params![
-                    "run-notify",
-                    "repo-1",
-                    "agent-1",
-                    r#"{"123":"thread-999"}"#
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (
-                    id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank
-                 ) VALUES (?1, ?2, ?3, ?4, 'dispatched', ?5, 1)",
-                libsql_rusqlite::params![
-                    "entry-notify",
-                    "run-notify",
-                    "card-notify",
-                    "agent-1",
-                    "dispatch-card-notify-pending"
-                ],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count, created_at
+             )
+             VALUES ($1, $2, $3, 'active', TRUE, $4::jsonb, 1, NOW())",
+        )
+        .bind("run-notify")
+        .bind("repo-1")
+        .bind("agent-1")
+        .bind(r#"{"123":"thread-999"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank, created_at
+             )
+             VALUES ($1, $2, $3, $4, 'dispatched', $5, 1, NOW())",
+        )
+        .bind("entry-notify")
+        .bind("run-notify")
+        .bind("card-notify")
+        .bind("agent-1")
+        .bind("dispatch-card-notify-pending")
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-notify",
             "done",
             "review",
             crate::engine::transition::ForceIntent::OperatorOverride,
-        );
+        )
+        .await;
         assert!(result.is_ok(), "transition to done should succeed");
 
-        let phase_gate_dispatch_id = {
-            let conn = db.lock().unwrap();
-            let run_status: String = conn
-                .query_row(
-                    "SELECT status FROM auto_queue_runs WHERE id = 'run-notify'",
-                    [],
-                    |row| row.get(0),
-                )
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'run-notify'")
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            assert_eq!(
-                run_status, "paused",
-                "single-phase terminal completion must pause for a phase gate"
-            );
+        assert_eq!(
+            run_status, "paused",
+            "single-phase terminal completion must pause for a phase gate"
+        );
 
-            let phase_gate_dispatch_id: String = conn
-                .query_row(
-                    "SELECT id FROM task_dispatches
-                     WHERE kanban_card_id = 'card-notify' AND dispatch_type = 'phase-gate'
-                     ORDER BY created_at DESC, id DESC
-                     LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let queued_notifications: i64 = conn
-                .query_row("SELECT COUNT(*) FROM message_outbox", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(
-                queued_notifications, 0,
-                "completion notify must wait for the phase gate to pass"
-            );
-            phase_gate_dispatch_id
-        };
+        let phase_gate_dispatch_id: String = sqlx::query_scalar(
+            "SELECT id FROM task_dispatches
+             WHERE kanban_card_id = 'card-notify' AND dispatch_type = 'phase-gate'
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let queued_notifications: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            queued_notifications, 0,
+            "completion notify must wait for the phase gate to pass"
+        );
 
         let completed = crate::dispatch::complete_dispatch(
             &db,
@@ -3384,80 +3442,78 @@ mod tests {
         .expect("phase gate completion should succeed");
         assert_eq!(completed["status"], "completed");
 
-        let conn = db.lock().unwrap();
-        let run_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_runs WHERE id = 'run-notify'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'run-notify'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(run_status, "completed");
 
-        let (target, bot, content): (String, String, String) = conn
-            .query_row(
-                "SELECT target, bot, content FROM message_outbox ORDER BY id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
+        let (target, bot, content): (String, String, String) = sqlx::query_as(
+            "SELECT target, bot, content FROM message_outbox ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(target, "channel:123");
         assert_eq!(bot, "notify");
         assert!(
             content.contains("자동큐 완료: repo-1 / run run-noti / 1개"),
             "notify message should summarize the completed run"
         );
+        pg_db.drop().await;
     }
 
     /// #110: non-terminal manual recovery transitions must not complete auto-queue entries.
-    #[test]
-    fn requested_force_transition_does_not_complete_auto_queue_entry() {
-        let db = test_db();
-        ensure_auto_queue_tables(&db);
-        let engine = test_engine(&db);
+    #[tokio::test]
+    async fn requested_force_transition_does_not_complete_auto_queue_entry() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
-        seed_card(&db, "card-pd", "review");
-        seed_dispatch(&db, "card-pd", "pending");
+        seed_card_pg(&pool, "card-pd", "review").await;
+        seed_dispatch_pg(&pool, "card-pd", "pending").await;
 
-        // Create auto-queue entry
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES ('run-pd', 'active', 'agent-1', datetime('now'))",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
-                 VALUES ('entry-pd', 'run-pd', 'card-pd', 'agent-1', 'dispatched', 1)",
-                [],
-            ).unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, status, agent_id, created_at)
+             VALUES ('run-pd', 'active', 'agent-1', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at
+             )
+             VALUES ('entry-pd', 'run-pd', 'card-pd', 'agent-1', 'dispatched', 1, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Transition to requested (NOT done)
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-pd",
             "requested",
             "pm-gate",
             crate::engine::transition::ForceIntent::SystemRecovery,
-        );
+        )
+        .await;
         assert!(result.is_ok());
 
         // Verify: entry should still be 'dispatched' (not done)
-        let entry_status: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-pd'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-pd'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             entry_status, "dispatched",
             "requested must NOT mark auto_queue_entry as done"
         );
+        pg_db.drop().await;
     }
 
     /// #128: started_at must reset on every in_progress re-entry (rework/resume).
@@ -3465,99 +3521,98 @@ mod tests {
     /// the original started_at on rework re-entry. This prevents losing the original
     /// start timestamp. Timeouts.js handles rework re-entry by checking the current
     /// dispatch's created_at rather than started_at.
-    #[test]
-    fn started_at_coalesces_on_in_progress_reentry() {
-        let db = test_db();
-        let engine = test_engine(&db);
+    #[tokio::test]
+    async fn started_at_coalesces_on_in_progress_reentry() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
-        // Create card in review with an old started_at (simulates work done 3h ago)
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
-                [],
-            ).ok();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, started_at, created_at, updated_at)
-                 VALUES ('card-rework', 'Test', 'review', 'agent-1', datetime('now', '-3 hours'), datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+             VALUES ('agent-1', 'Agent 1', '123', '456')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, started_at, created_at, updated_at
+             )
+             VALUES ('card-rework', 'Test', 'review', 'agent-1', NOW() - INTERVAL '3 hours', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Add dispatch to authorize transition
-        seed_dispatch(&db, "card-rework", "pending");
+        seed_dispatch_pg(&pool, "card-rework", "pending").await;
 
         // Transition back to in_progress (simulates rework)
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-rework",
             "in_progress",
             "pm-decision",
             crate::engine::transition::ForceIntent::SystemRecovery,
-        );
+        )
+        .await;
         assert!(result.is_ok(), "rework transition should succeed");
 
         // Verify started_at was PRESERVED (coalesce mode: original timestamp kept)
-        let age_seconds: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) FROM kanban_cards WHERE id = 'card-rework'",
-                [],
-                |row| row.get(0),
-            ).unwrap()
-        };
+        let age_seconds: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (NOW() - started_at))::bigint
+             FROM kanban_cards
+             WHERE id = 'card-rework'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(
             age_seconds > 3500,
             "started_at should be preserved (coalesce mode), but was only {} seconds ago",
             age_seconds
         );
+        pg_db.drop().await;
     }
 
     /// When started_at is NULL (first-time entry), coalesce mode sets it to now.
-    #[test]
-    fn started_at_set_on_first_in_progress_entry() {
-        let db = test_db();
-        let engine = test_engine(&db);
+    #[tokio::test]
+    async fn started_at_set_on_first_in_progress_entry() {
+        let pg_db = KanbanPgDatabase::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
-                [],
-            ).ok();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
-                 VALUES ('card-first', 'Test', 'requested', 'agent-1', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
+        seed_card_pg(&pool, "card-first", "requested").await;
 
-        seed_dispatch(&db, "card-first", "pending");
+        seed_dispatch_pg(&pool, "card-first", "pending").await;
 
-        let result = transition_status_with_opts(
-            &db,
+        let result = transition_status_with_opts_pg_only(
+            &pool,
             &engine,
             "card-first",
             "in_progress",
             "system",
             crate::engine::transition::ForceIntent::SystemRecovery,
-        );
+        )
+        .await;
         assert!(result.is_ok());
 
-        let age_seconds: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER) FROM kanban_cards WHERE id = 'card-first'",
-                [],
-                |row| row.get(0),
-            ).unwrap()
-        };
+        let age_seconds: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (NOW() - started_at))::bigint
+             FROM kanban_cards
+             WHERE id = 'card-first'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(
             age_seconds < 60,
             "started_at should be set to now on first entry, but was {} seconds ago",
             age_seconds
         );
+        pg_db.drop().await;
     }
 
     /// #800: `reset_full=true` reopens must scrub recorded worktree metadata
@@ -3581,7 +3636,7 @@ mod tests {
                 'd-800-completed', 'card-800-strip-wt', 'agent-1', 'implementation', 'completed',
                 'Old impl', ?1, ?2, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 serde_json::json!({
                     "worktree_path": "/tmp/agentdesk-800-stale",
                     "worktree_branch": "wt/800-old",
@@ -3605,7 +3660,7 @@ mod tests {
                 'd-800-pending', 'card-800-strip-wt', 'agent-1', 'implementation', 'pending',
                 'New impl', ?1, NULL, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 serde_json::json!({
                     "worktree_path": "/tmp/agentdesk-800-also-stale",
                     "worktree_branch": "wt/800-also-old",
@@ -3629,7 +3684,7 @@ mod tests {
                 'd-800-other-card', 'card-800-other', 'agent-1', 'implementation', 'completed',
                 'Other impl', ?1, ?2, datetime('now'), datetime('now')
              )",
-            libsql_rusqlite::params![
+            rusqlite::params![
                 serde_json::json!({
                     "worktree_path": "/tmp/agentdesk-800-other-keep",
                     "worktree_branch": "wt/800-other-keep"
