@@ -103,7 +103,7 @@ impl AppState {
     }
 
     pub fn queue_service(&self) -> crate::services::queue::QueueService {
-        crate::services::queue::QueueService::new(self.legacy_db().cloned(), self.pg_pool.clone())
+        crate::services::queue::QueueService::new(self.pg_pool.clone())
     }
 
     pub fn settings_service(&self) -> crate::services::settings::SettingsService {
