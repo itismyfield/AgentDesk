@@ -146,13 +146,6 @@ pub fn resolve_agent_primary_channel_on_conn(
     Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.primary_channel()))
 }
 
-pub fn resolve_agent_counter_model_channel_on_conn(
-    conn: &Connection,
-    agent_id: &str,
-) -> libsql_rusqlite::Result<Option<String>> {
-    Ok(load_agent_channel_bindings(conn, agent_id)?.and_then(|b| b.counter_model_channel()))
-}
-
 pub fn resolve_agent_channel_for_provider_on_conn(
     conn: &Connection,
     agent_id: &str,

@@ -1,5 +1,4 @@
 use axum::{Json, extract::State, http::StatusCode};
-use libsql_rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -61,11 +60,7 @@ async fn transition_status_pg_first(
 }
 
 fn spawn_review_tuning_aggregate_pg_first(state: &AppState) {
-    if let Some(pool) = state.pg_pool_ref() {
-        spawn_aggregate_if_needed_with_pg(None, Some(pool.clone()));
-    } else {
-        spawn_aggregate_if_needed_with_pg(Some(legacy_db(state)), None);
-    }
+    spawn_aggregate_if_needed_with_pg(state.pg_pool_ref().cloned());
 }
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
@@ -474,18 +469,20 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
     }
 }
 
-fn mark_next_review_round_advance_on_conn(
-    conn: &libsql_rusqlite::Connection,
+async fn mark_next_review_round_advance_pg_first(
+    state: &AppState,
     card_id: &str,
-) -> libsql_rusqlite::Result<bool> {
-    let metadata_raw: Option<String> = conn
-        .query_row(
-            "SELECT metadata FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
+) -> Result<bool, String> {
+    let pool = state
+        .pg_pool_ref()
+        .ok_or_else(|| "postgres pool unavailable for review round advance".to_string())?;
+    let metadata_raw =
+        sqlx::query_scalar::<_, Option<String>>("SELECT metadata FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("load postgres metadata for {card_id}: {error}"))?
+            .flatten();
 
     let mut metadata = metadata_raw
         .as_deref()
@@ -508,62 +505,14 @@ fn mark_next_review_round_advance_on_conn(
         crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
         serde_json::Value::Bool(true),
     );
-    conn.execute(
-        "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
-        libsql_rusqlite::params![metadata.to_string(), card_id],
-    )?;
-    Ok(true)
-}
 
-async fn mark_next_review_round_advance_pg_first(
-    state: &AppState,
-    card_id: &str,
-) -> Result<bool, String> {
-    if let Some(pool) = state.pg_pool_ref() {
-        let metadata_raw = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT metadata FROM kanban_cards WHERE id = $1",
-        )
+    sqlx::query("UPDATE kanban_cards SET metadata = $1, updated_at = NOW() WHERE id = $2")
+        .bind(metadata.to_string())
         .bind(card_id)
-        .fetch_optional(pool)
+        .execute(pool)
         .await
-        .map_err(|error| format!("load postgres metadata for {card_id}: {error}"))?
-        .flatten();
-
-        let mut metadata = metadata_raw
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-            .filter(|value| value.is_object())
-            .unwrap_or_else(|| json!({}));
-        let object = metadata
-            .as_object_mut()
-            .expect("review round advance metadata must be an object");
-        if object
-            .get(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
-            .and_then(|value| value.as_bool())
-            == Some(true)
-        {
-            return Ok(false);
-        }
-
-        object.insert(
-            crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
-            serde_json::Value::Bool(true),
-        );
-
-        sqlx::query("UPDATE kanban_cards SET metadata = $1, updated_at = NOW() WHERE id = $2")
-            .bind(metadata.to_string())
-            .bind(card_id)
-            .execute(pool)
-            .await
-            .map_err(|error| format!("update postgres metadata for {card_id}: {error}"))?;
-        return Ok(true);
-    }
-
-    let conn = legacy_db(state)
-        .lock()
-        .map_err(|error| format!("database lock poisoned: {error}"))?;
-    mark_next_review_round_advance_on_conn(&conn, card_id).map_err(|error| error.to_string())
+        .map_err(|error| format!("update postgres metadata for {card_id}: {error}"))?;
+    Ok(true)
 }
 
 fn dispatch_status_and_result(
@@ -1650,7 +1599,6 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome
             record_decision_tuning(
-                legacy_db(&state),
                 state.pg_pool_ref(),
                 &body.card_id,
                 "accept",
@@ -1703,7 +1651,6 @@ pub async fn submit_review_decision(
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
             record_decision_tuning(
-                legacy_db(&state),
                 state.pg_pool_ref(),
                 &body.card_id,
                 "dispute",
@@ -1989,7 +1936,6 @@ pub async fn submit_review_decision(
     );
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
     record_decision_tuning(
-        legacy_db(&state),
         state.pg_pool_ref(),
         &body.card_id,
         &body.decision,

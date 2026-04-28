@@ -62,28 +62,12 @@ pub(super) fn register_agent_ops<'js>(
     )?;
 
     // __resolveCounterModelChannel(agentId) -> channelId | ""
-    #[cfg(test)]
-    let db_counter = db.clone();
     let pg_counter = pg_pool.clone();
     agents_obj.set(
         "__resolveCounterModelChannel",
         Function::new(ctx.clone(), move |agent_id: String| -> String {
             if let Some(pool) = pg_counter.as_ref() {
                 return resolve_agent_counter_channel_pg_raw(pool, &agent_id);
-            }
-            #[cfg(test)]
-            if let Some(db_counter) = db_counter.as_ref() {
-                return match db_counter.separate_conn() {
-                    Ok(conn) => {
-                        match crate::db::agents::resolve_agent_counter_model_channel_on_conn(
-                            &conn, &agent_id,
-                        ) {
-                            Ok(Some(ch)) => ch,
-                            _ => String::new(),
-                        }
-                    }
-                    Err(_) => String::new(),
-                };
             }
             String::new()
         })?,

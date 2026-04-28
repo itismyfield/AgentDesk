@@ -3296,12 +3296,9 @@ fn load_kv_meta_value_pg(pool: &sqlx::PgPool, key: &str) -> Result<Option<String
     )
 }
 
-fn effective_max_entry_retries(
-    deps: &AutoQueueActivateDeps,
-    sqlite_conn: Option<&libsql_rusqlite::Connection>,
-) -> i64 {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let from_pg = match load_kv_meta_value_pg(pool, "runtime-config") {
+fn effective_max_entry_retries(deps: &AutoQueueActivateDeps) -> i64 {
+    let from_pg = deps.pg_pool.as_ref().and_then(|pool| {
+        match load_kv_meta_value_pg(pool, "runtime-config") {
             Ok(raw) => raw
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .and_then(|value| value.get("maxEntryRetries").and_then(Value::as_u64)),
@@ -3312,24 +3309,13 @@ fn effective_max_entry_retries(
                 );
                 None
             }
-        };
-        let fallback = crate::services::settings::runtime_config_defaults(deps.config.as_ref())
-            .get("maxEntryRetries")
-            .and_then(Value::as_u64)
-            .unwrap_or(3);
-        return clamp_retry_limit(from_pg.unwrap_or(fallback));
-    }
-
-    let value = sqlite_conn
-        .and_then(|conn| {
-            crate::services::settings::runtime_config_u64(
-                conn,
-                deps.config.as_ref(),
-                "maxEntryRetries",
-            )
-        })
+        }
+    });
+    let fallback = crate::services::settings::runtime_config_defaults(deps.config.as_ref())
+        .get("maxEntryRetries")
+        .and_then(Value::as_u64)
         .unwrap_or(3);
-    clamp_retry_limit(value)
+    clamp_retry_limit(from_pg.unwrap_or(fallback))
 }
 
 fn normalize_human_alert_target(channel: String) -> Option<String> {
@@ -3474,7 +3460,7 @@ fn record_entry_dispatch_failure(
             "{entry_id}: postgres backend is required to record dispatch failure"
         ));
     };
-    let retry_limit = effective_max_entry_retries(deps, None);
+    let retry_limit = effective_max_entry_retries(deps);
     let entry_id_text = entry_id.to_string();
     let trigger_source_text = trigger_source.to_string();
     let result = crate::utils::async_bridge::block_on_pg_result(

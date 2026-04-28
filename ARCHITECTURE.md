@@ -186,7 +186,6 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   └── v1.rs
-│   ├── boot.rs
 │   ├── cron_catalog.rs
 │   ├── maintenance.rs
 │   ├── mod.rs

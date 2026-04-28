@@ -1092,11 +1092,6 @@ fn parse_ratelimit_window_start_data(data: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-pub fn ratelimit_window_start(_conn: &libsql_rusqlite::Connection) -> Option<DateTime<Utc>> {
-    tracing::warn!("[receipt] sqlite rate-limit cache lookup disabled; postgres pool required");
-    None
-}
-
 pub async fn ratelimit_window_start_pg(pool: &sqlx::PgPool) -> Option<DateTime<Utc>> {
     let row = sqlx::query("SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1")
         .fetch_optional(pool)

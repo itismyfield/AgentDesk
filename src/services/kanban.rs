@@ -71,44 +71,21 @@ impl KanbanService {
     }
 
     pub async fn list_cards(&self, input: ListCardsInput) -> ServiceResult<ListCardsResponse> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            let registered_repo_ids =
-                kanban::list_registered_repo_ids_pg(pool)
-                    .await
-                    .map_err(|error| {
-                        ServiceError::internal(error)
-                            .with_code(ErrorCode::Database)
-                            .with_operation("list_cards.list_registered_repo_ids_pg")
-                    })?;
-            let records = kanban::list_cards_pg(
-                pool,
-                &ListCardsFilter {
-                    status: input.status,
-                    repo_id: input.repo_id,
-                    assigned_agent_id: input.assigned_agent_id,
-                },
-                &registered_repo_ids,
-            )
-            .await
-            .map_err(|error| {
-                ServiceError::internal(error)
-                    .with_code(ErrorCode::Database)
-                    .with_operation("list_cards.query_pg")
-            })?;
-
-            return Ok(ListCardsResponse {
-                cards: records.into_iter().map(KanbanCardView::from).collect(),
-            });
-        }
-
-        let conn = self.db.read_conn().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
+        let pool = self.pg_pool.as_ref().ok_or_else(|| {
+            ServiceError::internal("postgres pool unavailable for list_cards")
                 .with_code(ErrorCode::Database)
-                .with_operation("list_cards.read_conn")
+                .with_operation("list_cards.pg_pool")
         })?;
-        let registered_repo_ids = kanban::list_registered_repo_ids(&conn).unwrap_or_default();
-        let records = kanban::list_cards(
-            &conn,
+        let registered_repo_ids =
+            kanban::list_registered_repo_ids_pg(pool)
+                .await
+                .map_err(|error| {
+                    ServiceError::internal(error)
+                        .with_code(ErrorCode::Database)
+                        .with_operation("list_cards.list_registered_repo_ids_pg")
+                })?;
+        let records = kanban::list_cards_pg(
+            pool,
             &ListCardsFilter {
                 status: input.status,
                 repo_id: input.repo_id,
@@ -116,10 +93,11 @@ impl KanbanService {
             },
             &registered_repo_ids,
         )
+        .await
         .map_err(|error| {
-            ServiceError::internal(format!("list cards: {error}"))
+            ServiceError::internal(error)
                 .with_code(ErrorCode::Database)
-                .with_operation("list_cards.query")
+                .with_operation("list_cards.query_pg")
         })?;
 
         Ok(ListCardsResponse {

@@ -165,34 +165,22 @@ async fn enforce_session_reset_dilemma_fallback(
         reset_round, current_round
     );
 
-    if let Some(pool) = state.pg_pool_ref() {
-        let _ = sqlx::query(
-            "UPDATE kanban_cards
-             SET review_status = 'dilemma_pending',
-                 blocked_reason = $1,
-                 suggestion_pending_at = NULL,
-                 awaiting_dod_at = NULL,
-                 updated_at = NOW()
-             WHERE id = $2",
-        )
-        .bind(&blocked_reason)
-        .bind(card_id)
-        .execute(pool)
-        .await;
-    } else if let Ok(conn) = legacy_db(state).lock() {
-        let _ = conn.execute(
-            "UPDATE kanban_cards
-             SET review_status = 'dilemma_pending',
-                 blocked_reason = ?1,
-                 suggestion_pending_at = NULL,
-                 awaiting_dod_at = NULL,
-                 updated_at = datetime('now')
-             WHERE id = ?2",
-            libsql_rusqlite::params![blocked_reason, card_id],
-        );
-    } else {
+    let Some(pool) = state.pg_pool_ref() else {
         return;
-    }
+    };
+    let _ = sqlx::query(
+        "UPDATE kanban_cards
+         SET review_status = 'dilemma_pending',
+             blocked_reason = $1,
+             suggestion_pending_at = NULL,
+             awaiting_dod_at = NULL,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(&blocked_reason)
+    .bind(card_id)
+    .execute(pool)
+    .await;
 
     let payload = serde_json::json!({
         "card_id": card_id,
