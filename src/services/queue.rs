@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use libsql_rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
@@ -41,64 +40,15 @@ impl QueueService {
     }
 
     pub async fn cancel_dispatch(&self, dispatch_id: &str) -> ServiceResult<Value> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            return self.cancel_dispatch_pg(pool, dispatch_id).await;
-        }
-
-        self.cancel_dispatch_sqlite(dispatch_id)
-    }
-
-    fn cancel_dispatch_sqlite(&self, dispatch_id: &str) -> ServiceResult<Value> {
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("cancel_dispatch.lock")
-                .with_context("dispatch_id", dispatch_id)
-        })?;
-
-        let current_status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(ServiceError::internal(
+                "postgres pool unavailable for queue.cancel_dispatch",
             )
-            .optional()
-            .map_err(|error| {
-                ServiceError::internal(format!("load dispatch status: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_dispatch.query_status")
-                    .with_context("dispatch_id", dispatch_id)
-            })?;
-
-        match current_status.as_deref() {
-            None => Err(ServiceError::not_found("dispatch not found")
-                .with_code(ErrorCode::Dispatch)
-                .with_context("dispatch_id", dispatch_id)),
-            Some("completed") | Some("cancelled") | Some("failed") => {
-                Err(ServiceError::conflict(format!(
-                    "dispatch already in terminal state: {}",
-                    current_status.unwrap_or_default()
-                ))
-                .with_code(ErrorCode::Dispatch)
-                .with_context("dispatch_id", dispatch_id))
-            }
-            Some(_) => {
-                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                    &conn,
-                    dispatch_id,
-                    None,
-                )
-                .ok();
-                conn.execute(
-                    "DELETE FROM kv_meta WHERE key = ?1",
-                    [&format!("dispatch_notified:{dispatch_id}")],
-                )
-                .ok();
-
-                tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
-                Ok(json!({"ok": true, "dispatch_id": dispatch_id}))
-            }
-        }
+            .with_code(ErrorCode::Database)
+            .with_operation("cancel_dispatch.no_pool")
+            .with_context("dispatch_id", dispatch_id));
+        };
+        self.cancel_dispatch_pg(pool, dispatch_id).await
     }
 
     async fn cancel_dispatch_pg(&self, pool: &PgPool, dispatch_id: &str) -> ServiceResult<Value> {
@@ -164,80 +114,15 @@ impl QueueService {
         kanban_card_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> ServiceResult<Value> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            return self
-                .cancel_all_dispatches_pg(pool, kanban_card_id, agent_id)
-                .await;
-        }
-
-        self.cancel_all_dispatches_sqlite(kanban_card_id, agent_id)
-    }
-
-    fn cancel_all_dispatches_sqlite(
-        &self,
-        kanban_card_id: Option<&str>,
-        agent_id: Option<&str>,
-    ) -> ServiceResult<Value> {
-        let conn = self.db.lock().map_err(|e| {
-            ServiceError::internal(format!("{e}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("cancel_all_dispatches.lock")
-        })?;
-
-        let mut conditions = vec!["status IN ('pending', 'dispatched')".to_string()];
-        let mut params: Vec<Box<dyn libsql_rusqlite::types::ToSql>> = Vec::new();
-
-        if let Some(card_id) = kanban_card_id {
-            params.push(Box::new(card_id.to_string()));
-            conditions.push(format!("kanban_card_id = ?{}", params.len()));
-        }
-        if let Some(agent_id) = agent_id {
-            params.push(Box::new(agent_id.to_string()));
-            conditions.push(format!("to_agent_id = ?{}", params.len()));
-        }
-
-        let sql = format!(
-            "SELECT id FROM task_dispatches WHERE {}",
-            conditions.join(" AND ")
-        );
-        let param_refs: Vec<&dyn libsql_rusqlite::types::ToSql> =
-            params.iter().map(|param| param.as_ref()).collect();
-        let dispatch_ids: Vec<String> = {
-            let mut stmt = conn.prepare(&sql).map_err(|error| {
-                ServiceError::internal(format!("prepare cancel-all query: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_all_dispatches.prepare")
-            })?;
-            let rows = stmt
-                .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
-                .map_err(|error| {
-                    ServiceError::internal(format!("query cancel-all dispatches: {error}"))
-                        .with_code(ErrorCode::Database)
-                        .with_operation("cancel_all_dispatches.query")
-                })?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|error| {
-                ServiceError::internal(format!("read cancel-all dispatch rows: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_all_dispatches.collect")
-            })
-        }?;
-
-        let mut count = 0;
-        for dispatch_id in &dispatch_ids {
-            count += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                &conn,
-                dispatch_id,
-                None,
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(ServiceError::internal(
+                "postgres pool unavailable for queue.cancel_all_dispatches",
             )
-            .unwrap_or(0);
-        }
-
-        tracing::info!(
-            "[queue-api] Cancelled {count} dispatches (card={:?}, agent={:?})",
-            kanban_card_id,
-            agent_id
-        );
-        Ok(json!({"ok": true, "cancelled": count}))
+            .with_code(ErrorCode::Database)
+            .with_operation("cancel_all_dispatches.no_pool"));
+        };
+        self.cancel_all_dispatches_pg(pool, kanban_card_id, agent_id)
+            .await
     }
 
     async fn cancel_all_dispatches_pg(
@@ -477,70 +362,41 @@ impl QueueService {
         &self,
         channel_id: &str,
     ) -> ServiceResult<Option<CancelTurnChannelTarget>> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            return sqlx::query_as::<_, (String, Option<String>)>(
-                "SELECT id,
-                        CASE
-                          WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
-                          WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
-                          ELSE NULL
-                        END AS requested_provider
-                 FROM agents
-                 WHERE discord_channel_id = $1
-                    OR discord_channel_alt = $1
-                    OR discord_channel_cc = $1
-                    OR discord_channel_cdx = $1
-                 LIMIT 1",
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(ServiceError::internal(
+                "postgres pool unavailable for cancel_turn channel target",
             )
-            .bind(channel_id)
-            .fetch_optional(pool)
-            .await
-            .map(|row| {
-                row.map(|(agent_id, requested_provider)| CancelTurnChannelTarget {
-                    agent_id,
-                    requested_provider,
-                })
-            })
-            .map_err(|error| {
-                ServiceError::internal(format!("load postgres cancel channel target: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.query_channel_target_pg")
-                    .with_context("channel_id", channel_id)
-            });
-        }
-
-        let conn = self.db.lock().map_err(|error| {
-            ServiceError::internal(format!("{error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("cancel_turn.lock_channel_target")
-                .with_context("channel_id", channel_id)
-        })?;
-        conn.query_row(
+            .with_code(ErrorCode::Database)
+            .with_operation("cancel_turn.query_channel_target.no_pool")
+            .with_context("channel_id", channel_id));
+        };
+        sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT id,
                     CASE
-                      WHEN discord_channel_cc = ?1 OR discord_channel_id = ?1 THEN 'claude'
-                      WHEN discord_channel_cdx = ?1 OR discord_channel_alt = ?1 THEN 'codex'
+                      WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
+                      WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
                       ELSE NULL
                     END AS requested_provider
              FROM agents
-             WHERE discord_channel_id = ?1
-                OR discord_channel_alt = ?1
-                OR discord_channel_cc = ?1
-                OR discord_channel_cdx = ?1
+             WHERE discord_channel_id = $1
+                OR discord_channel_alt = $1
+                OR discord_channel_cc = $1
+                OR discord_channel_cdx = $1
              LIMIT 1",
-            [channel_id],
-            |row| {
-                Ok(CancelTurnChannelTarget {
-                    agent_id: row.get(0)?,
-                    requested_provider: row.get(1)?,
-                })
-            },
         )
-        .optional()
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .map(|row| {
+            row.map(|(agent_id, requested_provider)| CancelTurnChannelTarget {
+                agent_id,
+                requested_provider,
+            })
+        })
         .map_err(|error| {
-            ServiceError::internal(format!("load cancel channel target: {error}"))
+            ServiceError::internal(format!("load postgres cancel channel target: {error}"))
                 .with_code(ErrorCode::Database)
-                .with_operation("cancel_turn.query_channel_target")
+                .with_operation("cancel_turn.query_channel_target_pg")
                 .with_context("channel_id", channel_id)
         })
     }
@@ -549,158 +405,95 @@ impl QueueService {
         &self,
         channel_id: &str,
     ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            return sqlx::query_as::<
-                _,
-                (
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    i64,
-                ),
-            >(
-                "WITH channel_agent AS (
-                   SELECT id AS agent_id,
-                          CASE
-                            WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
-                            WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
-                            ELSE NULL
-                          END AS requested_provider
-                   FROM agents
-                   WHERE discord_channel_id = $1
-                      OR discord_channel_alt = $1
-                      OR discord_channel_cc = $1
-                      OR discord_channel_cdx = $1
-                   LIMIT 1
-                 )
-                 SELECT s.session_key,
-                        s.active_dispatch_id,
-                        s.provider,
-                        s.agent_id,
-                        ca.requested_provider,
-                        CASE
-                          WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
-                          WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
-                          WHEN ca.requested_provider IS NOT NULL
-                               AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
-                          ELSE 3
-                        END::BIGINT AS match_rank
-                 FROM sessions s
-                 LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
-                 WHERE s.status = 'working'
-                   AND (
-                     COALESCE(s.thread_channel_id, '') = $1
-                     OR s.session_key LIKE '%' || $1 || '%'
-                     OR (
-                       ca.agent_id IS NOT NULL
-                       AND (
-                         ca.requested_provider IS NULL
-                         OR COALESCE(s.provider, '') = ca.requested_provider
-                       )
-                     )
-                   )
-                 ORDER BY match_rank ASC, s.last_heartbeat DESC
-                 LIMIT 1",
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err(ServiceError::internal(
+                "postgres pool unavailable for cancel_turn session lookup",
             )
-            .bind(channel_id)
-            .fetch_optional(pool)
-            .await
-            .map(|row| {
-                row.map(
-                    |(
-                        session_key,
-                        dispatch_id,
-                        provider_name,
-                        agent_id,
-                        requested_provider,
-                        match_rank,
-                    )| CancelTurnSessionInfo {
-                        session_key,
-                        dispatch_id,
-                        provider_name,
-                        agent_id,
-                        requested_provider,
-                        match_rank,
-                    },
-                )
-            })
-            .map_err(|error| {
-                ServiceError::internal(format!("load postgres active turn: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.query_active_session_pg")
-                    .with_context("channel_id", channel_id)
-            });
-        } else {
-            let conn = self.db.lock().map_err(|error| {
-                ServiceError::internal(format!("{error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.lock")
-                    .with_context("channel_id", channel_id)
-            })?;
-            conn.query_row(
-                "WITH channel_agent AS (
-                   SELECT id AS agent_id,
-                          CASE
-                            WHEN discord_channel_cc = ?1 OR discord_channel_id = ?1 THEN 'claude'
-                            WHEN discord_channel_cdx = ?1 OR discord_channel_alt = ?1 THEN 'codex'
-                            ELSE NULL
-                          END AS requested_provider
-                   FROM agents
-                   WHERE discord_channel_id = ?1
-                      OR discord_channel_alt = ?1
-                      OR discord_channel_cc = ?1
-                      OR discord_channel_cdx = ?1
-                   LIMIT 1
-                 )
-                 SELECT s.session_key,
-                        s.active_dispatch_id,
-                        s.provider,
-                        s.agent_id,
-                        ca.requested_provider,
-                        CASE
-                          WHEN COALESCE(s.thread_channel_id, '') = ?1 THEN 0
-                          WHEN s.session_key LIKE '%' || ?1 || '%' THEN 1
-                          WHEN ca.requested_provider IS NOT NULL
-                               AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
-                          ELSE 3
-                        END AS match_rank
-                 FROM sessions s
-                 LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
-                 WHERE s.status = 'working'
+            .with_code(ErrorCode::Database)
+            .with_operation("cancel_turn.query_active_session.no_pool")
+            .with_context("channel_id", channel_id));
+        };
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                i64,
+            ),
+        >(
+            "WITH channel_agent AS (
+               SELECT id AS agent_id,
+                      CASE
+                        WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
+                        WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
+                        ELSE NULL
+                      END AS requested_provider
+               FROM agents
+               WHERE discord_channel_id = $1
+                  OR discord_channel_alt = $1
+                  OR discord_channel_cc = $1
+                  OR discord_channel_cdx = $1
+               LIMIT 1
+             )
+             SELECT s.session_key,
+                    s.active_dispatch_id,
+                    s.provider,
+                    s.agent_id,
+                    ca.requested_provider,
+                    CASE
+                      WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
+                      WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
+                      WHEN ca.requested_provider IS NOT NULL
+                           AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
+                      ELSE 3
+                    END::BIGINT AS match_rank
+             FROM sessions s
+             LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
+             WHERE s.status = 'working'
+               AND (
+                 COALESCE(s.thread_channel_id, '') = $1
+                 OR s.session_key LIKE '%' || $1 || '%'
+                 OR (
+                   ca.agent_id IS NOT NULL
                    AND (
-                     COALESCE(s.thread_channel_id, '') = ?1
-                     OR s.session_key LIKE '%' || ?1 || '%'
-                     OR (
-                       ca.agent_id IS NOT NULL
-                       AND (
-                         ca.requested_provider IS NULL
-                         OR COALESCE(s.provider, '') = ca.requested_provider
-                       )
-                     )
+                     ca.requested_provider IS NULL
+                     OR COALESCE(s.provider, '') = ca.requested_provider
                    )
-                 ORDER BY match_rank ASC, s.last_heartbeat DESC
-                 LIMIT 1",
-                [channel_id],
-                |row| {
-                    Ok(CancelTurnSessionInfo {
-                        session_key: row.get(0)?,
-                        dispatch_id: row.get(1)?,
-                        provider_name: row.get(2)?,
-                        agent_id: row.get(3)?,
-                        requested_provider: row.get(4)?,
-                        match_rank: row.get(5)?,
-                    })
+                 )
+               )
+             ORDER BY match_rank ASC, s.last_heartbeat DESC
+             LIMIT 1",
+        )
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .map(|row| {
+            row.map(
+                |(
+                    session_key,
+                    dispatch_id,
+                    provider_name,
+                    agent_id,
+                    requested_provider,
+                    match_rank,
+                )| CancelTurnSessionInfo {
+                    session_key,
+                    dispatch_id,
+                    provider_name,
+                    agent_id,
+                    requested_provider,
+                    match_rank,
                 },
             )
-            .optional()
-            .map_err(|error| {
-                ServiceError::internal(format!("load active turn: {error}"))
-                    .with_code(ErrorCode::Database)
-                    .with_operation("cancel_turn.query_active_session")
-                    .with_context("channel_id", channel_id)
-            })
-        }
+        })
+        .map_err(|error| {
+            ServiceError::internal(format!("load postgres active turn: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("cancel_turn.query_active_session_pg")
+                .with_context("channel_id", channel_id)
+        })
     }
 }

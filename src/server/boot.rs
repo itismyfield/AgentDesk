@@ -35,7 +35,7 @@ pub(super) async fn serve_http(
         .await
         .map_err(anyhow::Error::msg)?;
     crate::services::termination_audit::init_audit_db(db.clone(), pg_pool.clone());
-    crate::services::observability::init_observability(Some(db.clone()), pg_pool.clone());
+    crate::services::observability::init_observability(pg_pool.clone());
 
     // #1091 (909-2): dynamic maintenance job scheduler. #1092 (909-3) registers
     // the storage sweep jobs and #1093 (909-4) adds `storage.db_retention`

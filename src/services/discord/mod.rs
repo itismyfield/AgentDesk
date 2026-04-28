@@ -76,7 +76,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use libsql_rusqlite::OptionalExtension;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
@@ -2892,57 +2891,29 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
 }
 
 async fn mark_session_disconnected_for_idle_cleanup(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
 ) -> bool {
-    let mut prior_status = None;
-
-    if let Some(pool) = pg_pool {
-        prior_status =
-            sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
-                .bind(session_key)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-
-        let _ = sqlx::query(
-            "UPDATE sessions
-             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
-             WHERE session_key = $1",
-        )
-        .bind(session_key)
-        .execute(pool)
-        .await;
-    }
-
-    if let Some(db) = db {
-        let Ok(conn) = db.lock() else {
-            return prior_status.as_deref() != Some("disconnected");
-        };
-
-        let sqlite_prior_status = conn
-            .query_row(
-                "SELECT status FROM sessions WHERE session_key = ?1",
-                [session_key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
+    let Some(pool) = pg_pool else {
+        return false;
+    };
+    let prior_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")
+            .bind(session_key)
+            .fetch_optional(pool)
+            .await
             .ok()
             .flatten();
 
-        let _ = conn.execute(
-            "UPDATE sessions
-             SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
-             WHERE session_key = ?1",
-            [session_key],
-        );
-
-        if prior_status.is_none() {
-            prior_status = sqlite_prior_status;
-        }
-    }
+    let _ = sqlx::query(
+        "UPDATE sessions
+         SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+         WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .execute(pool)
+    .await;
 
     prior_status.as_deref() != Some("disconnected")
 }

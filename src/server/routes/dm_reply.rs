@@ -5,17 +5,6 @@ use serde_json::json;
 use super::AppState;
 use crate::services::discord_dm_reply_store::register_pending_dm_reply_db;
 
-/// TODO(#1238 / 843g): see agents::agent_quality_legacy_db.
-fn dm_reply_legacy_db(state: &AppState) -> &crate::db::Db {
-    use std::sync::OnceLock;
-    static PLACEHOLDER: OnceLock<crate::db::Db> = OnceLock::new();
-    state
-        .engine
-        .legacy_db()
-        .or_else(|| state.legacy_db())
-        .unwrap_or_else(|| PLACEHOLDER.get_or_init(super::pending_migration_shim_for_callers))
-}
-
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub source_agent: String,
@@ -49,12 +38,7 @@ pub async fn register_handler(
         .unwrap_or_else(|_| "{}".to_string());
     let ttl_seconds = body.ttl_seconds.unwrap_or(3600);
 
-    // TODO(#1238 / 843g): register_pending_dm_reply_db short-circuits to PG
-    // when a pool is configured (production runtime). The SQLite handle is
-    // kept only for the test fallback; once #1238 ports the function to
-    // PG-only this placeholder goes away.
     match register_pending_dm_reply_db(
-        dm_reply_legacy_db(&state),
         state.pg_pool_ref(),
         &source_agent,
         &user_id,

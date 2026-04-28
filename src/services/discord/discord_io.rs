@@ -93,11 +93,9 @@ pub(super) async fn try_handle_pending_dm_reply(
             {
                 tracing::warn!("  [dm-reply] notify source agent failed: {e}");
                 // Record failure in context so readConsumed can detect it
-                let sqlite3 = info.sqlite.clone();
                 let reply_id = info.id;
                 let err_msg = format!("{e}");
                 let _ = crate::services::discord_dm_reply_store::mark_pending_dm_reply_notify_failed_db(
-                    sqlite3.as_ref(),
                     pg_pool,
                     reply_id,
                     &err_msg,
@@ -219,17 +217,16 @@ pub async fn retry_failed_dm_notifications(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
 ) {
-    let entries = match crate::services::discord_dm_reply_store::load_failed_consumed_dm_replies_db(
-        db, pg_pool,
-    )
-    .await
-    {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!("  [dm-reply] list failed notifications: {error}");
-            return;
-        }
-    };
+    let entries =
+        match crate::services::discord_dm_reply_store::load_failed_consumed_dm_replies_db(pg_pool)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!("  [dm-reply] list failed notifications: {error}");
+                return;
+            }
+        };
 
     if entries.is_empty() {
         return;
@@ -258,7 +255,6 @@ pub async fn retry_failed_dm_notifications(
             Ok(()) => {
                 // Clear _notify_failed on success
                 let _ = crate::services::discord_dm_reply_store::clear_pending_dm_reply_notify_failure_db(
-                    db,
                     pg_pool,
                     entry.id,
                 )
@@ -292,11 +288,10 @@ async fn consume_pending_dm_reply(
     user_id: &str,
     answer: &str,
 ) -> Option<ConsumedDmReply> {
-    let row = crate::services::discord_dm_reply_store::load_oldest_pending_dm_reply_db(
-        db, pg_pool, user_id,
-    )
-    .await
-    .ok()??;
+    let row =
+        crate::services::discord_dm_reply_store::load_oldest_pending_dm_reply_db(pg_pool, user_id)
+            .await
+            .ok()??;
 
     // Merge the answer into the context JSON
     let mut context: serde_json::Value =
@@ -307,7 +302,6 @@ async fn consume_pending_dm_reply(
 
     // CAS: only mark consumed if still pending (guards against race)
     let updated = crate::services::discord_dm_reply_store::mark_pending_dm_reply_consumed_db(
-        db,
         pg_pool,
         row.id,
         &updated_context,
@@ -580,50 +574,5 @@ mod tests {
         assert_eq!(lines.next(), Some("DM_REPLY:7 from (retry): 네"));
         assert_eq!(lines.next(), Some("context={}"));
         assert!(lines.next().is_none());
-    }
-
-    #[tokio::test]
-    async fn consume_pending_dm_reply_stores_answer_but_returns_original_context() {
-        let db = crate::db::test_db();
-        let reply_id = crate::services::discord_dm_reply_store::register_pending_dm_reply(
-            &db,
-            "family-counsel",
-            "12345",
-            Some("1473922824350601297"),
-            r#"{"topicKey":"obujang.health_checkup","question":"건강검진 했어?"}"#,
-            3_600,
-        )
-        .expect("insert should succeed");
-
-        let consumed = consume_pending_dm_reply(Some(&db), None, "12345", "지난주에 했어")
-            .await
-            .expect("reply should consume");
-
-        assert_eq!(consumed.id, reply_id);
-        assert_eq!(consumed.source_agent, "family-counsel");
-        assert_eq!(consumed.answer, "지난주에 했어");
-        assert_eq!(consumed.channel_id.as_deref(), Some("1473922824350601297"));
-        assert_eq!(
-            consumed.context,
-            json!({
-                "topicKey": "obujang.health_checkup",
-                "question": "건강검진 했어?",
-            })
-        );
-
-        let stored_context: String = db
-            .separate_conn()
-            .expect("db connection")
-            .query_row(
-                "SELECT context FROM pending_dm_replies WHERE id = ?1",
-                libsql_rusqlite::params![reply_id],
-                |row| row.get(0),
-            )
-            .expect("stored context should exist");
-        let stored_context: serde_json::Value =
-            serde_json::from_str(&stored_context).expect("stored context should be json");
-        assert_eq!(stored_context["topicKey"], "obujang.health_checkup");
-        assert_eq!(stored_context["question"], "건강검진 했어?");
-        assert_eq!(stored_context["_answer"], "지난주에 했어");
     }
 }

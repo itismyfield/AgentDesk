@@ -1,12 +1,8 @@
 use anyhow::{Result, anyhow};
-use libsql_rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::db::Db;
-use crate::db::session_agent_resolution::{
-    resolve_agent_id_for_session, resolve_agent_id_for_session_pg,
-};
+use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnTokenUsage {
@@ -22,23 +18,6 @@ impl TurnTokenUsage {
             .saturating_add(self.cache_create_tokens)
             .saturating_add(self.cache_read_tokens)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct PersistTurn<'a> {
-    pub turn_id: &'a str,
-    pub session_key: Option<&'a str>,
-    pub thread_id: Option<&'a str>,
-    pub thread_title: Option<&'a str>,
-    pub channel_id: &'a str,
-    pub agent_id: Option<&'a str>,
-    pub provider: Option<&'a str>,
-    pub session_id: Option<&'a str>,
-    pub dispatch_id: Option<&'a str>,
-    pub started_at: Option<&'a str>,
-    pub finished_at: Option<&'a str>,
-    pub duration_ms: Option<i64>,
-    pub token_usage: TurnTokenUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -58,142 +37,12 @@ pub struct PersistTurnOwned {
     pub token_usage: TurnTokenUsage,
 }
 
-impl PersistTurnOwned {
-    pub fn as_borrowed(&self) -> PersistTurn<'_> {
-        PersistTurn {
-            turn_id: self.turn_id.as_str(),
-            session_key: self.session_key.as_deref(),
-            thread_id: self.thread_id.as_deref(),
-            thread_title: self.thread_title.as_deref(),
-            channel_id: self.channel_id.as_str(),
-            agent_id: self.agent_id.as_deref(),
-            provider: self.provider.as_deref(),
-            session_id: self.session_id.as_deref(),
-            dispatch_id: self.dispatch_id.as_deref(),
-            started_at: self.started_at.as_deref(),
-            finished_at: self.finished_at.as_deref(),
-            duration_ms: self.duration_ms,
-            token_usage: self.token_usage,
-        }
-    }
-}
-
-pub fn upsert_turn_owned_on_separate_conn(db: &Db, entry: &PersistTurnOwned) -> Result<()> {
-    let mut conn = db
-        .separate_conn()
-        .map_err(|e| anyhow!("db separate_conn failed while persisting turn: {e}"))?;
-    upsert_turn_on_conn(&mut conn, entry.as_borrowed())
-}
-
 pub async fn upsert_turn_owned_db(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     entry: &PersistTurnOwned,
 ) -> Result<()> {
-    if let Some(pool) = pg_pool {
-        return upsert_turn_owned_pg(pool, entry).await;
-    }
-
-    let db = db.ok_or_else(|| anyhow!("sqlite db is required when postgres pool is absent"))?;
-    upsert_turn_owned_on_separate_conn(db, entry)
-}
-
-pub fn upsert_turn_on_conn(conn: &mut Connection, entry: PersistTurn<'_>) -> Result<()> {
-    let turn_id = entry.turn_id.trim();
-    if turn_id.is_empty() {
-        return Err(anyhow!("turn_id is required"));
-    }
-
-    let channel_id = entry.channel_id.trim();
-    if channel_id.is_empty() {
-        return Err(anyhow!("channel_id is required"));
-    }
-
-    let session_key = normalized_opt(entry.session_key);
-    let thread_id = normalized_opt(entry.thread_id);
-    let thread_title = normalized_opt(entry.thread_title);
-    let provider = normalized_opt(entry.provider);
-    let session_id = normalized_opt(entry.session_id);
-    let dispatch_id = normalized_opt(entry.dispatch_id);
-    let started_at = normalized_opt(entry.started_at).unwrap_or_else(now_string);
-    let finished_at = normalized_opt(entry.finished_at).unwrap_or_else(now_string);
-    let agent_id = resolve_agent_id_for_session(
-        conn,
-        entry.agent_id,
-        session_key.as_deref(),
-        None,
-        thread_id.as_deref(),
-        dispatch_id.as_deref(),
-    );
-
-    conn.execute(
-        "INSERT INTO turns (
-            turn_id,
-            session_key,
-            thread_id,
-            thread_title,
-            channel_id,
-            agent_id,
-            provider,
-            session_id,
-            dispatch_id,
-            started_at,
-            finished_at,
-            duration_ms,
-            input_tokens,
-            cache_create_tokens,
-            cache_read_tokens,
-            output_tokens
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-         ON CONFLICT(turn_id) DO UPDATE SET
-            session_key = COALESCE(excluded.session_key, turns.session_key),
-            thread_id = COALESCE(excluded.thread_id, turns.thread_id),
-            thread_title = COALESCE(excluded.thread_title, turns.thread_title),
-            channel_id = excluded.channel_id,
-            agent_id = COALESCE(excluded.agent_id, turns.agent_id),
-            provider = COALESCE(excluded.provider, turns.provider),
-            session_id = COALESCE(excluded.session_id, turns.session_id),
-            dispatch_id = COALESCE(excluded.dispatch_id, turns.dispatch_id),
-            started_at = COALESCE(excluded.started_at, turns.started_at),
-            finished_at = COALESCE(excluded.finished_at, turns.finished_at),
-            duration_ms = COALESCE(excluded.duration_ms, turns.duration_ms),
-            input_tokens = CASE
-                WHEN excluded.input_tokens > 0 THEN excluded.input_tokens
-                ELSE turns.input_tokens
-            END,
-            cache_create_tokens = CASE
-                WHEN excluded.cache_create_tokens > 0 THEN excluded.cache_create_tokens
-                ELSE turns.cache_create_tokens
-            END,
-            cache_read_tokens = CASE
-                WHEN excluded.cache_read_tokens > 0 THEN excluded.cache_read_tokens
-                ELSE turns.cache_read_tokens
-            END,
-            output_tokens = CASE
-                WHEN excluded.output_tokens > 0 THEN excluded.output_tokens
-                ELSE turns.output_tokens
-            END",
-        params![
-            turn_id,
-            session_key,
-            thread_id,
-            thread_title,
-            channel_id,
-            agent_id,
-            provider,
-            session_id,
-            dispatch_id,
-            started_at,
-            finished_at,
-            entry.duration_ms,
-            u64_to_i64(entry.token_usage.input_tokens),
-            u64_to_i64(entry.token_usage.cache_create_tokens),
-            u64_to_i64(entry.token_usage.cache_read_tokens),
-            u64_to_i64(entry.token_usage.output_tokens),
-        ],
-    )?;
-
-    Ok(())
+    let pool = pg_pool.ok_or_else(|| anyhow!("postgres pool unavailable for turns upsert"))?;
+    upsert_turn_owned_pg(pool, entry).await
 }
 
 async fn upsert_turn_owned_pg(pool: &PgPool, entry: &PersistTurnOwned) -> Result<()> {
@@ -314,74 +163,4 @@ fn now_string() -> String {
 
 fn u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned_on_separate_conn};
-    use crate::db::test_db;
-
-    #[test]
-    fn upsert_turn_owned_on_separate_conn_persists_turn_rows() {
-        let db = test_db();
-        db.lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent One')",
-                [],
-            )
-            .unwrap();
-
-        upsert_turn_owned_on_separate_conn(
-            &db,
-            &PersistTurnOwned {
-                turn_id: "discord:2:3".to_string(),
-                session_key: Some("claude/token/host:adk-cdx".to_string()),
-                thread_id: Some("201".to_string()),
-                thread_title: Some("[AgentDesk] #593 turns persistence".to_string()),
-                channel_id: "101".to_string(),
-                agent_id: Some("agent-1".to_string()),
-                provider: Some("claude".to_string()),
-                session_id: Some("session-def".to_string()),
-                dispatch_id: Some("dispatch-2".to_string()),
-                started_at: Some("2026-04-15 07:00:00".to_string()),
-                finished_at: Some("2026-04-15 07:00:08".to_string()),
-                duration_ms: Some(8_000),
-                token_usage: TurnTokenUsage {
-                    input_tokens: 55,
-                    cache_create_tokens: 5,
-                    cache_read_tokens: 7,
-                    output_tokens: 11,
-                },
-            },
-        )
-        .unwrap();
-
-        let conn = db.lock().unwrap();
-        let row = conn
-            .query_row(
-                "SELECT thread_title, session_id, input_tokens, cache_create_tokens,
-                        cache_read_tokens, output_tokens
-                 FROM turns WHERE turn_id = 'discord:2:3'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .unwrap();
-
-        assert_eq!(row.0.as_deref(), Some("[AgentDesk] #593 turns persistence"));
-        assert_eq!(row.1.as_deref(), Some("session-def"));
-        assert_eq!(row.2, 55);
-        assert_eq!(row.3, 5);
-        assert_eq!(row.4, 7);
-        assert_eq!(row.5, 11);
-    }
 }
