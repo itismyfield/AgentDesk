@@ -85,15 +85,7 @@ fn test_api_router_with_pg(
 ) -> axum::Router {
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router_with_pg(
-        Some(db),
-        engine,
-        config,
-        tx,
-        buf,
-        health_registry,
-        Some(pg_pool),
-    )
+    api_router_with_pg_for_tests(db, engine, config, tx, buf, health_registry, Some(pg_pool))
 }
 
 async fn read_sse_body_until(body: &mut Body, needles: &[&str]) -> String {
@@ -27780,8 +27772,8 @@ async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
     let app = axum::Router::new().nest(
         "/api",
-        api_router_with_pg(
-            Some(db),
+        api_router_with_pg_for_tests(
+            db,
             engine,
             crate::config::Config::default(),
             tx.clone(),

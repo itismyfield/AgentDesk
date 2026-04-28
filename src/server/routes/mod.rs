@@ -51,6 +51,7 @@ use axum::{
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::error::{AppError, ErrorCode};
@@ -172,8 +173,8 @@ pub fn api_router(
     batch_buffer: crate::server::ws::BatchBuffer,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Router {
-    api_router_with_pg(
-        Some(db),
+    api_router_with_pg_for_tests(
+        db,
         engine,
         config,
         broadcast_tx,
@@ -184,7 +185,6 @@ pub fn api_router(
 }
 
 pub fn api_router_with_pg(
-    db: Option<Db>,
     engine: PolicyEngine,
     config: crate::config::Config,
     broadcast_tx: crate::server::ws::BroadcastTx,
@@ -192,11 +192,9 @@ pub fn api_router_with_pg(
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Router {
-    #[cfg(not(test))]
-    let _ = db;
     let state = AppState {
         #[cfg(test)]
-        legacy_db_override: db,
+        legacy_db_override: None,
         pg_pool,
         engine,
         config: Arc::new(config),
@@ -210,6 +208,29 @@ pub fn api_router_with_pg(
         state::global_monitoring_store(),
         state.health_registry.clone(),
     );
+
+    compose_api_router(state.clone()).with_state(state)
+}
+
+#[cfg(test)]
+pub fn api_router_with_pg_for_tests(
+    db: Db,
+    engine: PolicyEngine,
+    config: crate::config::Config,
+    broadcast_tx: crate::server::ws::BroadcastTx,
+    batch_buffer: crate::server::ws::BatchBuffer,
+    health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<sqlx::PgPool>,
+) -> Router {
+    let state = AppState {
+        legacy_db_override: Some(db),
+        pg_pool,
+        engine,
+        config: Arc::new(config),
+        broadcast_tx,
+        batch_buffer,
+        health_registry,
+    };
 
     compose_api_router(state.clone()).with_state(state)
 }

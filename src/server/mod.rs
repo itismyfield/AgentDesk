@@ -299,7 +299,6 @@ where
         .nest(
             "/api",
             routes::api_router_with_pg(
-                legacy_db,
                 engine.clone(),
                 config.clone(),
                 broadcast_tx.clone(),
@@ -309,8 +308,6 @@ where
             ),
         )
         .fallback_service(dashboard_service);
-    // ^^ #1237 (843f): legacy_db is Option<Db>; routes::api_router_with_pg
-    // signature accepts the optional handle and forwards to AppState.
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
