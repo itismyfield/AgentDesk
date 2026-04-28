@@ -289,32 +289,6 @@ pub fn runtime_config_defaults(config: &crate::config::Config) -> Value {
     Value::Object(runtime_config_defaults_map(config))
 }
 
-pub fn runtime_config_u64(
-    conn: &libsql_rusqlite::Connection,
-    config: &crate::config::Config,
-    key: &str,
-) -> Option<u64> {
-    let saved = conn
-        .query_row(
-            "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    if let Some(value) = saved
-        .as_ref()
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_u64)
-    {
-        return Some(value);
-    }
-
-    runtime_config_defaults_map(config)
-        .get(key)
-        .and_then(Value::as_u64)
-}
-
 fn runtime_scalar_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),

@@ -34,5 +34,8 @@ __pycache__/
 # Claude Code Agent tool isolated worktrees
 /.claude/worktrees/
 
+# /loop scheduling lockfile (per-session)
+/.claude/scheduled_tasks.lock
+
 # Transient ops playbooks (campaign prompts, incident runbooks)
 /docs/ops/

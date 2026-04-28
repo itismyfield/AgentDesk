@@ -213,14 +213,10 @@ pub async fn get_receipt(
             (first, "This Month")
         }
         "ratelimit" => {
-            // TODO(#1238 / 843g): receipt::ratelimit_window_start still reads
-            // SQLite. PG-only runtimes fall through to the 7-day default
-            // until the helper is migrated.
-            let ws = state
-                .db
-                .as_ref()
-                .and_then(|db| db.lock().ok())
-                .and_then(|conn| receipt::ratelimit_window_start(&conn));
+            let ws = match state.pg_pool.as_ref() {
+                Some(pool) => receipt::ratelimit_window_start_pg(pool).await,
+                None => None,
+            };
             (
                 ws.unwrap_or_else(|| now - chrono::Duration::days(7)),
                 "Rate Limit Window",
