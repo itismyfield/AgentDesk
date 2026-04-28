@@ -112,7 +112,7 @@
 | `engine::ops::review_ops` | `src/engine/ops/review_ops.rs` | 446 |  |
 | `engine::ops::runtime_ops` | `src/engine/ops/runtime_ops.rs` | 260 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 230 |  |
-| `engine::transition` | `src/engine/transition.rs` | 1757 | giant-file |
+| `engine::transition` | `src/engine/transition.rs` | 1711 | giant-file |
 | `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 690 |  |
 | `error` | `src/error.rs` | 188 |  |
 | `github` | `src/github/mod.rs` | 833 |  |
@@ -210,8 +210,8 @@
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
 | `services::api_friction` | `src/services/api_friction.rs` | 1808 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1050 | giant-file |
-| `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1782 | giant-file |
-| `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 518 |  |
+| `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 1697 | giant-file |
+| `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 510 |  |
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1679 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 650 |  |
@@ -321,7 +321,7 @@
 | `services::memory::memento` | `src/services/memory/memento.rs` | 2479 | giant-file |
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
-| `services::message_outbox` | `src/services/message_outbox.rs` | 515 |  |
+| `services::message_outbox` | `src/services/message_outbox.rs` | 506 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 3647 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
