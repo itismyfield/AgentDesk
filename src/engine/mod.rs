@@ -140,13 +140,8 @@ impl PolicyEngineActor {
         rx: mpsc::Receiver<EngineCommand>,
     ) {
         let _ = thread_id.set(thread::current().id());
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .ok();
-        let _runtime_guard = runtime.as_ref().map(|rt| rt.enter());
-
+        // Keep policy hooks outside a Tokio runtime so synchronous PG bridge calls
+        // use their isolated bridge pools instead of contending for the shared pool.
         while let Ok(command) = rx.recv() {
             // We popped a command off the channel, so approximate queue depth
             // should drop. saturating_sub guards against any accidental skew.
@@ -1306,9 +1301,18 @@ impl PolicyEngine {
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
         let code_owned = code.to_string();
         inner.context.with(|ctx| {
-            let result: T = ctx
-                .eval(code_owned.as_bytes().to_vec())
-                .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
+            let result: T = ctx.eval(code_owned.as_bytes().to_vec()).map_err(|e| {
+                let exception_detail = ctx
+                    .catch()
+                    .into_exception()
+                    .map(|ex| {
+                        let msg = ex.message().unwrap_or_default();
+                        let stack = ex.stack().unwrap_or_default();
+                        format!("{msg}\n{stack}")
+                    })
+                    .unwrap_or_else(|| format!("{e}"));
+                anyhow::anyhow!("JS eval error: {exception_detail}")
+            })?;
             Ok(result)
         })
     }

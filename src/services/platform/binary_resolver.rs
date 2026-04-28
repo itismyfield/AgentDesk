@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -17,6 +18,11 @@ const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
 const SHELL_ENV_DELIMITER: &str = "__AGENTDESK_SHELL_ENV__";
+
+thread_local! {
+    static ACTIVE_PROVIDER_CONTEXTS: RefCell<Vec<crate::services::provider_cli::ProviderExecutionContext>> =
+        const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinaryResolution {
@@ -47,6 +53,13 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
 }
 
 pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
+    if let Some(ctx) = active_provider_context(provider) {
+        return resolve_provider_binary_for_context(&ctx);
+    }
+    resolve_provider_binary_legacy(provider)
+}
+
+fn resolve_provider_binary_legacy(provider: &str) -> BinaryResolution {
     let requested_binary = normalize_name(provider);
     let override_var = override_var_name(&requested_binary);
     let cwd = current_dir_fallback();
@@ -155,6 +168,44 @@ pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
             }
         }
     }
+}
+
+struct ProviderContextScope;
+
+impl ProviderContextScope {
+    fn push(ctx: crate::services::provider_cli::ProviderExecutionContext) -> Self {
+        ACTIVE_PROVIDER_CONTEXTS.with(|contexts| contexts.borrow_mut().push(ctx));
+        Self
+    }
+}
+
+impl Drop for ProviderContextScope {
+    fn drop(&mut self) {
+        ACTIVE_PROVIDER_CONTEXTS.with(|contexts| {
+            contexts.borrow_mut().pop();
+        });
+    }
+}
+
+pub fn with_provider_execution_context<T>(
+    ctx: crate::services::provider_cli::ProviderExecutionContext,
+    run: impl FnOnce() -> T,
+) -> T {
+    let _scope = ProviderContextScope::push(ctx);
+    run()
+}
+
+fn active_provider_context(
+    provider: &str,
+) -> Option<crate::services::provider_cli::ProviderExecutionContext> {
+    ACTIVE_PROVIDER_CONTEXTS.with(|contexts| {
+        contexts
+            .borrow()
+            .iter()
+            .rev()
+            .find(|ctx| ctx.provider.eq_ignore_ascii_case(provider))
+            .cloned()
+    })
 }
 
 pub fn resolve_login_shell_path() -> Option<String> {
@@ -677,6 +728,118 @@ fn join_paths_lossy(paths: Vec<PathBuf>) -> Option<OsString> {
     std::env::join_paths(paths).ok()
 }
 
+/// Context-aware resolver (PR-2).
+///
+/// Resolution order:
+/// 1. Per-agent channel override in registry (`agent_overrides`)
+/// 2. Current registry channel
+/// 3. Legacy env-override / PATH / login-shell / fallback (unchanged behaviour)
+pub fn resolve_provider_binary_for_context(
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+) -> BinaryResolution {
+    let provider = normalize_name(&ctx.provider);
+    if let Some(root) = crate::config::runtime_root() {
+        if let Ok(Some(registry)) = crate::services::provider_cli::io::load_registry(&root) {
+            if let Some(channels) = registry.providers.get(&provider) {
+                // 1. Per-agent override → named channel
+                let channel_name = ctx
+                    .agent_id
+                    .as_deref()
+                    .and_then(|id| registry.agent_channel(&provider, id))
+                    .unwrap_or("current");
+
+                let selected_channel = match channel_name {
+                    "candidate" => channels.candidate.as_ref(),
+                    "default" => channels.default.as_ref(),
+                    "previous" => channels.previous.as_ref(),
+                    _ => channels.current.as_ref(),
+                };
+
+                if let Some(channel) = selected_channel {
+                    if let Some(resolution) =
+                        registry_channel_resolution(ctx, &provider, channel_name, channel)
+                    {
+                        return resolution;
+                    }
+                }
+
+                if channel_name != "current" {
+                    if let Some(channel) = channels.current.as_ref() {
+                        if let Some(resolution) =
+                            registry_channel_resolution(ctx, &provider, "current", channel)
+                        {
+                            return resolution;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 3. Fall back to legacy resolver.
+    resolve_provider_binary_legacy(&provider)
+}
+
+fn registry_channel_resolution(
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+    requested_binary: &str,
+    channel_name: &str,
+    channel: &crate::services::provider_cli::ProviderCliChannel,
+) -> Option<BinaryResolution> {
+    let cwd = current_dir_fallback();
+    let expanded = expand_user_path(OsStr::new(&channel.path));
+    let resolved_path = resolve_candidate_path(&expanded, &cwd).ok()?;
+    let resolution = finalize_resolution(
+        requested_binary.to_string(),
+        resolved_path,
+        format!("registry:{channel_name}"),
+        vec![format!("registry:{channel_name}=found:{}", channel.path)],
+    );
+    record_context_launch_artifact(ctx, &resolution, channel_name, &channel.version);
+    Some(resolution)
+}
+
+fn record_context_launch_artifact(
+    ctx: &crate::services::provider_cli::ProviderExecutionContext,
+    resolution: &BinaryResolution,
+    channel_name: &str,
+    cli_version: &str,
+) {
+    let Some(session_key) = ctx
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(root) = crate::config::runtime_root() else {
+        return;
+    };
+    let Some(cli_path) = resolution.resolved_path.clone() else {
+        return;
+    };
+    let canonical_path = resolution
+        .canonical_path
+        .clone()
+        .unwrap_or_else(|| cli_path.clone());
+
+    let artifact = crate::services::provider_cli::LaunchArtifact {
+        provider: resolution.requested_binary.clone(),
+        agent_id: ctx.agent_id.clone(),
+        channel_id: ctx.channel_id.clone(),
+        session_key: Some(session_key.to_string()),
+        channel: channel_name.to_string(),
+        cli_path,
+        canonical_path,
+        cli_version: cli_version.to_string(),
+        process_id: None,
+        tmux_session: ctx.tmux_session.clone(),
+        launched_at: chrono::Utc::now(),
+    };
+
+    let _ = crate::services::provider_cli::io::save_launch_artifact(&root, &artifact);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +847,24 @@ mod tests {
 
     fn env_guard() -> MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    struct RuntimeRootOverrideGuard {
+        previous: Option<PathBuf>,
+    }
+
+    impl RuntimeRootOverrideGuard {
+        fn set(path: &Path) -> Self {
+            let previous = crate::config::current_test_runtime_root_override();
+            crate::config::set_test_runtime_root_override(Some(path.to_path_buf()));
+            Self { previous }
+        }
+    }
+
+    impl Drop for RuntimeRootOverrideGuard {
+        fn drop(&mut self) {
+            crate::config::set_test_runtime_root_override(self.previous.take());
+        }
     }
 
     #[cfg(unix)]
@@ -701,6 +882,21 @@ mod tests {
         std::fs::set_permissions(path, perms).unwrap();
     }
 
+    fn registry_channel(path: &Path) -> crate::services::provider_cli::ProviderCliChannel {
+        crate::services::provider_cli::ProviderCliChannel {
+            path: path.to_string_lossy().to_string(),
+            canonical_path: std::fs::canonicalize(path)
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            version: "test-version".to_string(),
+            version_output: None,
+            source: "test".to_string(),
+            checked_at: chrono::Utc::now(),
+            evidence: Default::default(),
+        }
+    }
+
     #[test]
     fn resolve_binary_finds_known_tool() {
         let _guard = env_guard();
@@ -708,6 +904,68 @@ mod tests {
         assert!(resolve_binary("ls").is_some());
         #[cfg(windows)]
         assert!(resolve_binary("cmd.exe").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_context_prefers_agent_override_over_discord_channel_name() {
+        let _guard = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let _root_guard = RuntimeRootOverrideGuard::set(root.path());
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let current = bin_dir.join("codex-current");
+        let candidate = bin_dir.join("codex-candidate");
+        write_executable(&current);
+        write_executable(&candidate);
+
+        let mut registry = crate::services::provider_cli::ProviderCliRegistry::default();
+        let mut channels = crate::services::provider_cli::ProviderChannels {
+            current: Some(registry_channel(&current)),
+            candidate: Some(registry_channel(&candidate)),
+            ..Default::default()
+        };
+        channels
+            .agent_overrides
+            .insert("codex-agent".to_string(), "candidate".to_string());
+        registry.providers.insert("codex".to_string(), channels);
+        crate::services::provider_cli::io::save_registry(root.path(), &registry).unwrap();
+
+        let ctx = crate::services::provider_cli::ProviderExecutionContext {
+            provider: "codex".to_string(),
+            agent_id: Some("codex-agent".to_string()),
+            channel_id: Some("123".to_string()),
+            session_key: Some("session-1".to_string()),
+            tmux_session: Some("agentdesk-codex-agent-sandbox".to_string()),
+            channel_name: Some("agent-sandbox".to_string()),
+            execution_mode: Some("discord_turn".to_string()),
+        };
+
+        let resolution = with_provider_execution_context(ctx, || resolve_provider_binary("codex"));
+
+        assert_eq!(resolution.source.as_deref(), Some("registry:candidate"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(candidate.to_string_lossy().as_ref())
+        );
+        let artifact =
+            crate::services::provider_cli::io::load_launch_artifact(root.path(), "session-1")
+                .unwrap()
+                .unwrap();
+        assert_eq!(artifact.provider, "codex");
+        assert_eq!(artifact.agent_id.as_deref(), Some("codex-agent"));
+        assert_eq!(artifact.channel, "candidate");
+        assert_eq!(
+            artifact.tmux_session.as_deref(),
+            Some("agentdesk-codex-agent-sandbox")
+        );
+        assert_eq!(
+            artifact.canonical_path,
+            std::fs::canonicalize(&candidate)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
     }
 
     #[test]
@@ -854,6 +1112,107 @@ mod tests {
                 .iter()
                 .any(|attempt| attempt.contains("permission_denied"))
         );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_CODEX_PATH");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_resolver_normalizes_provider_for_registry_lookup() {
+        use crate::services::provider_cli::registry::{
+            ProviderChannels, ProviderCliChannel, ProviderCliRegistry,
+        };
+        use chrono::Utc;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime_root = RuntimeRootOverrideGuard::set(temp.path());
+        let registry_path = temp.path().join("registry-codex");
+        write_executable(&registry_path);
+
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                current: Some(ProviderCliChannel {
+                    path: registry_path.to_string_lossy().to_string(),
+                    canonical_path: registry_path.to_string_lossy().to_string(),
+                    version: "registry".to_string(),
+                    version_output: None,
+                    source: "test".to_string(),
+                    checked_at: Utc::now(),
+                    evidence: Default::default(),
+                }),
+                ..Default::default()
+            },
+        );
+        crate::services::provider_cli::io::save_registry(temp.path(), &registry).unwrap();
+
+        let resolution = resolve_provider_binary_for_context(
+            &crate::services::provider_cli::ProviderExecutionContext::for_provider("CoDeX"),
+        );
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(registry_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(resolution.source.as_deref(), Some("registry:current"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_resolver_falls_back_when_registry_path_is_not_executable() {
+        use crate::services::provider_cli::registry::{
+            ProviderChannels, ProviderCliChannel, ProviderCliRegistry,
+        };
+        use chrono::Utc;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let _runtime_root = RuntimeRootOverrideGuard::set(temp.path());
+        let invalid_registry_path = temp.path().join("registry-codex");
+        let fallback_path = temp.path().join("env-codex");
+        std::fs::write(&invalid_registry_path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&invalid_registry_path)
+            .unwrap()
+            .permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&invalid_registry_path, perms).unwrap();
+        write_executable(&fallback_path);
+
+        let mut registry = ProviderCliRegistry::default();
+        registry.providers.insert(
+            "codex".to_string(),
+            ProviderChannels {
+                current: Some(ProviderCliChannel {
+                    path: invalid_registry_path.to_string_lossy().to_string(),
+                    canonical_path: invalid_registry_path.to_string_lossy().to_string(),
+                    version: "registry".to_string(),
+                    version_output: None,
+                    source: "test".to_string(),
+                    checked_at: Utc::now(),
+                    evidence: Default::default(),
+                }),
+                ..Default::default()
+            },
+        );
+        crate::services::provider_cli::io::save_registry(temp.path(), &registry).unwrap();
+
+        unsafe {
+            std::env::set_var("AGENTDESK_CODEX_PATH", &fallback_path);
+        }
+        let resolution = resolve_provider_binary_for_context(
+            &crate::services::provider_cli::ProviderExecutionContext::for_provider("codex"),
+        );
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(fallback_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(resolution.source.as_deref(), Some("env_override"));
 
         unsafe {
             std::env::remove_var("AGENTDESK_CODEX_PATH");

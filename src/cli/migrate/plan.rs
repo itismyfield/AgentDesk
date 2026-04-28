@@ -376,7 +376,7 @@ fn parse_fallback_provider(raw: Option<&str>) -> Result<Option<ProviderKind>, St
     };
     let parsed = ProviderKind::from_str(raw).ok_or_else(|| {
         format!(
-            "Unsupported --fallback-provider '{}'. Expected one of: claude, codex, gemini, qwen.",
+            "Unsupported --fallback-provider '{}'. Expected one of: claude, codex, gemini, opencode, qwen.",
             raw
         )
     })?;

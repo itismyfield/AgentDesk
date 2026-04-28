@@ -901,7 +901,7 @@ async fn load_entry_status_row_pg_tx(
 ) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
-                kanban_card_id,
+                COALESCE(kanban_card_id, '') AS kanban_card_id,
                 agent_id,
                 status,
                 dispatch_id,
@@ -965,7 +965,10 @@ async fn record_entry_dispatch_history_on_pg(
         "INSERT INTO auto_queue_entry_dispatch_history (
              entry_id, dispatch_id, trigger_source
          )
-         VALUES ($1, $2, $3)
+         SELECT $1, $2, $3
+         WHERE EXISTS (
+             SELECT 1 FROM task_dispatches WHERE id = $2
+         )
          ON CONFLICT DO NOTHING",
     )
     .bind(entry_id)
@@ -1191,7 +1194,7 @@ pub async fn get_status_entry_pg(
     let row = sqlx::query(
         "SELECT e.id,
                 e.agent_id,
-                e.kanban_card_id,
+                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -1237,7 +1240,7 @@ pub async fn list_status_entries_pg(
     let rows = sqlx::query(
         "SELECT e.id,
                 e.agent_id,
-                e.kanban_card_id,
+                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
                 e.priority_rank::BIGINT AS priority_rank,
                 e.reason,
                 e.status,
@@ -1609,12 +1612,8 @@ pub async fn record_consultation_dispatch_on_pg(
         .to_string());
     }
 
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres consultation metadata update: {error}"))?;
-
-    let entry_result = update_entry_status_on_pg(
-        pool,
+    let entry_result = update_entry_status_on_pg_tx(
+        &mut tx,
         entry_id,
         ENTRY_STATUS_DISPATCHED,
         trigger_source,
@@ -1624,6 +1623,18 @@ pub async fn record_consultation_dispatch_on_pg(
         },
     )
     .await?;
+    if !entry_result.changed {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres consultation dispatch entry {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "stale postgres consultation dispatch entry {entry_id}: status update was not applied"
+        ));
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres consultation dispatch transaction: {error}"))?;
 
     Ok(ConsultationDispatchRecordResult {
         metadata_json,
@@ -1900,7 +1911,7 @@ pub async fn first_pending_entry_for_group_pg(
     current_phase: Option<i64>,
 ) -> Result<Option<(String, String, String, i64)>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
+        "SELECT e.id, COALESCE(e.kanban_card_id, '') AS kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase
          FROM auto_queue_entries e
          WHERE e.run_id = $1
            AND COALESCE(e.thread_group, 0) = $2
@@ -2266,9 +2277,9 @@ pub async fn slot_has_active_dispatch_excluding_pg(
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND status IN ('pending', 'dispatched')
-           AND COALESCE(NULLIF(COALESCE(context, '{}'::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
-           AND COALESCE((COALESCE(context, '{}'::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
-           AND COALESCE(context, '{}'::jsonb)->'phase_gate' IS NULL
+           AND COALESCE(NULLIF((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'slot_index', '')::BIGINT, -1) = $2
+           AND COALESCE(((COALESCE(NULLIF(context, ''), '{}')::jsonb)->>'sidecar_dispatch')::BOOLEAN, FALSE) = FALSE
+           AND (COALESCE(NULLIF(context, ''), '{}')::jsonb)->'phase_gate' IS NULL
            AND id != $3",
     )
     .bind(agent_id)
@@ -2327,8 +2338,8 @@ pub async fn sync_run_group_metadata_pg_tx(
 async fn load_entry_status_row_pg(pool: &PgPool, entry_id: &str) -> Result<EntryStatusRow, String> {
     let row = sqlx::query(
         "SELECT run_id,
-                kanban_card_id,
-                agent_id,
+                COALESCE(kanban_card_id, '') AS kanban_card_id,
+                COALESCE(agent_id, '') AS agent_id,
                 status,
                 dispatch_id,
                 COALESCE(retry_count, 0)::BIGINT AS retry_count,
@@ -3038,7 +3049,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed shared run");
-        sqlx::query("INSERT INTO agents (id, discord_channel_id) VALUES ('agent-1', '999')")
+        sqlx::query("INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '999')")
             .execute(&pool)
             .await
             .expect("seed agent");
@@ -3335,7 +3346,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         let completed_at: Option<DateTime<Utc>> =
             row.try_get("completed_at").expect("completed_at");
         assert_eq!(status, ENTRY_STATUS_PENDING);
@@ -3544,7 +3555,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         assert_eq!(status, ENTRY_STATUS_DISPATCHED);
         assert_eq!(dispatch_id.as_deref(), Some("dispatch-restored"));
         assert_eq!(slot_index, Some(0));
@@ -3599,7 +3610,7 @@ mod tests {
         .expect("entry row");
         let status: String = row.try_get("status").expect("status");
         let dispatch_id: Option<String> = row.try_get("dispatch_id").expect("dispatch_id");
-        let slot_index: Option<i32> = row.try_get("slot_index").expect("slot_index");
+        let slot_index: Option<i64> = row.try_get("slot_index").expect("slot_index");
         let completed_at: Option<DateTime<Utc>> =
             row.try_get("completed_at").expect("completed_at");
         assert_eq!(status, ENTRY_STATUS_DISPATCHED);
@@ -3786,7 +3797,7 @@ mod tests {
             "single-slot pool must allow only one concurrent group allocation"
         );
 
-        let assignments: Vec<(Option<String>, Option<i32>)> = sqlx::query(
+        let assignments: Vec<(Option<String>, Option<i64>)> = sqlx::query(
             "SELECT assigned_run_id, assigned_thread_group
              FROM auto_queue_slots
              WHERE agent_id = 'agent-1'
@@ -3800,7 +3811,7 @@ mod tests {
             (
                 row.try_get::<Option<String>, _>("assigned_run_id")
                     .expect("assigned_run_id"),
-                row.try_get::<Option<i32>, _>("assigned_thread_group")
+                row.try_get::<Option<i64>, _>("assigned_thread_group")
                     .expect("assigned_thread_group"),
             )
         })
@@ -3882,7 +3893,7 @@ mod tests {
         .expect("slot row");
         let assigned_run_id: Option<String> =
             row.try_get("assigned_run_id").expect("assigned_run_id");
-        let assigned_thread_group: Option<i32> = row
+        let assigned_thread_group: Option<i64> = row
             .try_get("assigned_thread_group")
             .expect("assigned_thread_group");
         let thread_id_map: Option<String> = row.try_get("thread_id_map").expect("thread_id_map");
@@ -3893,7 +3904,7 @@ mod tests {
                 .expect("thread_id_map json");
         assert_eq!(parsed["123"], "thread-slot-0");
 
-        let slot_index: Option<i32> =
+        let slot_index: Option<i64> =
             sqlx::query_scalar("SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-next'")
                 .fetch_one(&pool)
                 .await
@@ -3958,7 +3969,7 @@ mod tests {
         .expect("slot row");
         let assigned_run_id: Option<String> =
             row.try_get("assigned_run_id").expect("assigned_run_id");
-        let assigned_thread_group: Option<i32> = row
+        let assigned_thread_group: Option<i64> = row
             .try_get("assigned_thread_group")
             .expect("assigned_thread_group");
         let thread_id_map: Option<String> = row.try_get("thread_id_map").expect("thread_id_map");

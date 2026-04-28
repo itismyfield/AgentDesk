@@ -23,7 +23,6 @@ use sqlx::{PgPool, QueryBuilder, Row};
 
 use super::AppState;
 use crate::services::memory::MementoRememberRequest;
-use crate::services::provider::ProviderKind;
 
 // ── Backend detection ────────────────────────────────────────────
 
@@ -47,16 +46,17 @@ impl MemoryBackend {
 ///
 /// Priority:
 /// 1. `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch).
-/// 2. Memento MCP is configured for any active provider (Claude or Codex) → Memento.
+/// 2. Memento MCP is configured for any supported provider → Memento.
 /// 3. Otherwise → Local.
 pub(crate) fn detect_memory_backend() -> MemoryBackend {
     if env_flag_true("ADK_FORCE_LOCAL_MEMORY") {
         return MemoryBackend::Local;
     }
 
-    let memento_mcp_configured =
-        crate::services::mcp_config::provider_has_memento_mcp(&ProviderKind::Claude)
-            || crate::services::mcp_config::provider_has_memento_mcp(&ProviderKind::Codex);
+    let memento_mcp_configured = crate::services::provider::provider_registry()
+        .iter()
+        .filter_map(|entry| crate::services::provider::ProviderKind::from_str(entry.id))
+        .any(|provider| crate::services::mcp_config::provider_has_memento_mcp(&provider));
 
     if memento_mcp_configured {
         MemoryBackend::Memento

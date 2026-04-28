@@ -844,6 +844,7 @@ async fn resolve_pipeline_on_pg_tx(
     } else {
         None
     };
+
     let agent_override = if let Some(agent_id) = agent_id {
         sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
             .bind(agent_id)

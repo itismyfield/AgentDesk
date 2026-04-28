@@ -17,6 +17,7 @@ pub(super) fn provider_from_channel_suffix(channel: &str) -> Option<&'static str
         ProviderKind::Claude => Some("claude"),
         ProviderKind::Codex => Some("codex"),
         ProviderKind::Gemini => Some("gemini"),
+        ProviderKind::OpenCode => Some("opencode"),
         ProviderKind::Qwen => Some("qwen"),
         ProviderKind::Unsupported(_) => None,
     })

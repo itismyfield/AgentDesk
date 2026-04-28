@@ -1,7 +1,7 @@
 import type { CliProvider } from "../../types";
 import type { DeptForm, FormData } from "./types";
 
-export const CLI_PROVIDERS: CliProvider[] = ["claude", "codex", "gemini", "qwen", "opencode", "copilot", "antigravity", "api"];
+export const CLI_PROVIDERS: CliProvider[] = ["claude", "codex", "gemini", "opencode", "qwen", "copilot", "antigravity", "api"];
 
 export const STATUS_DOT: Record<string, string> = {
   working: "bg-emerald-400 shadow-emerald-400/50 shadow-sm",

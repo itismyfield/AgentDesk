@@ -190,7 +190,7 @@ pub struct SubmitVerdictBody {
     /// The commit SHA that was actually reviewed. When provided, the
     /// review-passed marker stamps this commit instead of the current HEAD.
     pub commit: Option<String>,
-    /// Provider identifier (e.g. "claude", "codex", "gemini") of the verdict submitter.
+    /// Provider identifier (e.g. "claude", "codex", "gemini", "opencode") of the verdict submitter.
     /// Used for cross-provider validation in counter-model reviews.
     pub provider: Option<String>,
 }
@@ -298,7 +298,7 @@ pub async fn submit_verdict(
                                 StatusCode::BAD_REQUEST,
                                 Json(json!({
                                     "error": format!(
-                                        "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', or 'qwen'",
+                                        "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', 'opencode', or 'qwen'",
                                         raw_submitter
                                     )
                                 })),

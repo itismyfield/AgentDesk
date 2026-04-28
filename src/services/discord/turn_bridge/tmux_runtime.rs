@@ -61,7 +61,7 @@ fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnI
         ProviderKind::Codex | ProviderKind::Qwen => {
             Some(ProviderTurnInterruptPlan { keys: &["C-c"] })
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
     }
 }
 
@@ -77,7 +77,7 @@ fn fallback_sigint_pid_for_provider(
         // C-c had already gone to the pane — irrelevant now that the C-c
         // path is removed for claude.
         ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
     }
 }
 
@@ -474,7 +474,7 @@ fn provider_cli_binary_name(provider: &ProviderKind) -> Option<&'static str> {
         ProviderKind::Claude => Some("claude"),
         ProviderKind::Codex => Some("codex"),
         ProviderKind::Qwen => Some("qwen"),
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
     }
 }
 

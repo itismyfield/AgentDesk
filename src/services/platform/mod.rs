@@ -11,6 +11,7 @@ pub mod tmux;
 pub use binary_resolver::{
     BinaryResolution, apply_binary_resolution, async_resolve_binary_with_login_shell,
     augment_exec_path, merged_runtime_path, probe_resolved_binary_version, resolve_provider_binary,
+    with_provider_execution_context,
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::{

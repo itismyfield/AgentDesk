@@ -4451,6 +4451,7 @@ mod tests {
     /// For those, the announce bot's ✅ is the only terminal signal, so the
     /// sync runs the full reconcile: DELETE ⏳/❌ (@me, 404-tolerant), PUT ✅.
     #[tokio::test]
+    #[ignore = "obsolete SQLite-only reaction sync fixture; PG coverage lives in sync_dispatch_status_reaction_with_pg_marks_completed_dispatch_success"]
     async fn sync_dispatch_status_reaction_writes_success_cycle_for_completed_dispatch() {
         let _env_lock = env_lock();
         let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
@@ -4518,6 +4519,7 @@ mod tests {
     /// own ✅ (if added via turn_bridge:1537) is untouched (@me-scoped
     /// deletes), but ❌ is the authoritative failure signal.
     #[tokio::test]
+    #[ignore = "obsolete SQLite-only reaction sync fixture; dispatch reaction sync is PG-only after #868"]
     async fn sync_dispatch_status_reaction_writes_failure_cycle_for_failed_dispatch() {
         let _env_lock = env_lock();
         let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;

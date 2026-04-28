@@ -97,7 +97,7 @@ pub(super) async fn handle_model_picker_interaction(
                 ctx,
                 serenity::CreateInteractionResponse::Message(
                     serenity::CreateInteractionResponseMessage::new()
-                        .content("Model override is only supported for Claude, Codex, Gemini, and Qwen channels.")
+                        .content("Model override is only supported for Claude, Codex, Gemini, OpenCode, and Qwen channels.")
                         .ephemeral(true),
                 ),
             )

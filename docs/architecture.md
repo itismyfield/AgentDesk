@@ -77,7 +77,7 @@ Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher
 세션 실행 백엔드, provider adapter, dispatch lifecycle, runtime/platform abstraction이 여기에 있다. 이 영역은 "어떤 provider 프로세스를 어떻게 띄우고, 결과를 어떻게 회수하는가"를 담당한다.
 
 핵심 역할:
-- Claude/Codex/Gemini/Qwen provider 실행과 stderr/stdout 처리
+- Claude/Codex/Gemini/OpenCode/Qwen provider 실행과 stderr/stdout 처리
 - tmux/process backend wrapper와 세션 진단
 - dispatch 생성, chaining, 상태 반영
 - OS/runtime path, binary, shell abstraction
@@ -311,7 +311,7 @@ CREATE TABLE agents (
   name        TEXT NOT NULL,
   name_ko     TEXT,
   department  TEXT,
-  provider    TEXT DEFAULT 'claude',      -- claude/codex/gemini
+  provider    TEXT DEFAULT 'claude',      -- claude/codex/gemini/opencode/qwen
   discord_channel_id    TEXT,             -- primary channel (claude)
   discord_channel_alt   TEXT,             -- alt channel (codex)
   avatar_emoji TEXT,

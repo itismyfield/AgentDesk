@@ -43,7 +43,9 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
         ProviderKind::Codex | ProviderKind::Qwen => {
             ManagedSessionClearBehavior::ResetManagedProcess
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionClearBehavior::Noop,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => {
+            ManagedSessionClearBehavior::Noop
+        }
     }
 }
 
@@ -53,7 +55,9 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
         ProviderKind::Codex | ProviderKind::Qwen => {
             ManagedSessionResetBehavior::ResetManagedProcess
         }
-        ProviderKind::Gemini | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
+        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => {
+            ManagedSessionResetBehavior::Noop
+        }
     }
 }
 

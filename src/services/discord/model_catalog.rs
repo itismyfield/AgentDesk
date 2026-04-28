@@ -811,7 +811,11 @@ pub(in crate::services::discord) fn provider_supports_model_override(
 ) -> bool {
     matches!(
         provider,
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen
+        ProviderKind::Claude
+            | ProviderKind::Codex
+            | ProviderKind::Gemini
+            | ProviderKind::OpenCode
+            | ProviderKind::Qwen
     )
 }
 
@@ -827,6 +831,7 @@ pub(in crate::services::discord) fn model_hint(
         ProviderKind::Gemini => {
             "default + models resolved from local Gemini catalog + custom model id".to_string()
         }
+        ProviderKind::OpenCode => "default + custom providerID/modelID".to_string(),
         ProviderKind::Qwen => {
             let catalog = resolve_qwen_model_catalog(working_dir);
             if catalog.entries.is_empty() {
@@ -844,7 +849,7 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
         ProviderKind::Claude => CLAUDE_MODEL_CATALOG.to_vec(),
         ProviderKind::Codex => build_codex_model_catalog(),
         ProviderKind::Gemini => build_gemini_model_catalog(),
-        ProviderKind::Qwen => Vec::new(),
+        ProviderKind::OpenCode | ProviderKind::Qwen => Vec::new(),
         ProviderKind::Unsupported(_) => Vec::new(),
     }
 }
@@ -854,7 +859,7 @@ fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static s
         ProviderKind::Claude => CLAUDE_MODEL_ALIASES,
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
         ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
-        ProviderKind::Qwen => &[],
+        ProviderKind::OpenCode | ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }
@@ -908,6 +913,18 @@ pub(in crate::services::discord) fn validate_model_input(
         ));
     }
 
+    if matches!(provider, ProviderKind::OpenCode) {
+        if is_valid_opencode_model_override(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+
+        return Err(format!(
+            "Unrecognized model `{}` for {}.\nOpenCode model overrides must use providerID/modelID, for example `anthropic/claude-sonnet-4-5`.\nUse `/model` to open the interactive picker.",
+            trimmed,
+            provider.display_name()
+        ));
+    }
+
     if let Some(canonical) = canonical_known_model(provider, trimmed) {
         return Ok(canonical.to_string());
     }
@@ -922,6 +939,18 @@ pub(in crate::services::discord) fn validate_model_input(
         provider.display_name(),
         model_hint(provider, working_dir)
     ))
+}
+
+fn is_valid_opencode_model_override(raw: &str) -> bool {
+    let Some((provider_id, model_id)) = raw.split_once('/') else {
+        return false;
+    };
+    !provider_id.trim().is_empty()
+        && !model_id.trim().is_empty()
+        && raw.len() <= 128
+        && raw.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '[' | ']')
+        })
 }
 
 #[cfg(test)]
@@ -971,6 +1000,26 @@ mod tests {
         let codex_dir = home.path().join(".codex");
         fs::create_dir_all(&codex_dir).unwrap();
         fs::write(codex_dir.join("models_cache.json"), raw).unwrap();
+    }
+
+    #[test]
+    fn validate_model_input_accepts_opencode_provider_model_pair() {
+        assert_eq!(
+            super::validate_model_input(
+                &ProviderKind::OpenCode,
+                "anthropic/claude-sonnet-4-5",
+                None,
+            )
+            .unwrap(),
+            "anthropic/claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn validate_model_input_rejects_opencode_bare_model_id() {
+        let err = super::validate_model_input(&ProviderKind::OpenCode, "claude-sonnet-4-5", None)
+            .unwrap_err();
+        assert!(err.contains("providerID/modelID"));
     }
 
     fn with_temp_qwen_env<F>(f: F)

@@ -1418,10 +1418,10 @@ function ModelDistributionCard({
           </h3>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {t({
-              ko: "Claude/Codex/Gemini/Qwen 모델이 토큰을 어떻게 나눠 쓰는지 확인합니다",
-              en: "See how Claude, Codex, Gemini, and Qwen models split token volume",
-              ja: "Claude/Codex/Gemini/Qwen モデルのトークン構成を確認します",
-              zh: "查看 Claude/Codex/Gemini/Qwen 模型如何分摊 Token 量",
+              ko: "Claude/Codex/Gemini/OpenCode/Qwen 모델이 토큰을 어떻게 나눠 쓰는지 확인합니다",
+              en: "See how Claude, Codex, Gemini, OpenCode, and Qwen models split token volume",
+              ja: "Claude/Codex/Gemini/OpenCode/Qwen モデルのトークン構成を確認します",
+              zh: "查看 Claude/Codex/Gemini/OpenCode/Qwen 模型如何分摊 Token 量",
             })}
           </p>
         </div>

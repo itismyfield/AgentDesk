@@ -1308,7 +1308,8 @@ mod tests {
                 status TEXT DEFAULT 'pending',
                 dispatch_id TEXT,
                 dispatched_at DATETIME,
-                completed_at DATETIME
+                completed_at DATETIME,
+                updated_at DATETIME
             );
             CREATE TABLE IF NOT EXISTS auto_queue_entry_dispatch_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1320,6 +1321,10 @@ mod tests {
             );",
         )
         .unwrap();
+        let _ = conn.execute(
+            "ALTER TABLE auto_queue_entries ADD COLUMN updated_at DATETIME",
+            [],
+        );
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
              VALUES ('card-aq', 'AQ Card', 'requested', 'agent-1', datetime('now'), datetime('now'))",
@@ -1666,10 +1671,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_from_channel_suffix_supports_gemini() {
+    fn provider_from_channel_suffix_supports_registry_providers() {
         assert_eq!(provider_from_channel_suffix("agent-cc"), Some("claude"));
         assert_eq!(provider_from_channel_suffix("agent-cdx"), Some("codex"));
         assert_eq!(provider_from_channel_suffix("agent-gm"), Some("gemini"));
+        assert_eq!(provider_from_channel_suffix("agent-oc"), Some("opencode"));
         assert_eq!(provider_from_channel_suffix("agent-qw"), Some("qwen"));
         assert_eq!(provider_from_channel_suffix("agent"), None);
     }

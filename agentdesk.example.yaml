@@ -39,6 +39,11 @@ agents:
         name: "td-cdx"
         workspace: "~/.adk/release/workspaces/ch-td"
         prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+      opencode:
+        id: "323456789012345678"
+        name: "td-oc"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
     keywords:
       - "아키텍처"
       - "코드"
@@ -137,10 +142,12 @@ onboarding:
     "-cc": claude
     "-cdx": codex
     "-gem": gemini
+    "-oc": opencode
     "-qw": qwen
   provider_options:
     - claude
     - codex
+    - opencode
   default_provider: claude
 
 # Dashboard edits still write runtime overrides into kv_meta.

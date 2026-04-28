@@ -16,6 +16,7 @@ pub enum ProviderKind {
     Claude,
     Codex,
     Gemini,
+    OpenCode,
     Qwen,
     Unsupported(String),
 }
@@ -58,10 +59,11 @@ pub struct ProviderRegistryEntry {
     pub managed_tmux_backend: bool,
 }
 
-const CLAUDE_COUNTERPARTS: &[&str] = &["codex", "gemini", "qwen"];
-const CODEX_COUNTERPARTS: &[&str] = &["claude", "gemini", "qwen"];
-const GEMINI_COUNTERPARTS: &[&str] = &["codex", "claude", "qwen"];
-const QWEN_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini"];
+const CLAUDE_COUNTERPARTS: &[&str] = &["codex", "gemini", "opencode", "qwen"];
+const CODEX_COUNTERPARTS: &[&str] = &["claude", "gemini", "opencode", "qwen"];
+const GEMINI_COUNTERPARTS: &[&str] = &["codex", "claude", "opencode", "qwen"];
+const OPENCODE_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini", "qwen"];
+const QWEN_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini", "opencode"];
 
 const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
     ProviderRegistryEntry {
@@ -128,6 +130,27 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         managed_tmux_backend: false,
     },
     ProviderRegistryEntry {
+        id: "opencode",
+        display_name: "OpenCode",
+        cli_init_label: "opencode (OpenCode)",
+        channel_suffix: Some("-oc"),
+        default_channel_provider: false,
+        counterpart_provider_ids: OPENCODE_COUNTERPARTS,
+        capabilities: ProviderCapabilities {
+            binary_name: "opencode",
+            supports_structured_output: true,
+            supports_resume: false,
+            supports_tool_stream: true,
+        },
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: false,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 128_000,
+        managed_tmux_backend: false,
+    },
+    ProviderRegistryEntry {
         id: "qwen",
         display_name: "Qwen Code",
         cli_init_label: "qwen (Alibaba)",
@@ -154,6 +177,10 @@ pub fn provider_registry() -> &'static [ProviderRegistryEntry] {
     PROVIDER_REGISTRY
 }
 
+pub fn supported_provider_ids() -> Vec<&'static str> {
+    provider_registry().iter().map(|entry| entry.id).collect()
+}
+
 impl ProviderKind {
     pub fn registry_entry(&self) -> Option<&'static ProviderRegistryEntry> {
         provider_registry()
@@ -166,6 +193,7 @@ impl ProviderKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
             Self::Unsupported(s) => s.as_str(),
         }
@@ -252,6 +280,7 @@ impl ProviderKind {
             Self::Claude => crate::services::claude::resolve_claude_path(),
             Self::Codex => crate::services::codex::resolve_codex_path(),
             Self::Gemini => crate::services::gemini::resolve_gemini_path(),
+            Self::OpenCode => crate::services::opencode::resolve_opencode_path(),
             Self::Qwen => crate::services::qwen::resolve_qwen_path(),
             Self::Unsupported(_) => None,
         }
@@ -284,6 +313,7 @@ impl ProviderKind {
                 "claude" => Some(Self::Claude),
                 "codex" => Some(Self::Codex),
                 "gemini" => Some(Self::Gemini),
+                "opencode" => Some(Self::OpenCode),
                 "qwen" => Some(Self::Qwen),
                 _ => None,
             })
@@ -1044,6 +1074,7 @@ mod tests {
         fold_read_output_result, followup_result_from_read_output_result, is_readonly_tool_policy,
         parse_provider_and_channel_from_tmux_name, poll_output_file_until_result,
         provider_registry, register_child_pid, run_retrying_stream_attempts,
+        supported_provider_ids,
     };
     use crate::dispatch::extract_thread_channel_id;
 
@@ -1137,6 +1168,10 @@ mod tests {
             ProviderKind::Gemini
         );
         assert_eq!(
+            ProviderKind::from_str_or_unsupported("OpenCode"),
+            ProviderKind::OpenCode
+        );
+        assert_eq!(
             ProviderKind::from_str_or_unsupported("Qwen"),
             ProviderKind::Qwen
         );
@@ -1187,12 +1222,24 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_from_str_opencode() {
+        assert_eq!(
+            ProviderKind::from_str("opencode"),
+            Some(ProviderKind::OpenCode)
+        );
+    }
+
+    #[test]
     fn test_provider_from_str_case_insensitive() {
         assert_eq!(ProviderKind::from_str("Claude"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CLAUDE"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CODEX"), Some(ProviderKind::Codex));
         assert_eq!(ProviderKind::from_str("Codex"), Some(ProviderKind::Codex));
         assert_eq!(ProviderKind::from_str("Gemini"), Some(ProviderKind::Gemini));
+        assert_eq!(
+            ProviderKind::from_str("OpenCode"),
+            Some(ProviderKind::OpenCode)
+        );
         assert_eq!(ProviderKind::from_str("Qwen"), Some(ProviderKind::Qwen));
     }
 
@@ -1216,9 +1263,13 @@ mod tests {
         assert!(name3.starts_with("AgentDesk-gemini-"));
         assert!(name3.contains("research-gm"));
 
-        let name4 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
-        assert!(name4.starts_with("AgentDesk-qwen-"));
-        assert!(name4.contains("sandbox-qw"));
+        let name4 = ProviderKind::OpenCode.build_tmux_session_name("sandbox-oc");
+        assert!(name4.starts_with("AgentDesk-opencode-"));
+        assert!(name4.contains("sandbox-oc"));
+
+        let name5 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
+        assert!(name5.starts_with("AgentDesk-qwen-"));
+        assert!(name5.contains("sandbox-qw"));
     }
 
     #[test]
@@ -1242,11 +1293,17 @@ mod tests {
         assert_eq!(provider3, ProviderKind::Gemini);
         assert_eq!(parsed_channel3, "research-gm");
 
-        let session4 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
+        let session4 = ProviderKind::OpenCode.build_tmux_session_name("sandbox-oc");
         let (provider4, parsed_channel4) =
             parse_provider_and_channel_from_tmux_name(&session4).unwrap();
-        assert_eq!(provider4, ProviderKind::Qwen);
-        assert_eq!(parsed_channel4, "sandbox-qw");
+        assert_eq!(provider4, ProviderKind::OpenCode);
+        assert_eq!(parsed_channel4, "sandbox-oc");
+
+        let session5 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
+        let (provider5, parsed_channel5) =
+            parse_provider_and_channel_from_tmux_name(&session5).unwrap();
+        assert_eq!(provider5, ProviderKind::Qwen);
+        assert_eq!(parsed_channel5, "sandbox-qw");
     }
 
     #[test]
@@ -1273,12 +1330,25 @@ mod tests {
                 "claude (Anthropic)",
                 "codex (OpenAI)",
                 "gemini (Google)",
+                "opencode (OpenCode)",
                 "qwen (Alibaba)"
             ]
         );
         assert_eq!(
             ProviderKind::provider_for_cli_init_index(3),
+            Some(ProviderKind::OpenCode)
+        );
+        assert_eq!(
+            ProviderKind::provider_for_cli_init_index(4),
             Some(ProviderKind::Qwen)
+        );
+    }
+
+    #[test]
+    fn test_supported_provider_ids_follow_registry_order() {
+        assert_eq!(
+            supported_provider_ids(),
+            vec!["claude", "codex", "gemini", "opencode", "qwen"]
         );
     }
 
@@ -1521,6 +1591,13 @@ mod tests {
             assert!(capabilities.supports_tool_stream);
             assert!(!capabilities.binary_name.is_empty());
         }
+        let capabilities = ProviderKind::OpenCode
+            .capabilities()
+            .expect("supported provider");
+        assert!(capabilities.supports_structured_output);
+        assert!(!capabilities.supports_resume);
+        assert!(capabilities.supports_tool_stream);
+        assert!(!capabilities.binary_name.is_empty());
     }
 
     #[test]

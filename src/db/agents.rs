@@ -22,10 +22,12 @@ pub struct AgentChannelBindings {
 }
 
 impl AgentChannelBindings {
+    fn configured_provider_kind(&self) -> Option<ProviderKind> {
+        self.provider.as_deref().and_then(ProviderKind::from_str)
+    }
+
     fn primary_provider_kind(&self) -> Option<ProviderKind> {
-        self.provider
-            .as_deref()
-            .and_then(ProviderKind::from_str)
+        self.configured_provider_kind()
             .or_else(ProviderKind::default_channel_provider)
     }
 
@@ -48,6 +50,11 @@ impl AgentChannelBindings {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
+            ProviderKind::OpenCode
+                if self.configured_provider_kind() == Some(ProviderKind::OpenCode) =>
+            {
+                self.legacy_primary_channel()
+            }
             _ => None,
         }
     }
@@ -65,10 +72,12 @@ impl AgentChannelBindings {
 
     pub fn counter_model_channel(&self) -> Option<String> {
         self.resolved_primary_provider_kind().and_then(|provider| {
+            let primary_channel = self.provider_specific_channel(&provider)?;
             provider
                 .preferred_counterparts()
                 .into_iter()
                 .find_map(|counterpart| self.provider_specific_channel(&counterpart))
+                .filter(|channel| channel != &primary_channel)
         })
     }
 
@@ -331,7 +340,23 @@ fn upsert_agent_from_config_sqlite(conn: &Connection, agent: &AgentDef) -> Resul
         .as_ref()
         .and_then(AgentChannel::target);
     let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-    let discord_channel_id = discord_channel_cc.clone();
+    // For providers without dedicated columns (gemini, opencode, qwen), store the
+    // provider-specific channel in discord_channel_id so primary_channel() can find it.
+    let provider_primary = match agent.provider.as_str() {
+        "gemini" => agent
+            .channels
+            .gemini
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "opencode" => agent
+            .channels
+            .opencode
+            .as_ref()
+            .and_then(AgentChannel::target),
+        "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
+        _ => None,
+    };
+    let discord_channel_id = provider_primary.or_else(|| discord_channel_cc.clone());
     let discord_channel_alt = discord_channel_cdx.clone();
 
     conn.execute(
@@ -509,6 +534,7 @@ mod tests {
                 claude: Some("111".into()),
                 codex: Some("222".into()),
                 gemini: None,
+                opencode: None,
                 qwen: None,
             },
             keywords: Vec::new(),
@@ -565,6 +591,38 @@ mod tests {
     }
 
     #[test]
+    fn sync_prefers_provider_primary_channel_over_claude_fallback() {
+        let db = test_db();
+        let agents = vec![AgentDef {
+            id: "opencode-01".into(),
+            name: "OpenCode".into(),
+            name_ko: None,
+            provider: "opencode".into(),
+            channels: AgentChannels {
+                claude: Some("claude-review".into()),
+                opencode: Some("opencode-primary".into()),
+                ..Default::default()
+            },
+            keywords: Vec::new(),
+            department: Some("eng".into()),
+            avatar_emoji: None,
+        }];
+
+        sync_agents_from_config(&db, &agents).unwrap();
+
+        let conn = db.lock().unwrap();
+        let (primary, claude): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT discord_channel_id, discord_channel_cc FROM agents WHERE id = 'opencode-01'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(primary.as_deref(), Some("opencode-primary"));
+        assert_eq!(claude.as_deref(), Some("claude-review"));
+    }
+
+    #[test]
     fn sync_upserts_existing_agents() {
         let db = test_db();
 
@@ -589,6 +647,7 @@ mod tests {
                 claude: Some("333".into()),
                 codex: None,
                 gemini: None,
+                opencode: None,
                 qwen: None,
             },
             keywords: Vec::new(),
@@ -1041,5 +1100,26 @@ mod tests {
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-05", Some("review")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn opencode_legacy_primary_is_not_counter_model_for_claude_agent() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-06', 'ClaudeOnly', 'claude', 'legacy-primary', NULL, 'cc-chan', NULL)",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-06")
+            .unwrap()
+            .expect("bindings");
+        assert_eq!(bindings.primary_channel(), Some("cc-chan".into()));
+        assert_eq!(bindings.counter_model_channel(), None);
     }
 }

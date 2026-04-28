@@ -308,6 +308,16 @@ async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
         })
 }
 
+#[cfg(test)]
+fn dispatch_exists_on_conn(conn: &rusqlite::Connection, dispatch_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_dispatches WHERE id = ?1)",
+        [dispatch_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| anyhow::anyhow!("sqlite dispatch existence lookup {dispatch_id}: {error}"))
+}
+
 async fn validate_dispatch_completion_evidence_on_pg(
     pool: &PgPool,
     db: Option<&Db>,
@@ -711,6 +721,61 @@ async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<b
     };
     let effective =
         crate::pipeline::resolve_for_card_pg(pool, repo_id.as_deref(), agent_id.as_deref()).await;
+    let is_review_state = effective
+        .hooks_for_state(&card_status)
+        .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
+
+    Ok(is_review_state && !has_review_dispatch && !has_active_work)
+}
+
+#[cfg(test)]
+fn card_needs_review_dispatch_on_conn(conn: &rusqlite::Connection, card_id: &str) -> Result<bool> {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT status, repo_id, assigned_agent_id
+             FROM kanban_cards
+             WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| {
+            anyhow::anyhow!("load sqlite card {card_id} for review redispatch: {error}")
+        })?;
+    let Some((card_status, repo_id, agent_id)) = row else {
+        return Ok(false);
+    };
+
+    let has_review_dispatch: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('review', 'review-decision')
+               AND status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("load sqlite review dispatch gate for {card_id}: {error}")
+        })?;
+    let has_active_work: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('implementation', 'rework')
+               AND status IN ('pending', 'dispatched')",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| anyhow::anyhow!("load sqlite active work gate for {card_id}: {error}"))?;
+
+    let Some(card_status) = card_status else {
+        return Ok(false);
+    };
+    let effective =
+        crate::pipeline::resolve_for_card(conn, repo_id.as_deref(), agent_id.as_deref());
     let is_review_state = effective
         .hooks_for_state(&card_status)
         .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"));
@@ -1198,13 +1263,18 @@ fn set_dispatch_status_with_backends_and_sync(
     let Some(pool) = pg_pool else {
         #[cfg(test)]
         if let Some(db) = db {
-            return set_dispatch_status_sqlite_for_tests(
-                db,
+            let conn = db
+                .lock()
+                .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+            return set_dispatch_status_on_conn_with_sync(
+                &conn,
                 dispatch_id,
                 to_status,
                 result,
+                transition_source,
                 allowed_from,
                 touch_completed_at,
+                sync_auto_queue_terminal_entries,
             );
         }
         let _ = db;
@@ -1352,8 +1422,21 @@ pub fn load_dispatch_row_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let _ = db;
     let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        {
+            if let Some(db) = db {
+                let conn = db
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+                if !dispatch_exists_on_conn(&conn, dispatch_id)? {
+                    return Ok(None);
+                }
+                return query_dispatch_row(&conn, dispatch_id).map(Some);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to load dispatch row {dispatch_id}"
         ));
@@ -1533,7 +1616,7 @@ fn complete_dispatch_inner_sqlite(
     let result_owned = maybe_inject_phase_gate_verdict_sqlite(&conn, dispatch_id, result);
     let effective_result = result_owned.unwrap_or_else(|| result.clone());
 
-    let changed = set_dispatch_status_on_conn(
+    let changed = set_dispatch_status_on_conn_with_sync(
         &conn,
         dispatch_id,
         "completed",
@@ -1544,17 +1627,11 @@ fn complete_dispatch_inner_sqlite(
             .unwrap_or("complete_dispatch"),
         Some(&["pending", "dispatched"]),
         true,
+        true,
     )?;
 
     if changed == 0 {
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if exists {
+        if dispatch_exists_on_conn(&conn, dispatch_id)? {
             tracing::info!("skipping completion hooks because dispatch is already finalized");
             return query_dispatch_row(&conn, dispatch_id);
         }
@@ -1562,13 +1639,10 @@ fn complete_dispatch_inner_sqlite(
     }
 
     let dispatch = query_dispatch_row(&conn, dispatch_id)?;
-    let kanban_card_id: Option<String> = conn
-        .query_row(
-            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok();
+    let kanban_card_id = dispatch
+        .get("kanban_card_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
     let dispatch_type = dispatch
         .get("dispatch_type")
         .and_then(|value| value.as_str());
@@ -1577,57 +1651,10 @@ fn complete_dispatch_inner_sqlite(
 
     let needs_review_dispatch = if skip_dispatch_completed_hooks {
         false
+    } else if let Some(card_id) = kanban_card_id.as_deref() {
+        card_needs_review_dispatch_on_conn(&conn, card_id)?
     } else {
-        db.lock()
-            .ok()
-            .map(|conn| {
-                let Some(card_id) = kanban_card_id.as_deref() else {
-                    return false;
-                };
-                let (card_status, repo_id, agent_id): (
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                ) = conn
-                    .query_row(
-                        "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
-                        [card_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .unwrap_or((None, None, None));
-                let has_review_dispatch: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM task_dispatches
-                         WHERE kanban_card_id = ?1
-                           AND dispatch_type IN ('review', 'review-decision')
-                           AND status IN ('pending', 'dispatched')",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                let has_active_work: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM task_dispatches
-                         WHERE kanban_card_id = ?1
-                           AND dispatch_type IN ('implementation', 'rework')
-                           AND status IN ('pending', 'dispatched')",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                let is_review_state = card_status.as_deref().is_some_and(|status| {
-                    let effective = crate::pipeline::resolve_for_card(
-                        &conn,
-                        repo_id.as_deref(),
-                        agent_id.as_deref(),
-                    );
-                    effective.hooks_for_state(status).is_some_and(|hooks| {
-                        hooks.on_enter.iter().any(|name| name == "OnReviewEnter")
-                    })
-                });
-                is_review_state && !has_review_dispatch && !has_active_work
-            })
-            .unwrap_or(false)
+        false
     };
 
     if skip_dispatch_completed_hooks && let Some(card_id) = kanban_card_id.as_deref() {
@@ -1657,7 +1684,7 @@ fn complete_dispatch_inner_sqlite(
     if needs_review_dispatch {
         let cid = kanban_card_id.as_deref().unwrap_or("unknown");
         tracing::warn!(
-            "[dispatch] Card {} in review-like state but no review dispatch - re-firing OnReviewEnter with blocking lock (#220)",
+            "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
             cid
         );
         let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));

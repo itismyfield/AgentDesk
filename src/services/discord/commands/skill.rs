@@ -72,6 +72,19 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
                 ))
             }
         }
+        ProviderKind::OpenCode => {
+            if args_str.is_empty() {
+                Ok(format!(
+                    "Use the local OpenCode skill `/{skill}` now. \
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            } else {
+                Ok(format!(
+                    "Use the local OpenCode skill `/{skill}` now with this user request: {args_str}\n\
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            }
+        }
         ProviderKind::Unsupported(name) => Err(format!(
             "Provider '{}' is not installed. This skill cannot run.",
             name

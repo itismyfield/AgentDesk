@@ -250,6 +250,8 @@ pub struct AgentChannels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<AgentChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qwen: Option<AgentChannel>,
 }
 
@@ -265,14 +267,20 @@ impl AgentChannels {
                 .as_ref()
                 .and_then(AgentChannel::target)
                 .is_none()
+            && self
+                .opencode
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .is_none()
             && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
     }
 
-    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
+    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 5] {
         [
             ("claude", self.claude.as_ref()),
             ("codex", self.codex.as_ref()),
             ("gemini", self.gemini.as_ref()),
+            ("opencode", self.opencode.as_ref()),
             ("qwen", self.qwen.as_ref()),
         ]
     }
@@ -1623,6 +1631,7 @@ mod tests {
                 claude: Some("123456789012345678".into()),
                 codex: None,
                 gemini: None,
+                opencode: None,
                 qwen: None,
             },
             keywords: Vec::new(),
@@ -1979,6 +1988,10 @@ mod tests {
         assert_eq!(
             config.provider_from_channel_suffix("any-qw").as_deref(),
             Some("qwen")
+        );
+        assert_eq!(
+            config.provider_from_channel_suffix("any-oc").as_deref(),
+            Some("opencode")
         );
         assert_eq!(config.provider_from_channel_suffix(""), None);
     }

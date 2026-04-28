@@ -2496,7 +2496,7 @@ fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'static str, S
         crate::services::provider::ProviderKind::from_str(provider_raw).ok_or_else(|| {
             (
                 "400 Bad Request",
-                r#"{"ok":false,"error":"provider must be one of: claude, codex"}"#.to_string(),
+                r#"{"ok":false,"error":"provider must be one of: claude, codex, gemini, opencode, qwen"}"#.to_string(),
             )
         })?;
 
@@ -2536,7 +2536,7 @@ fn parse_rebind_body(body: &str) -> Result<ParsedRebindRequest, (&'static str, S
 ///
 /// Body shape:
 /// ```json
-/// { "provider": "codex" | "claude",
+/// { "provider": "claude" | "codex" | "gemini" | "opencode" | "qwen",
 ///   "channel_id": "1234567890",
 ///   "tmux_session": "AgentDesk-codex-foo"   // optional — derived otherwise
 /// }

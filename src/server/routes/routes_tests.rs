@@ -5294,6 +5294,7 @@ async fn kanban_update_card_rejects_manual_non_backlog_transition() {
 }
 
 #[tokio::test]
+#[ignore = "obsolete SQLite kanban backlog cleanup fixture; route is PG-only after #843/#868"]
 async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -25999,7 +26000,7 @@ async fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases
     );
 
     for slot_index in [0_i32, 1_i32] {
-        let slot: (Option<String>, Option<i32>) = sqlx::query_as(
+        let slot: (Option<String>, Option<i64>) = sqlx::query_as(
             "SELECT assigned_run_id, assigned_thread_group
              FROM auto_queue_slots
              WHERE agent_id = 'agent-finished-recovery' AND slot_index = $1",

@@ -873,6 +873,7 @@ fn provider_check_id(provider: &ProviderKind) -> &'static str {
         ProviderKind::Claude => "provider_claude",
         ProviderKind::Codex => "provider_codex",
         ProviderKind::Gemini => "provider_gemini",
+        ProviderKind::OpenCode => "provider_opencode",
         ProviderKind::Qwen => "provider_qwen",
         ProviderKind::Unsupported(_) => "provider_unsupported",
     }
@@ -902,6 +903,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
 
 fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let configured = configured_provider_names(cfg, snapshot);
+    let opencode_configured = configured.contains("opencode");
     let qwen_configured = configured.contains("qwen");
     vec![
         check_runtime_path(),
@@ -916,6 +918,9 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
             configured.contains("gemini"),
             snapshot,
         ),
+        check_provider_cli(ProviderKind::OpenCode, opencode_configured, snapshot),
+        check_opencode_mcp_config(opencode_configured),
+        check_opencode_serve_health_probe(opencode_configured),
         check_provider_cli(ProviderKind::Qwen, qwen_configured, snapshot),
         check_qwen_settings_files(qwen_configured),
         check_qwen_auth_hints(qwen_configured),
@@ -923,6 +928,81 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
         check_provider_bindings(cfg, snapshot),
         check_credential_permissions(cfg),
     ]
+}
+
+fn check_opencode_mcp_config(configured: bool) -> Check {
+    let available = crate::services::mcp_config::provider_has_memento_mcp(&ProviderKind::OpenCode);
+    if available {
+        Check::ok(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "memento MCP is visible through runtime config or ~/.config/opencode/opencode.json",
+        )
+        .with_expected_actual("memento MCP configured", "memento MCP configured")
+    } else if configured {
+        Check::warn(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "memento MCP not visible for OpenCode",
+            "runtime mcp_servers 또는 ~/.config/opencode/opencode.json top-level mcp에 memento 서버를 설정하세요.",
+        )
+        .with_expected_actual("memento MCP configured", "memento MCP missing")
+        .with_next_steps(vec![
+            "agentdesk doctor --json".to_string(),
+            "jq '.mcp' ~/.config/opencode/opencode.json".to_string(),
+        ])
+    } else {
+        Check::ok(
+            "provider_opencode_mcp",
+            CheckGroup::ProviderRuntime,
+            "OpenCode MCP config",
+            "OpenCode is not configured",
+        )
+        .with_expected_actual("OpenCode configured if needed", "OpenCode not configured")
+    }
+}
+
+fn check_opencode_serve_health_probe(configured: bool) -> Check {
+    if !configured {
+        return Check::ok(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            "OpenCode is not configured",
+        )
+        .with_expected_actual(
+            "OpenCode serve probe required when configured",
+            "not configured",
+        );
+    }
+
+    let working_dir = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    match crate::services::opencode::probe_serve_health(&working_dir) {
+        Ok(detail) => Check::ok(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            detail,
+        )
+        .with_expected_actual("opencode serve /global/health returns 200", "healthy"),
+        Err(error) => Check::fail(
+            "provider_opencode_serve",
+            CheckGroup::ProviderRuntime,
+            "OpenCode serve health",
+            error,
+            "opencode serve가 정상 기동되는지 CLI 설치, 설정 파일, provider/model 인증 상태를 확인하세요.",
+        )
+        .with_expected_actual("opencode serve /global/health returns 200", "probe failed")
+        .with_next_steps(vec![
+            "opencode --version".to_string(),
+            "opencode serve --hostname 127.0.0.1 --port 0".to_string(),
+            format!("tail -n 200 {}", dcserver_log_hint()),
+        ]),
+    }
 }
 
 fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
@@ -2245,6 +2325,7 @@ fn check_provider_cli(
         ProviderKind::Claude => "claude CLI",
         ProviderKind::Codex => "codex CLI",
         ProviderKind::Gemini => "gemini CLI",
+        ProviderKind::OpenCode => "opencode CLI",
         ProviderKind::Qwen => "qwen CLI",
         ProviderKind::Unsupported(_) => "provider CLI",
     };
