@@ -92,7 +92,7 @@ pub fn register_globals_with_supervisor_and_pg(
     quality_ops::register_quality_ops(ctx)?;
 
     // ── agentdesk.config ─────────────────────────────────────────
-    config_ops::register_config_ops(ctx, db.clone(), pg_pool.clone())?;
+    config_ops::register_config_ops(ctx, pg_pool.clone())?;
 
     // ── agentdesk.http ────────────────────────────────────────────
     http_ops::register_http_ops(ctx)?;
@@ -130,7 +130,6 @@ pub fn register_globals_with_supervisor_and_pg(
     runtime_ops::register_runtime_ops(ctx, db.clone(), pg_pool.clone(), supervisor_bridge)?;
 
     // ── agentdesk.message ────────────────────────────────────────
-    let db_for_pipeline = db.clone();
     let db_for_dm_reply = db.clone();
     let pg_for_dm_reply = pg_pool.clone();
     let db_for_agents = db.clone();
@@ -140,7 +139,7 @@ pub fn register_globals_with_supervisor_and_pg(
     exec_ops::register_exec_ops(ctx)?;
 
     // ── agentdesk.pipeline ────────────────────────────────────────
-    pipeline_ops::register_pipeline_ops(ctx, db_for_pipeline, pg_pool.clone())?;
+    pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;
 
     // ── agentdesk.dmReply ────────────────────────────────────
     dm_reply_ops::register_dm_reply_ops(ctx, db_for_dm_reply, pg_for_dm_reply)?;

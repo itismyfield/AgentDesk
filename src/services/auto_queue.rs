@@ -7,12 +7,9 @@ use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::{BTreeMap, HashMap};
 use tracing::field::{Empty, display};
 
-use crate::db::{
-    Db,
-    auto_queue::{
-        self, AutoQueueRunRecord, GenerateCandidateRecord, GenerateCardFilter, StatusEntryRecord,
-        StatusFilter,
-    },
+use crate::db::auto_queue::{
+    self, AutoQueueRunRecord, GenerateCandidateRecord, GenerateCardFilter, StatusEntryRecord,
+    StatusFilter,
 };
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
@@ -143,7 +140,6 @@ macro_rules! auto_queue_log {
 
 #[derive(Clone)]
 pub struct AutoQueueService {
-    _db: Option<Db>,
     engine: PolicyEngine,
 }
 
@@ -280,8 +276,8 @@ struct ThreadLinkCandidate {
 }
 
 impl AutoQueueService {
-    pub fn new(db: Option<Db>, engine: PolicyEngine) -> Self {
-        Self { _db: db, engine }
+    pub fn new(engine: PolicyEngine) -> Self {
+        Self { engine }
     }
 
     pub async fn status_with_pg(

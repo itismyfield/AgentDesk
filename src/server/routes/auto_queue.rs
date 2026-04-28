@@ -2311,7 +2311,7 @@ impl AutoQueueActivateDeps {
     }
 
     fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
+        crate::services::auto_queue::AutoQueueService::new(self.engine.clone())
     }
 
     fn entry_json(&self, entry_id: &str) -> serde_json::Value {
@@ -2336,7 +2336,7 @@ impl AutoQueueActivateDeps {
                 pool,
                 move |bridge_pool| async move {
                     Ok::<serde_json::Value, String>(
-                        crate::services::auto_queue::AutoQueueService::new(None, engine)
+                        crate::services::auto_queue::AutoQueueService::new(engine)
                             .entry_json_with_pg(&bridge_pool, &entry_id, guild_id.as_deref())
                             .await
                             .unwrap_or(serde_json::Value::Null),

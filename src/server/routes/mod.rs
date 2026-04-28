@@ -99,10 +99,7 @@ impl AppState {
     }
 
     pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        // AutoQueueService already accepts Option<Db>; pass it through
-        // directly without forcing a placeholder shim.
-        let db = self.legacy_db().cloned();
-        crate::services::auto_queue::AutoQueueService::new(db, self.engine.clone())
+        crate::services::auto_queue::AutoQueueService::new(self.engine.clone())
     }
 
     pub fn queue_service(&self) -> crate::services::queue::QueueService {
