@@ -86,7 +86,7 @@
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3802 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2517 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1877 | giant-file |
-| `engine` | `src/engine/mod.rs` | 2363 | giant-file |
+| `engine` | `src/engine/mod.rs` | 2364 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 995 |  |
 | `engine::loader` | `src/engine/loader.rs` | 731 |  |
