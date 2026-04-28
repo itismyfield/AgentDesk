@@ -4,7 +4,7 @@
 
 - Production Rust modules: `320`
 - Giant-file threshold: `>= 1000` lines
-- Giant files: `86`
+- Giant files: `85`
 
 ## Namespace Summary
 
@@ -90,7 +90,7 @@
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 995 |  |
 | `engine::loader` | `src/engine/loader.rs` | 731 |  |
-| `engine::ops` | `src/engine/ops.rs` | 193 |  |
+| `engine::ops` | `src/engine/ops.rs` | 353 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 362 |  |
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 868 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 505 |  |
@@ -101,7 +101,7 @@
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 539 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 399 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 56 |  |
-| `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1484 | giant-file |
+| `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 911 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 207 |  |
 | `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 39 |  |
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 251 |  |
