@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
 
 #[derive(Debug, Clone)]
@@ -302,40 +301,6 @@ pub async fn clear_slot_threads_for_slot_pg(
     Ok(cleared)
 }
 
-pub async fn reset_slot_thread_bindings_excluding(
-    db: &Db,
-    agent_id: &str,
-    slot_index: i64,
-    exclude_dispatch_id: Option<&str>,
-) -> Result<(usize, usize, usize), String> {
-    let conn = db
-        .separate_conn()
-        .map_err(|err| format!("db open failed for slot reset: {err}"))?;
-    if crate::db::auto_queue::slot_has_active_dispatch_excluding(
-        &conn,
-        agent_id,
-        slot_index,
-        exclude_dispatch_id,
-    ) {
-        return Err(format!(
-            "slot {slot_index} for agent {agent_id} has active dispatch"
-        ));
-    }
-    let target = build_slot_clear_target(&conn, agent_id, slot_index);
-    drop(conn);
-
-    let archived_threads = archive_slot_threads(&target.thread_channel_ids).await?;
-
-    let conn = db
-        .separate_conn()
-        .map_err(|err| format!("db reopen failed for slot reset: {err}"))?;
-    let cleared_sessions = clear_slot_sessions_db(&conn, &target.thread_channel_ids);
-    let cleared_bindings = clear_slot_thread_map(&conn, agent_id, slot_index);
-    drop(conn);
-
-    Ok((archived_threads, cleared_sessions, cleared_bindings))
-}
-
 pub async fn slot_has_active_dispatch_excluding_pg(
     pool: &PgPool,
     agent_id: &str,
@@ -452,21 +417,6 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     .rows_affected() as usize;
 
     Ok((archived_threads, cleared_sessions, cleared_bindings))
-}
-
-fn clear_slot_thread_map(
-    conn: &libsql_rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> usize {
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET thread_id_map = '{}',
-             updated_at = datetime('now')
-         WHERE agent_id = ?1 AND slot_index = ?2",
-        libsql_rusqlite::params![agent_id, slot_index],
-    )
-    .unwrap_or(0)
 }
 
 async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, String> {
