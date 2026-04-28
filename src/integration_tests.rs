@@ -3125,28 +3125,53 @@ mod tests {
         assert_eq!(stored_review_mode, "enabled");
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-    fn implementation_completion_for_auto_queue_review_mode_disabled_skips_review_and_mainline_sync_completes_entry()
+    // #1342: migrated to PG fixtures because the dispatch/auto_queue/github
+    // sync paths now route through PG when the engine has a pg_pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn implementation_completion_for_auto_queue_review_mode_disabled_skips_review_and_mainline_sync_completes_entry()
      {
         let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
         let repo_id = repo.path().to_string_lossy().to_string();
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_repo(&db, &repo_id);
-        ensure_auto_queue_tables(&db);
-        seed_card_with_repo(
-            &db,
-            "card-966-review-disabled",
-            "in_progress",
-            &repo_id,
-            9662,
-            None,
-        );
+        let engine = test_engine_with_pg(pool.clone());
 
-        let (dispatch_id, _, _) = dispatch::create_dispatch_record_sqlite_test(
-            &db,
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) \
+             VALUES ($1, $1, true)",
+        )
+        .bind(&repo_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, repo_id,
+                github_issue_number, github_issue_url, created_at, updated_at
+             ) VALUES ($1, 'Codex Card', 'in_progress', 'agent-1', $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-966-review-disabled")
+        .bind(&repo_id)
+        .bind(9662_i64)
+        .bind(format!("https://github.com/{repo_id}/issues/9662"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let dispatch_value = dispatch::create_dispatch_pg_only(
+            &pool,
+            &engine,
             "card-966-review-disabled",
             "agent-1",
             "implementation",
@@ -3154,44 +3179,42 @@ mod tests {
             &serde_json::json!({
                 "target_repo": repo.path().to_string_lossy(),
             }),
-            dispatch::DispatchCreateOptions::default(),
         )
         .unwrap();
+        let dispatch_id = dispatch_value["id"].as_str().unwrap().to_string();
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at)
-                 VALUES ('run-966-review-disabled', ?1, 'agent-1', 'active', datetime('now'))",
-                [repo_id.as_str()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (
-                    id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, slot_index, dispatched_at, created_at
-                 ) VALUES (
-                    'entry-966-review-disabled', 'run-966-review-disabled', 'card-966-review-disabled', 'agent-1', 'dispatched', 0, ?1, 0, datetime('now'), datetime('now')
-                 )",
-                [dispatch_id.as_str()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_slots (
-                    agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at
-                 ) VALUES (
-                    'agent-1', 0, 'run-966-review-disabled', 0, '{}', datetime('now'), datetime('now')
-                 )",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "UPDATE auto_queue_runs
-                 SET review_mode = 'disabled'
-                 WHERE id = 'run-966-review-disabled'",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, review_mode, created_at)
+             VALUES ('run-966-review-disabled', $1, 'agent-1', 'active', 'disabled', NOW())",
+        )
+        .bind(&repo_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank,
+                dispatch_id, slot_index, dispatched_at, created_at
+             ) VALUES (
+                'entry-966-review-disabled', 'run-966-review-disabled',
+                'card-966-review-disabled', 'agent-1', 'dispatched', 0, $1, 0, NOW(), NOW()
+             )",
+        )
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group,
+                thread_id_map, created_at, updated_at
+             ) VALUES ('agent-1', 0, 'run-966-review-disabled', 0, '{}'::jsonb, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         run_git(
             repo.path(),
@@ -3205,7 +3228,7 @@ mod tests {
 
         let result = crate::services::discord::build_work_dispatch_completion_result(
             Some(&db),
-            None,
+            Some(&pool),
             &dispatch_id,
             "test_harness",
             false,
@@ -3214,54 +3237,56 @@ mod tests {
         );
         dispatch::complete_dispatch(&db, &engine, &dispatch_id, &result).unwrap();
 
-        assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
-        assert_eq!(
-            get_card_status(&db, "card-966-review-disabled"),
-            "in_progress"
-        );
+        let dispatch_status: String =
+            sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                .bind(&dispatch_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dispatch_status, "completed");
 
-        {
-            let conn = db.lock().unwrap();
-            let review_dispatch_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM task_dispatches
-                     WHERE kanban_card_id = 'card-966-review-disabled'
-                       AND dispatch_type = 'review'",
-                    [],
-                    |row| row.get(0),
-                )
+        let card_status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind("card-966-review-disabled")
+                .fetch_one(&pool)
+                .await
                 .unwrap();
-            let entry_status: String = conn
-                .query_row(
-                    "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let run_status: String = conn
-                .query_row(
-                    "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let slot_run_id: Option<String> = conn
-                .query_row(
-                    "SELECT assigned_run_id FROM auto_queue_slots
-                     WHERE agent_id = 'agent-1' AND slot_index = 0",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(review_dispatch_count, 0);
-            assert_eq!(entry_status, "dispatched");
-            assert_eq!(run_status, "active");
-            assert_eq!(slot_run_id.as_deref(), Some("run-966-review-disabled"));
-        }
+        assert_eq!(card_status, "in_progress");
 
-        crate::github::sync::sync_github_issues_for_repo(
-            &db,
-            &engine,
+        let review_dispatch_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE kanban_card_id = 'card-966-review-disabled'
+               AND dispatch_type = 'review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let entry_status: String = sqlx::query_scalar(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let run_status: String = sqlx::query_scalar(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let slot_run_id: Option<String> = sqlx::query_scalar(
+            "SELECT assigned_run_id FROM auto_queue_slots
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(review_dispatch_count, 0);
+        assert_eq!(entry_status, "dispatched");
+        assert_eq!(run_status, "active");
+        assert_eq!(slot_run_id.as_deref(), Some("run-966-review-disabled"));
+
+        crate::github::sync::sync_github_issues_for_repo_pg(
+            &pool,
             &repo_id,
             &[crate::github::sync::GhIssue {
                 number: 9662,
@@ -3271,36 +3296,50 @@ mod tests {
                 body: Some("review-off mainline sync".to_string()),
             }],
         )
+        .await
         .unwrap();
 
-        assert_eq!(get_card_status(&db, "card-966-review-disabled"), "done");
+        let card_status_after_sync: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind("card-966-review-disabled")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(card_status_after_sync, "done");
 
-        let conn = db.lock().unwrap();
-        let entry_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let run_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let slot_binding: (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT assigned_run_id, assigned_thread_group FROM auto_queue_slots
-                 WHERE agent_id = 'agent-1' AND slot_index = 0",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(entry_status, "done");
-        assert_eq!(run_status, "completed");
-        assert_eq!(slot_binding, (None, None));
+        let entry_status_final: String = sqlx::query_scalar(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-966-review-disabled'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let run_status_final: String = sqlx::query_scalar(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-966-review-disabled'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let slot_run_id_final: Option<String> = sqlx::query_scalar(
+            "SELECT assigned_run_id FROM auto_queue_slots
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let slot_thread_group_final: Option<i32> = sqlx::query_scalar(
+            "SELECT assigned_thread_group FROM auto_queue_slots
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(entry_status_final, "done");
+        assert_eq!(run_status_final, "completed");
+        assert_eq!(slot_run_id_final, None);
+        assert_eq!(slot_thread_group_final, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5375,24 +5414,40 @@ mod tests {
     // #698: phase 0 is the default starting phase per default-pipeline.yaml.
     // A falsy guard on `gate.batch_phase` (the pre-fix behavior) would ignore
     // phase-0 gate completions, stranding the run as `paused` forever.
-    #[tokio::test]
-    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
+    // #1342: migrated to PG fixtures because the dispatch/auto_queue JS bridge
+    // routes through PG when the engine has a pg_pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_queue_phase_gate_completes_for_batch_phase_zero() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        ensure_auto_queue_tables(&db);
-        seed_card(&db, "card-phase-zero", "done");
+        let engine = test_engine_with_pg(pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
-                 VALUES ('run-phase-zero', 'test/repo', 'agent-1', 'paused', datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ($1, 'Test Card', 'done', 'agent-1', NOW(), NOW())",
+        )
+        .bind("card-phase-zero")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-phase-zero', 'test/repo', 'agent-1', 'paused', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let phase_gate_dispatch = dispatch::create_dispatch(
             &db,
@@ -5416,21 +5471,29 @@ mod tests {
         )
         .expect("phase 0 gate dispatch should be created");
         let phase_gate_dispatch_id = phase_gate_dispatch["id"].as_str().unwrap().to_string();
-        set_phase_gate_state(
-            &db,
-            "run-phase-zero",
-            0,
-            "pending",
-            &[phase_gate_dispatch_id.as_str()],
-            Some(1),
-            false,
-            Some("card-phase-zero"),
-            None,
-            None,
-        );
 
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (
+                run_id, phase, status, verdict, dispatch_id, pass_verdict,
+                next_phase, final_phase, anchor_card_id, failure_reason
+             ) VALUES ($1, 0, 'pending', NULL, $2, 'phase_gate_passed', 1, FALSE, $3, NULL)",
+        )
+        .bind("run-phase-zero")
+        .bind(&phase_gate_dispatch_id)
+        .bind("card-phase-zero")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pre_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = 0",
+        )
+        .bind("run-phase-zero")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(
-            phase_gate_state(&db, "run-phase-zero", 0).is_some(),
+            pre_count > 0,
             "seeded phase 0 gate state must exist before completion"
         );
 
@@ -5446,23 +5509,31 @@ mod tests {
         .expect("phase 0 gate completion should succeed");
         assert_eq!(completed["status"], "completed");
 
-        let run_status: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-zero'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
+        let run_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = $1")
+                .bind("run-phase-zero")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_ne!(
             run_status, "paused",
             "phase 0 gate pass must not leave the run paused (#698)"
         );
-        assert!(
-            phase_gate_state(&db, "run-phase-zero", 0).is_none(),
+
+        let post_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates WHERE run_id = $1 AND phase = 0",
+        )
+        .bind("run-phase-zero")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            post_count, 0,
             "phase 0 gate completion must clear the persisted phase gate state (#698)"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -6180,43 +6251,89 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. db.* and kanban.* JS bridge now require PG. Migrate to PG fixture — tracked in #1342."]
-    fn scenario_547_implementation_noop_completion_waits_for_review_before_auto_queue_activate() {
+    // #1342: migrated to PG fixtures because the dispatch + auto_queue JS
+    // bridge ops now route through PG when the engine has a pg_pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_547_implementation_noop_completion_waits_for_review_before_auto_queue_activate()
+     {
         let policies_dir = setup_auto_queue_activate_spy_policy_dir();
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine_with_dir(&db, policies_dir.path());
-        seed_agent(&db);
-        set_kv(&db, "server_port", "8791");
-        seed_card(&db, "card-547-noop", "in_progress");
-        seed_card(&db, "card-547-next", "ready");
-        seed_dispatch(
-            &db,
-            "impl-547-noop",
-            "card-547-noop",
-            "implementation",
-            "pending",
-        );
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policies_dir.path());
 
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-547', 'repo', 'agent-1', 'active')",
-            [],
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
         )
+        .execute(&pool)
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at, thread_group, batch_phase) \
-             VALUES ('entry-547-noop', 'run-547', 'card-547-noop', 'agent-1', 'dispatched', 'impl-547-noop', datetime('now'), 0, 0)",
-            [],
+
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+            .bind("server_port")
+            .bind("8791")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for (card_id, status) in [("card-547-noop", "in_progress"), ("card-547-next", "ready")] {
+            sqlx::query(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+                 VALUES ($1, 'Test Card', $2, 'agent-1', NOW(), NOW())",
+            )
+            .bind(card_id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('impl-547-noop', 'card-547-noop', 'agent-1', 'implementation', 'pending', 'Test Dispatch', NOW(), NOW())",
         )
+        .execute(&pool)
+        .await
         .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase) \
-             VALUES ('entry-547-next', 'run-547', 'card-547-next', 'agent-1', 'pending', 0, 0)",
-            [],
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind("impl-547-noop")
+            .bind("card-547-noop")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-547', 'repo', 'agent-1', 'active')",
         )
+        .execute(&pool)
+        .await
         .unwrap();
-        drop(conn);
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id,
+                dispatched_at, thread_group, batch_phase
+             ) VALUES (
+                'entry-547-noop', 'run-547', 'card-547-noop', 'agent-1',
+                'dispatched', 'impl-547-noop', NOW(), 0, 0
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+             ) VALUES (
+                'entry-547-next', 'run-547', 'card-547-next', 'agent-1',
+                'pending', 0, 0
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let result = dispatch::complete_dispatch(
             &db,
@@ -6236,41 +6353,47 @@ mod tests {
             result.err()
         );
 
-        assert_eq!(get_card_status(&db, "card-547-noop"), "review");
+        let card_status: String =
+            sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
+                .bind("card-547-noop")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(card_status, "review");
 
-        let conn = db.lock().unwrap();
-        let entry_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-noop'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        drop(conn);
+        let entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-547-noop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             entry_status, "dispatched",
             "#655: noop completion must keep the active auto-queue entry live until review finishes"
         );
 
+        let activate_count: Option<String> =
+            sqlx::query_scalar("SELECT value FROM kv_meta WHERE key = $1")
+                .bind("test_auto_queue_activate_count")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            kv_value(&db, "test_auto_queue_activate_count").as_deref(),
-            None,
+            activate_count, None,
             "#655: noop completion must not trigger auto-queue activate before review verdict"
         );
 
-        let next_entry_status: String = db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-547-next'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let next_entry_status: String =
+            sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'entry-547-next'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             next_entry_status, "pending",
             "#655: follow-up auto-queue entry must stay pending until noop review reaches terminal state"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -6691,35 +6814,52 @@ mod tests {
     /// writing the failure marker BEFORE setStatus wipes it immediately.
     /// The helper must setStatus first and stamp blocked_reason afterward
     /// so the pr:create_failed marker survives the transition.
+    /// #1342: migrated to PG fixtures because the cards.*/db.*/kanban.* JS
+    /// bridges now route through PG when the engine has a pg_pool.
     #[cfg(unix)]
-    #[test]
-    #[ignore = "SQLite-only test. JS bridge cards.*/db.*/kanban.* now require PG. Migrate to PG fixture — tracked in #1342."]
-    fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
         let (_repo, _repo_guard) = setup_test_repo();
 
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_repo(&db, "test/repo");
+        let engine = test_engine_with_pg(pool.clone());
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) \
+             VALUES ('test/repo', 'test/repo', true)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         // Seed a card with review_status set so the terminal transition
         // has cleanup to do — this is the path that historically cleared
         // blocked_reason.
-        seed_card_with_repo(
-            &db,
-            "card-701-mark-failed",
-            "review",
-            "test/repo",
-            712,
-            None,
-        );
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET review_status = 'reviewing' WHERE id = 'card-701-mark-failed'",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, repo_id,
+                github_issue_number, github_issue_url, review_status,
+                created_at, updated_at
+             ) VALUES (
+                'card-701-mark-failed', 'Codex Card', 'review', 'agent-1',
+                'test/repo', 712, 'https://github.com/test/repo/issues/712',
+                'reviewing', NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Invoke the review-automation helper via the JS engine. It is not
         // exported on `agentdesk.reviewAutomation` by name for arbitrary
@@ -6730,17 +6870,14 @@ mod tests {
                 r#"(() => { agentdesk.reviewAutomation.markPrCreateFailed("card-701-mark-failed", "test_reason"); return "ok"; })()"#,
             )
             .unwrap();
-        kanban::drain_hook_side_effects(&db, &engine);
+        kanban::drain_hook_side_effects_with_backends(Some(&db), &engine);
 
-        let conn = db.lock().unwrap();
-        let (card_status, blocked_reason): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-701-mark-failed'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        drop(conn);
+        let (card_status, blocked_reason): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, blocked_reason FROM kanban_cards WHERE id = 'card-701-mark-failed'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         assert_eq!(
             card_status, "done",
@@ -6751,6 +6888,9 @@ mod tests {
             Some("pr:create_failed:test_reason"),
             "#701: markPrCreateFailed must persist the pr:create_failed marker AFTER setStatus (terminal transitions clear blocked_reason, so the ordering matters)"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     /// #743 regression: escalateToManualIntervention can overwrite the
@@ -10603,36 +10743,50 @@ mod tests {
         pg_db.drop().await;
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
-    fn consultation_clear_redispatches_linked_auto_queue_entry() {
+    // #1342: migrated to PG fixtures because the dispatch + auto_queue JS
+    // bridge ops now route through PG when the engine has a pg_pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consultation_clear_redispatches_linked_auto_queue_entry() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-consult-clear", "requested");
-        ensure_auto_queue_tables(&db);
+        let engine = test_engine_with_pg(pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-                sqlite_params![
-                    serde_json::json!({
-                        "preflight_status": "consult_required",
-                        "deps": "#42"
-                    })
-                    .to_string(),
-                    "card-consult-clear"
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
-                 VALUES ('run-consult-clear', 'repo-1', 'agent-1', 'active', datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, metadata, created_at, updated_at
+             ) VALUES (
+                'card-consult-clear', 'Test Card', 'requested', 'agent-1',
+                CAST($1 AS jsonb), NOW(), NOW()
+             )",
+        )
+        .bind(
+            serde_json::json!({
+                "preflight_status": "consult_required",
+                "deps": "#42"
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-consult-clear', 'repo-1', 'agent-1', 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let consultation = dispatch::create_dispatch(
             &db,
@@ -10646,15 +10800,19 @@ mod tests {
         .unwrap();
         let consultation_id = consultation["id"].as_str().unwrap().to_string();
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at) \
-                 VALUES ('entry-consult-clear', 'run-consult-clear', 'card-consult-clear', 'agent-1', 'dispatched', 1, ?1, datetime('now'))",
-                sqlite_params![consultation_id],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank,
+                dispatch_id, dispatched_at
+             ) VALUES (
+                'entry-consult-clear', 'run-consult-clear', 'card-consult-clear',
+                'agent-1', 'dispatched', 1, $1, NOW()
+             )",
+        )
+        .bind(&consultation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let completed = dispatch::complete_dispatch(
             &db,
@@ -10668,15 +10826,14 @@ mod tests {
         .unwrap();
         assert_eq!(completed["status"], "completed");
 
-        let (card_status, latest_dispatch_id, metadata_json): (String, String, String) = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status, latest_dispatch_id, metadata FROM kanban_cards WHERE id = 'card-consult-clear'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let (card_status, latest_dispatch_id, metadata_json): (String, String, String) =
+            sqlx::query_as(
+                "SELECT status, latest_dispatch_id, metadata::text \
+                 FROM kanban_cards WHERE id = 'card-consult-clear'",
             )
-            .unwrap()
-        };
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
         assert_eq!(card_status, "in_progress");
         assert_eq!(metadata["consultation_status"], "completed");
@@ -10684,15 +10841,15 @@ mod tests {
         assert_eq!(metadata["preflight_status"], "clear");
         assert_eq!(metadata["deps"], "#42");
 
-        let (dispatch_type, dispatch_status, parent_dispatch_id): (String, String, Option<String>) = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT dispatch_type, status, parent_dispatch_id FROM task_dispatches WHERE id = ?1",
-                sqlite_params![latest_dispatch_id.clone()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let (dispatch_type, dispatch_status, parent_dispatch_id): (String, String, Option<String>) =
+            sqlx::query_as(
+                "SELECT dispatch_type, status, parent_dispatch_id \
+             FROM task_dispatches WHERE id = $1",
             )
-            .unwrap()
-        };
+            .bind(&latest_dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(dispatch_type, "implementation");
         assert_eq!(dispatch_status, "pending");
         assert_eq!(
@@ -10700,34 +10857,28 @@ mod tests {
             Some(consultation_id.as_str())
         );
 
-        let (entry_status, entry_dispatch_id): (String, String) = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-consult-clear'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap()
-        };
+        let (entry_status, entry_dispatch_id): (String, String) = sqlx::query_as(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-consult-clear'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(entry_status, "dispatched");
         assert_eq!(entry_dispatch_id, latest_dispatch_id);
 
-        let history: Vec<String> = {
-            let conn = db.lock().unwrap();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT dispatch_id
-                     FROM auto_queue_entry_dispatch_history
-                     WHERE entry_id = 'entry-consult-clear'
-                     ORDER BY id ASC",
-                )
-                .unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .filter_map(|row| row.ok())
-                .collect()
-        };
+        let history: Vec<String> = sqlx::query_scalar(
+            "SELECT dispatch_id \
+             FROM auto_queue_entry_dispatch_history \
+             WHERE entry_id = 'entry-consult-clear' \
+             ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(history, vec![consultation_id, latest_dispatch_id]);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[cfg(unix)]
