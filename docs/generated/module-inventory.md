@@ -86,7 +86,7 @@
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3778 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2517 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1823 | giant-file |
-| `engine` | `src/engine/mod.rs` | 2364 | giant-file |
+| `engine` | `src/engine/mod.rs` | 2527 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 975 |  |
 | `engine::loader` | `src/engine/loader.rs` | 731 |  |
@@ -101,7 +101,7 @@
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 539 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 399 |  |
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 56 |  |
-| `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 911 |  |
+| `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 923 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 207 |  |
 | `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 39 |  |
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 251 |  |
@@ -124,7 +124,7 @@
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
-| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1573 | giant-file |
+| `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1657 | giant-file |
 | `kanban` | `src/kanban.rs` | 3813 | giant-file |
 | `launch` | `src/launch.rs` | 64 |  |
 | `logging` | `src/logging.rs` | 160 |  |
