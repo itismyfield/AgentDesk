@@ -24,6 +24,9 @@
 - [`known-legacy.md`](known-legacy.md) — code paths that intentionally remain
   legacy, with the cleanup-owner issue number. Touch them only inside the
   scope of the listed issue or for narrow bugfix.
+- [`opencode-usability-spec.md`](opencode-usability-spec.md) — implementation
+  contract for raising OpenCode's Discord-facing usability toward Claude/Codex
+  parity, including prompt/output safety, SSE text handling, and MCP sync.
 
 ## Generated Companions (read-only)
 
