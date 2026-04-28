@@ -239,6 +239,9 @@ fn collect_stream_result(
         }
     }
 
+    if let Some(error) = error {
+        return Err(error);
+    }
     if let Some(result) = done {
         return Ok(result.trim().to_string());
     }
@@ -257,6 +260,34 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn collect_stream_result_prioritizes_stream_error_over_text_and_done() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(StreamMessage::Text {
+                content: "partial output".to_string(),
+            })
+            .unwrap();
+        sender
+            .send(StreamMessage::Done {
+                result: "successful looking output".to_string(),
+                session_id: Some("opencode-session".to_string()),
+            })
+            .unwrap();
+        sender
+            .send(StreamMessage::Error {
+                message: "opencode session failed".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+            })
+            .unwrap();
+        drop(sender);
+
+        let error = collect_stream_result(Ok(()), receiver).expect_err("stream error must win");
+        assert_eq!(error, "opencode session failed");
+    }
 
     #[cfg(unix)]
     fn write_executable(path: &Path, contents: &str) {

@@ -4314,6 +4314,58 @@ mod tests {
             }
         }
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_provider_reports_opencode_permission_denied_with_attempts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("opencode");
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+
+        std::fs::write(&provider, "#!/bin/sh\nprintf 'opencode 9.9.9\\n'\n").unwrap();
+        let mut perms = std::fs::metadata(&provider).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&provider, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("AGENTDESK_OPENCODE_PATH", &provider);
+        }
+
+        let (status, Json(body)) = check_provider(Json(CheckProviderBody {
+            provider: "opencode".to_string(),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["installed"], json!(false));
+        assert_eq!(body["logged_in"], json!(false));
+        assert_eq!(body["version"], json!(null));
+        assert_eq!(body["failure_kind"], json!("permission_denied"));
+        assert_eq!(body["path"], json!(null));
+        assert!(
+            body["attempts"]
+                .as_array()
+                .is_some_and(|attempts| !attempts.is_empty())
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_OPENCODE_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 }
 
 // ── Provider Check ──────────────────────────────────────────
@@ -4328,42 +4380,11 @@ pub struct CheckProviderBody {
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // OpenCode uses its own binary resolver and has no user-login concept.
-    if body.provider == "opencode" {
-        let bin_path =
-            tokio::task::spawn_blocking(crate::services::opencode::resolve_opencode_path)
-                .await
-                .ok()
-                .flatten();
-        let installed = bin_path.is_some();
-        let version = bin_path.as_deref().and_then(|p| {
-            std::process::Command::new(p)
-                .arg("--version")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "installed": installed,
-                "logged_in": installed,
-                "version": version,
-                "path": bin_path,
-                "canonical_path": serde_json::Value::Null,
-                "source": "path",
-                "failure_kind": if installed { serde_json::Value::Null } else { json!("not_found") },
-                "attempts": [],
-            })),
-        );
-    }
-
     let cmd = match body.provider.as_str() {
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "opencode" => "opencode",
         "qwen" => "qwen",
         _ => {
             return (
@@ -4380,15 +4401,11 @@ pub async fn check_provider(
     // This ensures onboarding and actual launch always agree on availability.
     let resolution = {
         let provider = cmd.to_string();
-        tokio::task::spawn_blocking(move || match provider.as_str() {
-            "claude" | "codex" | "gemini" | "qwen" => Some(
-                crate::services::platform::resolve_provider_binary(&provider),
-            ),
-            _ => None,
+        tokio::task::spawn_blocking(move || {
+            crate::services::platform::resolve_provider_binary(&provider)
         })
         .await
         .ok()
-        .flatten()
     }
     .unwrap_or_else(|| crate::services::platform::resolve_provider_binary(cmd));
     let mut failure_kind = resolution.failure_kind.clone();
@@ -4426,20 +4443,24 @@ pub async fn check_provider(
     }
 
     // Check login (heuristic: config directory exists with content)
-    let logged_in = dirs::home_dir()
-        .map(|home| {
-            let config_dir = if cmd == "claude" {
-                home.join(".claude")
-            } else if cmd == "codex" {
-                home.join(".codex")
-            } else if cmd == "qwen" {
-                home.join(".qwen")
-            } else {
-                home.join(".gemini")
-            };
-            config_dir.is_dir()
-        })
-        .unwrap_or(false);
+    let logged_in = if cmd == "opencode" {
+        true
+    } else {
+        dirs::home_dir()
+            .map(|home| {
+                let config_dir = if cmd == "claude" {
+                    home.join(".claude")
+                } else if cmd == "codex" {
+                    home.join(".codex")
+                } else if cmd == "qwen" {
+                    home.join(".qwen")
+                } else {
+                    home.join(".gemini")
+                };
+                config_dir.is_dir()
+            })
+            .unwrap_or(false)
+    };
 
     (
         StatusCode::OK,
