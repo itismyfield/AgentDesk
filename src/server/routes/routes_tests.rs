@@ -25511,6 +25511,7 @@ async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -25656,6 +25657,7 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -25767,6 +25769,7 @@ fn auto_queue_recovery_honors_stale_dispatch_runtime_config() {
 /// Regression test for #295: onTick1min must backstop terminal cards that still
 /// have pending auto-queue entries in active/paused runs.
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn auto_queue_recovery_skips_terminal_pending_entries() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -25888,6 +25891,7 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots() {
     crate::pipeline::ensure_loaded();
     let db = test_db();

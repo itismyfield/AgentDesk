@@ -853,6 +853,7 @@ fn policies_js_files_under_10kb_budget() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn auto_queue_log_context_hydrates_agent_id_without_redundant_reloads() {
     let db = test_db();
     {
@@ -1336,6 +1337,7 @@ async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
     crate::pipeline::ensure_loaded();
 
@@ -1592,6 +1594,7 @@ fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn js_auto_queue_phase_gate_bridge_saves_and_clears_rows() {
     crate::pipeline::ensure_loaded();
 

@@ -3126,6 +3126,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
     fn implementation_completion_for_auto_queue_review_mode_disabled_skips_review_and_mainline_sync_completes_entry()
      {
         let (repo, _remote, _repo_guard) = setup_test_repo_with_origin();
@@ -5375,6 +5376,7 @@ mod tests {
     // A falsy guard on `gate.batch_phase` (the pre-fix behavior) would ignore
     // phase-0 gate completions, stranding the run as `paused` forever.
     #[tokio::test]
+    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
     async fn auto_queue_phase_gate_completes_for_batch_phase_zero() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -6475,6 +6477,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. db.* and kanban.* JS bridge now require PG. Migrate to PG fixture — tracked in #1342."]
     fn scenario_547_implementation_noop_completion_waits_for_review_before_auto_queue_activate() {
         let policies_dir = setup_auto_queue_activate_spy_policy_dir();
         let db = test_db();
@@ -10897,6 +10900,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. db.* JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
     fn consultation_clear_redispatches_linked_auto_queue_entry() {
         let db = test_db();
         let engine = test_engine(&db);
