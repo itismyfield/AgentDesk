@@ -61,14 +61,6 @@ pub struct EntryDispatchFailureResult {
     pub changed: bool,
 }
 
-#[derive(Debug, Error)]
-pub enum EntryDispatchFailureError {
-    #[error(transparent)]
-    EntryStatus(#[from] EntryStatusUpdateError),
-    #[error(transparent)]
-    Sql(#[from] libsql_rusqlite::Error), // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsultationDispatchRecordResult {
     pub metadata_json: String,
@@ -363,112 +355,6 @@ pub async fn reactivate_done_entry_on_pg(
         to_status: ENTRY_STATUS_DISPATCHED.to_string(),
         changed: true,
     })
-}
-
-pub fn record_entry_dispatch_failure_on_conn(
-    conn: &Connection,
-    entry_id: &str,
-    max_retries: i64,
-    trigger_source: &str,
-) -> Result<EntryDispatchFailureResult, EntryDispatchFailureError> {
-    let retry_limit = max_retries.max(1);
-    loop {
-        let current = load_entry_status_row(conn, entry_id)?;
-        if current.status != ENTRY_STATUS_DISPATCHED {
-            return Ok(EntryDispatchFailureResult {
-                run_id: current.run_id,
-                from_status: current.status.clone(),
-                to_status: current.status,
-                retry_count: current.retry_count,
-                retry_limit,
-                changed: false,
-            });
-        }
-
-        let retry_count = current.retry_count.saturating_add(1);
-        let target_status = if retry_count >= retry_limit {
-            ENTRY_STATUS_FAILED
-        } else {
-            ENTRY_STATUS_PENDING
-        };
-
-        conn.execute_batch("SAVEPOINT auto_queue_entry_dispatch_failure")?;
-        let update_result =
-            (|| -> Result<Option<EntryDispatchFailureResult>, EntryDispatchFailureError> {
-                let rows_affected = conn.execute(
-                    "UPDATE auto_queue_entries
-                 SET status = CASE
-                         WHEN retry_count + 1 >= ?1 THEN 'failed'
-                         ELSE 'pending'
-                     END,
-                     dispatch_id = NULL,
-                     slot_index = NULL,
-                     dispatched_at = NULL,
-                     completed_at = CASE
-                         WHEN retry_count + 1 >= ?1 THEN datetime('now')
-                         ELSE NULL
-                     END,
-                     retry_count = retry_count + 1
-                 WHERE id = ?2
-                   AND status = 'dispatched'
-                   AND retry_count = ?3",
-                    libsql_rusqlite::params![retry_limit, entry_id, current.retry_count], // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-                )?;
-
-                if rows_affected == 0 {
-                    return Ok(None);
-                }
-
-                record_entry_transition_on_conn(
-                    conn,
-                    entry_id,
-                    ENTRY_STATUS_DISPATCHED,
-                    target_status,
-                    trigger_source,
-                )?;
-
-                if target_status == ENTRY_STATUS_FAILED {
-                    maybe_finalize_run_after_terminal_entry(conn, &current.run_id, target_status)?;
-                }
-
-                Ok(Some(EntryDispatchFailureResult {
-                    run_id: current.run_id,
-                    from_status: ENTRY_STATUS_DISPATCHED.to_string(),
-                    to_status: target_status.to_string(),
-                    retry_count,
-                    retry_limit,
-                    changed: true,
-                }))
-            })();
-
-        match update_result {
-            Ok(Some(result)) => {
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
-                return Ok(result);
-            }
-            Ok(None) => {
-                conn.execute_batch("RELEASE SAVEPOINT auto_queue_entry_dispatch_failure")?;
-                let latest = load_entry_status_row(conn, entry_id)?;
-                if latest.status != ENTRY_STATUS_DISPATCHED {
-                    return Ok(EntryDispatchFailureResult {
-                        run_id: latest.run_id,
-                        from_status: latest.status.clone(),
-                        to_status: latest.status,
-                        retry_count: latest.retry_count,
-                        retry_limit,
-                        changed: false,
-                    });
-                }
-            }
-            Err(error) => {
-                let _ = conn.execute_batch(
-                    "ROLLBACK TO SAVEPOINT auto_queue_entry_dispatch_failure; \
-                     RELEASE SAVEPOINT auto_queue_entry_dispatch_failure",
-                );
-                return Err(error);
-            }
-        }
-    }
 }
 
 pub async fn record_entry_dispatch_failure_on_pg(
@@ -4004,21 +3890,6 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     Ok(true)
 }
 
-pub fn pause_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let updated = conn.execute(
-        "UPDATE auto_queue_runs
-         SET status = 'paused',
-             completed_at = NULL
-         WHERE id = ?1 AND status = 'active'",
-        [run_id],
-    )?;
-    if updated > 0 {
-        release_run_slots(conn, run_id)?;
-    }
-    Ok(updated > 0)
-}
-
 pub async fn pause_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
     let mut tx = pool
         .begin()
@@ -4054,18 +3925,6 @@ pub async fn pause_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres pause auto-queue run {run_id}: {error}"))?;
-    Ok(updated > 0)
-}
-
-pub fn resume_run_on_conn(conn: &Connection, run_id: &str) -> libsql_rusqlite::Result<bool> {
-    // TODO(#839): sqlite compatibility retained for out-of-scope callers or legacy tests.
-    let updated = conn.execute(
-        "UPDATE auto_queue_runs
-         SET status = 'active',
-             completed_at = NULL
-         WHERE id = ?1 AND status = 'paused'",
-        [run_id],
-    )?;
     Ok(updated > 0)
 }
 

@@ -1471,6 +1471,7 @@ fn js_auto_queue_run_status_bridge_updates_run_and_releases_slots() {
 }
 
 #[test]
+#[ignore = "SQLite-only test. autoQueue.recordConsultationDispatch JS bridge now requires PG. Migrate to PG fixture — tracked in #1342."]
 fn js_auto_queue_consultation_bridge_updates_card_metadata_and_entry_status() {
     crate::pipeline::ensure_loaded();
 
