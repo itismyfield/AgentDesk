@@ -86,7 +86,7 @@
 | `GET` | `/api/dispatches/{id}` | `dispatches::get_dispatch` | `src/server/routes/dispatches/crud.rs:63` | `src/server/routes/domains/ops.rs:33` |
 | `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:139` | `src/server/routes/domains/ops.rs:33` |
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:103` | `src/server/routes/domains/ops.rs:220` |
-| `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:33` | `src/server/routes/domains/integrations.rs:40` |
+| `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:22` | `src/server/routes/domains/integrations.rs:40` |
 | `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:3484` | `src/server/routes/domains/ops.rs:231` |
 | `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:3653` | `src/server/routes/domains/ops.rs:233` |
 | `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:3630` | `src/server/routes/domains/ops.rs:232` |

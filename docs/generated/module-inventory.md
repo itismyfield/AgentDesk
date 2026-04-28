@@ -146,7 +146,7 @@
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2060 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1743 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
-| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1938 | giant-file |
+| `server::routes::analytics` | `src/server/routes/analytics.rs` | 1937 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
 | `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 10113 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 195 |  |
@@ -158,7 +158,7 @@
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 6079 | giant-file |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2882 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1524 | giant-file |
-| `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 76 |  |
+| `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 3697 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 62 |  |
@@ -233,7 +233,7 @@
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 384 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1271 | giant-file |
-| `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 629 |  |
+| `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 584 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 2955 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 618 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
@@ -302,7 +302,7 @@
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 776 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1252 | giant-file |
-| `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 427 |  |
+| `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 358 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatches` | `src/services/dispatches.rs` | 434 |  |
 | `services::dispatches_followup` | `src/services/dispatches_followup.rs` | 143 |  |
@@ -322,7 +322,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 506 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 3413 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 3392 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
@@ -335,7 +335,7 @@
 | `services::provider` | `src/services/provider.rs` | 2100 | giant-file |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 381 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
-| `services::queue` | `src/services/queue.rs` | 706 |  |
+| `services::queue` | `src/services/queue.rs` | 499 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2446 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1176 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
