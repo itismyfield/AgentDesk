@@ -2398,51 +2398,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_queue_activate_concurrent_calls_dispatch_once() {
+    // #1239: migrated to PG fixtures because `activate_with_deps` is now
+    // PG-only — the SQLite fallback was removed in favor of `activate_with_deps_pg`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn auto_queue_activate_concurrent_calls_dispatch_once() {
         // `create_dispatch()` may resolve the default repo/worktree from
         // AGENTDESK_REPO_DIR. Hold the shared env lock with a real git repo so
         // this concurrency test does not race unrelated env-mutating tests.
         let (_repo, _repo_guard) = setup_test_repo();
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        ensure_auto_queue_tables(&db);
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
-                 VALUES ('card-aq-concurrent', 'AQ Concurrent', 'ready', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
-                 VALUES ('run-aq-concurrent', 'repo-1', 'agent-1', 'active', datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
-                 VALUES ('entry-aq-concurrent', 'run-aq-concurrent', 'card-aq-concurrent', 'agent-1', 'pending', 0, datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+             VALUES ('card-aq-concurrent', 'AQ Concurrent', 'ready', 'agent-1', 'repo-1', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-aq-concurrent', 'repo-1', 'agent-1', 'active', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+             VALUES ('entry-aq-concurrent', 'run-aq-concurrent', 'card-aq-concurrent', 'agent-1', 'pending', 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
-            db.clone(),
+            test_db(),
             engine.clone(),
         );
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
 
         let make_worker = || {
             let deps = deps.clone();
             let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                crate::server::routes::auto_queue::activate_with_deps(
+            tokio::spawn(async move {
+                barrier.wait().await;
+                crate::server::routes::auto_queue::activate_with_deps_pg(
                     &deps,
                     crate::server::routes::auto_queue::ActivateBody {
                         run_id: Some("run-aq-concurrent".to_string()),
@@ -2453,23 +2463,25 @@ mod tests {
                         active_only: Some(true),
                     },
                 )
+                .await
             })
         };
 
         let first_handle = make_worker();
         let second_handle = make_worker();
-        let first = first_handle.join().unwrap();
-        let second = second_handle.join().unwrap();
+        let first = first_handle.await.unwrap();
+        let second = second_handle.await.unwrap();
         assert_eq!(first.0, axum::http::StatusCode::OK);
         assert_eq!(second.0, axum::http::StatusCode::OK);
 
-        // The two concurrent activate calls must collectively dispatch exactly once.
-        // Check via DB rather than response counts — under heavy contention a thread
-        // may observe the reservation without its count being reflected in the JSON
-        // response (the entry was already claimed by the other thread). On Windows
-        // the surviving dispatch can become visible a little later than the hook
-        // drain call, so poll briefly for the stabilized row set.
-        let mut dispatch_count = 0;
+        // The two concurrent activate calls must collectively dispatch exactly
+        // once. Check via DB rather than response counts — under heavy
+        // contention a thread may observe the reservation without its count
+        // being reflected in the JSON response (the entry was already claimed
+        // by the other thread). On Windows the surviving dispatch can become
+        // visible a little later than the hook drain call, so poll briefly for
+        // the stabilized row set.
+        let mut dispatch_count: i64 = 0;
         let mut entry_status = String::new();
         let mut card_status = String::new();
         let mut latest_dispatch_id: Option<String> = None;
@@ -2477,72 +2489,43 @@ mod tests {
         let mut entry_dispatch_id: Option<String> = None;
 
         for attempt in 0..80 {
-            kanban::drain_hook_side_effects(&db, &engine);
+            kanban::drain_hook_side_effects_with_backends(None, &engine);
 
-            let (
-                observed_dispatch_count,
-                observed_entry_status,
-                observed_card_status,
-                observed_latest_dispatch_id,
-                observed_dispatch_status,
-                observed_entry_dispatch_id,
-            ) = {
-                let conn = db.lock().unwrap();
-                let observed_dispatch_count: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-concurrent'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                let observed_entry_status: String = conn
-                    .query_row(
-                        "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                let (observed_card_status, observed_latest_dispatch_id): (String, Option<String>) =
-                    conn.query_row(
-                        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-concurrent'",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .unwrap();
-                let observed_dispatch_status =
-                    observed_latest_dispatch_id
-                        .as_deref()
-                        .and_then(|dispatch_id| {
-                            conn.query_row(
-                                "SELECT status FROM task_dispatches WHERE id = ?1",
-                                [dispatch_id],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                        });
-                let observed_entry_dispatch_id: Option<String> = conn
-                    .query_row(
-                        "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                (
-                    observed_dispatch_count,
-                    observed_entry_status,
-                    observed_card_status,
-                    observed_latest_dispatch_id,
-                    observed_dispatch_status,
-                    observed_entry_dispatch_id,
-                )
+            dispatch_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-concurrent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            entry_status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let card_row: (String, Option<String>) = sqlx::query_as(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-aq-concurrent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            card_status = card_row.0;
+            latest_dispatch_id = card_row.1;
+            dispatch_status = if let Some(ref dispatch_id) = latest_dispatch_id {
+                sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
+                    .bind(dispatch_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap()
+            } else {
+                None
             };
-
-            dispatch_count = observed_dispatch_count;
-            entry_status = observed_entry_status;
-            card_status = observed_card_status;
-            latest_dispatch_id = observed_latest_dispatch_id;
-            dispatch_status = observed_dispatch_status;
-            entry_dispatch_id = observed_entry_dispatch_id;
+            entry_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-concurrent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
             if dispatch_count == 1
                 && card_status == "in_progress"
@@ -2554,7 +2537,7 @@ mod tests {
             }
 
             if attempt < 79 {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
 
@@ -2576,73 +2559,96 @@ mod tests {
             entry_dispatch_id, latest_dispatch_id,
             "recovered concurrent activate must keep the entry attached to the surviving dispatch"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    #[test]
-    fn auto_queue_activate_agent_scope_uses_free_slot_for_additional_group() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        ensure_auto_queue_tables(&db);
+    // #1239: migrated to PG fixtures because `activate_with_deps` is now
+    // PG-only — the SQLite fallback was removed in favor of `activate_with_deps_pg`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_queue_activate_agent_scope_uses_free_slot_for_additional_group() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let engine = test_engine_with_pg(pool.clone());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
-                 VALUES ('card-aq-live', 'AQ Live', 'in_progress', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
-                [],
-            )
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+             VALUES ('card-aq-live', 'AQ Live', 'in_progress', 'agent-1', 'repo-1', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
+             VALUES ('card-aq-next', 'AQ Next', 'ready', 'agent-1', 'repo-1', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at) \
+             VALUES ('run-aq-slot-scale', 'repo-1', 'agent-1', 'active', 2, 2, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, priority_rank, dispatched_at, created_at) \
+             VALUES ('entry-aq-live', 'run-aq-slot-scale', 'card-aq-live', 'agent-1', 'dispatched', 'dispatch-aq-live', 0, 0, 0, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, priority_rank, created_at) \
+             VALUES ('entry-aq-next', 'run-aq-slot-scale', 'card-aq-next', 'agent-1', 'pending', 1, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+             VALUES ('agent-1', 0, 'run-aq-slot-scale', 0, '{}'::jsonb, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
+             VALUES ('agent-1', 1, NULL, NULL, '{}'::jsonb, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-aq-live', 'card-aq-live', 'agent-1', 'implementation', 'dispatched', 'Test Dispatch', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE kanban_cards SET latest_dispatch_id = $1 WHERE id = $2")
+            .bind("dispatch-aq-live")
+            .bind("card-aq-live")
+            .execute(&pool)
+            .await
             .unwrap();
-            conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at) \
-                 VALUES ('card-aq-next', 'AQ Next', 'ready', 'agent-1', 'repo-1', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at) \
-                 VALUES ('run-aq-slot-scale', 'repo-1', 'agent-1', 'active', 2, 2, datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group, priority_rank, dispatched_at, created_at) \
-                 VALUES ('entry-aq-live', 'run-aq-slot-scale', 'card-aq-live', 'agent-1', 'dispatched', 'dispatch-aq-live', 0, 0, 0, datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, thread_group, priority_rank, created_at) \
-                 VALUES ('entry-aq-next', 'run-aq-slot-scale', 'card-aq-next', 'agent-1', 'pending', 1, 0, datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
-                 VALUES ('agent-1', 0, 'run-aq-slot-scale', 0, '{}', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_slots (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map, created_at, updated_at) \
-                 VALUES ('agent-1', 1, NULL, NULL, '{}', datetime('now'), datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-        seed_dispatch(
-            &db,
-            "dispatch-aq-live",
-            "card-aq-live",
-            "implementation",
-            "dispatched",
-        );
 
         let deps = crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(
-            db.clone(),
+            test_db(),
             engine.clone(),
         );
-        let (status, body) = crate::server::routes::auto_queue::activate_with_deps(
+        let (status, body) = crate::server::routes::auto_queue::activate_with_deps_pg(
             &deps,
             crate::server::routes::auto_queue::ActivateBody {
                 run_id: Some("run-aq-slot-scale".to_string()),
@@ -2652,7 +2658,8 @@ mod tests {
                 unified_thread: None,
                 active_only: Some(true),
             },
-        );
+        )
+        .await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(
@@ -2661,22 +2668,23 @@ mod tests {
             "agent-scoped activate should dispatch another group when a free slot exists"
         );
 
-        kanban::drain_hook_side_effects(&db, &engine);
+        kanban::drain_hook_side_effects_with_backends(None, &engine);
 
-        let conn = db.lock().unwrap();
-        let (entry_status, slot_index, dispatch_id): (String, Option<i64>, Option<String>) = conn
-            .query_row(
-                "SELECT status, slot_index, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-next'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(entry_status, "dispatched");
-        assert_eq!(slot_index, Some(1));
+        let next_row: (String, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT status, slot_index, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq-next'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(next_row.0, "dispatched");
+        assert_eq!(next_row.1, Some(1));
         assert!(
-            dispatch_id.is_some(),
+            next_row.2.is_some(),
             "newly dispatched group must persist dispatch_id"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
