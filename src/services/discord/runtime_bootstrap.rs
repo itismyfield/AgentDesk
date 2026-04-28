@@ -1516,24 +1516,12 @@ async fn gc_stale_thread_sessions_via_api(api_port: u16) {
 /// Periodic GC: disconnect stale fixed-channel working sessions from the DB so
 /// restart recovery cannot restore dead provider session IDs.
 async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
-    let cleared = if let Some(pool) = shared.pg_pool.as_ref() {
-        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool)
-            .await
-    } else {
-        let Some(db) = &shared.sqlite else {
-            return;
-        };
-
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!("  [{ts}] ⚠ Fixed-session GC lock error: {e}");
-                return;
-            }
-        };
-        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db(&conn)
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return;
     };
+    let cleared =
+        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db_pg(pool)
+            .await;
 
     if cleared > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
