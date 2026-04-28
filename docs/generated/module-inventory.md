@@ -93,7 +93,7 @@
 | `engine::ops` | `src/engine/ops.rs` | 193 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 362 |  |
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 868 |  |
-| `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 739 |  |
+| `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 505 |  |
 | `engine::ops::ci_recovery_ops` | `src/engine/ops/ci_recovery_ops.rs` | 286 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 81 |  |
 | `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1200 | giant-file |
