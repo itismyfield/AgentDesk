@@ -927,9 +927,48 @@ async fn cancel_dispatch_pg_first(
 }
 
 async fn dismiss_review_cleanup_pg_first(state: &AppState, card_id: &str) -> Result<(), String> {
-    let pool = state
-        .pg_pool_ref()
-        .ok_or_else(|| "postgres pool unavailable for dismiss cleanup".to_string())?;
+    let Some(pool) = state.pg_pool_ref() else {
+        let conn = legacy_db(state)
+            .lock()
+            .map_err(|error| format!("database lock poisoned: {error}"))?;
+        let dispatch_ids: Vec<String> = conn
+            .prepare(
+                "SELECT id FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+                   AND status IN ('pending', 'dispatched')
+                   AND dispatch_type IN ('review', 'review-decision')",
+            )
+            .map_err(|error| {
+                format!("prepare dismiss cleanup dispatch query for {card_id}: {error}")
+            })?
+            .query_map([card_id], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("load dismiss cleanup dispatches for {card_id}: {error}"))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| format!("decode dismiss cleanup dispatches for {card_id}: {error}"))?;
+
+        for dispatch_id in &dispatch_ids {
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, None)
+                .map_err(|error| error.to_string())?;
+        }
+
+        let clear_review_status = crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        };
+        crate::engine::transition::execute_intent_on_conn(&conn, &clear_review_status)
+            .map_err(|error| error.to_string())?;
+
+        conn.execute(
+            "UPDATE kanban_cards
+             SET channel_thread_map = NULL,
+                 active_thread_id = NULL
+             WHERE id = ?1",
+            [card_id],
+        )
+        .map_err(|error| format!("clear dismiss thread mappings for {card_id}: {error}"))?;
+        return Ok(());
+    };
+
     let mut tx = pool
         .begin()
         .await

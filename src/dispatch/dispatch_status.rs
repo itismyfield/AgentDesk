@@ -1344,8 +1344,27 @@ fn set_dispatch_status_with_backends_and_sync(
     touch_completed_at: bool,
     sync_auto_queue_terminal_entries: bool,
 ) -> Result<usize> {
-    let _ = db;
     let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        {
+            if let Some(db) = db {
+                let conn = db
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+                return set_dispatch_status_on_conn_with_sync(
+                    &conn,
+                    dispatch_id,
+                    to_status,
+                    result,
+                    transition_source,
+                    allowed_from,
+                    touch_completed_at,
+                    sync_auto_queue_terminal_entries,
+                );
+            }
+        }
+        #[cfg(not(test))]
+        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to set dispatch status for {dispatch_id}"
         ));
@@ -1435,8 +1454,21 @@ pub fn load_dispatch_row_with_backends(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
-    let _ = db;
     let Some(pool) = pg_pool else {
+        #[cfg(test)]
+        {
+            if let Some(db) = db {
+                let conn = db
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("legacy db lock poisoned: {error}"))?;
+                if !dispatch_exists_on_conn(&conn, dispatch_id)? {
+                    return Ok(None);
+                }
+                return query_dispatch_row(&conn, dispatch_id).map(Some);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to load dispatch row {dispatch_id}"
         ));
