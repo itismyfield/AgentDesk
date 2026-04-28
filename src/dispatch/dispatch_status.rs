@@ -1071,13 +1071,21 @@ fn set_dispatch_status_on_conn_with_sync(
                     "failed" => crate::db::auto_queue::ENTRY_STATUS_FAILED,
                     _ => crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
                 };
-                crate::db::auto_queue::sync_dispatch_terminal_entries_on_conn(
-                    conn,
-                    dispatch_id,
-                    entry_status,
-                    transition_source,
-                    true,
+                let completed_at_sql = if entry_status == crate::db::auto_queue::ENTRY_STATUS_DONE {
+                    "COALESCE(completed_at, datetime('now'))"
+                } else {
+                    "datetime('now')"
+                };
+                conn.execute(
+                    &format!(
+                        "UPDATE auto_queue_entries
+                         SET status = ?1,
+                             completed_at = {completed_at_sql}
+                         WHERE dispatch_id = ?2 AND status = 'dispatched'"
+                    ),
+                    libsql_rusqlite::params![entry_status, dispatch_id],
                 )?;
+                let _ = transition_source;
             }
         }
         Ok(changed)

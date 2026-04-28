@@ -2999,12 +2999,12 @@ mod tests {
 
             if expected_retry_count < 3 {
                 let conn = db.lock().unwrap();
-                crate::db::auto_queue::update_entry_status_on_conn(
-                    &conn,
-                    "entry-aq-orphan",
-                    crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-                    "test_rearm_orphan_dispatch",
-                    &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
+                conn.execute(
+                    "UPDATE auto_queue_entries
+                     SET status = 'dispatched',
+                         dispatched_at = datetime('now')
+                     WHERE id = 'entry-aq-orphan'",
+                    [],
                 )
                 .unwrap();
                 conn.execute(

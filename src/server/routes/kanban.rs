@@ -3974,20 +3974,14 @@ fn skip_live_auto_queue_entries_for_card_legacy(
 
     let mut changed = 0usize;
     for entry_id in entry_ids {
-        if crate::db::auto_queue::update_entry_status_on_conn(
-            conn,
-            &entry_id,
-            crate::db::auto_queue::ENTRY_STATUS_SKIPPED,
-            "force_transition_cleanup",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        )
-        .map_err(|error| match error {
-            crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
-            other => libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
-                std::io::Error::other(other.to_string()),
-            )),
-        })?
-        .changed
+        if conn.execute(
+            "UPDATE auto_queue_entries
+                 SET status = 'skipped',
+                     updated_at = datetime('now'),
+                     completed_at = COALESCE(completed_at, datetime('now'))
+                 WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+            [&entry_id],
+        )? > 0
         {
             changed += 1;
         }
@@ -4001,31 +3995,20 @@ fn move_auto_queue_entry_to_dispatched_on_conn(
     entry_id: &str,
     trigger_source: &str,
     options: &crate::db::auto_queue::EntryStatusUpdateOptions,
-) -> Result<(), crate::db::auto_queue::EntryStatusUpdateError> {
-    match crate::db::auto_queue::update_entry_status_on_conn(
-        conn,
-        entry_id,
-        crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
-        trigger_source,
-        options,
-    ) {
-        Err(crate::db::auto_queue::EntryStatusUpdateError::InvalidTransition {
-            from_status,
-            to_status,
-            ..
-        }) if from_status == crate::db::auto_queue::ENTRY_STATUS_DONE
-            && to_status == crate::db::auto_queue::ENTRY_STATUS_DISPATCHED =>
-        {
-            crate::db::auto_queue::reactivate_done_entry_on_conn(
-                conn,
-                entry_id,
-                trigger_source,
-                options,
-            )
-            .map(|_| ())
-        }
-        other => other.map(|_| ()),
-    }
+) -> libsql_rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE auto_queue_entries
+         SET status = 'dispatched',
+             dispatch_id = COALESCE(?2, dispatch_id),
+             slot_index = COALESCE(?3, slot_index),
+             dispatched_at = COALESCE(dispatched_at, datetime('now')),
+             completed_at = NULL,
+             updated_at = datetime('now')
+         WHERE id = ?1 AND status IN ('pending', 'dispatched', 'done')",
+        libsql_rusqlite::params![entry_id, options.dispatch_id, options.slot_index],
+    )?;
+    let _ = trigger_source;
+    Ok(())
 }
 
 async fn move_auto_queue_entry_to_dispatched_on_pg(

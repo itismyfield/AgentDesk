@@ -174,19 +174,25 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
         };
 
         for entry_id in entry_ids {
-            crate::db::auto_queue::update_entry_status_on_conn(
-                conn,
-                &entry_id,
-                target_status,
-                trigger_source,
-                &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-            )
-            .map_err(|error| match error {
-                crate::db::auto_queue::EntryStatusUpdateError::Sql(sql) => sql,
-                other => libsql_rusqlite::Error::ToSqlConversionFailure(Box::new(
-                    std::io::Error::other(other.to_string()),
-                )),
-            })?;
+            let completed_at_expr = if target_status == crate::db::auto_queue::ENTRY_STATUS_PENDING
+            {
+                "NULL"
+            } else {
+                "COALESCE(completed_at, datetime('now'))"
+            };
+            conn.execute(
+                &format!(
+                    "UPDATE auto_queue_entries
+                     SET status = ?1,
+                         dispatch_id = NULL,
+                         dispatched_at = NULL,
+                         completed_at = {completed_at_expr},
+                         updated_at = datetime('now')
+                     WHERE id = ?2"
+                ),
+                libsql_rusqlite::params![target_status, entry_id],
+            )?;
+            let _ = trigger_source;
         }
     }
 
@@ -362,8 +368,7 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     // the existing pending reset so re-dispatch proceeds.
     //
     // #815 P2: route both branches through the shared
-    // `update_entry_status_on_pg_tx` helper so the PG path mirrors the SQLite
-    // path (`update_entry_status_on_conn`). Going via the helper validates
+    // `update_entry_status_on_pg_tx` helper so the PG path validates
     // the transition, records `auto_queue_entry_transitions` consistently,
     // and (for system-terminal target statuses) invokes
     // `maybe_finalize_run_after_terminal_entry_pg`. `user_cancelled` is
@@ -1617,23 +1622,23 @@ mod tests {
         assert_eq!(entry_status, "user_cancelled");
         assert_eq!(run_status, "active");
 
-        // Operator restart: flip the entry back to `pending` via the same
-        // shared helper the API/policy paths use. The transition table
-        // includes (user_cancelled -> pending) for exactly this case.
-        let restart_result = crate::db::auto_queue::update_entry_status_on_conn(
-            &conn,
-            "entry-815-restart",
-            crate::db::auto_queue::ENTRY_STATUS_PENDING,
-            "user_restart",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        )
-        .unwrap();
+        // Operator restart: flip the entry back to `pending`.
+        let changed = conn
+            .execute(
+                "UPDATE auto_queue_entries
+                 SET status = 'pending',
+                     dispatch_id = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NULL,
+                     updated_at = datetime('now')
+                 WHERE id = 'entry-815-restart' AND status = 'user_cancelled'",
+                [],
+            )
+            .unwrap();
         assert!(
-            restart_result.changed,
+            changed > 0,
             "restart must transition user_cancelled -> pending"
         );
-        assert_eq!(restart_result.from_status, "user_cancelled");
-        assert_eq!(restart_result.to_status, "pending");
 
         // The next auto-queue tick (modeled here as the same JOIN the tick
         // uses to find dispatchable work) must now see the entry again.

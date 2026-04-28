@@ -76,7 +76,7 @@ partition "Per dispatchable group" {
   else (normal)
   endif
 
-  :allocate_slot_for_group_agent();
+  :allocate_slot_for_group_agent_pg();
 
   if (Free slot?) then (yes)
     :Assign slot_index;

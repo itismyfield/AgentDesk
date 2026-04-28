@@ -2429,33 +2429,26 @@ fn allocate_slot_for_group_agent_prefer_pg(
     thread_group: i64,
     agent_id: &str,
 ) -> Result<Option<crate::db::auto_queue::SlotAllocation>, String> {
-    if let Some(pool) = deps.pg_pool.as_ref() {
-        let run_id = run_id.to_string();
-        let agent_id = agent_id.to_string();
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            move |bridge_pool| async move {
-                crate::db::auto_queue::allocate_slot_for_group_agent_pg(
-                    &bridge_pool,
-                    &run_id,
-                    thread_group,
-                    &agent_id,
-                )
-                .await
-            },
-            |error| error,
-        );
-    }
-
-    let conn = deps.db.separate_conn().map_err(|error| {
-        format!("open sqlite slot allocation DB for {run_id}:{thread_group}: {error}")
-    })?;
-    crate::db::auto_queue::allocate_slot_for_group_agent(&conn, run_id, thread_group, agent_id)
-        .map_err(|error| {
-            format!(
-                "allocate sqlite slot for run {run_id} agent {agent_id} group {thread_group}: {error}"
+    let Some(pool) = deps.pg_pool.as_ref() else {
+        return Err(format!(
+            "postgres backend required for auto-queue slot allocation ({run_id}:{thread_group})"
+        ));
+    };
+    let run_id = run_id.to_string();
+    let agent_id = agent_id.to_string();
+    crate::utils::async_bridge::block_on_pg_result(
+        pool,
+        move |bridge_pool| async move {
+            crate::db::auto_queue::allocate_slot_for_group_agent_pg(
+                &bridge_pool,
+                &run_id,
+                thread_group,
+                &agent_id,
             )
-        })
+            .await
+        },
+        |error| error,
+    )
 }
 
 fn slot_requires_thread_reset_before_reuse_prefer_pg(

@@ -24931,8 +24931,21 @@ async fn auto_queue_cancel_also_cancels_phase_gate_dispatches_and_deletes_gate_r
         )
         .unwrap();
     assert_eq!(slot, (None, None));
+    let active_slot_dispatches: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE to_agent_id = 'agent-cancel-phase-gate'
+               AND status IN ('pending', 'dispatched')
+               AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = 0
+               AND COALESCE(CAST(json_extract(COALESCE(context, '{}'), '$.sidecar_dispatch') AS INTEGER), 0) = 0
+               AND json_type(COALESCE(context, '{}'), '$.phase_gate') IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert!(
-        !crate::db::auto_queue::slot_has_active_dispatch(&conn, "agent-cancel-phase-gate", 0,),
+        !active_slot_dispatches,
         "cancelled phase-gate dispatches must not keep the slot blocked"
     );
 }
