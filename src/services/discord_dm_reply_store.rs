@@ -59,18 +59,6 @@ pub(crate) fn register_pending_dm_reply(
     Ok(conn.last_insert_rowid())
 }
 
-pub(crate) fn delete_pending_dm_reply(sqlite: &Db, reply_id: i64) -> Result<(), String> {
-    let conn = sqlite
-        .separate_conn()
-        .map_err(|e| format!("db connection: {e}"))?;
-    conn.execute(
-        "DELETE FROM pending_dm_replies WHERE id = ?1",
-        libsql_rusqlite::params![reply_id],
-    )
-    .map_err(|e| format!("delete failed: {e}"))?;
-    Ok(())
-}
-
 pub(crate) async fn register_pending_dm_reply_db(
     sqlite: &Db,
     pg_pool: Option<&PgPool>,
@@ -131,23 +119,6 @@ pub(crate) async fn register_pending_dm_reply_db(
     };
 
     Ok(id)
-}
-
-pub(crate) async fn delete_pending_dm_reply_db(
-    sqlite: &Db,
-    pg_pool: Option<&PgPool>,
-    reply_id: i64,
-) -> Result<(), String> {
-    let Some(pool) = pg_pool else {
-        return delete_pending_dm_reply(sqlite, reply_id);
-    };
-
-    sqlx::query("DELETE FROM pending_dm_replies WHERE id = $1")
-        .bind(reply_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("delete failed: {error}"))?;
-    Ok(())
 }
 
 pub(crate) async fn load_oldest_pending_dm_reply_db(
@@ -452,24 +423,5 @@ mod tests {
         assert_eq!(row.1, "12345");
         assert_eq!(row.2.as_deref(), Some("1473922824350601297"));
         assert!(row.3.contains("health_checkup"));
-    }
-
-    #[test]
-    fn delete_pending_dm_reply_removes_row() {
-        let db = test_db();
-        let reply_id = register_pending_dm_reply(&db, "family-counsel", "12345", None, "{}", 3_600)
-            .expect("insert should succeed");
-
-        delete_pending_dm_reply(&db, reply_id).expect("delete should succeed");
-
-        let conn = db.separate_conn().unwrap();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pending_dm_replies WHERE id = ?1",
-                libsql_rusqlite::params![reply_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
     }
 }

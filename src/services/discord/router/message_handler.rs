@@ -5728,6 +5728,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[ignore = "SQLite-only test. Migrate to PG fixture — tracked in #1342."]
     async fn enforce_dispatch_cwd_policy_marks_implementation_dispatch_failed() {
         let db = crate::db::test_db();
         {
