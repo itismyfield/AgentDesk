@@ -52,25 +52,23 @@ impl OpenCodeServerProcess {
 // ---------------------------------------------------------------------------
 
 pub fn resolve_opencode_path() -> Option<String> {
-    std::env::var("AGENTDESK_OPENCODE_PATH")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            which::which("opencode")
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
+    resolve_opencode_binary().resolved_path
+}
+
+fn resolve_opencode_binary() -> crate::services::platform::BinaryResolution {
+    crate::services::platform::resolve_provider_binary("opencode")
 }
 
 pub fn probe_serve_health(working_dir: &str) -> Result<String, String> {
-    let bin = resolve_opencode_path().ok_or_else(|| {
+    let resolution = resolve_opencode_binary();
+    let bin = resolution.resolved_path.clone().ok_or_else(|| {
         "OpenCode CLI not found — install with: npm install -g opencode-ai".to_string()
     })?;
     let port = allocate_port()?;
     let password = generate_password();
     let auth = build_auth_header(&password);
     let base_url = format!("http://127.0.0.1:{port}");
-    let mut server = spawn_server(&bin, port, &password, working_dir)?;
+    let mut server = spawn_server(&bin, &resolution, port, &password, working_dir)?;
     let result = wait_for_health(&base_url, &auth, Some(&server.startup_output))
         .map(|_| format!("serve health ok at {base_url}"));
     shutdown_server(&mut server, &base_url, &auth);
@@ -198,7 +196,8 @@ fn execute_command_streaming_inner(
 
     let model_override = parse_model_override(model)?;
 
-    let bin = resolve_opencode_path().ok_or_else(|| {
+    let resolution = resolve_opencode_binary();
+    let bin = resolution.resolved_path.clone().ok_or_else(|| {
         "OpenCode CLI not found — install with: npm install -g opencode-ai".to_string()
     })?;
 
@@ -207,7 +206,7 @@ fn execute_command_streaming_inner(
     let auth = build_auth_header(&password);
     let base_url = format!("http://127.0.0.1:{port}");
 
-    let mut server = spawn_server(&bin, port, &password, working_dir)?;
+    let mut server = spawn_server(&bin, &resolution, port, &password, working_dir)?;
     register_child_pid(cancel_token, server.id());
 
     let result = run_session(
@@ -236,11 +235,13 @@ fn execute_command_streaming_inner(
 
 fn spawn_server(
     bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
     port: u16,
     password: &str,
     working_dir: &str,
 ) -> Result<OpenCodeServerProcess, String> {
     let mut cmd = Command::new(bin);
+    crate::services::platform::apply_binary_resolution(&mut cmd, resolution);
     configure_child_process_group(&mut cmd);
     cmd.arg("serve")
         .arg("--hostname")
@@ -1262,10 +1263,21 @@ mod tests {
     fn test_resolve_opencode_path_env_override() {
         let key = "AGENTDESK_OPENCODE_PATH";
         let original = std::env::var_os(key);
-        unsafe { std::env::set_var(key, "/custom/opencode") };
+        let temp = tempfile::tempdir().unwrap();
+        let opencode = temp.path().join("opencode");
+        std::fs::write(&opencode, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&opencode).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&opencode, permissions).unwrap();
+        }
+
+        unsafe { std::env::set_var(key, &opencode) };
         assert_eq!(
             resolve_opencode_path(),
-            Some("/custom/opencode".to_string())
+            Some(opencode.to_string_lossy().into_owned())
         );
         match original {
             Some(v) => unsafe { std::env::set_var(key, v) },

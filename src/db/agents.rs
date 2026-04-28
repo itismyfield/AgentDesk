@@ -20,10 +20,12 @@ pub struct AgentChannelBindings {
 }
 
 impl AgentChannelBindings {
+    fn configured_provider_kind(&self) -> Option<ProviderKind> {
+        self.provider.as_deref().and_then(ProviderKind::from_str)
+    }
+
     fn primary_provider_kind(&self) -> Option<ProviderKind> {
-        self.provider
-            .as_deref()
-            .and_then(ProviderKind::from_str)
+        self.configured_provider_kind()
             .or_else(ProviderKind::default_channel_provider)
     }
 
@@ -46,7 +48,11 @@ impl AgentChannelBindings {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
-            ProviderKind::OpenCode => self.legacy_primary_channel(),
+            ProviderKind::OpenCode
+                if self.configured_provider_kind() == Some(ProviderKind::OpenCode) =>
+            {
+                self.legacy_primary_channel()
+            }
             _ => None,
         }
     }
@@ -64,10 +70,12 @@ impl AgentChannelBindings {
 
     pub fn counter_model_channel(&self) -> Option<String> {
         self.resolved_primary_provider_kind().and_then(|provider| {
+            let primary_channel = self.provider_specific_channel(&provider)?;
             provider
                 .preferred_counterparts()
                 .into_iter()
                 .find_map(|counterpart| self.provider_specific_channel(&counterpart))
+                .filter(|channel| channel != &primary_channel)
         })
     }
 
@@ -1079,5 +1087,26 @@ mod tests {
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-05", Some("review")).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn opencode_legacy_primary_is_not_counter_model_for_claude_agent() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-06', 'ClaudeOnly', 'claude', 'legacy-primary', NULL, 'cc-chan', NULL)",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-06")
+            .unwrap()
+            .expect("bindings");
+        assert_eq!(bindings.primary_channel(), Some("cc-chan".into()));
+        assert_eq!(bindings.counter_model_channel(), None);
     }
 }
