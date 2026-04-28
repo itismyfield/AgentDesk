@@ -140,58 +140,12 @@ fn is_five_min_policy_tick(count: u64) -> bool {
     count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
 }
 
-pub(crate) struct RunInputs {
-    /// #1237 (843f): the runtime no longer carries an `AppState.db` (SQLite
-    /// legacy compatibility handle) — the only remaining `Db` source is
-    /// `engine.legacy_db()`, populated by `PolicyEngine::new_with_legacy_db`
-    /// in test fixtures. Production runtimes set this to `None` and the
-    /// remaining SQLite-backed call sites are tracked under #1238 (843g).
-    legacy_db: Option<crate::db::Db>,
+pub(crate) async fn run(
+    config: Config,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<PgPool>,
-}
-
-pub(crate) trait IntoRunInputs {
-    fn into_run_inputs(self) -> RunInputs;
-}
-
-impl IntoRunInputs for (PolicyEngine, Option<Arc<HealthRegistry>>, Option<PgPool>) {
-    fn into_run_inputs(self) -> RunInputs {
-        let (engine, health_registry, pg_pool) = self;
-        let legacy_db = engine.legacy_db().cloned();
-        RunInputs {
-            legacy_db,
-            engine,
-            health_registry,
-            pg_pool,
-        }
-    }
-}
-
-impl IntoRunInputs for (crate::db::Db, PolicyEngine, Option<Arc<HealthRegistry>>) {
-    fn into_run_inputs(self) -> RunInputs {
-        let (legacy_db, engine, health_registry) = self;
-        let pg_pool = engine.pg_pool().cloned();
-        RunInputs {
-            legacy_db: Some(legacy_db),
-            engine,
-            health_registry,
-            pg_pool,
-        }
-    }
-}
-
-pub(crate) async fn run<A, B, C>(config: Config, a: A, b: B, c: C) -> Result<()>
-where
-    (A, B, C): IntoRunInputs,
-{
-    let RunInputs {
-        legacy_db,
-        engine,
-        health_registry,
-        pg_pool,
-    } = (a, b, c).into_run_inputs();
+) -> Result<()> {
     let pg_pool = match pg_pool {
         Some(pool) => Some(pool),
         None => crate::db::postgres::connect_and_migrate(&config)
@@ -236,7 +190,7 @@ where
     };
     let startup_pool = startup_pg_pool.as_ref().or(pg_pool.as_ref());
     crate::reconcile::reconcile_boot_runtime(
-        legacy_db.as_ref(),
+        None,
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
     )
