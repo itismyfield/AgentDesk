@@ -858,28 +858,6 @@ pub(super) async fn post_dispatch_message_to_channel_with_delivery(
 /// path was retired; the command bot's turn-lifecycle emojis remain the
 /// single source of truth. The helper signature is unchanged so callers
 /// don't need to re-thread http client/token availability through.
-pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction(
-    db: &crate::db::Db,
-    _client: &reqwest::Client,
-    _token: &str,
-    _base_url: &str,
-    dispatch_id: &str,
-    channel_id: &str,
-    message_id: &str,
-) -> Result<(), String> {
-    persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-        Some(db),
-        _client,
-        _token,
-        _base_url,
-        dispatch_id,
-        channel_id,
-        message_id,
-        None,
-    )
-    .await
-}
-
 pub(super) async fn persist_dispatch_message_target_and_add_pending_reaction_with_pg(
     db: Option<&crate::db::Db>,
     _client: &reqwest::Client,

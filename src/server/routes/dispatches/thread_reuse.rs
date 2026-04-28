@@ -358,13 +358,6 @@ struct ThreadMapValidationOutcome {
     new_active_thread_id: Option<String>,
 }
 
-pub(crate) async fn validate_channel_thread_maps_on_startup(
-    db: &crate::db::Db,
-    token: &str,
-) -> (usize, usize) {
-    validate_channel_thread_maps_on_startup_with_backends(Some(db), None, token).await
-}
-
 pub(crate) async fn validate_channel_thread_maps_on_startup_with_backends(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
