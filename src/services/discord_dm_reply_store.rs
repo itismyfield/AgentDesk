@@ -27,6 +27,9 @@ fn normalize_register_args(
     Ok((source_agent.to_string(), user_id.to_string(), channel_id))
 }
 
+// PG pending_dm_replies rows are authoritative in mixed mode. The SQLite
+// fallback was removed in #1239; production runtimes always carry a
+// Postgres pool after #1237.
 pub(crate) async fn register_pending_dm_reply_db(
     pg_pool: Option<&PgPool>,
     source_agent: &str,
