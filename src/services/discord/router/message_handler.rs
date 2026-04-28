@@ -54,6 +54,11 @@ enum SessionResetReason {
 }
 
 const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
+const WATCHDOG_DEADLOCK_PREALERT_BOT: &str = "announce";
+
+fn watchdog_deadlock_prealert_bot_name() -> &'static str {
+    WATCHDOG_DEADLOCK_PREALERT_BOT
+}
 
 fn parse_watchdog_alert_channel_id(raw: &str) -> Option<serenity::ChannelId> {
     let trimmed = raw.trim();
@@ -151,7 +156,7 @@ inflight_updated_at: {updated_at}\n\
 }
 
 async fn maybe_send_watchdog_deadlock_prealert(
-    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     now_ms: i64,
@@ -166,6 +171,32 @@ async fn maybe_send_watchdog_deadlock_prealert(
         );
         return false;
     };
+    let Some(registry) = shared.health_registry() else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⏰ WATCHDOG: health registry unavailable for {} pre-timeout alert to {}",
+            WATCHDOG_DEADLOCK_PREALERT_BOT,
+            alert_channel_id
+        );
+        return false;
+    };
+    let alert_http = match super::super::health::resolve_bot_http(
+        registry.as_ref(),
+        WATCHDOG_DEADLOCK_PREALERT_BOT,
+    )
+    .await
+    {
+        Ok(http) => http,
+        Err((status, body)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⏰ WATCHDOG: {} bot unavailable for pre-timeout alert to {}: {status}: {body}",
+                WATCHDOG_DEADLOCK_PREALERT_BOT,
+                alert_channel_id
+            );
+            return false;
+        }
+    };
     let inflight = super::super::inflight::load_inflight_state(provider, channel_id.get());
     let message = build_watchdog_deadlock_prealert_message(
         provider,
@@ -176,11 +207,12 @@ async fn maybe_send_watchdog_deadlock_prealert(
         max_deadline_ms,
         inflight.as_ref(),
     );
-    match alert_channel_id.say(http, message).await {
+    match alert_channel_id.say(&*alert_http, message).await {
         Ok(_) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] ⏰ WATCHDOG: sent pre-timeout alert for channel {} to {}",
+                "  [{ts}] ⏰ WATCHDOG: sent pre-timeout alert via {} bot for channel {} to {}",
+                WATCHDOG_DEADLOCK_PREALERT_BOT,
                 channel_id,
                 alert_channel_id
             );
@@ -1044,7 +1076,6 @@ pub(in crate::services::discord) async fn start_headless_turn(
     {
         let watchdog_token = cancel_token.clone();
         let watchdog_shared = shared.clone();
-        let watchdog_http = ctx.http.clone();
         let timeout = super::super::turn_watchdog_timeout();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let turn_started_ms = now_ms;
@@ -1141,7 +1172,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
                         return;
                     }
                     if maybe_send_watchdog_deadlock_prealert(
-                        &watchdog_http,
+                        &watchdog_shared,
                         &watchdog_provider,
                         channel_id,
                         now,
@@ -3537,7 +3568,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                         return;
                     }
                     if maybe_send_watchdog_deadlock_prealert(
-                        &watchdog_http,
+                        &watchdog_shared,
                         &watchdog_provider,
                         channel_id,
                         now,
@@ -6399,6 +6430,7 @@ mod tests {
 
     #[test]
     fn watchdog_prealert_helpers_parse_and_dedupe_deadline() {
+        assert_eq!(watchdog_deadlock_prealert_bot_name(), "announce");
         assert_eq!(
             parse_watchdog_alert_channel_id("channel:<#12345>"),
             Some(ChannelId::new(12345))
