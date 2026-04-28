@@ -209,7 +209,7 @@
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 199 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 24 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
-| `services::api_friction` | `src/services/api_friction.rs` | 1710 | giant-file |
+| `services::api_friction` | `src/services/api_friction.rs` | 1708 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1046 | giant-file |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 987 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 329 |  |
