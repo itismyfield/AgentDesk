@@ -3,6 +3,7 @@
 //! Architecture: spawns `opencode serve --hostname 127.0.0.1 --port <N>`, drives the
 //! HTTP REST + SSE API, and normalizes events to AgentDesk `StreamMessage`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use serde_json::Value;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::configure_child_process_group;
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,22 +40,29 @@ pub fn resolve_opencode_path() -> Option<String> {
 
 pub fn execute_command_simple_cancellable(
     prompt: &str,
-    _cancel_token: Option<&CancelToken>,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<String, String> {
-    let cancel = Arc::new(CancelToken::new());
+    let local_cancel;
+    let effective_cancel = match cancel_token {
+        Some(token) => Some(token),
+        None => {
+            local_cancel = CancelToken::new();
+            Some(&local_cancel)
+        }
+    };
     let (tx, rx) = std::sync::mpsc::channel::<StreamMessage>();
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
 
-    execute_command_streaming(
+    execute_command_streaming_inner(
         prompt,
         None,
         &working_dir,
         tx,
         None,
         None,
-        Some(cancel),
+        effective_cancel,
         None,
         None,
         None,
@@ -97,8 +105,41 @@ pub fn execute_command_streaming(
     working_dir: &str,
     sender: Sender<StreamMessage>,
     system_prompt: Option<&str>,
-    _allowed_tools: Option<&[String]>,
+    allowed_tools: Option<&[String]>,
     cancel_token: Option<Arc<CancelToken>>,
+    remote_profile: Option<&RemoteProfile>,
+    _tmux_session_name: Option<&str>,
+    _report_channel_id: Option<u64>,
+    _report_provider: Option<ProviderKind>,
+    model: Option<&str>,
+    _compact_percent: Option<u64>,
+) -> Result<(), String> {
+    execute_command_streaming_inner(
+        prompt,
+        _session_id,
+        working_dir,
+        sender,
+        system_prompt,
+        allowed_tools,
+        cancel_token.as_deref(),
+        remote_profile,
+        _tmux_session_name,
+        _report_channel_id,
+        _report_provider,
+        model,
+        _compact_percent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_command_streaming_inner(
+    prompt: &str,
+    _session_id: Option<&str>,
+    working_dir: &str,
+    sender: Sender<StreamMessage>,
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+    cancel_token: Option<&CancelToken>,
     remote_profile: Option<&RemoteProfile>,
     _tmux_session_name: Option<&str>,
     _report_channel_id: Option<u64>,
@@ -113,6 +154,8 @@ pub fn execute_command_streaming(
         );
     }
 
+    let model_override = parse_model_override(model)?;
+
     let bin = resolve_opencode_path().ok_or_else(|| {
         "OpenCode CLI not found — install with: npm install -g opencode-ai".to_string()
     })?;
@@ -123,16 +166,17 @@ pub fn execute_command_streaming(
     let base_url = format!("http://127.0.0.1:{port}");
 
     let mut child = spawn_server(&bin, port, &password, working_dir)?;
-    register_child(&cancel_token, child.id());
+    register_child_pid(cancel_token, child.id());
 
     let result = run_session(
         prompt,
         system_prompt,
-        model,
+        allowed_tools,
+        model_override.as_ref(),
         &base_url,
         &auth,
         &sender,
-        &cancel_token,
+        cancel_token,
     );
 
     dispose_server(&base_url, &auth);
@@ -181,11 +225,12 @@ fn dispose_server(base_url: &str, auth: &str) {
 fn run_session(
     prompt: &str,
     system_prompt: Option<&str>,
-    model: Option<&str>,
+    allowed_tools: Option<&[String]>,
+    model: Option<&OpenCodeModelRef>,
     base_url: &str,
     auth: &str,
     sender: &Sender<StreamMessage>,
-    cancel_token: &Option<Arc<CancelToken>>,
+    cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     // 1. Wait for server to be ready
     wait_for_health(base_url, auth)?;
@@ -195,7 +240,7 @@ fn run_session(
     }
 
     // 2. Create session
-    let session_id = create_session(base_url, auth, model)?;
+    let session_id = create_session(base_url, auth)?;
 
     // 3. Announce session
     let _ = sender.send(StreamMessage::Init {
@@ -216,7 +261,15 @@ fn run_session(
         .map_err(|e| format!("Failed to connect to OpenCode SSE stream: {e}"))?;
 
     // 5. Send prompt (non-blocking — server processes it while we read SSE)
-    send_prompt(base_url, auth, &session_id, prompt, system_prompt)?;
+    send_prompt(
+        base_url,
+        auth,
+        &session_id,
+        prompt,
+        system_prompt,
+        allowed_tools,
+        model,
+    )?;
 
     // 6. Read SSE stream
     let reader: BufReader<Box<dyn std::io::Read + Send>> =
@@ -248,17 +301,11 @@ fn wait_for_health(base_url: &str, auth: &str) -> Result<(), String> {
     }
 }
 
-fn create_session(base_url: &str, auth: &str, model: Option<&str>) -> Result<String, String> {
-    let body = if let Some(m) = model {
-        serde_json::json!({"modelID": m})
-    } else {
-        serde_json::json!({})
-    };
-
+fn create_session(base_url: &str, auth: &str) -> Result<String, String> {
     let response = ureq::post(&format!("{base_url}/session"))
         .set("Authorization", auth)
         .set("Content-Type", "application/json")
-        .send_json(body)
+        .send_json(serde_json::json!({}))
         .map_err(|e| format!("Failed to create OpenCode session: {e}"))?;
 
     let json: Value = response
@@ -279,15 +326,10 @@ fn send_prompt(
     session_id: &str,
     prompt: &str,
     system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+    model: Option<&OpenCodeModelRef>,
 ) -> Result<(), String> {
-    let text = match system_prompt {
-        Some(sp) if !sp.trim().is_empty() => format!("{sp}\n\n{prompt}"),
-        _ => prompt.to_string(),
-    };
-
-    let body = serde_json::json!({
-        "parts": [{"type": "text", "text": text}]
-    });
+    let body = build_prompt_body(prompt, system_prompt, allowed_tools, model);
 
     let resp = ureq::post(&format!("{base_url}/session/{session_id}/prompt_async"))
         .set("Authorization", auth)
@@ -300,6 +342,105 @@ fn send_prompt(
         Ok(())
     } else {
         Err(format!("prompt_async returned unexpected status: {status}"))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OpenCodeModelRef {
+    provider_id: String,
+    model_id: String,
+}
+
+fn parse_model_override(model: Option<&str>) -> Result<Option<OpenCodeModelRef>, String> {
+    let Some(raw) = model.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+
+    let Some((provider_id, model_id)) = raw.split_once('/') else {
+        return Err(format!(
+            "OpenCode model override must use providerID/modelID syntax, got `{raw}`"
+        ));
+    };
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Err(format!(
+            "OpenCode model override must use providerID/modelID syntax, got `{raw}`"
+        ));
+    }
+
+    Ok(Some(OpenCodeModelRef {
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+    }))
+}
+
+fn build_prompt_body(
+    prompt: &str,
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+    model: Option<&OpenCodeModelRef>,
+) -> Value {
+    let mut body = serde_json::json!({
+        "parts": [{"type": "text", "text": prompt}]
+    });
+
+    if let Some(system) = compose_system_prompt(system_prompt, allowed_tools)
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("system".to_string(), Value::String(system));
+    }
+
+    if let Some(model) = model
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert(
+            "model".to_string(),
+            serde_json::json!({
+                "providerID": model.provider_id,
+                "modelID": model.model_id,
+            }),
+        );
+    }
+
+    body
+}
+
+fn compose_system_prompt(
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(system_prompt) = system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(system_prompt.to_string());
+    }
+
+    if let Some(tools) = allowed_tools.filter(|tools| !tools.is_empty()) {
+        let mut names = tools
+            .iter()
+            .map(|tool| tool.trim())
+            .filter(|tool| !tool.is_empty())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        if !names.is_empty() {
+            parts.push(format!(
+                "AgentDesk allowed tools advisory: requested allowed tools are {}. OpenCode permission-key mapping is not verified in this runtime; follow this allowlist while AgentDesk enforces outbound safety separately.",
+                names.join(", ")
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -317,11 +458,11 @@ fn consume_sse(
     reader: BufReader<Box<dyn std::io::Read + Send>>,
     session_id: &str,
     sender: &Sender<StreamMessage>,
-    cancel_token: &Option<Arc<CancelToken>>,
+    cancel_token: Option<&CancelToken>,
     base_url: &str,
     auth: &str,
 ) -> Result<(), String> {
-    let mut accumulated_text = String::new();
+    let mut state = SseMessageState::default();
     let mut current_data = String::new();
     let mut idle_seen = false;
     let mut last_event = Instant::now();
@@ -367,14 +508,12 @@ fn consume_sse(
             let data = current_data.clone();
             current_data.clear();
 
-            if let Some(should_stop) =
-                process_sse_event(&data, session_id, sender, &mut accumulated_text)
-            {
+            if let Some(should_stop) = process_sse_event(&data, session_id, sender, &mut state) {
                 if should_stop {
                     idle_seen = true;
                     // Send Done
                     let _ = sender.send(StreamMessage::Done {
-                        result: accumulated_text.trim().to_string(),
+                        result: state.accumulated_text.trim().to_string(),
                         session_id: Some(session_id.to_string()),
                     });
                     break;
@@ -383,11 +522,96 @@ fn consume_sse(
         }
     }
 
-    if !idle_seen && accumulated_text.trim().is_empty() {
+    if !idle_seen && state.accumulated_text.trim().is_empty() {
         return Err("OpenCode stream ended without a terminal event".to_string());
     }
 
     Ok(())
+}
+
+#[derive(Default)]
+struct SseMessageState {
+    accumulated_text: String,
+    text_part_snapshots: HashMap<String, String>,
+}
+
+fn append_text_delta(sender: &Sender<StreamMessage>, state: &mut SseMessageState, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    state.accumulated_text.push_str(text);
+    let _ = sender.send(StreamMessage::Text {
+        content: text.to_string(),
+    });
+}
+
+fn emit_text_part(part: &Value, sender: &Sender<StreamMessage>, state: &mut SseMessageState) {
+    let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if text.is_empty() {
+        return;
+    }
+
+    let Some(part_id) = part
+        .get("id")
+        .or_else(|| part.get("partID"))
+        .and_then(|v| v.as_str())
+    else {
+        append_text_delta(sender, state, text);
+        return;
+    };
+
+    let previous = state
+        .text_part_snapshots
+        .get(part_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    let delta = text.strip_prefix(previous).unwrap_or(text);
+    state
+        .text_part_snapshots
+        .insert(part_id.to_string(), text.to_string());
+    append_text_delta(sender, state, delta);
+}
+
+fn emit_part(part: &Value, sender: &Sender<StreamMessage>, state: &mut SseMessageState) {
+    let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    match part_type {
+        "text" => emit_text_part(part, sender, state),
+        "thinking" | "redactedThinking" => {
+            let summary = part
+                .get("thinking")
+                .or_else(|| part.get("summary"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let _ = sender.send(StreamMessage::Thinking { summary });
+        }
+        "tool-use" => {
+            let name = part
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let input = part.get("input").map(|v| v.to_string()).unwrap_or_default();
+            let _ = sender.send(StreamMessage::ToolUse {
+                name: name.to_string(),
+                input,
+            });
+        }
+        "tool-result" => {
+            let content = part
+                .get("output")
+                .or_else(|| part.get("content"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let is_error = part
+                .get("isError")
+                .or_else(|| part.get("is_error"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let _ = sender.send(StreamMessage::ToolResult { content, is_error });
+        }
+        _ => {}
+    }
 }
 
 /// Returns `Some(true)` if the session is done (idle), `Some(false)` to continue, `None` to ignore.
@@ -395,7 +619,7 @@ fn process_sse_event(
     data: &str,
     session_id: &str,
     sender: &Sender<StreamMessage>,
-    accumulated_text: &mut String,
+    state: &mut SseMessageState,
 ) -> Option<bool> {
     let event: Value = serde_json::from_str(data).ok()?;
     let event_type = event.get("type").and_then(|v| v.as_str())?;
@@ -446,53 +670,31 @@ fn process_sse_event(
 
         "part" => {
             let part = props.and_then(|p| p.get("part"))?;
-            let part_type = part.get("type").and_then(|v| v.as_str())?;
+            emit_part(part, sender, state);
+            Some(false)
+        }
 
-            match part_type {
-                "text" => {
-                    let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    if !text.is_empty() {
-                        accumulated_text.push_str(text);
-                        let _ = sender.send(StreamMessage::Text {
-                            content: text.to_string(),
-                        });
-                    }
+        "message.part.delta" => {
+            if props.and_then(|p| p.get("field")).and_then(|v| v.as_str()) == Some("text") {
+                let delta = props
+                    .and_then(|p| p.get("delta"))
+                    .and_then(|v| v.as_str())?;
+                if let Some(part_id) = props.and_then(|p| p.get("partID")).and_then(|v| v.as_str())
+                {
+                    let entry = state
+                        .text_part_snapshots
+                        .entry(part_id.to_string())
+                        .or_default();
+                    entry.push_str(delta);
                 }
-                "thinking" | "redactedThinking" => {
-                    let summary = part
-                        .get("thinking")
-                        .or_else(|| part.get("summary"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let _ = sender.send(StreamMessage::Thinking { summary });
-                }
-                "tool-use" => {
-                    let name = part
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let input = part.get("input").map(|v| v.to_string()).unwrap_or_default();
-                    let _ = sender.send(StreamMessage::ToolUse {
-                        name: name.to_string(),
-                        input,
-                    });
-                }
-                "tool-result" => {
-                    let content = part
-                        .get("output")
-                        .or_else(|| part.get("content"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let is_error = part
-                        .get("isError")
-                        .or_else(|| part.get("is_error"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let _ = sender.send(StreamMessage::ToolResult { content, is_error });
-                }
-                _ => {}
+                append_text_delta(sender, state, delta);
             }
+            Some(false)
+        }
+
+        "message.part.updated" => {
+            let part = props.and_then(|p| p.get("part"))?;
+            emit_part(part, sender, state);
             Some(false)
         }
 
@@ -504,11 +706,8 @@ fn process_sse_event(
                         if part.get("type").and_then(|v| v.as_str()) == Some("text") {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 // Only emit if we haven't already streamed it
-                                if accumulated_text.is_empty() && !text.trim().is_empty() {
-                                    accumulated_text.push_str(text);
-                                    let _ = sender.send(StreamMessage::Text {
-                                        content: text.to_string(),
-                                    });
+                                if state.accumulated_text.is_empty() && !text.trim().is_empty() {
+                                    append_text_delta(sender, state, text);
                                 }
                             }
                         }
@@ -563,17 +762,8 @@ fn build_auth_header(password: &str) -> String {
     format!("Basic {}", BASE64.encode(credentials.as_bytes()))
 }
 
-fn register_child(cancel_token: &Option<Arc<CancelToken>>, pid: u32) {
-    if let Some(token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(pid);
-    }
-}
-
-fn is_cancelled(cancel_token: &Option<Arc<CancelToken>>) -> bool {
-    cancel_token
-        .as_ref()
-        .map(|t| cancel_requested(Some(t.as_ref())))
-        .unwrap_or(false)
+fn is_cancelled(cancel_token: Option<&CancelToken>) -> bool {
+    cancel_requested(cancel_token)
 }
 
 fn send_error(sender: &Sender<StreamMessage>, message: String) -> Result<(), String> {
@@ -598,10 +788,21 @@ mod tests {
     // Helper to process a raw SSE data string and collect messages
     fn parse_event(data: &str, session_id: &str) -> (Vec<StreamMessage>, Option<bool>) {
         let (tx, rx) = mpsc::channel::<StreamMessage>();
-        let mut acc = String::new();
-        let stop = process_sse_event(data, session_id, &tx, &mut acc);
+        let mut state = SseMessageState::default();
+        let stop = process_sse_event(data, session_id, &tx, &mut state);
         drop(tx);
         (rx.try_iter().collect(), stop)
+    }
+
+    fn parse_events(events: &[&str], session_id: &str) -> (Vec<StreamMessage>, Vec<Option<bool>>) {
+        let (tx, rx) = mpsc::channel::<StreamMessage>();
+        let mut state = SseMessageState::default();
+        let stops = events
+            .iter()
+            .map(|event| process_sse_event(event, session_id, &tx, &mut state))
+            .collect::<Vec<_>>();
+        drop(tx);
+        (rx.try_iter().collect(), stops)
     }
 
     #[test]
@@ -630,6 +831,94 @@ mod tests {
         assert!(
             msgs.iter()
                 .any(|m| matches!(m, StreamMessage::Text { content } if content == "hello world"))
+        );
+    }
+
+    #[test]
+    fn test_message_part_updated_text_emitted() {
+        let data = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-1","type":"text","text":"OK"}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "OK"))
+        );
+    }
+
+    #[test]
+    fn test_message_part_updated_wrong_session_ignored() {
+        let data = r#"{"type":"message.part.updated","properties":{"sessionID":"other-session","part":{"id":"part-1","type":"text","text":"OK"}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert!(
+            msgs.is_empty(),
+            "wrong-session updated text must be ignored"
+        );
+        assert_eq!(stop, None);
+    }
+
+    #[test]
+    fn test_message_part_delta_then_updated_does_not_duplicate_text() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"O"}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"K"}}"#,
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-1","messageID":"m1","sessionID":"s1","type":"text","text":"OK"}}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false), Some(false)]);
+        let text = msgs
+            .iter()
+            .filter_map(|msg| match msg {
+                StreamMessage::Text { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn test_parse_model_override_accepts_provider_model_pair() {
+        assert_eq!(
+            parse_model_override(Some("anthropic/claude-sonnet-4-5")).unwrap(),
+            Some(OpenCodeModelRef {
+                provider_id: "anthropic".to_string(),
+                model_id: "claude-sonnet-4-5".to_string(),
+            })
+        );
+        assert_eq!(parse_model_override(Some("default")).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_model_override_rejects_bare_model_id() {
+        let err = parse_model_override(Some("claude-sonnet-4-5")).unwrap_err();
+        assert!(err.contains("providerID/modelID"));
+    }
+
+    #[test]
+    fn test_prompt_body_keeps_system_separate_from_user_parts() {
+        let model = OpenCodeModelRef {
+            provider_id: "anthropic".to_string(),
+            model_id: "claude-sonnet-4-5".to_string(),
+        };
+        let tools = vec!["Read".to_string(), "Bash".to_string()];
+        let body = build_prompt_body(
+            "visible request",
+            Some("hidden system"),
+            Some(&tools),
+            Some(&model),
+        );
+        assert_eq!(body["parts"][0]["text"], "visible request");
+        assert_eq!(
+            body["model"],
+            serde_json::json!({"providerID":"anthropic","modelID":"claude-sonnet-4-5"})
+        );
+        let system = body["system"].as_str().unwrap();
+        assert!(system.contains("hidden system"));
+        assert!(system.contains("AgentDesk allowed tools advisory"));
+        assert!(
+            !body["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hidden system")
         );
     }
 

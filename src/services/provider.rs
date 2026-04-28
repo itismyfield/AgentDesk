@@ -139,11 +139,11 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         capabilities: ProviderCapabilities {
             binary_name: "opencode",
             supports_structured_output: true,
-            supports_resume: true,
+            supports_resume: false,
             supports_tool_stream: true,
         },
         default_behavior: ProviderDefaultBehavior {
-            resume_without_reset: true,
+            resume_without_reset: false,
             runtime_model: None,
             source_label: "provider default",
         },
@@ -1544,7 +1544,6 @@ mod tests {
             ProviderKind::Claude,
             ProviderKind::Codex,
             ProviderKind::Gemini,
-            ProviderKind::OpenCode,
             ProviderKind::Qwen,
         ] {
             let capabilities = provider.capabilities().expect("supported provider");
@@ -1553,6 +1552,13 @@ mod tests {
             assert!(capabilities.supports_tool_stream);
             assert!(!capabilities.binary_name.is_empty());
         }
+        let capabilities = ProviderKind::OpenCode
+            .capabilities()
+            .expect("supported provider");
+        assert!(capabilities.supports_structured_output);
+        assert!(!capabilities.supports_resume);
+        assert!(capabilities.supports_tool_stream);
+        assert!(!capabilities.binary_name.is_empty());
     }
 
     #[test]

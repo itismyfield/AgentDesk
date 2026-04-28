@@ -624,6 +624,38 @@ These are useful but not required for first parity:
 
 ## Regression Test Plan
 
+## PR #95 Implementation Status
+
+Implemented in this PR:
+
+- OpenCode runtime capability metadata now reflects current behavior:
+  `supports_resume` and `resume_without_reset` are false until real OpenCode
+  session reuse exists.
+- OpenCode simple execution passes the caller cancellation token through the
+  runtime path and registers the spawned `opencode serve` process on that
+  token.
+- OpenCode model override uses AgentDesk's locked `providerID/modelID` syntax
+  and serializes the split pair as OpenCode `PromptInput.model` on
+  `/prompt_async`; bare model ids are rejected.
+- OpenCode prompt shaping keeps hidden/system guidance in the top-level
+  `system` field and leaves visible user text in `parts`.
+- AgentDesk `_allowed_tools` is not mapped to OpenCode `tools` in P0; OpenCode
+  receives a concise advisory in `system` until exact permission-key mapping is
+  verified.
+- OpenCode SSE handling tracks text state by part id, supports delta/update
+  events, filters wrong-session events, and avoids duplicate text when a full
+  update follows streamed deltas.
+- Final Discord formatting now runs a provider-neutral hidden-context sanitizer
+  before provider-specific output filtering.
+
+Not implemented in this PR:
+
+- OpenCode MCP sync/detection and `provider_has_memento_mcp(...)` integration.
+- Provider CLI/API/dashboard provider-surface completeness.
+- Exact OpenCode permission-key serialization for AgentDesk allowed tools.
+- Runtime fallback when an older or drifted OpenCode build rejects top-level
+  `system`; this remains a follow-up unless observed API drift requires it.
+
 ### Rust unit tests
 
 - `src/services/discord/response_sanitizer.rs`
@@ -702,10 +734,13 @@ These are useful but not required for first parity:
 
 ## Implementation Checklist
 
-- [ ] Add shared hidden-context sanitizer module and tests.
-- [ ] Hook sanitizer into `format_for_discord_with_provider(...)`.
-- [ ] Add OpenCode prompt composer and tests.
-- [ ] Add OpenCode SSE delta/update state tracking and tests.
+- [x] Add shared hidden-context sanitizer module and tests.
+- [x] Hook sanitizer into `format_for_discord_with_provider(...)`.
+- [x] Add OpenCode prompt composer and tests.
+- [x] Add OpenCode SSE delta/update state tracking and tests.
+- [x] Correct OpenCode provider capability metadata for non-resume behavior.
+- [x] Add OpenCode `providerID/modelID` override validation and prompt
+      serialization.
 - [ ] Add OpenCode MCP sync/detection, preserving manual config.
 - [ ] Update memory/health surfaces that currently only check Claude/Codex MCP.
 - [ ] Include OpenCode in provider-cli server API status/action validation.
@@ -718,4 +753,4 @@ These are useful but not required for first parity:
       OpenCode.
 - [ ] Update CLI/Discord help text that lists supported providers.
 - [ ] Update OpenCode role/response contract docs or prompts.
-- [ ] Run formatting, targeted tests, and `cargo check --all-targets`.
+- [x] Run formatting, targeted tests, and `cargo check --all-targets`.
