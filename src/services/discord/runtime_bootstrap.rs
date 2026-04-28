@@ -121,6 +121,88 @@ fn enqueue_restored_intervention(
     true
 }
 
+/// codex review round-6 P2 (#1332): outcome of filtering loaded
+/// queued-placeholder mappings against the live mailbox queue.
+///
+/// `live` is the surviving set ready to be inserted into
+/// `SharedData::queued_placeholders`. `channels_with_stale` is the unique
+/// channel ids that had at least one mapping pruned — the bootstrap path
+/// rewrites their on-disk snapshot so the next restart does not resurrect
+/// the stale rows. `stale_count` is purely informational for the FLUSH
+/// log line.
+pub(in crate::services::discord) struct FilteredQueuedPlaceholders {
+    pub(in crate::services::discord) live: Vec<((ChannelId, MessageId), MessageId)>,
+    pub(in crate::services::discord) channels_with_stale: std::collections::HashSet<ChannelId>,
+    pub(in crate::services::discord) stale_count: usize,
+}
+
+/// codex review round-6 P2 (#1332): drop any restored queued-placeholder
+/// mapping whose `(channel_id, user_msg_id)` is no longer present in the
+/// live mailbox queue snapshot. This runs AFTER the restart pending-queue
+/// restore (which rebuilds `intervention_queue` from disk) and BEFORE
+/// `kickoff_idle_queues`, so the live set captures both pending-queue
+/// restored items and any catch-up message that landed earlier in the
+/// startup pipeline.
+///
+/// A mapping is "stale" when startup skipped or superseded its source
+/// message before placeholder restoration ran — for instance, the channel
+/// is no longer owned, the sender is no longer allowed, the item was
+/// pruned as a duplicate, or it overflowed the queue cap. Without this
+/// filter, the `📬 메시지 대기 중` card and its sidecar row would never
+/// reach a dispatch or queue-exit event, leaving them stale forever.
+pub(in crate::services::discord) fn filter_restored_queued_placeholders(
+    loaded: std::collections::HashMap<(ChannelId, MessageId), MessageId>,
+    live_queue_ids: &std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
+) -> FilteredQueuedPlaceholders {
+    let mut live: Vec<((ChannelId, MessageId), MessageId)> = Vec::new();
+    let mut channels_with_stale: std::collections::HashSet<ChannelId> =
+        std::collections::HashSet::new();
+    let mut stale_count = 0usize;
+    for ((channel_id, user_msg_id), placeholder_msg_id) in loaded {
+        let in_live_queue = live_queue_ids
+            .get(&channel_id)
+            .map(|ids| ids.contains(&user_msg_id.get()))
+            .unwrap_or(false);
+        if in_live_queue {
+            live.push(((channel_id, user_msg_id), placeholder_msg_id));
+        } else {
+            stale_count += 1;
+            channels_with_stale.insert(channel_id);
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                placeholder_msg_id = placeholder_msg_id.get(),
+                "queued_placeholder restore: pruning stale mapping with no live queue entry"
+            );
+        }
+    }
+    FilteredQueuedPlaceholders {
+        live,
+        channels_with_stale,
+        stale_count,
+    }
+}
+
+/// codex review round-6 P2 (#1332): snapshot every mailbox in `shared` and
+/// collect the union of `intervention.message_id` + every
+/// `intervention.source_message_ids` entry per channel. The result is the
+/// set of user message ids the queued-placeholder filter accepts as
+/// "still live" on this channel.
+pub(in crate::services::discord) async fn collect_live_queue_message_ids(
+    shared: &SharedData,
+) -> std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> {
+    let mut by_channel: std::collections::HashMap<ChannelId, std::collections::HashSet<u64>> =
+        std::collections::HashMap::new();
+    let snapshots = shared.mailboxes.snapshot_all().await;
+    for (channel_id, snapshot) in snapshots {
+        let ids = super::queued_message_ids(&snapshot);
+        if !ids.is_empty() {
+            by_channel.insert(channel_id, ids);
+        }
+    }
+    by_channel
+}
+
 fn spawn_startup_thread_map_validation(
     db: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
@@ -1100,26 +1182,73 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         // `kickoff_idle_queues` so the restored mailbox queue
                         // entries pick up the existing `📬 메시지 대기 중`
                         // Discord cards instead of stranding them and posting
-                        // duplicate placeholders. Must run before
-                        // `restore_inflight_turns` for symmetry with the
-                        // pending-queue restore (which itself runs first to
-                        // avoid making queued items look "already known").
+                        // duplicate placeholders. Must run AFTER the mailbox
+                        // queue is restored (above) and BEFORE
+                        // `kickoff_idle_queues` / `restore_inflight_turns` so
+                        // the live-queue filter (round-6 P2) can reject any
+                        // mapping whose source message id is no longer in any
+                        // currently-queued intervention.
                         let restored_queued_placeholders =
                             super::queued_placeholders_store::load_queued_placeholders(
                                 &provider_for_restore,
                                 &shared_for_tmux2.token_hash,
                             );
                         if !restored_queued_placeholders.is_empty() {
-                            let count = restored_queued_placeholders.len();
-                            for (key, placeholder_msg_id) in restored_queued_placeholders {
+                            // codex review round-6 P2 (#1332): when startup
+                            // skips/supersedes a restored or catch-up queue
+                            // item before this point (channel no longer
+                            // owned, sender no longer allowed, duplicate or
+                            // cap pruning, …), its persisted queued-
+                            // placeholder mapping has no live queue entry to
+                            // attach to. Inserting it unconditionally would
+                            // strand the `📬` card + sidecar row forever:
+                            // no future dispatch or queue-exit event would
+                            // reference that user message id. Filter the
+                            // loaded mappings against the live mailbox queue
+                            // and DELETE the on-disk + in-memory state for
+                            // every mapping whose user message id is no
+                            // longer queued.
+                            let live_queue_ids = collect_live_queue_message_ids(
+                                &shared_for_tmux2,
+                            )
+                            .await;
+                            let filter_outcome = filter_restored_queued_placeholders(
+                                restored_queued_placeholders,
+                                &live_queue_ids,
+                            );
+                            for (key, placeholder_msg_id) in &filter_outcome.live {
                                 shared_for_tmux2
                                     .queued_placeholders
-                                    .insert(key, placeholder_msg_id);
+                                    .insert(*key, *placeholder_msg_id);
                             }
+                            // Re-snapshot every channel that had at least
+                            // one stale mapping pruned so the on-disk file
+                            // matches the filtered in-memory state. Empty
+                            // channels are removed via the snapshot helper
+                            // (the `entries.is_empty()` branch deletes the
+                            // file). Without this rewrite, the next restart
+                            // would re-load the same stale mapping and the
+                            // leak would compound across restarts.
+                            for channel_id in &filter_outcome.channels_with_stale {
+                                super::queued_placeholders_store::persist_channel_from_map(
+                                    &shared_for_tmux2.queued_placeholders,
+                                    &shared_for_tmux2.provider,
+                                    &shared_for_tmux2.token_hash,
+                                    *channel_id,
+                                );
+                            }
+                            let live_count = filter_outcome.live.len();
+                            let stale_count = filter_outcome.stale_count;
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::info!(
-                                "  [{ts}] 📋 FLUSH: restored {count} queued-placeholder mapping(s) from disk"
-                            );
+                            if stale_count > 0 {
+                                tracing::warn!(
+                                    "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
+                                );
+                            } else {
+                                tracing::info!(
+                                    "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
+                                );
+                            }
                         }
 
                         restore_inflight_turns(
@@ -1603,6 +1732,281 @@ mod tests {
             restored_fast_mode_reset_channels(&settings),
             vec![ChannelId::new(123), ChannelId::new(456)]
         );
+    }
+
+    /// codex review round-6 P2 (#1332): the queued-placeholder restore path
+    /// must reject any persisted mapping whose `(channel_id, user_msg_id)`
+    /// has no corresponding live queue entry by the time `kickoff_idle_queues`
+    /// runs. Otherwise a startup that skipped/superseded the user message
+    /// (channel no longer owned, sender no longer allowed, duplicate/cap
+    /// pruning, …) would strand the `📬 메시지 대기 중` Discord card AND its
+    /// sidecar row forever — no future dispatch or queue-exit event would
+    /// reach that user message id.
+    ///
+    /// Scenario: persist 2 placeholder sidecars for the same channel, but
+    /// only 1 of them has a corresponding live queue intervention. Drive
+    /// the same filter helpers the `run_bot` startup path uses. Assert
+    /// only the live mapping ends up in memory AND the stale one is
+    /// removed from the on-disk snapshot.
+    #[test]
+    fn restored_queued_placeholders_filter_drops_stale_mappings_with_no_live_queue_entry() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+        use std::collections::{HashMap, HashSet};
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "round6_p2_filter_hash";
+        let channel_id = ChannelId::new(990_000_000_000_001);
+        let live_user_msg = MessageId::new(890_000_000_000_001);
+        let live_card = MessageId::new(790_000_000_000_001);
+        let stale_user_msg = MessageId::new(890_000_000_000_002);
+        let stale_card = MessageId::new(790_000_000_000_002);
+
+        // 1) "Pre-restart": persist BOTH mappings on disk under one channel.
+        //    This mirrors the real-world setup where both messages were
+        //    queued at the time of the previous shutdown.
+        let map: dashmap::DashMap<(ChannelId, MessageId), MessageId> = dashmap::DashMap::new();
+        map.insert((channel_id, live_user_msg), live_card);
+        map.insert((channel_id, stale_user_msg), stale_card);
+        queued_placeholders_store::persist_channel_from_map(
+            &map, &provider, token_hash, channel_id,
+        );
+        let snapshot_file = tmp
+            .path()
+            .join("runtime")
+            .join("discord_queued_placeholders")
+            .join("claude")
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        assert!(
+            snapshot_file.exists(),
+            "preconditions: both mappings must be persisted before the filter runs",
+        );
+
+        // 2) Reload from disk (mimics the bootstrap path's
+        //    `load_queued_placeholders`).
+        let loaded = queued_placeholders_store::load_queued_placeholders(&provider, token_hash);
+        assert_eq!(
+            loaded.len(),
+            2,
+            "fresh load must observe both persisted mappings"
+        );
+
+        // 3) Build the live-queue map: only `live_user_msg` is in the
+        //    mailbox queue. The other mapping is stale because startup
+        //    skipped its source message (sender no longer allowed,
+        //    duplicate pruning, channel ownership lost, etc.).
+        let mut live_queue_ids: HashMap<ChannelId, HashSet<u64>> = HashMap::new();
+        live_queue_ids
+            .entry(channel_id)
+            .or_default()
+            .insert(live_user_msg.get());
+
+        // 4) Run the filter and assert exactly the live mapping survives.
+        let outcome = filter_restored_queued_placeholders(loaded, &live_queue_ids);
+        assert_eq!(
+            outcome.live.len(),
+            1,
+            "exactly one mapping must survive the filter"
+        );
+        let surviving_keys: HashSet<(ChannelId, MessageId)> = outcome
+            .live
+            .iter()
+            .map(|((ch, user), _)| (*ch, *user))
+            .collect();
+        assert!(
+            surviving_keys.contains(&(channel_id, live_user_msg)),
+            "live mapping must survive"
+        );
+        assert!(
+            !surviving_keys.contains(&(channel_id, stale_user_msg)),
+            "stale mapping must be dropped"
+        );
+        assert_eq!(outcome.stale_count, 1);
+        assert!(
+            outcome.channels_with_stale.contains(&channel_id),
+            "channel must be flagged for re-snapshot",
+        );
+
+        // 5) Replay the bootstrap rewrite: insert survivors into a fresh
+        //    DashMap and re-snapshot the channel. This is exactly the
+        //    sequence `run_bot` performs after the filter.
+        let post_restart_map: dashmap::DashMap<(ChannelId, MessageId), MessageId> =
+            dashmap::DashMap::new();
+        for ((ch, user), card) in &outcome.live {
+            post_restart_map.insert((*ch, *user), *card);
+        }
+        for stale_channel in &outcome.channels_with_stale {
+            queued_placeholders_store::persist_channel_from_map(
+                &post_restart_map,
+                &provider,
+                token_hash,
+                *stale_channel,
+            );
+        }
+
+        // 6) The on-disk snapshot must now reflect ONLY the live mapping.
+        //    A subsequent restart would reload exactly one entry — proving
+        //    the leak does not compound across restarts.
+        let after_filter_load =
+            queued_placeholders_store::load_queued_placeholders(&provider, token_hash);
+        assert_eq!(
+            after_filter_load.len(),
+            1,
+            "stale mapping must be removed from disk so the next restart starts clean",
+        );
+        assert_eq!(
+            after_filter_load.get(&(channel_id, live_user_msg)).copied(),
+            Some(live_card)
+        );
+        assert!(
+            after_filter_load
+                .get(&(channel_id, stale_user_msg))
+                .is_none(),
+            "stale mapping must NOT be reloadable from disk after the filter",
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    /// codex review round-6 P2 (#1332): end-to-end smoke that exercises
+    /// `collect_live_queue_message_ids` against a real `SharedData` mailbox.
+    /// Enqueue an intervention into the mailbox and confirm the helper
+    /// surfaces both the head id and any source-id aliases. Without this,
+    /// a merged-tail user message id would falsely look "no longer queued"
+    /// and the filter above would drop its placeholder mapping.
+    ///
+    /// Isolated under temp `AGENTDESK_ROOT_DIR` because `replace_queue`
+    /// write-throughs the snapshot to disk via the mailbox actor.
+    #[tokio::test]
+    async fn collect_live_queue_message_ids_includes_head_and_source_message_ids() {
+        use crate::services::discord::runtime_store::lock_test_env;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(991_000_000_000_001);
+        let head_msg = MessageId::new(891_000_000_000_001);
+        let merged_tail = MessageId::new(891_000_000_000_002);
+
+        let intervention = Intervention {
+            author_id: UserId::new(2024),
+            message_id: head_msg,
+            // Merged interventions accumulate every source id, including
+            // the head. Only the head reaches the dispatch hand-off, so the
+            // helper MUST also expose the merged-tail id, otherwise the
+            // round-6 filter would prune its placeholder mapping.
+            source_message_ids: vec![head_msg, merged_tail],
+            text: "merged".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: true,
+        };
+
+        // Build a minimal persistence context — mailbox actor requires it
+        // even when the test does not assert on disk side effects.
+        let ctx = QueuePersistenceContext::new(
+            &shared.provider,
+            &shared.token_hash,
+            shared
+                .dispatch_role_overrides
+                .get(&channel_id)
+                .map(|override_id| override_id.value().get()),
+        );
+        shared
+            .mailbox(channel_id)
+            .replace_queue(vec![intervention], ctx)
+            .await;
+
+        let ids = collect_live_queue_message_ids(&shared).await;
+        let channel_ids = ids
+            .get(&channel_id)
+            .expect("live-queue map must contain the channel after enqueue");
+        assert!(
+            channel_ids.contains(&head_msg.get()),
+            "head message id must be in the live-queue set"
+        );
+        assert!(
+            channel_ids.contains(&merged_tail.get()),
+            "merged-tail source id must also be in the live-queue set so its placeholder mapping survives the filter",
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
+    }
+
+    /// codex review round-6 P2 (#1332): when EVERY persisted mapping for a
+    /// channel is stale (no live queue entries), the channel's on-disk
+    /// snapshot file must be removed, not left as an empty array. The
+    /// store's `save_channel_queued_placeholders` deletes empty files so a
+    /// future restart sees no row at all.
+    #[test]
+    fn restored_queued_placeholders_filter_clears_disk_when_all_stale() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+        use std::collections::{HashMap, HashSet};
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "round6_p2_all_stale_hash";
+        let channel_id = ChannelId::new(990_000_000_000_002);
+        let stale_user_msg = MessageId::new(890_000_000_000_010);
+        let stale_card = MessageId::new(790_000_000_000_010);
+
+        let map: dashmap::DashMap<(ChannelId, MessageId), MessageId> = dashmap::DashMap::new();
+        map.insert((channel_id, stale_user_msg), stale_card);
+        queued_placeholders_store::persist_channel_from_map(
+            &map, &provider, token_hash, channel_id,
+        );
+
+        let loaded = queued_placeholders_store::load_queued_placeholders(&provider, token_hash);
+        assert_eq!(loaded.len(), 1);
+
+        // Empty live-queue map → every loaded mapping is stale.
+        let live_queue_ids: HashMap<ChannelId, HashSet<u64>> = HashMap::new();
+        let outcome = filter_restored_queued_placeholders(loaded, &live_queue_ids);
+        assert!(
+            outcome.live.is_empty(),
+            "no mapping survives an empty live queue"
+        );
+        assert_eq!(outcome.stale_count, 1);
+
+        // Replay the bootstrap rewrite with an empty survivors map. The
+        // store helper removes the channel file when the in-memory entries
+        // are empty, so the next load returns nothing for this bot.
+        let post_restart_map: dashmap::DashMap<(ChannelId, MessageId), MessageId> =
+            dashmap::DashMap::new();
+        for stale_channel in &outcome.channels_with_stale {
+            queued_placeholders_store::persist_channel_from_map(
+                &post_restart_map,
+                &provider,
+                token_hash,
+                *stale_channel,
+            );
+        }
+
+        let after = queued_placeholders_store::load_queued_placeholders(&provider, token_hash);
+        assert!(
+            after.is_empty(),
+            "all-stale channel must clear its on-disk file completely",
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
 
     #[test]

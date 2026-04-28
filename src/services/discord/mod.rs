@@ -3995,10 +3995,23 @@ mod tests {
     // belonging to a no-longer-active intervention. The placeholder controller
     // entry tied to the same Discord message id must also be detached so the
     // cap-bounded `entries` map does not retain a stale Queued row.
+    // codex review round-6 P2 (#1332): `apply_queue_exit_feedback` calls
+    // `queue_exit_drain_queued_placeholders`, which now writes through to
+    // disk via `persist_channel_from_map` whenever a mapping is drained.
+    // Wrap the test in `lock_test_env` + a temp `AGENTDESK_ROOT_DIR` so
+    // the write-through lands in a per-test temp directory and cannot
+    // pollute the dev runtime or race a parallel test.
     #[tokio::test]
     async fn queued_placeholders_cleared_on_queue_exit() {
         use super::QueueExitEvent;
         use super::QueueExitKind;
+        use crate::services::discord::runtime_store::lock_test_env;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
         let shared = super::make_shared_data_for_tests();
         let channel_id = ChannelId::new(900_000_000_000_001);
         let user_msg_id = MessageId::new(800_000_000_000_001);
@@ -4028,6 +4041,10 @@ mod tests {
             0,
             "queue-exit feedback must drop the queued placeholder mapping"
         );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
     }
 
     // codex review P2 (#1332 follow-up): the queue-exit drain must report the
@@ -4036,10 +4053,21 @@ mod tests {
     // `apply_queue_exit_feedback` cannot rewrite the visible `📬 메시지 대기 중`
     // text and the user is left looking at a promise for a turn that has
     // been cancelled.
+    // codex review round-6 P2 (#1332): `queue_exit_drain_queued_placeholders`
+    // writes through to disk via `persist_channel_from_map` whenever it
+    // drains at least one mapping. Wrap the test in `lock_test_env` +
+    // temp `AGENTDESK_ROOT_DIR` so the write lands in a per-test sandbox.
     #[tokio::test]
     async fn queue_exit_drain_reports_visible_cards_for_each_kind() {
         use super::QueueExitEvent;
         use super::QueueExitKind;
+        use crate::services::discord::runtime_store::lock_test_env;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
         let shared = super::make_shared_data_for_tests();
         let channel_id = ChannelId::new(910_000_000_000_001);
         let cancelled_msg = MessageId::new(810_000_000_000_001);
@@ -4105,6 +4133,10 @@ mod tests {
         assert!(super::queue_exit_card_body(QueueExitKind::Cancelled).contains("큐에서 제거됨"));
         assert!(super::queue_exit_card_body(QueueExitKind::Expired).contains("큐에서 제거됨"));
         assert!(super::queue_exit_card_body(QueueExitKind::Superseded).contains("큐에서 제거됨"));
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
     }
 
     // codex review P2 (#1332 follow-up): merged interventions accumulate
@@ -4112,10 +4144,21 @@ mod tests {
     // placeholder. When the merged intervention later exits the queue, the
     // drain must clear EVERY source id's mapping in one pass — not just the
     // head id.
+    //
+    // codex review round-6 P2 (#1332): isolated under temp `AGENTDESK_ROOT_DIR`
+    // so the persistence write-through cannot leak into the dev runtime or
+    // race a parallel test.
     #[tokio::test]
     async fn queue_exit_drain_handles_merged_source_ids() {
         use super::QueueExitEvent;
         use super::QueueExitKind;
+        use crate::services::discord::runtime_store::lock_test_env;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
         let shared = super::make_shared_data_for_tests();
         let channel_id = ChannelId::new(920_000_000_000_001);
         let head_msg = MessageId::new(820_000_000_000_001);
@@ -4167,6 +4210,10 @@ mod tests {
             shared.queued_placeholders.is_empty(),
             "every merged source id must be drained from queued_placeholders"
         );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
     }
 
     /// codex review round-3 P1: simulate the dispatch path consuming the
