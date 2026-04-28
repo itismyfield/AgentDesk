@@ -716,6 +716,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: token_hash.clone(),
+        provider: provider.clone(),
         api_port,
         sqlite,
         pg_pool,
@@ -1090,6 +1091,33 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)"
+                            );
+                        }
+
+                        // codex review round-3 P2 (#1332): restore the
+                        // `queued_placeholders` mapping from disk BEFORE
+                        // `kickoff_idle_queues` so the restored mailbox queue
+                        // entries pick up the existing `📬 메시지 대기 중`
+                        // Discord cards instead of stranding them and posting
+                        // duplicate placeholders. Must run before
+                        // `restore_inflight_turns` for symmetry with the
+                        // pending-queue restore (which itself runs first to
+                        // avoid making queued items look "already known").
+                        let restored_queued_placeholders =
+                            super::queued_placeholders_store::load_queued_placeholders(
+                                &provider_for_restore,
+                                &shared_for_tmux2.token_hash,
+                            );
+                        if !restored_queued_placeholders.is_empty() {
+                            let count = restored_queued_placeholders.len();
+                            for (key, placeholder_msg_id) in restored_queued_placeholders {
+                                shared_for_tmux2
+                                    .queued_placeholders
+                                    .insert(key, placeholder_msg_id);
+                            }
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 📋 FLUSH: restored {count} queued-placeholder mapping(s) from disk"
                             );
                         }
 

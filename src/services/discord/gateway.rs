@@ -290,6 +290,7 @@ pub(super) fn drain_merged_queued_placeholders(
     source_message_ids: &[MessageId],
 ) -> Vec<MessageId> {
     let mut to_delete = Vec::new();
+    let mut mutated = false;
     for message_id in source_message_ids {
         if *message_id == head_message_id {
             continue;
@@ -302,7 +303,18 @@ pub(super) fn drain_merged_queued_placeholders(
                 .placeholder_controller
                 .detach_by_message(channel_id, placeholder_msg_id);
             to_delete.push(placeholder_msg_id);
+            mutated = true;
         }
+    }
+    // codex review round-3 P2: persist the write-through after the batch
+    // drain so a restart sees the same state as memory.
+    if mutated {
+        super::queued_placeholders_store::persist_channel_from_map(
+            &shared.queued_placeholders,
+            &shared.provider,
+            &shared.token_hash,
+            channel_id,
+        );
     }
     to_delete
 }

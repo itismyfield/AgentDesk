@@ -1218,6 +1218,7 @@ impl TestHealthHarness {
             cached_serenity_ctx: tokio::sync::OnceCell::new(),
             cached_bot_token: tokio::sync::OnceCell::new(),
             token_hash: super::settings::discord_token_hash("test-token"),
+            provider: provider.clone(),
             api_port: 8791,
             sqlite: None,
             pg_pool: None,

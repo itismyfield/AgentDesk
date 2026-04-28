@@ -2567,10 +2567,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     // additional source ids' Discord cards must be tidied up so the user does
     // not see duplicate `📬` cards left behind for the merged tail.
     let queued_placeholder_handoff = if started {
-        shared
-            .queued_placeholders
-            .remove(&(channel_id, user_msg_id))
-            .map(|(_, msg_id)| msg_id)
+        // Use the write-through helper so the on-disk snapshot stays in sync
+        // with the in-memory map (codex review round-3 P2).
+        shared.remove_queued_placeholder(channel_id, user_msg_id)
     } else {
         None
     };
@@ -2628,10 +2627,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         // a fast dequeue (active turn finishing concurrently) always sees a
         // valid mapping when it picks the intervention up. If the subsequent
         // `ensure_queued` edit fails we roll back the mapping below.
+        //
+        // codex review round-3 P2: also write-through to disk so a dcserver
+        // restart while a foreground turn is queued can re-attach the
+        // restored mailbox queue entry to the same `📬` Discord card.
         if want_queued_card {
-            shared
-                .queued_placeholders
-                .insert((channel_id, user_msg_id), placeholder_msg_id);
+            shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
         }
 
         let enqueue_outcome = super::super::mailbox_enqueue_intervention(
@@ -2668,11 +2669,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         // If the enqueue was rejected (dedup / duplicate) the mapping must
         // not remain — there is no intervention for the dispatch path to
         // pick up. Drop the speculatively-inserted entry to keep
-        // `queued_placeholders` consistent.
+        // `queued_placeholders` consistent (write-through clears disk too).
         if !enqueued && want_queued_card {
-            shared
-                .queued_placeholders
-                .remove(&(channel_id, user_msg_id));
+            shared.remove_queued_placeholder(channel_id, user_msg_id);
         }
 
         // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
@@ -2720,54 +2719,88 @@ pub(in crate::services::discord) async fn handle_text_message(
                 placeholder_msg_id
             );
         } else if enqueued && want_queued_card {
-            let gateway = DiscordGateway::new(
-                ctx.http.clone(),
-                shared.clone(),
-                bot_owner_provider.clone(),
-                None,
-            );
-            let key = super::super::placeholder_controller::PlaceholderKey {
-                provider: bot_owner_provider.clone(),
-                channel_id,
-                message_id: placeholder_msg_id,
-            };
-            let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
-                reason: super::super::formatting::MonitorHandoffReason::Queued,
-                started_at_unix: chrono::Utc::now().timestamp(),
-                tool_summary: None,
-                command_summary: None,
-                context_line: None,
-            };
-            let outcome = shared
-                .placeholder_controller
-                .ensure_queued(&gateway, key, queued_input)
-                .await;
-            use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
-            match outcome {
-                Edited | Coalesced => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 📬 RACE: queued placeholder rendered (channel {}, msg {})",
-                        channel_id,
-                        placeholder_msg_id
-                    );
-                }
-                _ => {
-                    // Edit failed — roll back the mapping and delete the
-                    // raw `...` so the dispatch path never matches a Discord
-                    // message that no longer exists.
-                    shared
-                        .queued_placeholders
-                        .remove(&(channel_id, user_msg_id));
-                    let _ = channel_id
-                        .delete_message(&ctx.http, placeholder_msg_id)
-                        .await;
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ⚠ RACE: queued placeholder render failed, deleted instead (channel {}, msg {})",
-                        channel_id,
-                        placeholder_msg_id
-                    );
+            // codex review round-3 P1: between `mailbox_enqueue_intervention`
+            // and the `ensure_queued` await below, the active turn can finish
+            // and the dispatch path can already have consumed our
+            // `(channel_id, user_msg_id)` mapping — at which point the
+            // placeholder we POSTed has been promoted to the live response
+            // card. Editing it to `📬 메시지 대기 중` (or deleting it on the
+            // fallback branch) would corrupt/erase the active card. Recheck
+            // ownership atomically before each Discord mutation; on mismatch
+            // the consumer now owns the message — exit without rolling back
+            // the mapping.
+            if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔁 RACE: queued placeholder handoff already consumed by dispatch (channel {}, msg {}); skipping render",
+                    channel_id,
+                    placeholder_msg_id
+                );
+            } else {
+                let gateway = DiscordGateway::new(
+                    ctx.http.clone(),
+                    shared.clone(),
+                    bot_owner_provider.clone(),
+                    None,
+                );
+                let key = super::super::placeholder_controller::PlaceholderKey {
+                    provider: bot_owner_provider.clone(),
+                    channel_id,
+                    message_id: placeholder_msg_id,
+                };
+                let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
+                    reason: super::super::formatting::MonitorHandoffReason::Queued,
+                    started_at_unix: chrono::Utc::now().timestamp(),
+                    tool_summary: None,
+                    command_summary: None,
+                    context_line: None,
+                };
+                let outcome = shared
+                    .placeholder_controller
+                    .ensure_queued(&gateway, key, queued_input)
+                    .await;
+                use super::super::placeholder_controller::PlaceholderControllerOutcome::*;
+                match outcome {
+                    Edited | Coalesced => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 📬 RACE: queued placeholder rendered (channel {}, msg {})",
+                            channel_id,
+                            placeholder_msg_id
+                        );
+                    }
+                    _ => {
+                        // Edit failed — roll back the mapping and delete the
+                        // raw `...` so the dispatch path never matches a
+                        // Discord message that no longer exists. Recheck
+                        // ownership one more time before mutating Discord —
+                        // dispatch may have consumed the handoff during the
+                        // `ensure_queued` await above (codex review round-3
+                        // P1).
+                        if shared.queued_placeholder_still_owned(
+                            channel_id,
+                            user_msg_id,
+                            placeholder_msg_id,
+                        ) {
+                            shared.remove_queued_placeholder(channel_id, user_msg_id);
+                            let _ = channel_id
+                                .delete_message(&ctx.http, placeholder_msg_id)
+                                .await;
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ⚠ RACE: queued placeholder render failed, deleted instead (channel {}, msg {})",
+                                channel_id,
+                                placeholder_msg_id
+                            );
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 🔁 RACE: queued placeholder render failed AND handoff already consumed (channel {}, msg {}); leaving Discord state intact",
+                                channel_id,
+                                placeholder_msg_id
+                            );
+                        }
+                    }
                 }
             }
         } else {

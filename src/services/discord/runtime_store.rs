@@ -53,6 +53,15 @@ pub(crate) fn discord_pending_queue_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_pending_queue"))
 }
 
+/// #1332 round-3 codex review P2: per-channel sidecar root for the
+/// `queued_placeholders` mapping. Persisted next to `discord_pending_queue/`
+/// so a dcserver restart can re-attach restored mailbox queue entries to the
+/// existing `📬 메시지 대기 중` Discord card instead of leaking a stale card
+/// and posting a fresh placeholder.
+pub(crate) fn discord_queued_placeholders_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_queued_placeholders"))
+}
+
 pub(super) fn discord_handoff_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_handoff"))
 }
@@ -238,6 +247,10 @@ mod tests {
                 discord_restart_reports_root(),
             ),
             ("discord_pending_queue_root", discord_pending_queue_root()),
+            (
+                "discord_queued_placeholders_root",
+                discord_queued_placeholders_root(),
+            ),
             ("discord_handoff_root", discord_handoff_root()),
             ("shared_agent_memory_root", shared_agent_memory_root()),
             ("last_message_root", last_message_root()),

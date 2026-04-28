@@ -25,6 +25,7 @@ mod placeholder_controller;
 mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
+mod queued_placeholders_store;
 // #1074: landing zone for the future recovery-engine module split
 // (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
 // Named `recovery_paths` to avoid shadowing the existing
@@ -945,6 +946,11 @@ pub(super) struct SharedData {
     /// SHA-256 hash of the bot token — used to namespace the pending-queue directory
     /// so that multiple bots sharing the same runtime root cannot steal each other's queues.
     pub(super) token_hash: String,
+    /// #1332 round-3: the provider this `SharedData` was bootstrapped for.
+    /// Persisted alongside `token_hash` so the `queued_placeholders` write-through
+    /// helper can resolve `discord_queued_placeholders/<provider>/<token_hash>/`
+    /// without a hot-path lock acquisition on `settings`.
+    pub(super) provider: ProviderKind,
     /// HTTP API port for self-referencing requests (from config server.port).
     pub(super) api_port: u16,
     /// Shared DB handle for direct dispatch finalization (avoids HTTP round-trip).
@@ -1051,6 +1057,70 @@ impl SharedData {
             .map(|entry| entry.clone())
             .filter(|users| !users.is_empty())
             .unwrap_or_else(|| vec![UserRecord::new(fallback_user_id, fallback_user_name)])
+    }
+
+    /// #1332 round-3 codex review P2: write-through insert for the
+    /// `queued_placeholders` mapping. Updates the in-memory `DashMap` first
+    /// so the running process keeps its existing read-after-write semantics,
+    /// then snapshots the channel's mappings to disk so a subsequent restart
+    /// can re-attach the restored mailbox queue entries to the same
+    /// `📬 메시지 대기 중` Discord cards.
+    pub(super) fn insert_queued_placeholder(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        placeholder_msg_id: MessageId,
+    ) {
+        self.queued_placeholders
+            .insert((channel_id, user_msg_id), placeholder_msg_id);
+        queued_placeholders_store::persist_channel_from_map(
+            &self.queued_placeholders,
+            &self.provider,
+            &self.token_hash,
+            channel_id,
+        );
+    }
+
+    /// #1332 round-3 codex review P2: write-through remove for the
+    /// `queued_placeholders` mapping. Returns the placeholder message id that
+    /// was removed (if any) so callers can drive the same downstream flow as
+    /// the raw `DashMap::remove`.
+    pub(super) fn remove_queued_placeholder(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+    ) -> Option<MessageId> {
+        let removed = self
+            .queued_placeholders
+            .remove(&(channel_id, user_msg_id))
+            .map(|(_, msg_id)| msg_id);
+        queued_placeholders_store::persist_channel_from_map(
+            &self.queued_placeholders,
+            &self.provider,
+            &self.token_hash,
+            channel_id,
+        );
+        removed
+    }
+
+    /// #1332 round-3 codex review P1: atomic ownership recheck for the
+    /// race-loss render path. After enqueueing the intervention, the active
+    /// turn might finish concurrently and the dispatch path can already have
+    /// consumed our `(channel_id, user_msg_id)` mapping — at which point the
+    /// placeholder we POSTed has been promoted to the live response card.
+    /// Returns `true` only when the mapping still points at our exact
+    /// `placeholder_msg_id`; callers MUST exit gracefully (without editing or
+    /// deleting Discord state) if this returns `false`.
+    pub(super) fn queued_placeholder_still_owned(
+        &self,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        placeholder_msg_id: MessageId,
+    ) -> bool {
+        self.queued_placeholders
+            .get(&(channel_id, user_msg_id))
+            .map(|entry| *entry == placeholder_msg_id)
+            .unwrap_or(false)
     }
 }
 
@@ -1398,6 +1468,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
         token_hash: "test-token-hash".to_string(),
+        provider: ProviderKind::Claude,
         api_port: 9,
         sqlite,
         pg_pool,
@@ -1636,6 +1707,7 @@ fn queue_exit_drain_queued_placeholders(
     queue_exit_events: &[&QueueExitEvent],
 ) -> Vec<(MessageId, QueueExitKind)> {
     let mut visible_cards_to_clear: Vec<(MessageId, QueueExitKind)> = Vec::new();
+    let mut mutated = false;
     for event in queue_exit_events {
         for message_id in &event.intervention.source_message_ids {
             if let Some((_, placeholder_msg_id)) = shared
@@ -1646,8 +1718,21 @@ fn queue_exit_drain_queued_placeholders(
                     .placeholder_controller
                     .detach_by_message(channel_id, placeholder_msg_id);
                 visible_cards_to_clear.push((placeholder_msg_id, event.kind));
+                mutated = true;
             }
         }
+    }
+    // codex review round-3 P2: persist the write-through after the batch
+    // drain so a restart sees the same state as memory (queue-exit cleanup
+    // must clear the on-disk snapshot, otherwise restart would resurrect
+    // mappings for cancelled/expired/superseded interventions).
+    if mutated {
+        queued_placeholders_store::persist_channel_from_map(
+            &shared.queued_placeholders,
+            &shared.provider,
+            &shared.token_hash,
+            channel_id,
+        );
     }
     visible_cards_to_clear
 }
@@ -3969,5 +4054,161 @@ mod tests {
             shared.queued_placeholders.is_empty(),
             "every merged source id must be drained from queued_placeholders"
         );
+    }
+
+    /// codex review round-3 P1: simulate the dispatch path consuming the
+    /// `queued_placeholders` handoff between `mailbox_enqueue_intervention`
+    /// and the race-loss `ensure_queued` call.  The race-loss handler must
+    /// recheck ownership and decline to mutate Discord — otherwise it would
+    /// edit/delete a message that the active turn now uses as its live
+    /// response card.
+    #[test]
+    fn queued_placeholder_ownership_recheck_detects_dispatch_consumption() {
+        // Isolate the round-3 P2 write-through to a tempdir so this test does
+        // not pollute the developer's ~/.adk/release runtime directory when
+        // AGENTDESK_ROOT_DIR is unset.
+        let _lock = crate::services::discord::runtime_store::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(930_000_000_000_001);
+        let user_msg_id = MessageId::new(830_000_000_000_001);
+        let placeholder_msg_id = MessageId::new(730_000_000_000_001);
+
+        // 1) Race-loss handler inserts the mapping after enqueue.
+        shared.insert_queued_placeholder(channel_id, user_msg_id, placeholder_msg_id);
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "fresh insert must report ownership"
+        );
+
+        // 2) Dispatch path picks up the queued turn — the active turn finished
+        //    concurrently and `remove_queued_placeholder` consumes the handoff.
+        let consumed = shared.remove_queued_placeholder(channel_id, user_msg_id);
+        assert_eq!(consumed, Some(placeholder_msg_id));
+
+        // 3) Race-loss handler reaches its `ensure_queued` await — the
+        //    recheck MUST report it no longer owns the message id, so the
+        //    handler bails out without touching Discord.
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "after dispatch consumption, recheck must report no ownership"
+        );
+
+        // 4) An adversarial dispatch could theoretically reinsert a *different*
+        //    placeholder for the same key; the recheck must compare values, not
+        //    just presence, so we never edit a message that belongs to a newer
+        //    turn.
+        let other_placeholder = MessageId::new(730_000_000_000_002);
+        shared.insert_queued_placeholder(channel_id, user_msg_id, other_placeholder);
+        assert!(
+            !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id),
+            "recheck must compare placeholder ids, not just presence"
+        );
+        assert!(
+            shared.queued_placeholder_still_owned(channel_id, user_msg_id, other_placeholder),
+            "recheck succeeds for the new owner's placeholder"
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
+    }
+
+    /// codex review round-3 P2: simulate a dcserver restart while a foreground
+    /// message is queued. After the restart, the freshly-bootstrapped
+    /// `SharedData` must observe the same `(channel_id, user_msg_id) →
+    /// placeholder_msg_id` mapping that was live before the crash so the
+    /// dispatch path can re-attach the restored mailbox queue entry to the
+    /// existing `📬 메시지 대기 중` Discord card.
+    #[test]
+    fn queued_placeholders_persist_across_restart() {
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+
+        const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "round3_p2_restart_hash";
+        let channel_id = ChannelId::new(940_000_000_000_001);
+        let user_msg_id_a = MessageId::new(840_000_000_000_001);
+        let user_msg_id_b = MessageId::new(840_000_000_000_002);
+        let placeholder_a = MessageId::new(740_000_000_000_001);
+        let placeholder_b = MessageId::new(740_000_000_000_002);
+
+        // 1) "Pre-restart" SharedData: insert via the write-through helper so
+        //    the on-disk snapshot mirrors the in-memory map.
+        let pre_restart = super::make_shared_data_for_tests();
+        // The test harness builds SharedData with a fixed token_hash; for this
+        // restart test we want full control over the persistence namespace,
+        // so write directly via the store helper (matching what
+        // `insert_queued_placeholder` does on the real path).
+        pre_restart
+            .queued_placeholders
+            .insert((channel_id, user_msg_id_a), placeholder_a);
+        pre_restart
+            .queued_placeholders
+            .insert((channel_id, user_msg_id_b), placeholder_b);
+        queued_placeholders_store::persist_channel_from_map(
+            &pre_restart.queued_placeholders,
+            &provider,
+            token_hash,
+            channel_id,
+        );
+
+        // 2) Snapshot must land on disk under the bot's namespace.
+        let snapshot_file = tmp
+            .path()
+            .join("runtime")
+            .join("discord_queued_placeholders")
+            .join("claude")
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        assert!(
+            snapshot_file.exists(),
+            "queued-placeholder snapshot must be persisted at {:?}",
+            snapshot_file
+        );
+
+        // 3) "Restart" — drop pre_restart, build a fresh SharedData, load
+        //    from disk (mirrors what runtime_bootstrap does just before
+        //    `kickoff_idle_queues`).
+        drop(pre_restart);
+        let post_restart = super::make_shared_data_for_tests();
+        assert!(
+            post_restart.queued_placeholders.is_empty(),
+            "fresh SharedData must start with an empty map (sanity check)"
+        );
+        let restored = queued_placeholders_store::load_queued_placeholders(&provider, token_hash);
+        for (key, placeholder_msg_id) in restored {
+            post_restart
+                .queued_placeholders
+                .insert(key, placeholder_msg_id);
+        }
+
+        // 4) Both pre-restart mappings are visible to the dispatch path.
+        assert_eq!(post_restart.queued_placeholders.len(), 2);
+        assert_eq!(
+            post_restart
+                .queued_placeholders
+                .get(&(channel_id, user_msg_id_a))
+                .map(|v| *v),
+            Some(placeholder_a)
+        );
+        assert_eq!(
+            post_restart
+                .queued_placeholders
+                .get(&(channel_id, user_msg_id_b))
+                .map(|v| *v),
+            Some(placeholder_b)
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
 }
