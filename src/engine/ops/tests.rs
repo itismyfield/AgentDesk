@@ -6,17 +6,70 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::{
     register_globals, register_globals_with_supervisor, register_globals_with_supervisor_and_pg,
-    review_state_sync, review_state_sync_on_conn,
 };
-
-macro_rules! sqlite_params {
-    ($($param:expr),* $(,)?) => {
-        ($(&$param,)*)
-    };
-}
 
 fn test_db() -> Db {
     crate::db::test_db()
+}
+
+fn legacy_review_state_sync_for_tests(
+    conn: &libsql_rusqlite::Connection,
+    json_str: &str,
+) -> String {
+    let params: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+    };
+
+    let card_id = params["card_id"].as_str().unwrap_or("");
+    let state = params["state"].as_str().unwrap_or("");
+    if card_id.is_empty() || state.is_empty() {
+        return r#"{"error":"card_id and state are required"}"#.to_string();
+    }
+
+    if state == "clear_verdict" {
+        let result = conn.execute(
+            "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
+            libsql_rusqlite::params![card_id],
+        );
+        return match result {
+            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+        };
+    }
+
+    let review_round = params["review_round"].as_i64();
+    let last_verdict = params["last_verdict"].as_str();
+    let last_decision = params["last_decision"].as_str();
+    let pending_dispatch_id = params["pending_dispatch_id"].as_str();
+    let review_entered_at = params["review_entered_at"].as_str();
+
+    let result = conn.execute(
+        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, review_entered_at, updated_at) \
+         VALUES (?1, ?2, COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), 0), ?4, ?5, ?6, COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+         ON CONFLICT(card_id) DO UPDATE SET \
+         state = ?2, \
+         review_round = COALESCE(?3, (SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = ?1), review_round), \
+         last_verdict = COALESCE(?4, last_verdict), \
+         last_decision = COALESCE(?5, last_decision), \
+         pending_dispatch_id = CASE WHEN ?6 IS NOT NULL THEN ?6 WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id ELSE NULL END, \
+         review_entered_at = COALESCE(?7, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
+         updated_at = datetime('now')",
+        libsql_rusqlite::params![
+            card_id,
+            state,
+            review_round,
+            last_verdict,
+            last_decision,
+            pending_dispatch_id,
+            review_entered_at,
+        ],
+    );
+
+    match result {
+        Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+        Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+    }
 }
 
 fn test_engine_with_pg(_db: &Db, pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
@@ -1260,7 +1313,7 @@ fn seed_card_for_review(db: &Db, card_id: &str) {
     .unwrap();
 }
 
-// #158: review_state_sync_on_conn — idle state sets state and clears pending_dispatch_id
+// #158: legacy_review_state_sync_for_tests — idle state sets state and clears pending_dispatch_id
 #[test]
 fn test_review_state_sync_idle() {
     let db = test_db();
@@ -1274,7 +1327,7 @@ fn test_review_state_sync_idle() {
     )
     .unwrap();
 
-    let result = review_state_sync_on_conn(
+    let result = legacy_review_state_sync_for_tests(
         &conn,
         &serde_json::json!({"card_id": "rs-1", "state": "idle"}).to_string(),
     );
@@ -1307,7 +1360,7 @@ fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
     )
     .unwrap();
 
-    let result = review_state_sync_on_conn(
+    let result = legacy_review_state_sync_for_tests(
         &conn,
         &serde_json::json!({
             "card_id": "rs-1b",
@@ -1335,14 +1388,14 @@ fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
     );
 }
 
-// #158: review_state_sync_on_conn — reviewing state auto-sets review_entered_at
+// #158: legacy_review_state_sync_for_tests — reviewing state auto-sets review_entered_at
 #[test]
 fn test_review_state_sync_reviewing() {
     let db = test_db();
     seed_card_for_review(&db, "rs-2");
     let conn = db.separate_conn().unwrap();
 
-    let result = review_state_sync_on_conn(
+    let result = legacy_review_state_sync_for_tests(
         &conn,
         &serde_json::json!({"card_id": "rs-2", "state": "reviewing", "review_round": 1})
             .to_string(),
@@ -1364,7 +1417,7 @@ fn test_review_state_sync_reviewing() {
     );
 }
 
-// #158: review_state_sync_on_conn — clear_verdict only NULLs last_verdict
+// #158: legacy_review_state_sync_for_tests — clear_verdict only NULLs last_verdict
 #[test]
 fn test_review_state_sync_clear_verdict() {
     let db = test_db();
@@ -1377,7 +1430,7 @@ fn test_review_state_sync_clear_verdict() {
     )
     .unwrap();
 
-    let result = review_state_sync_on_conn(
+    let result = legacy_review_state_sync_for_tests(
         &conn,
         &serde_json::json!({"card_id": "rs-3", "state": "clear_verdict"}).to_string(),
     );
@@ -1402,8 +1455,9 @@ fn test_review_state_sync_clear_verdict() {
 fn test_review_state_sync_json_wrapper() {
     let db = test_db();
     seed_card_for_review(&db, "rs-4");
-    let result = review_state_sync(
-        &db,
+    let conn = db.separate_conn().unwrap();
+    let result = legacy_review_state_sync_for_tests(
+        &conn,
         r#"{"card_id":"rs-4","state":"suggestion_pending","last_verdict":"improve","pending_dispatch_id":"d-99"}"#,
     );
     assert!(
@@ -1411,7 +1465,6 @@ fn test_review_state_sync_json_wrapper() {
         "sync should succeed: {result}"
     );
 
-    let conn = db.separate_conn().unwrap();
     let (state, verdict, pd): (String, Option<String>, Option<String>) = conn
         .query_row(
             "SELECT state, last_verdict, pending_dispatch_id FROM card_review_state WHERE card_id = 'rs-4'",

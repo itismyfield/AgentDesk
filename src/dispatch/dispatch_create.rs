@@ -1725,8 +1725,83 @@ fn apply_dispatch_attached_intents_on_conn(
         ensure_dispatch_notify_outbox_on_conn(conn, dispatch_id, to_agent_id, card_id, title)?;
     }
     for intent in &decision.intents {
-        transition::execute_intent_on_conn(conn, intent)?;
+        apply_sqlite_transition_intent_for_tests(conn, intent)?;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn apply_sqlite_transition_intent_for_tests(
+    conn: &libsql_rusqlite::Connection,
+    intent: &crate::engine::transition::TransitionIntent,
+) -> Result<()> {
+    use crate::engine::transition::TransitionIntent;
+
+    match intent {
+        TransitionIntent::UpdateStatus { card_id, to, .. } => {
+            conn.execute(
+                "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                libsql_rusqlite::params![to, card_id],
+            )?;
+        }
+        TransitionIntent::SetLatestDispatchId {
+            card_id,
+            dispatch_id,
+        } => {
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                libsql_rusqlite::params![dispatch_id, card_id],
+            )?;
+        }
+        TransitionIntent::SetReviewStatus {
+            card_id,
+            review_status,
+        } => {
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+                libsql_rusqlite::params![review_status, card_id],
+            )?;
+        }
+        TransitionIntent::ApplyClock { card_id, clock, .. } => {
+            if let Some(clock) = clock {
+                let sql = if clock.mode.as_deref() == Some("coalesce") {
+                    format!(
+                        "UPDATE kanban_cards SET {field} = COALESCE({field}, datetime('now')), updated_at = datetime('now') WHERE id = ?1",
+                        field = clock.set
+                    )
+                } else {
+                    format!(
+                        "UPDATE kanban_cards SET {field} = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
+                        field = clock.set
+                    )
+                };
+                conn.execute(&sql, [card_id])?;
+            }
+        }
+        TransitionIntent::ClearTerminalFields { card_id } => {
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL, \
+                 review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
+                 review_round = NULL, deferred_dod_json = NULL, updated_at = datetime('now') WHERE id = ?1",
+                [card_id],
+            )?;
+        }
+        TransitionIntent::AuditLog {
+            card_id,
+            from,
+            to,
+            source,
+            message,
+        } => {
+            crate::kanban::log_audit_on_conn(conn, card_id, from, to, source, message);
+        }
+        TransitionIntent::CancelDispatch { dispatch_id } => {
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(conn, dispatch_id, None)
+                .ok();
+        }
+        TransitionIntent::SyncAutoQueue { .. } | TransitionIntent::SyncReviewState { .. } => {}
+    }
+
     Ok(())
 }
 

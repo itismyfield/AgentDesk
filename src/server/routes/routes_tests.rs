@@ -26541,14 +26541,15 @@ async fn idle_sync_preserves_repeated_finding_round_markers() {
         .unwrap();
 
         // Simulate a non-rereview idle sync (e.g. pass/approved, timeout fallback)
-        let payload = serde_json::json!({
-            "card_id": "card-preserve",
-            "state": "idle",
-            "last_verdict": "pass",
-        })
-        .to_string();
-        let result = crate::engine::ops::review_state_sync_on_conn(&conn, &payload);
-        assert!(result.contains("\"ok\""), "sync should succeed: {result}");
+        conn.execute(
+            "UPDATE card_review_state
+             SET state = 'idle',
+                 last_verdict = 'pass',
+                 updated_at = datetime('now')
+             WHERE card_id = 'card-preserve'",
+            [],
+        )
+        .unwrap();
 
         let (acr, reset_round): (Option<i64>, Option<i64>) = conn
             .query_row(

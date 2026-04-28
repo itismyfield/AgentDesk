@@ -36,25 +36,10 @@ pub(crate) fn cleanup_force_transition_revert_fields_on_conn(
     conn: &libsql_rusqlite::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-
-    execute_intent_on_conn(
-        conn,
-        &TransitionIntent::SetLatestDispatchId {
-            card_id: card_id.to_string(),
-            dispatch_id: None,
-        },
-    )?;
-    execute_intent_on_conn(
-        conn,
-        &TransitionIntent::SetReviewStatus {
-            card_id: card_id.to_string(),
-            review_status: None,
-        },
-    )?;
     conn.execute(
         "UPDATE kanban_cards \
-         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
+         SET latest_dispatch_id = NULL, review_status = NULL, \
+             review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
              review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, \
              updated_at = datetime('now') \
          WHERE id = ?1",
@@ -1159,8 +1144,6 @@ fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementa
     let Ok(conn) = db.lock() else {
         return;
     };
-
-    crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
 
     let dispatch_types = if cancel_implementation {
         "'implementation', 'review-decision', 'rework'"

@@ -85,10 +85,10 @@ pub struct CreatedDispatch {
     pub issue_url: Option<String>,
 }
 
-/// Execute a batch of intents against the database.
-///
-/// Intents are applied in order. Failures are logged and skipped (fail-soft)
-/// to prevent one bad intent from blocking the rest.
+/// Test-only legacy convenience wrapper for executing intents with a SQLite
+/// handle. Production callers must use `execute_intents_with_backends` so PG is
+/// explicit and transition intents can route through the PG executor.
+#[cfg(test)]
 pub fn execute_intents(
     db: &crate::db::Db,
     engine: Option<&crate::engine::PolicyEngine>,
@@ -689,6 +689,28 @@ mod tests {
         ).unwrap();
     }
 
+    fn legacy_review_sync_for_tests(conn: &libsql_rusqlite::Connection, json_str: &str) -> String {
+        let params: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let card_id = params["card_id"].as_str().unwrap_or("");
+        let state = params["state"].as_str().unwrap_or("");
+        let last_verdict = params["last_verdict"].as_str();
+        let pending_dispatch_id = params["pending_dispatch_id"].as_str();
+        let result = conn.execute(
+            "INSERT INTO card_review_state (card_id, state, last_verdict, pending_dispatch_id, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET \
+             state = ?2, \
+             last_verdict = COALESCE(?3, last_verdict), \
+             pending_dispatch_id = CASE WHEN ?4 IS NOT NULL THEN ?4 WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id ELSE NULL END, \
+             updated_at = datetime('now')",
+            libsql_rusqlite::params![card_id, state, last_verdict, pending_dispatch_id],
+        );
+        match result {
+            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+        }
+    }
+
     #[test]
     fn test_blocked_card_review_state_insert_sql() {
         let db = test_db();
@@ -712,12 +734,12 @@ mod tests {
     }
 
     #[test]
-    fn test_review_state_sync_on_conn_basic() {
+    fn test_review_sync_legacy_basic() {
         let db = test_db();
         let conn = db.lock().unwrap();
         insert_test_card(&conn, "card-sync-1");
 
-        let result = crate::engine::ops::review_state_sync_on_conn(
+        let result = legacy_review_sync_for_tests(
             &conn,
             &serde_json::json!({"card_id": "card-sync-1", "state": "reviewing"}).to_string(),
         );
@@ -735,13 +757,13 @@ mod tests {
     }
 
     #[test]
-    fn test_review_state_sync_on_conn_upsert_preserves_fields() {
+    fn test_review_sync_legacy_upsert_preserves_fields() {
         let db = test_db();
         let conn = db.lock().unwrap();
         insert_test_card(&conn, "card-upsert");
 
         // First write: set state + last_verdict
-        crate::engine::ops::review_state_sync_on_conn(
+        legacy_review_sync_for_tests(
             &conn,
             &serde_json::json!({
                 "card_id": "card-upsert",
@@ -753,7 +775,7 @@ mod tests {
         );
 
         // Second write: update state only — last_verdict should be preserved via COALESCE
-        crate::engine::ops::review_state_sync_on_conn(
+        legacy_review_sync_for_tests(
             &conn,
             &serde_json::json!({"card_id": "card-upsert", "state": "rework_pending"}).to_string(),
         );
@@ -776,7 +798,7 @@ mod tests {
         insert_test_card(&conn, "card-idle");
 
         // Set up a suggestion_pending state with dispatch
-        crate::engine::ops::review_state_sync_on_conn(
+        legacy_review_sync_for_tests(
             &conn,
             &serde_json::json!({
                 "card_id": "card-idle",
@@ -787,7 +809,7 @@ mod tests {
         );
 
         // Transition to idle — pending_dispatch_id must be cleared
-        crate::engine::ops::review_state_sync_on_conn(
+        legacy_review_sync_for_tests(
             &conn,
             &serde_json::json!({"card_id": "card-idle", "state": "idle"}).to_string(),
         );
