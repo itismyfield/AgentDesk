@@ -137,11 +137,24 @@ pub fn canary_promotion_evidence(
         canary_active_since(state),
     )?;
 
-    Ok(serde_json::to_string(&json!({
-        "operator_evidence": operator_evidence,
-        "canary_launch": canary_launch,
-    }))
-    .unwrap_or_else(|_| operator_evidence.to_string()))
+    match canary_launch {
+        Some(launch) => Ok(serde_json::to_string(&json!({
+            "operator_evidence": operator_evidence,
+            "canary_launch": launch,
+        }))
+        .unwrap_or_else(|_| operator_evidence.to_string())),
+        None => {
+            eprintln!(
+                "WARNING: no candidate launch artifact recorded for {}/{} after canary activation — proceeding without canary verification (possible quota exhaustion)",
+                state.provider, agent_id
+            );
+            Ok(serde_json::to_string(&json!({
+                "operator_evidence": operator_evidence,
+                "warning": "no canary turn recorded; proceeding without canary verification (possible quota exhaustion)",
+            }))
+            .unwrap_or_else(|_| operator_evidence.to_string()))
+        }
+    }
 }
 
 fn canary_active_since(state: &ProviderCliMigrationState) -> chrono::DateTime<chrono::Utc> {

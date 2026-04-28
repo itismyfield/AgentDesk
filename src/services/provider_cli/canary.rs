@@ -61,17 +61,18 @@ pub fn canary_evidence(agent_id: &str, channel: &ProviderCliChannel) -> HashMap<
 /// Returns the most recent candidate launch artifact for the given agent recorded after
 /// `not_before`, verifying path and version match the registered candidate channel.
 ///
-/// Always returns `Err` when no qualifying artifact exists — "agent was never launched"
-/// does NOT exempt from canary runtime validation; it only means the session guard need
-/// not protect an existing session.
+/// Returns `Ok(None)` when no qualifying artifact exists — this allows promotion to proceed
+/// with a warning (e.g. when quota exhaustion prevented a canary turn from running).
+/// Returns `Err` only on version/path mismatch against the registered candidate channel.
 pub fn verified_candidate_launch_artifact(
     root: &Path,
     provider: &str,
     agent_id: &str,
     candidate: &ProviderCliChannel,
     not_before: DateTime<Utc>,
-) -> Result<LaunchArtifact, String> {
+) -> Result<Option<LaunchArtifact>, String> {
     let mut candidates: Vec<_> = load_launch_artifacts(root, provider)
+        .map_err(|error| format!("failed to load launch artifacts for {provider}: {error}"))?
         .into_iter()
         .filter(|artifact| {
             artifact.agent_id.as_deref() == Some(agent_id)
@@ -82,9 +83,7 @@ pub fn verified_candidate_launch_artifact(
     candidates.sort_by_key(|artifact| artifact.launched_at);
 
     let Some(artifact) = candidates.pop() else {
-        return Err(format!(
-            "no candidate launch artifact recorded for {provider}/{agent_id} after canary activation; run a canary turn before promotion"
-        ));
+        return Ok(None);
     };
 
     if artifact.canonical_path != candidate.canonical_path
@@ -95,7 +94,7 @@ pub fn verified_candidate_launch_artifact(
         ));
     }
 
-    Ok(artifact)
+    Ok(Some(artifact))
 }
 
 #[cfg(test)]
@@ -162,8 +161,8 @@ mod tests {
     }
 
     #[test]
-    fn verified_artifact_errors_when_agent_never_launched() {
-        // "No prior launch" exempts from session guard but NOT from canary proof.
+    fn verified_artifact_returns_none_when_agent_never_launched() {
+        // No launch artifact exists — returns Ok(None) so caller can warn and proceed.
         let root = tempfile::tempdir().unwrap();
         let candidate = candidate_channel("/tmp/codex", "1.0.0");
         let result = verified_candidate_launch_artifact(
@@ -173,16 +172,12 @@ mod tests {
             &candidate,
             Utc::now() - chrono::Duration::seconds(60),
         );
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("run a canary turn before promotion")
-        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
-    fn verified_artifact_errors_when_launched_but_canary_turn_skipped() {
+    fn verified_artifact_returns_none_when_launched_but_canary_turn_skipped() {
         let root = tempfile::tempdir().unwrap();
         // Agent has a pre-migration artifact on the current channel
         crate::services::provider_cli::io::save_launch_artifact(
@@ -211,11 +206,35 @@ mod tests {
             &candidate,
             Utc::now() - chrono::Duration::seconds(60),
         );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn verified_artifact_fails_when_launch_artifact_is_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let artifact_dir = crate::services::provider_cli::paths::launch_artifacts_dir(root.path());
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(
+            artifact_dir.join("corrupt.json"),
+            r#"{"provider":"codex","agent_id":123}"#,
+        )
+        .unwrap();
+
+        let candidate = candidate_channel("/tmp/codex", "1.0.0");
+        let result = verified_candidate_launch_artifact(
+            root.path(),
+            "codex",
+            "codex-agent",
+            &candidate,
+            Utc::now() - chrono::Duration::seconds(60),
+        );
+
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
-                .contains("run a canary turn before promotion")
+                .contains("failed to load launch artifacts")
         );
     }
 }

@@ -93,6 +93,8 @@ struct LegacyBotEntry {
     allow_all_users: Option<bool>,
     allowed_bot_ids: Option<Vec<u64>>,
     channel_model_overrides: BTreeMap<String, String>,
+    channel_fast_modes: BTreeMap<String, bool>,
+    channel_fast_mode_reset_pending: BTreeSet<String>,
 }
 
 impl ConfigAuditReport {
@@ -419,13 +421,30 @@ fn audit_bot_settings(
 
     for (entry_key, entry_value) in obj {
         let legacy = parse_legacy_bot_entry(entry_key, entry_value);
-        if !legacy.channel_model_overrides.is_empty() {
-            runtime_only_entries.insert(
-                legacy.hash_key.clone(),
-                serde_json::json!({
-                    "channel_model_overrides": legacy.channel_model_overrides,
-                }),
-            );
+        if !legacy.channel_model_overrides.is_empty()
+            || !legacy.channel_fast_modes.is_empty()
+            || !legacy.channel_fast_mode_reset_pending.is_empty()
+        {
+            let mut runtime_entry = Map::new();
+            if !legacy.channel_model_overrides.is_empty() {
+                runtime_entry.insert(
+                    "channel_model_overrides".to_string(),
+                    serde_json::json!(legacy.channel_model_overrides),
+                );
+            }
+            if !legacy.channel_fast_modes.is_empty() {
+                runtime_entry.insert(
+                    "channel_fast_modes".to_string(),
+                    serde_json::json!(legacy.channel_fast_modes),
+                );
+            }
+            if !legacy.channel_fast_mode_reset_pending.is_empty() {
+                runtime_entry.insert(
+                    "channel_fast_mode_reset_pending".to_string(),
+                    serde_json::json!(legacy.channel_fast_mode_reset_pending),
+                );
+            }
+            runtime_only_entries.insert(legacy.hash_key.clone(), Value::Object(runtime_entry));
         }
 
         if !legacy.has_migratable_fields() {
@@ -564,7 +583,7 @@ fn audit_bot_settings(
         }
     } else if saw_migratable_data || saw_runtime_rewrite {
         report.actions.push(format!(
-            "{} '{}' to runtime-only channel_model_overrides entries",
+            "{} '{}' to runtime-only channel settings entries",
             if dry_run { "would rewrite" } else { "rewrote" },
             path.display()
         ));
@@ -785,6 +804,32 @@ fn parse_legacy_bot_entry(entry_key: &str, entry_value: &Value) -> LegacyBotEntr
                             .map(|model| (channel_id.clone(), model.to_string()))
                     })
                     .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default(),
+        channel_fast_modes: entry_value
+            .get("channel_fast_modes")
+            .and_then(Value::as_object)
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(channel_id, enabled)| {
+                        enabled
+                            .as_bool()
+                            .map(|enabled| (channel_id.clone(), enabled))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default(),
+        channel_fast_mode_reset_pending: entry_value
+            .get("channel_fast_mode_reset_pending")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default(),
     }
@@ -1154,7 +1199,14 @@ discord:
                     "allow_all_users": true,
                     "channel_model_overrides": {
                         "789": "gpt-5.4"
-                    }
+                    },
+                    "channel_fast_modes": {
+                        "789": true,
+                        "790": false
+                    },
+                    "channel_fast_mode_reset_pending": [
+                        "codex:789"
+                    ]
                 }
             }))
             .unwrap(),
@@ -1195,6 +1247,12 @@ discord:
         assert_eq!(
             rewritten[&hash_key]["channel_model_overrides"]["789"],
             "gpt-5.4"
+        );
+        assert_eq!(rewritten[&hash_key]["channel_fast_modes"]["789"], true);
+        assert_eq!(rewritten[&hash_key]["channel_fast_modes"]["790"], false);
+        assert_eq!(
+            rewritten[&hash_key]["channel_fast_mode_reset_pending"],
+            serde_json::json!(["codex:789"])
         );
 
         unsafe {

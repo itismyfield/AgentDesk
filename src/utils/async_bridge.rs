@@ -20,6 +20,22 @@ fn build_runtime<E>(map_runtime_error: impl Fn(String) -> E) -> Result<tokio::ru
         .map_err(|error| map_runtime_error(format!("tokio runtime: {error}")))
 }
 
+fn block_on_runtime_thread<F, T, E, M>(future: F, map_runtime_error: M) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    M: Fn(String) -> E + Copy + Send + 'static,
+{
+    match std::thread::spawn(move || build_runtime(map_runtime_error)?.block_on(future)).join() {
+        Ok(result) => result,
+        Err(payload) => Err(map_runtime_error(format!(
+            "tokio bridge thread panicked: {}",
+            panic_payload_to_string(payload.as_ref())
+        ))),
+    }
+}
+
 async fn build_bridge_pg_pool<E>(
     source_pool: &PgPool,
     map_runtime_error: impl Fn(String) -> E,
@@ -43,22 +59,17 @@ where
     M: Fn(String) -> E + Copy + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if tokio::task::try_id().is_none() {
+            return block_on_runtime_thread(future, map_runtime_error);
+        }
         return match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| handle.block_on(future))
             }
             tokio::runtime::RuntimeFlavor::CurrentThread => {
-                match std::thread::spawn(move || build_runtime(map_runtime_error)?.block_on(future))
-                    .join()
-                {
-                    Ok(result) => result,
-                    Err(payload) => Err(map_runtime_error(format!(
-                        "tokio bridge thread panicked: {}",
-                        panic_payload_to_string(payload.as_ref())
-                    ))),
-                }
+                block_on_runtime_thread(future, map_runtime_error)
             }
-            _ => build_runtime(map_runtime_error)?.block_on(future),
+            _ => block_on_runtime_thread(future, map_runtime_error),
         };
     }
 
@@ -78,6 +89,9 @@ where
     B: FnOnce(PgPool) -> F + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if tokio::task::try_id().is_none() {
+            return run_pg_bridge_thread(pool, future_factory, map_runtime_error);
+        }
         return match handle.runtime_flavor() {
             tokio::runtime::RuntimeFlavor::MultiThread => {
                 let pool = pool.clone();

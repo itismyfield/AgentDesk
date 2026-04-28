@@ -193,6 +193,9 @@ pub struct ProviderCliUpdateStrategy {
     /// True when upgrade overwrites the binary at the same canonical path.
     /// Requires previous binary to be preserved BEFORE running the upgrade.
     pub mutates_in_place: bool,
+    /// True when the package manager is expected to move the canonical binary
+    /// path during upgrade while the previous binary still needs preservation.
+    pub allow_candidate_path_change: bool,
 }
 
 pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
@@ -202,6 +205,7 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
         command_argv: &["npm", "install", "-g", "@openai/codex"],
         expected_binary_name: "codex",
         mutates_in_place: true,
+        allow_candidate_path_change: false,
     },
     ProviderCliUpdateStrategy {
         provider: "claude",
@@ -209,6 +213,7 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
         command_argv: &["npm", "install", "-g", "@anthropic-ai/claude-code"],
         expected_binary_name: "claude",
         mutates_in_place: true,
+        allow_candidate_path_change: false,
     },
     ProviderCliUpdateStrategy {
         provider: "gemini",
@@ -216,6 +221,15 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
         command_argv: &["npm", "install", "-g", "@google/gemini-cli"],
         expected_binary_name: "gemini",
         mutates_in_place: true,
+        allow_candidate_path_change: false,
+    },
+    ProviderCliUpdateStrategy {
+        provider: "opencode",
+        install_source: "npm-global",
+        command_argv: &["npm", "install", "-g", "opencode-ai"],
+        expected_binary_name: "opencode",
+        mutates_in_place: true,
+        allow_candidate_path_change: false,
     },
     ProviderCliUpdateStrategy {
         provider: "qwen",
@@ -223,6 +237,7 @@ pub const PROVIDER_UPDATE_STRATEGIES: &[ProviderCliUpdateStrategy] = &[
         command_argv: &["pip", "install", "--user", "--upgrade", "qwen-cli"],
         expected_binary_name: "qwen",
         mutates_in_place: true,
+        allow_candidate_path_change: true,
     },
 ];
 

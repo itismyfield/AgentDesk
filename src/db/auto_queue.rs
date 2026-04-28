@@ -2316,6 +2316,14 @@ pub async fn record_consultation_dispatch_on_pg(
         },
     )
     .await?;
+    if !entry_result.changed {
+        tx.rollback().await.map_err(|error| {
+            format!("rollback stale postgres consultation dispatch entry {entry_id}: {error}")
+        })?;
+        return Err(format!(
+            "stale postgres consultation dispatch entry {entry_id}: status update was not applied"
+        ));
+    }
 
     tx.commit()
         .await
@@ -3855,6 +3863,22 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     .await
     .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))?;
     if remaining > 0 {
+        return Ok(false);
+    }
+
+    let user_cancelled = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status = 'user_cancelled'",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("count user-cancelled auto-queue entries for run {run_id}: {error}")
+    })?;
+    if user_cancelled > 0 {
         return Ok(false);
     }
 

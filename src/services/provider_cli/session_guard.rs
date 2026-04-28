@@ -54,7 +54,17 @@ pub fn evaluate_session_migration_guards(
     target_agent_ids: &[String],
     target_channel: &str,
 ) -> SessionGuardEvaluation {
-    let artifacts = load_launch_artifacts(root, provider);
+    let artifacts = match load_launch_artifacts(root, provider) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            return SessionGuardEvaluation {
+                provider: provider.to_string(),
+                target_channel: target_channel.to_string(),
+                guards: Vec::new(),
+                blockers: vec![format!("failed to load launch artifacts: {error}")],
+            };
+        }
+    };
     let mut agents: HashSet<String> = target_agent_ids.iter().cloned().collect();
     if agents.is_empty() {
         agents.extend(
@@ -65,7 +75,7 @@ pub fn evaluate_session_migration_guards(
     }
 
     let mut guards = Vec::new();
-    let mut blockers = Vec::new();
+    let blockers = Vec::new();
 
     for agent_id in agents {
         let agent_artifacts = artifacts_for_agent(&artifacts, &agent_id);
@@ -280,6 +290,33 @@ mod tests {
         assert!(evaluation.is_clear());
         assert_eq!(evaluation.guards.len(), 2);
         assert!(evaluation.blockers.is_empty());
+    }
+
+    #[test]
+    fn guard_blocks_when_launch_artifacts_are_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let artifact_dir = crate::services::provider_cli::paths::launch_artifacts_dir(root.path());
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(
+            artifact_dir.join("corrupt.json"),
+            r#"{"provider":"codex","agent_id":123}"#,
+        )
+        .unwrap();
+
+        let evaluation = evaluate_session_migration_guards(
+            root.path(),
+            "codex",
+            &["codex-agent".to_string()],
+            "candidate",
+        );
+
+        assert!(!evaluation.is_clear());
+        assert!(evaluation.guards.is_empty());
+        assert!(
+            evaluation.blockers[0]
+                .as_str()
+                .contains("failed to load launch artifacts")
+        );
     }
 
     #[test]

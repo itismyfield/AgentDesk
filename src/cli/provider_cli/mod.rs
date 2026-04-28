@@ -235,10 +235,14 @@ fn cmd_status(provider: Option<&str>, json_output: bool) -> Result<(), String> {
         let mut output = Vec::new();
         for p in filter {
             let channels = registry.providers.get(p);
+            let live_current = channels
+                .and_then(|c| c.current.as_ref())
+                .cloned()
+                .or_else(|| snapshot_current_channel(p));
             let migration = load_migration_state(&root, p).ok().flatten();
             output.push(json!({
                 "provider": p,
-                "current": channels.and_then(|c| c.current.as_ref()).map(|ch| &ch.version),
+                "current": live_current.as_ref().map(|ch| ch.version.clone()),
                 "candidate": channels.and_then(|c| c.candidate.as_ref()).map(|ch| &ch.version),
                 "previous": channels.and_then(|c| c.previous.as_ref()).map(|ch| &ch.version),
                 "migration_state": migration.as_ref().map(|m| format!("{:?}", m.state)),
@@ -254,13 +258,15 @@ fn cmd_status(provider: Option<&str>, json_output: bool) -> Result<(), String> {
     let mut rows: Vec<[String; 5]> = Vec::new();
     for p in filter {
         let channels = registry.providers.get(p);
+        let live_current = channels
+            .and_then(|c| c.current.as_ref())
+            .cloned()
+            .or_else(|| snapshot_current_channel(p));
         let migration = load_migration_state(&root, p).ok().flatten();
         let state_str = migration.as_ref().map(|m| format!("{:?}", m.state));
         rows.push([
             p.to_string(),
-            d(channels
-                .and_then(|c| c.current.as_ref())
-                .map(|ch| ch.version.as_str())),
+            d(live_current.as_ref().map(|ch| ch.version.as_str())),
             d(channels
                 .and_then(|c| c.candidate.as_ref())
                 .map(|ch| ch.version.as_str())),
@@ -319,6 +325,7 @@ fn cmd_plan(provider: &str) -> Result<(), String> {
             "install_source": strategy.install_source,
             "command": strategy.command_argv,
             "mutates_in_place": strategy.mutates_in_place,
+            "allow_candidate_path_change": strategy.allow_candidate_path_change,
         },
         "current_version": snapshot.as_ref().map(|ch| &ch.version),
         "current_path": snapshot.as_ref().map(|ch| &ch.canonical_path),
@@ -728,7 +735,8 @@ fn should_reuse_migration_state(state: &ProviderCliMigrationState) -> bool {
 }
 
 /// Full migration orchestration: runs through the state machine up to
-/// `CanaryActive`. Promotion requires a recorded candidate canary launch.
+/// `CanaryActive`. Promotion verifies a recorded candidate canary launch when
+/// present, or records a warning when no launch artifact exists.
 fn cmd_run(
     provider: &str,
     candidate_path: Option<&str>,
@@ -773,15 +781,27 @@ fn cmd_run(
         )?;
         advance_to(&mut state, MigrationState::UpgradePlanned, None)?;
         advance_to(&mut state, MigrationState::UpgradeSucceeded, None)?;
-        crate::services::provider_cli::registry::ProviderCliChannel {
-            path: path.to_string(),
-            canonical_path: path.to_string(),
-            version: "manual".to_string(),
-            version_output: None,
-            source: "manual_override".to_string(),
-            checked_at: chrono::Utc::now(),
-            evidence: Default::default(),
-        }
+        let canonical = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string());
+        snapshot_current_channel(provider)
+            .map(|mut ch| {
+                ch.path = path.to_string();
+                ch.canonical_path = canonical.clone();
+                ch.source = "manual_override".to_string();
+                ch
+            })
+            .unwrap_or_else(
+                || crate::services::provider_cli::registry::ProviderCliChannel {
+                    path: path.to_string(),
+                    canonical_path: canonical,
+                    version: "unknown".to_string(),
+                    version_output: None,
+                    source: "manual_override".to_string(),
+                    checked_at: chrono::Utc::now(),
+                    evidence: Default::default(),
+                },
+            )
     } else if skip_upgrade {
         advance_to(
             &mut state,
@@ -933,7 +953,7 @@ fn cmd_resume(provider: &str, skip_confirm: bool) -> Result<(), String> {
             if skip_confirm {
                 cmd_promote(
                     provider,
-                    Some("resumed with --skip-confirm after verified canary"),
+                    Some("resumed with --skip-confirm after canary decision"),
                 )
             } else {
                 eprintln!(
@@ -1327,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_from_canary_active_requires_verified_candidate_launch() {
+    fn promote_from_canary_active_warns_when_candidate_launch_missing() {
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
 
@@ -1356,14 +1376,14 @@ mod tests {
             "codex".to_string(),
             ProviderChannels {
                 current: Some(current.clone()),
-                candidate: Some(candidate),
+                candidate: Some(candidate.clone()),
                 ..Default::default()
             },
         );
         save_registry(dir.path(), &registry).unwrap();
 
-        // Agent was previously launched (pre-migration artifact) so a canary turn IS required.
-        // Without a candidate artifact after canary activation, promote must fail.
+        // A missing post-activation candidate launch now records warning evidence but does not
+        // block promotion; this covers quota-exhausted canary turns.
         crate::services::provider_cli::io::save_launch_artifact(
             dir.path(),
             &LaunchArtifact {
@@ -1387,10 +1407,10 @@ mod tests {
         let registry = load_registry(dir.path()).unwrap().unwrap();
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
 
-        assert!(result.is_err());
-        assert_eq!(state.state, MigrationState::CanaryActive);
+        assert!(result.is_ok());
+        assert_eq!(state.state, MigrationState::ProviderAgentsMigrated);
         let channels = registry.providers.get("codex").unwrap();
-        assert_eq!(channels.current.as_ref(), Some(&current));
+        assert_eq!(channels.current.as_ref(), Some(&candidate));
     }
 
     #[test]

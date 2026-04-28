@@ -5,6 +5,11 @@ use super::registry::{
     LaunchArtifact, ProviderCliMigrationState, ProviderCliRegistry, SmokeResult,
 };
 
+#[derive(serde::Deserialize)]
+struct LaunchArtifactProviderHint {
+    provider: String,
+}
+
 #[derive(Debug)]
 pub enum IoError {
     Io(std::io::Error),
@@ -88,18 +93,85 @@ pub fn load_launch_artifact(
     read_json(&paths::launch_artifact_path(root, session_key))
 }
 
-pub fn load_launch_artifacts(root: &Path, provider: &str) -> Vec<LaunchArtifact> {
+pub fn load_launch_artifacts(root: &Path, provider: &str) -> Result<Vec<LaunchArtifact>, IoError> {
     let dir = paths::launch_artifacts_dir(root);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
     };
 
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|content| serde_json::from_str::<LaunchArtifact>(&content).ok())
-        .filter(|artifact| artifact.provider == provider)
-        .collect()
+    let mut artifacts = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                let path_provider = launch_artifact_provider_hint_from_path(&path);
+                if path_provider
+                    .as_deref()
+                    .is_some_and(|value| value != provider)
+                {
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
+        if launch_artifact_provider_hint(&content)
+            .as_deref()
+            .is_some_and(|value| value != provider)
+        {
+            continue;
+        }
+        let artifact: LaunchArtifact = serde_json::from_str(&content)?;
+        if artifact.provider == provider {
+            artifacts.push(artifact);
+        }
+    }
+    Ok(artifacts)
+}
+
+fn launch_artifact_provider_hint_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    ["codex", "claude", "gemini", "opencode", "qwen"]
+        .into_iter()
+        .find(|provider| stem.starts_with(&format!("{provider}-")))
+        .map(str::to_string)
+}
+
+fn launch_artifact_provider_hint(content: &str) -> Option<String> {
+    serde_json::from_str::<LaunchArtifactProviderHint>(content)
+        .map(|hint| hint.provider)
+        .ok()
+        .or_else(|| launch_artifact_provider_hint_from_malformed_json(content))
+}
+
+fn launch_artifact_provider_hint_from_malformed_json(content: &str) -> Option<String> {
+    // `provider` is the first serialized field for launch artifacts, so partially written
+    // artifacts usually still expose enough context to scope parse failures to one provider.
+    let (_, after_key) = content.split_once("\"provider\"")?;
+    let (_, after_colon) = after_key.split_once(':')?;
+    let start = after_colon.find('"')?;
+    let candidate = &after_colon[start..];
+    let mut escaped = false;
+
+    for (index, ch) in candidate.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return serde_json::from_str::<String>(&candidate[..=index]).ok(),
+            _ => {}
+        }
+    }
+
+    None
 }
 
 // ── Smoke result ──────────────────────────────────────────────────────────────
@@ -122,7 +194,24 @@ pub fn load_smoke_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::provider_cli::registry::ProviderCliRegistry;
+    use crate::services::provider_cli::registry::{LaunchArtifact, ProviderCliRegistry};
+    use chrono::Utc;
+
+    fn launch_artifact(provider: &str, session_key: &str) -> LaunchArtifact {
+        LaunchArtifact {
+            provider: provider.to_string(),
+            agent_id: Some(format!("{provider}-agent")),
+            channel_id: Some("123".to_string()),
+            session_key: Some(session_key.to_string()),
+            channel: "candidate".to_string(),
+            cli_path: format!("/tmp/{provider}"),
+            canonical_path: format!("/tmp/{provider}"),
+            cli_version: "test".to_string(),
+            process_id: None,
+            tmux_session: None,
+            launched_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn registry_round_trip() {
@@ -161,5 +250,95 @@ mod tests {
         save_migration_state(dir.path(), &state).unwrap();
         let loaded = load_migration_state(dir.path(), "codex").unwrap().unwrap();
         assert_eq!(loaded.provider, "codex");
+    }
+
+    #[test]
+    fn load_launch_artifacts_skips_corrupt_artifact_for_other_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        std::fs::write(
+            launch_dir.join("qwen-corrupt.json"),
+            r#"{"provider":"qwen","agent_id":123}"#,
+        )
+        .unwrap();
+
+        let artifacts = load_launch_artifacts(dir.path(), "codex").unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn load_launch_artifacts_fails_corrupt_artifact_for_requested_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        std::fs::write(
+            launch_dir.join("codex-corrupt.json"),
+            r#"{"provider":"codex","agent_id":123}"#,
+        )
+        .unwrap();
+
+        let result = load_launch_artifacts(dir.path(), "codex");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_launch_artifacts_validates_provider_by_content_before_filename_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        let artifact = launch_artifact("codex", "qwen-prefixed-codex-session");
+        std::fs::write(
+            launch_dir.join("qwen-prefixed-codex-session.json"),
+            serde_json::to_string(&artifact).unwrap(),
+        )
+        .unwrap();
+
+        let artifacts = load_launch_artifacts(dir.path(), "codex").unwrap();
+
+        assert_eq!(artifacts, vec![artifact]);
+    }
+
+    #[test]
+    fn load_launch_artifacts_fails_corrupt_artifact_without_parseable_provider_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(&launch_dir).unwrap();
+        std::fs::write(launch_dir.join("codex-corrupt-no-provider-hint.json"), "{}").unwrap();
+
+        let result = load_launch_artifacts(dir.path(), "codex");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_launch_artifacts_skips_unreadable_artifact_for_other_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(launch_dir.join("qwen-unreadable.json")).unwrap();
+
+        let artifacts = load_launch_artifacts(dir.path(), "codex").unwrap();
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn load_launch_artifacts_fails_unreadable_artifact_for_requested_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_dir = paths::launch_artifacts_dir(dir.path());
+        std::fs::create_dir_all(launch_dir.join("codex-unreadable.json")).unwrap();
+
+        let result = load_launch_artifacts(dir.path(), "codex");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn launch_artifact_provider_hint_reads_malformed_json_prefix() {
+        let hint = launch_artifact_provider_hint(r#"{"provider":"codex","agent_id":"a""#);
+
+        assert_eq!(hint.as_deref(), Some("codex"));
     }
 }

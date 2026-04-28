@@ -656,21 +656,28 @@ pub(crate) async fn sync_auto_queue_terminal_on_pg(
     // opt out of that gate, so complete them here once the last dispatched
     // entry has been marked done.
     for run_id in done_run_ids {
-        let review_mode = sqlx::query_scalar::<_, String>(
-            "SELECT COALESCE(review_mode, 'enabled')
-             FROM auto_queue_runs
-             WHERE id = $1",
-        )
-        .bind(&run_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| format!("load auto-queue review mode for run {run_id}: {error}"))?;
-        if review_mode.as_deref() == Some("disabled") {
+        if auto_queue_run_review_disabled_on_pg(tx, &run_id).await? {
             let _ = crate::db::auto_queue::maybe_finalize_run_if_ready_pg(tx, &run_id).await?;
         }
     }
 
     Ok(())
+}
+
+async fn auto_queue_run_review_disabled_on_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    let review_mode = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT review_mode FROM auto_queue_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue review mode for run {run_id}: {error}"))?
+    .flatten();
+
+    Ok(review_mode.as_deref().unwrap_or("enabled") == "disabled")
 }
 
 async fn record_auto_queue_transition_on_pg(

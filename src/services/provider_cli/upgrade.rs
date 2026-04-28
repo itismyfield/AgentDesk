@@ -42,6 +42,10 @@ pub enum UpgradeError {
     VersionUnchanged {
         version: String,
     },
+    EntrypointRestoreFailed {
+        failure: String,
+        restore_error: String,
+    },
     Io(std::io::Error),
 }
 
@@ -83,6 +87,13 @@ impl std::fmt::Display for UpgradeError {
             UpgradeError::VersionUnchanged { version } => {
                 write!(f, "upgrade_version_unchanged: {version}")
             }
+            UpgradeError::EntrypointRestoreFailed {
+                failure,
+                restore_error,
+            } => write!(
+                f,
+                "entrypoint_restore_failed_after_upgrade_error({failure}): {restore_error}"
+            ),
             UpgradeError::Io(e) => write!(f, "io: {e}"),
         }
     }
@@ -187,7 +198,9 @@ fn validate_post_upgrade_channel(
             post_version,
         });
     }
-    if current_snapshot.canonical_path != post_channel.canonical_path {
+    if !strategy.allow_candidate_path_change
+        && current_snapshot.canonical_path != post_channel.canonical_path
+    {
         return Err(UpgradeError::CandidatePathChanged {
             pre_canonical_path: current_snapshot.canonical_path.clone(),
             post_canonical_path: post_channel.canonical_path.clone(),
@@ -363,6 +376,49 @@ fn preserve_previous_install(
     Ok(())
 }
 
+fn restore_npm_global_entrypoint(
+    strategy: &ProviderCliUpdateStrategy,
+    current_snapshot: &ProviderCliChannel,
+    previous_preservation_path: Option<&Path>,
+) -> Result<(), UpgradeError> {
+    if strategy.install_source != "npm-global" {
+        return Ok(());
+    }
+
+    let Some(previous_entry) = previous_preservation_path else {
+        return Ok(());
+    };
+
+    match fs::symlink_metadata(previous_entry) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(UpgradeError::Io(error)),
+    }
+
+    let current_entry = Path::new(&current_snapshot.path);
+    if let Some(parent) = current_entry.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    remove_path_if_exists(current_entry)?;
+    create_symlink_or_copy(previous_entry, previous_entry, current_entry)?;
+    Ok(())
+}
+
+fn restore_npm_global_entrypoint_after_failure(
+    strategy: &ProviderCliUpdateStrategy,
+    current_snapshot: &ProviderCliChannel,
+    previous_preservation_path: Option<&Path>,
+    failure: UpgradeError,
+) -> UpgradeError {
+    match restore_npm_global_entrypoint(strategy, current_snapshot, previous_preservation_path) {
+        Ok(()) => failure,
+        Err(restore_error) => UpgradeError::EntrypointRestoreFailed {
+            failure: failure.to_string(),
+            restore_error: restore_error.to_string(),
+        },
+    }
+}
+
 /// Run the allowlisted update strategy for `provider`.
 ///
 /// Guards (in order):
@@ -402,26 +458,66 @@ pub fn run_upgrade(
         }
     }
 
+    // npm-global: the existing entry-point symlink blocks `npm install -g` from creating
+    // its own (EEXIST). Remove it now that the previous install is preserved (or the
+    // operator explicitly skipped preservation).
+    if strategy.install_source == "npm-global" {
+        remove_path_if_exists(Path::new(&current_snapshot.path))?;
+    }
+
     // Run the update command.
     let argv = strategy.command_argv;
-    let output = run_upgrade_command(argv)?;
+    let output = match run_upgrade_command(argv) {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(restore_npm_global_entrypoint_after_failure(
+                strategy,
+                current_snapshot,
+                previous_preservation_path,
+                error,
+            ));
+        }
+    };
 
     if !output.success {
-        return Err(UpgradeError::UpgradeCommandFailed {
-            exit_code: output.exit_code,
-            stderr: output.stderr,
-        });
+        return Err(restore_npm_global_entrypoint_after_failure(
+            strategy,
+            current_snapshot,
+            previous_preservation_path,
+            UpgradeError::UpgradeCommandFailed {
+                exit_code: output.exit_code,
+                stderr: output.stderr,
+            },
+        ));
     }
 
     // Re-snapshot after upgrade to get new version.
-    let post_channel =
-        snapshot_current_channel(provider).ok_or_else(|| UpgradeError::UpgradeCommandFailed {
-            exit_code: None,
-            stderr: "binary not found after upgrade".to_string(),
-        })?;
+    let post_channel = match snapshot_current_channel(provider) {
+        Some(channel) => channel,
+        None => {
+            return Err(restore_npm_global_entrypoint_after_failure(
+                strategy,
+                current_snapshot,
+                previous_preservation_path,
+                UpgradeError::UpgradeCommandFailed {
+                    exit_code: None,
+                    stderr: "binary not found after upgrade".to_string(),
+                },
+            ));
+        }
+    };
 
     let post_version = post_channel.version.clone();
-    validate_post_upgrade_channel(strategy, current_snapshot, &post_channel, &pre_version)?;
+    if let Err(error) =
+        validate_post_upgrade_channel(strategy, current_snapshot, &post_channel, &pre_version)
+    {
+        return Err(restore_npm_global_entrypoint_after_failure(
+            strategy,
+            current_snapshot,
+            previous_preservation_path,
+            error,
+        ));
+    }
 
     let mut evidence = HashMap::new();
     evidence.insert("pre_version".to_string(), pre_version.clone());
@@ -725,6 +821,109 @@ mod tests {
         assert_eq!(
             dest.canonicalize().unwrap(),
             preserved_tree.join("bin/codex.js").canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_global_entry_point_removed_before_upgrade_command() {
+        // Verify that remove_path_if_exists is called for npm-global after preservation.
+        // We set up a symlink at `current_snapshot.path` and confirm it is absent once
+        // the preservation+removal step completes (the actual upgrade command is not run
+        // because there is no real npm binary in this environment, but the removal happens
+        // before the command is invoked).
+        let temp = tempfile::tempdir().unwrap();
+        let package_root = temp.path().join("npm/lib/node_modules/@openai/codex");
+        let bin_dir = package_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+
+        let global_bin = temp.path().join("npm/bin");
+        std::fs::create_dir_all(&global_bin).unwrap();
+        let entrypoint = global_bin.join("codex");
+        std::os::unix::fs::symlink(package_root.join("bin/codex.js"), &entrypoint).unwrap();
+
+        assert!(entrypoint.exists(), "entry point must exist before upgrade");
+
+        let channel = ProviderCliChannel {
+            path: entrypoint.to_string_lossy().to_string(),
+            canonical_path: package_root
+                .join("bin/codex.js")
+                .to_string_lossy()
+                .to_string(),
+            version: "1.0.0".to_string(),
+            version_output: None,
+            source: "current_path".to_string(),
+            checked_at: chrono::Utc::now(),
+            evidence: Default::default(),
+        };
+        let dest = temp.path().join("runtime/codex-previous-binary");
+
+        // Manually reproduce the preserve + remove_path_if_exists steps from run_upgrade().
+        let strategy = update_strategy_for("codex").unwrap();
+        preserve_previous_install(strategy, &channel, &dest).unwrap();
+        remove_path_if_exists(Path::new(&channel.path)).unwrap();
+
+        assert!(
+            !entrypoint.exists(),
+            "entry point must be removed so npm install -g can create its own symlink"
+        );
+        // Backup must still be intact.
+        assert!(
+            dest.exists(),
+            "preserved backup must still exist after removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_global_entry_point_restored_from_preservation_after_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let package_root = temp.path().join("npm/lib/node_modules/@openai/codex");
+        let bin_dir = package_root.join("bin");
+        let runtime_dir = package_root.join("dist");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(bin_dir.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(runtime_dir.join("runtime.js"), "module.exports = {};\n").unwrap();
+
+        let global_bin = temp.path().join("npm/bin");
+        std::fs::create_dir_all(&global_bin).unwrap();
+        let entrypoint = global_bin.join("codex");
+        std::os::unix::fs::symlink(package_root.join("bin/codex.js"), &entrypoint).unwrap();
+
+        let channel = ProviderCliChannel {
+            path: entrypoint.to_string_lossy().to_string(),
+            canonical_path: package_root
+                .join("bin/codex.js")
+                .to_string_lossy()
+                .to_string(),
+            version: "1.0.0".to_string(),
+            version_output: None,
+            source: "current_path".to_string(),
+            checked_at: chrono::Utc::now(),
+            evidence: Default::default(),
+        };
+        let dest = temp.path().join("runtime/codex-previous-binary");
+        let strategy = update_strategy_for("codex").unwrap();
+
+        preserve_previous_install(strategy, &channel, &dest).unwrap();
+        remove_path_if_exists(Path::new(&channel.path)).unwrap();
+        assert!(
+            !entrypoint.exists(),
+            "entry point should be absent before restore"
+        );
+
+        restore_npm_global_entrypoint(strategy, &channel, Some(&dest)).unwrap();
+
+        assert!(entrypoint.exists(), "entry point should be restored");
+        assert!(dest.exists(), "preserved backup should remain intact");
+        assert_eq!(
+            entrypoint.canonicalize().unwrap(),
+            temp.path()
+                .join("runtime/codex-previous-binary.tree/bin/codex.js")
+                .canonicalize()
+                .unwrap()
         );
     }
 }
