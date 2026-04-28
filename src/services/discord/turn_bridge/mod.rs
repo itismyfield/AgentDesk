@@ -15,7 +15,7 @@ use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
-use crate::db::turns::{PersistTurnOwned, TurnTokenUsage, upsert_turn_owned_on_separate_conn};
+use crate::db::turns::{PersistTurnOwned, TurnTokenUsage};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
@@ -695,7 +695,7 @@ pub(super) fn persist_turn_analytics_row(
 }
 
 pub(super) fn persist_turn_analytics_row_with_handles(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -750,49 +750,33 @@ pub(super) fn persist_turn_analytics_row_with_handles(
         duration_ms: Some(duration_ms),
         token_usage: resolved_token_usage,
     };
-    let db = db.cloned();
     let pg_pool = pg_pool.cloned();
-    let persist_sqlite = move |sqlite: crate::db::Db, entry: PersistTurnOwned| {
-        if let Err(error) = upsert_turn_owned_on_separate_conn(&sqlite, &entry) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
-        }
-    };
-    let persist_pg = move |db: Option<crate::db::Db>,
-                           pg_pool: sqlx::PgPool,
-                           entry: PersistTurnOwned| async move {
-        if let Err(error) =
-            crate::db::turns::upsert_turn_owned_db(db.as_ref(), Some(&pg_pool), &entry).await
-        {
+    let persist_pg = move |pg_pool: sqlx::PgPool, entry: PersistTurnOwned| async move {
+        if let Err(error) = crate::db::turns::upsert_turn_owned_db(Some(&pg_pool), &entry).await {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ failed to persist turn analytics row: {error}");
         }
     };
 
-    if let Some(pg_pool) = pg_pool {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let _ = runtime.spawn(persist_pg(db, pg_pool, entry));
-            return;
+    let Some(pg_pool) = pg_pool else {
+        return;
+    };
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let _ = runtime.spawn(persist_pg(pg_pool, entry));
+        return;
+    }
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => {
+            runtime.block_on(persist_pg(pg_pool, entry));
         }
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => {
-                runtime.block_on(persist_pg(db, pg_pool, entry));
-            }
-            Err(error) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ failed to create runtime for turn analytics persistence: {error}"
-                );
-            }
-        }
-    } else if let Some(db) = db {
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let _ = runtime.spawn_blocking(move || persist_sqlite(db, entry));
-        } else {
-            persist_sqlite(db, entry);
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ failed to create runtime for turn analytics persistence: {error}"
+            );
         }
     }
 }
