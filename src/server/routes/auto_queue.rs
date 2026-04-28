@@ -1751,13 +1751,6 @@ async fn reorder_with_pg(body: &ReorderBody, pool: &sqlx::PgPool) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn cancel_with_conn(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &libsql_rusqlite::Connection,
-) -> serde_json::Value {
-    crate::services::auto_queue::cancel_run::cancel_with_conn(health_registry, conn)
-}
-
 async fn soft_pause_with_pg(pool: &sqlx::PgPool) -> Result<serde_json::Value, String> {
     let paused = sqlx::query(
         "UPDATE auto_queue_runs
@@ -1833,74 +1826,11 @@ async fn force_pause_with_pg(
     Ok(response)
 }
 
-fn force_pause_with_conn(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &libsql_rusqlite::Connection,
-) -> serde_json::Value {
-    let active_run_ids =
-        crate::services::auto_queue::cancel_run::load_run_ids_with_status(conn, &["active"])
-            .unwrap_or_default();
-    let cleanup = crate::services::auto_queue::cancel_run::cancel_and_release_runs_with_conn(
-        health_registry,
-        conn,
-        &active_run_ids,
-        "auto_queue_pause",
-        Some("run_pause_orphan_self_heal"),
-    );
-    let _deleted_phase_gates =
-        crate::services::auto_queue::cancel_run::delete_phase_gate_rows_for_runs(
-            conn,
-            &active_run_ids,
-        );
-    let _skipped_entries =
-        crate::services::auto_queue::cancel_run::skip_dispatched_entries_for_runs(
-            conn,
-            &active_run_ids,
-            "run_pause",
-        );
-    let paused = conn
-        .execute(
-            "UPDATE auto_queue_runs
-             SET status = 'paused',
-                 completed_at = NULL
-             WHERE status = 'active'",
-            [],
-        )
-        .unwrap_or(0);
-    let mut response = json!({
-        "ok": true,
-        "paused_runs": paused,
-        "cancelled_dispatches": cleanup.cancelled_dispatches,
-        "released_slots": cleanup.slot_cleanup.released_slots,
-        "cleared_slot_sessions": cleanup.slot_cleanup.cleared_slot_sessions,
-    });
-    if let Some(warning) = crate::services::auto_queue::cancel_run::slot_cleanup_warning(
-        &cleanup.slot_cleanup.warnings,
-    ) {
-        response["warning"] = json!(warning);
-    }
-    response
-}
-
 async fn cancel_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
     crate::services::auto_queue::cancel_run::cancel_with_pg(health_registry, pool).await
-}
-
-fn cancel_selected_runs_with_conn(
-    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
-    conn: &libsql_rusqlite::Connection,
-    target_run_ids: &[String],
-    reason: &str,
-) -> serde_json::Value {
-    crate::services::auto_queue::cancel_run::cancel_selected_runs_with_conn(
-        health_registry,
-        conn,
-        target_run_ids,
-        reason,
-    )
 }
 
 #[derive(Debug, Serialize)]
