@@ -1425,68 +1425,109 @@ mod delayed_worker {
 mod idle_session_cleanup {
     use super::*;
 
-    #[test]
-    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
-    fn scenario_492_idle_session_without_active_dispatch_force_kills_once_after_60_minutes() {
-        let policies_dir = setup_timeouts_policy_dir();
-        let db = test_db();
-        let engine = test_engine_with_dir(&db, policies_dir.path());
-        let session_key = "host:idle-492-no-dispatch";
-
-        seed_agent(&db);
-        set_kv(&db, "server_port", "8791");
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1', 'codex', 'idle', datetime('now', '-181 minutes'), datetime('now', '-181 minutes'))",
-                [session_key],
-            )
-            .unwrap();
-        }
-
-        engine
-            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
-            .unwrap();
-        kanban::drain_hook_side_effects(&db, &engine);
-
-        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
-
-        let http_last: serde_json::Value =
-            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
-        let url = http_last["url"].as_str().unwrap_or("");
-        assert!(url.contains("/api/sessions/"));
-        assert!(url.contains("host%3Aidle-492-no-dispatch"));
-        assert!(url.ends_with("/force-kill"));
-        assert!(
-            message_outbox_rows(&db).is_empty(),
-            "idle force-kill policy path must not enqueue a duplicate notify alert"
-        );
+    /// PG seed: ensure a single test agent (`agent-1`) exists.
+    async fn seed_agent_pg(pool: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Test Agent', '111', '222') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("seed agent-1 in postgres");
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
-    fn scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl() {
+    /// PG kv_meta upsert sibling for the legacy `set_kv` SQLite helper.
+    async fn set_kv_pg(pool: &sqlx::PgPool, key: &str, value: &str) {
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .expect("upsert kv_meta in postgres");
+    }
+
+    /// PG kv_meta read sibling for the legacy `kv_value` SQLite helper.
+    async fn kv_value_pg(pool: &sqlx::PgPool, key: &str) -> Option<String> {
+        sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .expect("query kv_meta from postgres")
+    }
+
+    /// PG message_outbox sibling for the legacy `message_outbox_rows` helper.
+    /// Returns rows ordered by ascending id, as `(target, content)` tuples.
+    async fn message_outbox_rows_pg(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT target, content FROM message_outbox ORDER BY id ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("read message_outbox from postgres")
+    }
+
+    /// Seed an idle session row in postgres. Uses TIMESTAMPTZ arithmetic
+    /// (`NOW() - INTERVAL '<n> minutes'`) instead of SQLite's
+    /// `datetime('now', '-N minutes')`.
+    async fn seed_idle_session_pg(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        active_dispatch_id: Option<&str>,
+        idle_minutes: i32,
+    ) {
+        let sql = format!(
+            "INSERT INTO sessions
+                 (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (
+                 $1, 'agent-1', 'codex', 'idle', $2,
+                 NOW() - INTERVAL '{idle_minutes} minutes',
+                 NOW() - INTERVAL '{idle_minutes} minutes'
+             )"
+        );
+        sqlx::query(&sql)
+            .bind(session_key)
+            .bind(active_dispatch_id)
+            .execute(pool)
+            .await
+            .expect("seed idle session in postgres");
+    }
+
+    /// Bump an existing session's last_heartbeat / created_at to `idle_minutes`
+    /// ago. Used by the safety-TTL scenario.
+    async fn age_session_pg(pool: &sqlx::PgPool, session_key: &str, idle_minutes: i32) {
+        let sql = format!(
+            "UPDATE sessions
+                SET last_heartbeat = NOW() - INTERVAL '{idle_minutes} minutes',
+                    created_at    = NOW() - INTERVAL '{idle_minutes} minutes'
+              WHERE session_key = $1"
+        );
+        sqlx::query(&sql)
+            .bind(session_key)
+            .execute(pool)
+            .await
+            .expect("age session in postgres");
+    }
+
+    // #1342: migrated to PG fixtures because the timeouts.js policy + the JS
+    // bridge db.* now route exclusively through PG once the engine is built
+    // with a pg_pool. The legacy SQLite `set_kv` / `kv_value` /
+    // `message_outbox_rows` helpers no longer observe the runtime state.
+    #[tokio::test]
+    async fn scenario_492_idle_session_without_active_dispatch_force_kills_once_after_60_minutes() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let policies_dir = setup_timeouts_policy_dir();
         let db = test_db();
-        let engine = test_engine_with_dir(&db, policies_dir.path());
-        let session_key = "host:idle-492-active-dispatch";
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policies_dir.path());
+        let session_key = "host:idle-492-no-dispatch";
 
-        seed_agent(&db);
-        set_kv(&db, "server_port", "8791");
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1', 'codex', 'idle', 'dispatch-492', datetime('now', '-61 minutes'), datetime('now', '-61 minutes'))",
-                [session_key],
-            )
-            .unwrap();
-        }
+        seed_agent_pg(&pool).await;
+        set_kv_pg(&pool, "server_port", "8791").await;
+        seed_idle_session_pg(&pool, session_key, None, 181).await;
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
@@ -1494,80 +1535,123 @@ mod idle_session_cleanup {
         kanban::drain_hook_side_effects(&db, &engine);
 
         assert_eq!(
-            kv_value(&db, "test_http_count"),
-            None,
-            "active dispatch rows must not be reaped by the 60-minute idle TTL"
+            kv_value_pg(&pool, "test_http_count").await.as_deref(),
+            Some("1")
         );
-        assert!(message_outbox_rows(&db).is_empty());
 
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE sessions
-                 SET last_heartbeat = datetime('now', '-181 minutes'),
-                     created_at = datetime('now', '-181 minutes')
-                 WHERE session_key = ?1",
-                [session_key],
-            )
-            .unwrap();
-        }
+        let http_last: serde_json::Value = serde_json::from_str(
+            &kv_value_pg(&pool, "test_http_last")
+                .await
+                .expect("test_http_last must be recorded by force-kill stub"),
+        )
+        .unwrap();
+        let url = http_last["url"].as_str().unwrap_or("");
+        assert!(url.contains("/api/sessions/"));
+        assert!(url.contains("host%3Aidle-492-no-dispatch"));
+        assert!(url.ends_with("/force-kill"));
+        assert!(
+            message_outbox_rows_pg(&pool).await.is_empty(),
+            "idle force-kill policy path must not enqueue a duplicate notify alert"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        let policies_dir = setup_timeouts_policy_dir();
+        let db = test_db();
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policies_dir.path());
+        let session_key = "host:idle-492-active-dispatch";
+
+        seed_agent_pg(&pool).await;
+        set_kv_pg(&pool, "server_port", "8791").await;
+        seed_idle_session_pg(&pool, session_key, Some("dispatch-492"), 61).await;
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+        assert_eq!(
+            kv_value_pg(&pool, "test_http_count").await,
+            None,
+            "active dispatch rows must not be reaped by the 60-minute idle TTL"
+        );
+        assert!(message_outbox_rows_pg(&pool).await.is_empty());
 
-        let http_last: serde_json::Value =
-            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        age_session_pg(&pool, session_key, 181).await;
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            kv_value_pg(&pool, "test_http_count").await.as_deref(),
+            Some("1")
+        );
+
+        let http_last: serde_json::Value = serde_json::from_str(
+            &kv_value_pg(&pool, "test_http_last")
+                .await
+                .expect("test_http_last must be recorded by safety-TTL force-kill"),
+        )
+        .unwrap();
         let url = http_last["url"].as_str().unwrap_or("");
         assert!(url.contains("host%3Aidle-492-active-dispatch"));
         assert!(url.ends_with("/force-kill"));
         assert!(
-            message_outbox_rows(&db).is_empty(),
+            message_outbox_rows_pg(&pool).await.is_empty(),
             "idle safety TTL policy path must not enqueue a duplicate notify alert"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
-    #[test]
-    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
-    fn scenario_632_idle_session_force_kill_response_with_dead_tmux_stays_silent() {
+    #[tokio::test]
+    async fn scenario_632_idle_session_force_kill_response_with_dead_tmux_stays_silent() {
+        let pg_db = IntegrationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
         let policies_dir = setup_timeouts_policy_dir();
         let db = test_db();
-        let engine = test_engine_with_dir(&db, policies_dir.path());
+        let engine = test_engine_with_pg_and_dir(pool.clone(), policies_dir.path());
         let session_key = "host:idle-632-dead-tmux";
 
-        seed_agent(&db);
-        set_kv(&db, "server_port", "8791");
-        set_kv(&db, "test_force_kill_tmux_killed", "false");
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO sessions
-                 (session_key, agent_id, provider, status, last_heartbeat, created_at)
-                 VALUES (?1, 'agent-1', 'codex', 'idle', datetime('now', '-181 minutes'), datetime('now', '-181 minutes'))",
-                [session_key],
-            )
-            .unwrap();
-        }
+        seed_agent_pg(&pool).await;
+        set_kv_pg(&pool, "server_port", "8791").await;
+        set_kv_pg(&pool, "test_force_kill_tmux_killed", "false").await;
+        seed_idle_session_pg(&pool, session_key, None, 181).await;
 
         engine
             .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
             .unwrap();
         kanban::drain_hook_side_effects(&db, &engine);
 
-        assert_eq!(kv_value(&db, "test_http_count").as_deref(), Some("1"));
+        assert_eq!(
+            kv_value_pg(&pool, "test_http_count").await.as_deref(),
+            Some("1")
+        );
 
-        let http_last: serde_json::Value =
-            serde_json::from_str(&kv_value(&db, "test_http_last").unwrap()).unwrap();
+        let http_last: serde_json::Value = serde_json::from_str(
+            &kv_value_pg(&pool, "test_http_last")
+                .await
+                .expect("test_http_last must be recorded by dead-tmux force-kill"),
+        )
+        .unwrap();
         let url = http_last["url"].as_str().unwrap_or("");
         assert!(url.contains("host%3Aidle-632-dead-tmux"));
         assert!(url.ends_with("/force-kill"));
         assert!(
-            message_outbox_rows(&db).is_empty(),
+            message_outbox_rows_pg(&pool).await.is_empty(),
             "idle cleanup must stay silent when force-kill reports tmux_killed=false"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
