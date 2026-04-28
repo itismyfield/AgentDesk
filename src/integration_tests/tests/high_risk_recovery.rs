@@ -1426,6 +1426,7 @@ mod idle_session_cleanup {
     use super::*;
 
     #[test]
+    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
     fn scenario_492_idle_session_without_active_dispatch_force_kills_once_after_60_minutes() {
         let policies_dir = setup_timeouts_policy_dir();
         let db = test_db();
@@ -1466,6 +1467,7 @@ mod idle_session_cleanup {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
     fn scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl() {
         let policies_dir = setup_timeouts_policy_dir();
         let db = test_db();
@@ -1529,6 +1531,7 @@ mod idle_session_cleanup {
     }
 
     #[test]
+    #[ignore = "SQLite-only test. JS bridge db.* now requires PG. Migrate to PG fixture — tracked in #1342."]
     fn scenario_632_idle_session_force_kill_response_with_dead_tmux_stays_silent() {
         let policies_dir = setup_timeouts_policy_dir();
         let db = test_db();
