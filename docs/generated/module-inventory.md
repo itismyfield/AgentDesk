@@ -82,10 +82,10 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 877 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 166 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 4870 | giant-file |
-| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 24 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3798 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2592 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 4871 | giant-file |
+| `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3891 | giant-file |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2736 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1825 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
@@ -154,8 +154,8 @@
 | `server::routes::discord` | `src/server/routes/discord.rs` | 152 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 3991 | giant-file |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
-| `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 424 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5306 | giant-file |
+| `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 436 |  |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5328 | giant-file |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2908 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1243 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
@@ -329,7 +329,7 @@
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
-| `services::opencode` | `src/services/opencode.rs` | 1716 | giant-file |
+| `services::opencode` | `src/services/opencode.rs` | 1978 | giant-file |
 | `services::platform` | `src/services/platform/mod.rs` | 20 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1330 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
