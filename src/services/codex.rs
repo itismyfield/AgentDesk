@@ -994,16 +994,6 @@ fn base_exec_args(
     args
 }
 
-pub(crate) fn codex_reasoning_summary(item: &Value) -> Option<String> {
-    item.get("summary")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|s| s.get("text"))
-        .and_then(|v| v.as_str())
-        .and_then(|t| t.lines().find(|line| !line.trim().is_empty()))
-        .map(|line| line.trim().to_string())
-}
-
 fn normalize_codex_mcp_segment(value: &str) -> Option<String> {
     let normalized = value
         .trim()
@@ -1146,8 +1136,7 @@ fn handle_codex_json_line(
                         });
                     }
                     "reasoning" => {
-                        let summary = codex_reasoning_summary(item);
-                        let _ = sender.send(StreamMessage::Thinking { summary });
+                        let _ = sender.send(StreamMessage::redacted_thinking());
                     }
                     _ => {}
                 }
@@ -1206,8 +1195,7 @@ fn handle_codex_json_line(
                         let _ = sender.send(StreamMessage::ToolResult { content, is_error });
                     }
                     "reasoning" => {
-                        let summary = codex_reasoning_summary(item);
-                        let _ = sender.send(StreamMessage::Thinking { summary });
+                        let _ = sender.send(StreamMessage::redacted_thinking());
                     }
                     _ => {}
                 }
@@ -1411,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_reasoning_completed_sends_thinking_with_summary() {
+    fn test_codex_reasoning_completed_sends_redacted_thinking() {
         let (tx, rx) = mpsc::channel();
         let mut thread_id = None;
         let mut final_text = String::new();
@@ -1428,12 +1416,10 @@ mod tests {
 
         let items: Vec<StreamMessage> = rx.try_iter().collect();
         assert_eq!(items.len(), 1);
-        match &items[0] {
-            StreamMessage::Thinking { summary } => {
-                assert_eq!(summary.as_deref(), Some("Analyzing the code structure"));
-            }
-            _ => panic!("Expected Thinking with summary"),
-        }
+        assert!(matches!(
+            items[0],
+            StreamMessage::Thinking { summary: None }
+        ));
     }
 
     #[test]

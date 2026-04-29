@@ -5,7 +5,7 @@ use std::sync::mpsc;
 
 use crate::services::codex::{
     CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-    codex_background_event_summary, codex_reasoning_summary,
+    codex_background_event_summary,
 };
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
@@ -406,7 +406,7 @@ fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_external_prompt, emit_json_line, handle_background_event,
+        decode_external_prompt, emit_json_line, handle_background_event, handle_item_completed,
         normalize_resume_session_id,
     };
     use crate::services::codex::{
@@ -488,6 +488,30 @@ mod tests {
                 "task_notification_kind": "background",
             })
         );
+    }
+
+    #[test]
+    fn handle_item_completed_redacts_reasoning_payload() {
+        let tdir = tempfile::tempdir().unwrap();
+        let path = tdir.path().join("codex.jsonl");
+        let mut output = RotatingJsonlWriter::open(&path).unwrap();
+        let mut final_text = String::new();
+
+        handle_item_completed(
+            &mut output,
+            &json!({
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "internal reasoning" }]
+            }),
+            &mut final_text,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("internal reasoning"));
+        let value: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(value["message"]["content"][0]["type"], "thinking");
+        assert!(value["message"]["content"][0].get("thinking").is_none());
     }
 }
 
@@ -573,30 +597,23 @@ fn handle_item_completed(
             )?;
         }
         "reasoning" => {
-            // #1199 follow-up: surface codex reasoning to the unified
-            // turn_bridge consumer by re-emitting it as a Claude-style
-            // assistant + thinking content block. Without this the codex
-            // tmux wrapper silently drops the reasoning event and CoT never
-            // reaches the body code-fence path patched in #1199.
-            if let Some(summary) = codex_reasoning_summary(item) {
-                emit_json_line(
-                    output,
-                    serde_json::json!({
-                        "type": "assistant",
-                        "message": {
-                            "content": [{
-                                "type": "thinking",
-                                "thinking": summary,
-                            }]
-                        }
-                    }),
-                )?;
-            }
+            emit_json_line(output, assistant_redacted_thinking_event())?;
         }
         _ => {}
     }
 
     Ok(())
+}
+
+fn assistant_redacted_thinking_event() -> serde_json::Value {
+    serde_json::json!({
+        "type": "assistant",
+        "message": {
+            "content": [{
+                "type": "thinking",
+            }]
+        }
+    })
 }
 
 fn handle_background_event(

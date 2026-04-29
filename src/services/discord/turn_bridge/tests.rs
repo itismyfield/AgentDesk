@@ -201,6 +201,19 @@ fn optional_metric_token_fields_preserve_partial_usage() {
 }
 
 #[test]
+fn thinking_status_line_redacts_payload() {
+    assert_eq!(super::thinking_status_line(), "💭 Thinking...");
+}
+
+#[test]
+fn thinking_transcript_event_redacts_payload() {
+    let event = super::redacted_thinking_transcript_event(Some("internal reasoning".to_string()));
+
+    assert!(event.summary.is_none());
+    assert!(event.content.is_empty());
+}
+
+#[test]
 fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
     let shared = make_shared_data_for_tests();
     let channel_id = ChannelId::new(1486333430516945999);

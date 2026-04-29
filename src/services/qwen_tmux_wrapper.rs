@@ -621,10 +621,7 @@ fn normalize_stream_event(json: &Value, state: &mut TurnNormalizationState) -> V
                         Vec::new()
                     } else {
                         block.thinking_emitted = true;
-                        vec![assistant_thinking_event(
-                            thinking.trim(),
-                            state.current_model.as_deref(),
-                        )]
+                        vec![assistant_thinking_event(state.current_model.as_deref())]
                     }
                 }
                 Some("input_json_delta") => {
@@ -691,17 +688,7 @@ fn normalize_assistant_message(json: &Value, state: &mut TurnNormalizationState)
                 }
             }
             Some("thinking") => {
-                let summary = block
-                    .get("signature")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| block.get("thinking").and_then(|v| v.as_str()))
-                    .unwrap_or("");
-                if !summary.trim().is_empty() {
-                    events.push(assistant_thinking_event(
-                        summary.trim(),
-                        state.current_model.as_deref(),
-                    ));
-                }
+                events.push(assistant_thinking_event(state.current_model.as_deref()));
             }
             Some("tool_use") => {
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
@@ -810,14 +797,13 @@ fn assistant_text_event(text: &str, model: Option<&str>) -> Value {
     })
 }
 
-fn assistant_thinking_event(summary: &str, model: Option<&str>) -> Value {
+fn assistant_thinking_event(model: Option<&str>) -> Value {
     json!({
         "type": "assistant",
         "message": {
             "model": model,
             "content": [{
                 "type": "thinking",
-                "thinking": summary,
             }]
         }
     })
@@ -1009,6 +995,38 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "assistant");
         assert_eq!(events[0]["message"]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn normalize_stream_event_redacts_thinking_delta() {
+        let mut state = Default::default();
+        let _ = normalize_qwen_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","signature":"pondering"}}}"#,
+            &mut state,
+        );
+        let events = normalize_qwen_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"internal reasoning"}}}"#,
+            &mut state,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message"]["content"][0]["type"], "thinking");
+        assert!(events[0]["message"]["content"][0].get("thinking").is_none());
+        assert!(!events[0].to_string().contains("internal reasoning"));
+    }
+
+    #[test]
+    fn normalize_assistant_message_redacts_thinking_block() {
+        let mut state = Default::default();
+        let events = normalize_qwen_line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning"}]}}"#,
+            &mut state,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message"]["content"][0]["type"], "thinking");
+        assert!(events[0]["message"]["content"][0].get("thinking").is_none());
+        assert!(!events[0].to_string().contains("internal reasoning"));
     }
 
     #[test]

@@ -234,7 +234,6 @@ struct QwenPartialBlockState {
     kind: String,
     tool_name: Option<String>,
     input_json: String,
-    thinking_signature: Option<String>,
     thinking_emitted: bool,
 }
 
@@ -688,10 +687,6 @@ fn process_qwen_partial_event(
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
                     input_json,
-                    thinking_signature: block
-                        .get("signature")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
                     thinking_emitted: false,
                 },
             );
@@ -730,31 +725,15 @@ fn process_qwen_partial_event(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if !thinking.is_empty() && !block_state.thinking_emitted {
-                        let summary = block_state
-                            .thinking_signature
-                            .clone()
-                            .or_else(|| Some("thinking".to_string()));
                         block_state.thinking_emitted = true;
                         let _ = block_state;
                         mark_meaningful_progress(state);
                         state
                             .buffered_messages
-                            .push(StreamMessage::Thinking { summary });
+                            .push(StreamMessage::redacted_thinking());
                     }
                 }
-                Some("signature_delta") => {
-                    let signature = event
-                        .get("delta")
-                        .and_then(|v| v.get("signature"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !signature.is_empty() {
-                        block_state
-                            .thinking_signature
-                            .get_or_insert_with(String::new)
-                            .push_str(signature);
-                    }
-                }
+                Some("signature_delta") => {}
                 Some("input_json_delta") => {
                     let partial_json = event
                         .get("delta")
@@ -779,9 +758,9 @@ fn process_qwen_partial_event(
                     });
                 } else if block_state.kind == "thinking" && !block_state.thinking_emitted {
                     mark_meaningful_progress(state);
-                    state.buffered_messages.push(StreamMessage::Thinking {
-                        summary: block_state.thinking_signature,
-                    });
+                    state
+                        .buffered_messages
+                        .push(StreamMessage::redacted_thinking());
                 }
             }
         }
@@ -831,21 +810,9 @@ fn process_qwen_assistant_message(json: &Value, state: &mut QwenAttemptState) {
             }
             Some("thinking") if !state.partial_stream_seen => {
                 mark_meaningful_progress(state);
-                let summary = block
-                    .get("signature")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        block
-                            .get("thinking")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(|value| value.chars().take(80).collect())
-                    });
                 state
                     .buffered_messages
-                    .push(StreamMessage::Thinking { summary });
+                    .push(StreamMessage::redacted_thinking());
             }
             Some("tool_use") if !state.partial_stream_seen => {
                 mark_meaningful_progress(state);
@@ -1875,28 +1842,17 @@ fn update_status_from_usage(
 }
 
 fn maybe_emit_partial_thinking(index: usize, state: &mut QwenAttemptState) {
-    let Some(summary) = state
-        .partial_blocks
-        .get_mut(&index)
-        .and_then(|block_state| {
-            if block_state.kind != "thinking" || block_state.thinking_emitted {
-                return None;
-            }
-            block_state.thinking_emitted = true;
-            Some(
-                block_state
-                    .thinking_signature
-                    .clone()
-                    .or_else(|| Some("thinking".to_string())),
-            )
-        })
-    else {
+    let Some(block_state) = state.partial_blocks.get_mut(&index) else {
         return;
     };
+    if block_state.kind != "thinking" || block_state.thinking_emitted {
+        return;
+    }
+    block_state.thinking_emitted = true;
     mark_meaningful_progress(state);
     state
         .buffered_messages
-        .push(StreamMessage::Thinking { summary });
+        .push(StreamMessage::redacted_thinking());
 }
 
 fn normalize_tool_input(raw: String) -> String {
@@ -2441,6 +2397,70 @@ mod tests {
             state.buffered_messages.last(),
             Some(StreamMessage::ToolUse { name, input })
                 if name == "Bash" && input == "{\"cmd\":\"pwd\"}"
+        ));
+    }
+
+    #[test]
+    fn process_qwen_json_event_redacts_partial_thinking_delta() {
+        let mut state = QwenAttemptState::default();
+        process_qwen_json_event(
+            &json!({
+                "type": "stream_event",
+                "session_id": "session-123",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "thinking",
+                        "signature": "pondering"
+                    }
+                }
+            }),
+            &mut state,
+        );
+        process_qwen_json_event(
+            &json!({
+                "type": "stream_event",
+                "session_id": "session-123",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": "internal reasoning"
+                    }
+                }
+            }),
+            &mut state,
+        );
+
+        assert!(state.meaningful_progress_seen);
+        assert!(matches!(
+            state.buffered_messages.last(),
+            Some(StreamMessage::Thinking { summary: None })
+        ));
+    }
+
+    #[test]
+    fn process_qwen_json_event_redacts_assistant_thinking_block() {
+        let mut state = QwenAttemptState::default();
+        process_qwen_json_event(
+            &json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "thinking",
+                        "thinking": "internal reasoning"
+                    }]
+                }
+            }),
+            &mut state,
+        );
+
+        assert!(matches!(
+            state.buffered_messages.last(),
+            Some(StreamMessage::Thinking { summary: None })
         ));
     }
 }

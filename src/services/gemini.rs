@@ -1975,6 +1975,25 @@ Available sessions for this project (2):
     }
 
     #[test]
+    fn reasoning_shaped_message_does_not_emit_text() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = GeminiAttemptState::new(None);
+        process_gemini_stream_line(
+            r#"{"type":"message","role":"assistant","content":{"type":"thinking","thinking":"internal reasoning"}}"#,
+            &mut state,
+            &tx,
+        );
+        process_gemini_stream_line(
+            r#"{"type":"reasoning","role":"assistant","content":"internal reasoning"}"#,
+            &mut state,
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert!(state.final_text.is_empty());
+    }
+
+    #[test]
     fn execute_complete_emits_stream_events_before_done() {
         let (tx, rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);

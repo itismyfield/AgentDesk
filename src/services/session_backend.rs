@@ -510,7 +510,6 @@ pub(crate) fn parse_stream_message_with_state(
         "assistant" => {
             let content = json.get("message")?.get("content")?.as_array()?;
             let mut has_thinking = false;
-            let mut thinking_summary: Option<String> = None;
 
             for item in content {
                 let item_type = match item.get("type").and_then(|value| value.as_str()) {
@@ -549,20 +548,13 @@ pub(crate) fn parse_stream_message_with_state(
                     }
                     "thinking" => {
                         has_thinking = true;
-                        thinking_summary = item
-                            .get("thinking")
-                            .and_then(|value| value.as_str())
-                            .map(|value| value.trim().to_string())
-                            .filter(|value| !value.is_empty());
                     }
                     _ => {}
                 }
             }
 
             if has_thinking {
-                return Some(StreamMessage::Thinking {
-                    summary: thinking_summary,
-                });
+                return Some(StreamMessage::redacted_thinking());
             }
             None
         }

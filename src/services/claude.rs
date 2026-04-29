@@ -2274,7 +2274,7 @@ mod tests {
         let msg = parse_stream_message(&json).unwrap();
         match msg {
             StreamMessage::Thinking { summary } => {
-                assert_eq!(summary.as_deref(), Some("Let me analyze this"));
+                assert!(summary.is_none());
             }
             _ => panic!("Expected Thinking"),
         }

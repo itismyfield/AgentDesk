@@ -76,7 +76,7 @@ pub enum StreamMessage {
     ToolUse { name: String, input: String },
     /// Tool execution result
     ToolResult { content: String, is_error: bool },
-    /// Chain-of-thought thinking block with optional topic summary
+    /// Provider thinking/reasoning progress marker. Raw reasoning payloads must stay redacted.
     Thinking { summary: Option<String> },
     /// Background task notification
     TaskNotification {
@@ -128,6 +128,12 @@ pub enum StreamMessage {
     },
     /// Latest read offset in a growing tmux output file
     OutputOffset { offset: u64 },
+}
+
+impl StreamMessage {
+    pub(crate) fn redacted_thinking() -> Self {
+        Self::Thinking { summary: None }
+    }
 }
 
 /// Cached regex pattern for session ID validation.

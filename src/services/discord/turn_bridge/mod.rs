@@ -98,6 +98,21 @@ fn merge_task_notification_kind(
     }
 }
 
+fn thinking_status_line() -> String {
+    "💭 Thinking...".to_string()
+}
+
+fn redacted_thinking_transcript_event(_summary: Option<String>) -> SessionTranscriptEvent {
+    SessionTranscriptEvent {
+        kind: SessionTranscriptEventKind::Thinking,
+        tool_name: None,
+        summary: None,
+        content: String::new(),
+        status: Some("info".to_string()),
+        is_error: false,
+    }
+}
+
 fn emit_turn_quality_event(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -1074,11 +1089,7 @@ pub(super) fn spawn_turn_bridge(
                             state_dirty = true;
                         }
                         StreamMessage::Thinking { summary } => {
-                            let display = if let Some(ref s) = summary {
-                                format!("💭 {s}")
-                            } else {
-                                "💭 Thinking...".to_string()
-                            };
+                            let display = thinking_status_line();
                             // #1113 implicit-terminate: a Thinking event after an
                             // unfinished ToolUse means the agent moved on without
                             // emitting a ToolResult. Promote the orphaned tool to
@@ -1095,40 +1106,13 @@ pub(super) fn spawn_turn_bridge(
                             current_tool_line = Some(display);
                             last_tool_name = None;
                             last_tool_summary = None;
-                            // Surface the chain-of-thought block in the message
-                            // body so users can see the agent's reasoning even
-                            // after the placeholder gets overwritten by the next
-                            // tool call. Wrap it in a Discord code block so the
-                            // reader can tell reasoning from regular response
-                            // text at a glance.
-                            if let Some(thinking_text) = summary
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                            {
-                                if !full_response.is_empty()
-                                    && !full_response.ends_with('\n')
-                                {
-                                    full_response.push('\n');
-                                }
-                                full_response.push_str("\n💭 **Reasoning**\n```\n");
-                                full_response.push_str(
-                                    &super::formatting::escape_for_code_fence(thinking_text),
-                                );
-                                full_response.push_str("\n```\n");
-                                inflight_state.full_response = full_response.clone();
-                                state_dirty = true;
-                            }
+                            // Thinking payloads can contain raw model reasoning.
+                            // Keep them out of the user-visible Discord response
+                            // and use only a neutral progress marker.
+                            state_dirty = true;
                             push_transcript_event(
                                 &mut transcript_events,
-                                SessionTranscriptEvent {
-                                    kind: SessionTranscriptEventKind::Thinking,
-                                    tool_name: None,
-                                    summary: summary.clone(),
-                                    content: summary.unwrap_or_default(),
-                                    status: Some("info".to_string()),
-                                    is_error: false,
-                                },
+                                redacted_thinking_transcript_event(summary),
                             );
                         }
                         StreamMessage::ToolUse { name, input } => {
