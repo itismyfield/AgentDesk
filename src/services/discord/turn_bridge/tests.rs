@@ -254,6 +254,9 @@ fn test_watcher_handle(tmux_session_name: &str, paused: bool) -> super::super::T
         cancel: Arc::new(AtomicBool::new(false)),
         pause_epoch: Arc::new(AtomicU64::new(1)),
         turn_delivered: Arc::new(AtomicBool::new(false)),
+        last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+            super::super::tmux_watcher_now_ms(),
+        )),
     }
 }
 

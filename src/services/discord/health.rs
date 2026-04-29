@@ -1544,6 +1544,9 @@ impl TestHealthHarness {
                 cancel: cancel.clone(),
                 pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::tmux_watcher_now_ms(),
+                )),
             },
         );
         cancel
@@ -1564,6 +1567,9 @@ impl TestHealthHarness {
                 cancel: cancel.clone(),
                 pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::tmux_watcher_now_ms(),
+                )),
             },
         );
         cancel

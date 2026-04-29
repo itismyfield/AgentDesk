@@ -281,6 +281,9 @@ fn attach_paused_turn_watcher(
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
         let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
+            super::super::tmux_watcher_now_ms(),
+        ));
         let handle = TmuxWatcherHandle {
             tmux_session_name: tmux_session_name.clone(),
             paused: paused.clone(),
@@ -288,6 +291,7 @@ fn attach_paused_turn_watcher(
             cancel: cancel.clone(),
             pause_epoch: pause_epoch.clone(),
             turn_delivered: turn_delivered.clone(),
+            last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
         let claim = super::super::tmux::claim_or_reuse_watcher(
             &shared.tmux_watchers,
@@ -319,6 +323,7 @@ fn attach_paused_turn_watcher(
                 resume_offset,
                 pause_epoch,
                 turn_delivered,
+                last_heartbeat_ts_ms,
             ));
         }
     }
@@ -6563,6 +6568,9 @@ mod tests {
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 pause_epoch: owner_pause_epoch.clone(),
                 turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::super::super::tmux_watcher_now_ms(),
+                )),
             },
         );
 

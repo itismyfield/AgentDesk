@@ -533,6 +533,24 @@ pub(super) struct TmuxWatcherHandle {
     /// Set by turn_bridge when it delivers the response directly (non-handoff path).
     /// Watcher checks this before relay to avoid duplicate messages.
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    /// Updated by the watcher task loop. If this stops moving while the registry
+    /// still has a slot, the slot is stale and must not suppress a new watcher.
+    pub(super) last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+}
+
+pub(super) const TMUX_WATCHER_STALE_HEARTBEAT_MS: i64 = 60_000;
+
+pub(super) fn tmux_watcher_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+impl TmuxWatcherHandle {
+    pub(super) fn heartbeat_stale(&self) -> bool {
+        let last = self
+            .last_heartbeat_ts_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        last <= 0 || tmux_watcher_now_ms().saturating_sub(last) > TMUX_WATCHER_STALE_HEARTBEAT_MS
+    }
 }
 
 pub(super) type TmuxWatcherRegistryGuard = std::sync::MutexGuard<'static, ()>;
@@ -686,9 +704,9 @@ impl TmuxWatcherRegistry {
     }
 
     pub(super) fn tmux_session_is_stale(&self, tmux_session_name: &str) -> Option<bool> {
-        self.by_tmux_session
-            .get(tmux_session_name)
-            .map(|entry| entry.cancel.load(std::sync::atomic::Ordering::Relaxed))
+        self.by_tmux_session.get(tmux_session_name).map(|entry| {
+            entry.cancel.load(std::sync::atomic::Ordering::Relaxed) || entry.heartbeat_stale()
+        })
     }
 
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -1412,6 +1430,9 @@ pub(crate) mod test_harness_exports {
             cancel: cancel.clone(),
             pause_epoch: pause_epoch.clone(),
             turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                super::tmux_watcher_now_ms(),
+            )),
         };
         let inspector = WatcherHandleInspector {
             cancel,
