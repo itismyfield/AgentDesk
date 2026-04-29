@@ -3975,6 +3975,7 @@ mod tests {
             restart_generation: None,
             rebind_origin: false,
             long_running_placeholder_active: false,
+            watcher_owns_live_relay: false,
         };
 
         assert!(
@@ -4094,6 +4095,7 @@ mod tests {
             restart_generation: None,
             rebind_origin: false,
             long_running_placeholder_active: false,
+            watcher_owns_live_relay: false,
         };
 
         save_missing_session_handoff(

@@ -130,6 +130,12 @@ pub(super) struct InflightTurnState {
     /// the turn loop alongside `long_running_placeholder_active`.
     #[serde(default)]
     pub long_running_placeholder_active: bool,
+    /// #1222 single-relay-owner: true when a live tmux watcher, not
+    /// `turn_bridge`, owns assistant content delivery for this in-flight turn.
+    /// Lifecycle/banner paths may still update metadata, but bridge must not
+    /// stream or terminal-replace assistant text while this is true.
+    #[serde(default)]
+    pub watcher_owns_live_relay: bool,
 }
 
 impl InflightTurnState {
@@ -190,6 +196,7 @@ impl InflightTurnState {
             restart_generation: None,
             rebind_origin: false,
             long_running_placeholder_active: false,
+            watcher_owns_live_relay: false,
         }
     }
 

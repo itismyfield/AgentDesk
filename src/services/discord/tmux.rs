@@ -1513,9 +1513,11 @@ async fn finish_monitor_auto_turn(
         token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        shared
-            .global_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = shared.global_active.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_sub(1),
+        );
     }
     shared.turn_start_times.remove(&channel_id);
     if let Ok(mut last) = shared.last_turn_at.lock() {
@@ -2303,6 +2305,9 @@ fn watcher_should_yield_to_inflight_state(
     };
 
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return false;
+    }
+    if state.watcher_owns_live_relay {
         return false;
     }
 
@@ -3939,6 +3944,11 @@ async fn finish_restored_watcher_active_turn(
         token
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = shared.global_active.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_sub(1),
+        );
     }
     super::clear_watchdog_deadline_override(channel_id.get()).await;
     shared
@@ -7860,12 +7870,12 @@ mod tests {
         enqueue_background_trigger_response_to_notify_outbox,
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         fallback_placeholder_cleanup_decision, finish_monitor_auto_turn,
-        format_monitor_suppressed_body, format_monitor_suppressed_label,
-        lifecycle_reason_code_for_tmux_exit, load_restored_provider_session_id,
-        matching_recent_watcher_reattach_offset, missing_inflight_fallback_plan,
-        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
-        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
-        recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
+        finish_restored_watcher_active_turn, format_monitor_suppressed_body,
+        format_monitor_suppressed_label, lifecycle_reason_code_for_tmux_exit,
+        load_restored_provider_session_id, matching_recent_watcher_reattach_offset,
+        missing_inflight_fallback_plan, notify_path_offset_advance_decision,
+        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
+        process_watcher_lines, recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
         record_recent_turn_stop_for_tests, record_recent_turn_stop_with_offset_for_tests,
         record_recent_watcher_reattach_offset, refresh_session_heartbeat_from_tmux_output,
         reset_stale_local_relay_offset_if_output_regressed,
@@ -9817,6 +9827,64 @@ mod tests {
         );
 
         assert!(should_yield);
+    }
+
+    #[test]
+    fn watcher_owned_live_relay_does_not_yield_to_active_bridge_guard() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("deadlock-manager".to_string()),
+            7,
+            9,
+            11,
+            "ping".to_string(),
+            Some("session-1".to_string()),
+            Some("#AgentDesk-codex-deadlock-manager".to_string()),
+            Some("/tmp/output.jsonl".to_string()),
+            Some("/tmp/input.fifo".to_string()),
+            0,
+        );
+        state.turn_start_offset = Some(120);
+        state.last_offset = 180;
+        state.watcher_owns_live_relay = true;
+
+        assert!(!watcher_should_yield_to_inflight_state(
+            Some(&state),
+            "#AgentDesk-codex-deadlock-manager",
+            100,
+            180,
+        ));
+    }
+
+    #[tokio::test]
+    async fn restored_watcher_finish_does_not_underflow_global_active() {
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1485506232256981);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token,
+                UserId::new(343742347365974026),
+                MessageId::new(1487795113240559701),
+            )
+            .await
+        );
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
+
+        finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            true,
+            "restored_watcher_finish_does_not_underflow_global_active",
+        )
+        .await;
+
+        assert_eq!(shared.global_active.load(Ordering::Relaxed), 0);
     }
 
     #[test]
