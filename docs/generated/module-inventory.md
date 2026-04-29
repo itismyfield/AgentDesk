@@ -240,7 +240,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3105 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 826 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 4358 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 4359 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 587 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1127 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
