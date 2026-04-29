@@ -300,6 +300,13 @@ src/
 │   │   ├── tmux_overload_retry.rs
 │   │   ├── tmux_reaper.rs
 │   │   └── tmux_restart_handoff.rs
+│   ├── git/
+│   │   ├── branch_resolver.rs
+│   │   ├── commit_resolver.rs
+│   │   ├── mod.rs
+│   │   ├── remote.rs
+│   │   ├── repo_resolver.rs
+│   │   └── worktree_resolver.rs
 │   ├── maintenance/
 │   │   ├── jobs/
 │   │   │   ├── db_retention.rs
