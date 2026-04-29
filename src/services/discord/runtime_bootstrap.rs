@@ -774,6 +774,18 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             super::placeholder_controller::PlaceholderController::default(),
         ),
         queued_placeholders: dashmap::DashMap::new(),
+        queue_exit_placeholder_clears: {
+            let map = dashmap::DashMap::new();
+            for (key, placeholder_msg_id) in
+                super::queued_placeholders_store::load_queue_exit_placeholder_clears(
+                    &provider,
+                    &token_hash,
+                )
+            {
+                map.insert(key, placeholder_msg_id);
+            }
+            map
+        },
         queued_placeholders_persist_locks: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -967,6 +979,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = shared_for_migrate.cached_serenity_ctx.set(ctx.clone());
                 let _ = shared_for_migrate.cached_bot_token.set(token_for_ready.clone());
+                super::drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;
                 health_registry_for_setup
                     .register_http(provider_for_setup.as_str().to_string(), ctx.http.clone())
                     .await;

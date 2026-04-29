@@ -863,6 +863,12 @@ pub(super) struct SharedData {
     /// duplicate placeholder.
     pub(in crate::services::discord) queued_placeholders:
         dashmap::DashMap<(ChannelId, MessageId), MessageId>,
+    /// #1362: queue-exit placeholder cards that were removed from
+    /// `queued_placeholders` while `cached_serenity_ctx` was not ready. Kept in
+    /// memory and mirrored to a sidecar so ready-time drain can delete the
+    /// visible stale `📬` cards after the Discord HTTP client exists.
+    pub(in crate::services::discord) queue_exit_placeholder_clears:
+        dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     /// #1332 round-4 codex review P2 + round-5 P2: per-channel mutex guarding
     /// `queued_placeholders` snapshot writes AND any Discord PATCH that
     /// asserts queued ownership. When two updates for the same channel race
@@ -1215,6 +1221,67 @@ impl SharedData {
             .map(|entry| *entry == placeholder_msg_id)
             .unwrap_or(false)
     }
+
+    async fn add_pending_queue_exit_placeholder_clears(
+        &self,
+        channel_id: ChannelId,
+        cards: &[QueueExitVisibleCard],
+    ) {
+        if cards.is_empty() {
+            return;
+        }
+        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
+        let _persist_guard = persist_lock.lock().await;
+        for card in cards {
+            self.queue_exit_placeholder_clears
+                .insert((channel_id, card.user_msg_id), card.placeholder_msg_id);
+        }
+        queued_placeholders_store::persist_queue_exit_placeholder_clears_channel_from_map(
+            &self.queue_exit_placeholder_clears,
+            &self.provider,
+            &self.token_hash,
+            channel_id,
+        );
+    }
+
+    async fn remove_pending_queue_exit_placeholder_clears(
+        &self,
+        channel_id: ChannelId,
+        cards: &[(MessageId, MessageId)],
+    ) {
+        if cards.is_empty() {
+            return;
+        }
+        let persist_lock = self.queued_placeholders_persist_lock(channel_id);
+        let _persist_guard = persist_lock.lock().await;
+        for (user_msg_id, placeholder_msg_id) in cards {
+            let key = (channel_id, *user_msg_id);
+            if self
+                .queue_exit_placeholder_clears
+                .get(&key)
+                .map(|entry| *entry == *placeholder_msg_id)
+                .unwrap_or(false)
+            {
+                self.queue_exit_placeholder_clears.remove(&key);
+            }
+        }
+        queued_placeholders_store::persist_queue_exit_placeholder_clears_channel_from_map(
+            &self.queue_exit_placeholder_clears,
+            &self.provider,
+            &self.token_hash,
+            channel_id,
+        );
+    }
+
+    fn pending_queue_exit_placeholder_clears(&self) -> Vec<(ChannelId, MessageId, MessageId)> {
+        self.queue_exit_placeholder_clears
+            .iter()
+            .map(|entry| {
+                let (channel_id, user_msg_id) = *entry.key();
+                (channel_id, user_msg_id, *entry.value())
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1531,6 +1598,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
         placeholder_controller: Arc::new(placeholder_controller::PlaceholderController::default()),
         queued_placeholders: dashmap::DashMap::new(),
+        queue_exit_placeholder_clears: dashmap::DashMap::new(),
         queued_placeholders_persist_locks: dashmap::DashMap::new(),
         recovering_channels: dashmap::DashMap::new(),
         shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1790,6 +1858,13 @@ fn queue_exit_card_body(kind: QueueExitKind) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueueExitVisibleCard {
+    user_msg_id: MessageId,
+    placeholder_msg_id: MessageId,
+    kind: QueueExitKind,
+}
+
 /// codex review P2 (#1332 follow-up): drain the in-memory `queued_placeholders`
 /// + `placeholder_controller` rows for every queue-exit event and return the
 /// visible Discord card ids the caller should edit/delete. Split out from
@@ -1799,7 +1874,7 @@ async fn queue_exit_drain_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
     queue_exit_events: &[&QueueExitEvent],
-) -> Vec<(MessageId, QueueExitKind)> {
+) -> Vec<QueueExitVisibleCard> {
     // codex review round-4 P2 + round-5 P2: hold the channel's persistence
     // mutex across the whole batch drain + snapshot write. Without this, a
     // concurrent `insert_queued_placeholder` for the same channel could
@@ -1810,7 +1885,7 @@ async fn queue_exit_drain_queued_placeholders(
     // that span `.await` can still serialize against this drain.
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
     let _persist_guard = persist_lock.lock().await;
-    let mut visible_cards_to_clear: Vec<(MessageId, QueueExitKind)> = Vec::new();
+    let mut visible_cards_to_clear: Vec<QueueExitVisibleCard> = Vec::new();
     let mut mutated = false;
     for event in queue_exit_events {
         for message_id in &event.intervention.source_message_ids {
@@ -1821,7 +1896,11 @@ async fn queue_exit_drain_queued_placeholders(
                 shared
                     .placeholder_controller
                     .detach_by_message(channel_id, placeholder_msg_id);
-                visible_cards_to_clear.push((placeholder_msg_id, event.kind));
+                visible_cards_to_clear.push(QueueExitVisibleCard {
+                    user_msg_id: *message_id,
+                    placeholder_msg_id,
+                    kind: event.kind,
+                });
                 mutated = true;
             }
         }
@@ -1874,9 +1953,12 @@ async fn apply_queue_exit_feedback(
         queue_exit_drain_queued_placeholders(shared, channel_id, &queue_exit_events).await;
 
     let Some(ctx) = shared.cached_serenity_ctx.get() else {
+        shared
+            .add_pending_queue_exit_placeholder_clears(channel_id, &visible_cards_to_clear)
+            .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing); also skipped clearing {} visible queued card(s)",
+            "  [{ts}] ⚠ QUEUE-FEEDBACK: skipped {} queue exit reaction(s) in channel {} (cached ctx missing); queued {} visible card(s) for ready-time cleanup",
             queue_exit_events.len(),
             channel_id,
             visible_cards_to_clear.len(),
@@ -1891,18 +1973,18 @@ async fn apply_queue_exit_feedback(
     // the bare serenity HTTP edit instead of the placeholder controller
     // because the controller entry was just detached (and the public
     // `transition` API only renders terminal monitor-handoff cards).
-    for (placeholder_msg_id, kind) in &visible_cards_to_clear {
-        let body = queue_exit_card_body(*kind);
+    for card in &visible_cards_to_clear {
+        let body = queue_exit_card_body(card.kind);
         let edit_result = channel_id
             .edit_message(
                 &ctx.http,
-                *placeholder_msg_id,
+                card.placeholder_msg_id,
                 serenity::EditMessage::new().content(body),
             )
             .await;
         if edit_result.is_err() {
             let _ = channel_id
-                .delete_message(&ctx.http, *placeholder_msg_id)
+                .delete_message(&ctx.http, card.placeholder_msg_id)
                 .await;
         }
     }
@@ -1924,6 +2006,90 @@ async fn apply_queue_exit_feedback(
         )
         .await;
     }
+}
+
+struct QueueExitPendingPlaceholderDeleter {
+    http: Arc<serenity::Http>,
+}
+
+impl runtime_bootstrap::StalePlaceholderDeleter for QueueExitPendingPlaceholderDeleter {
+    fn delete<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        placeholder_msg_id: MessageId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            channel_id
+                .delete_message(&self.http, placeholder_msg_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears(
+    shared: &SharedData,
+) {
+    let Some(ctx) = shared.cached_serenity_ctx.get() else {
+        return;
+    };
+    let deleter = QueueExitPendingPlaceholderDeleter {
+        http: ctx.http.clone(),
+    };
+    drain_pending_queue_exit_placeholder_clears_with(shared, &deleter).await;
+}
+
+pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears_with(
+    shared: &SharedData,
+    deleter: &dyn runtime_bootstrap::StalePlaceholderDeleter,
+) -> (usize, usize) {
+    let pending = shared.pending_queue_exit_placeholder_clears();
+    if pending.is_empty() {
+        return (0, 0);
+    }
+
+    let mut deleted_by_channel: HashMap<ChannelId, Vec<(MessageId, MessageId)>> = HashMap::new();
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    for (channel_id, user_msg_id, placeholder_msg_id) in pending {
+        match deleter.delete(channel_id, placeholder_msg_id).await {
+            Ok(_) => {
+                deleted += 1;
+                deleted_by_channel
+                    .entry(channel_id)
+                    .or_default()
+                    .push((user_msg_id, placeholder_msg_id));
+                tracing::debug!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    placeholder_msg_id = placeholder_msg_id.get(),
+                    "queue_exit_pending_clear: deleted queued placeholder card",
+                );
+            }
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    placeholder_msg_id = placeholder_msg_id.get(),
+                    "queue_exit_pending_clear: failed to delete queued placeholder card ({error}); keeping pending",
+                );
+            }
+        }
+    }
+
+    for (channel_id, cards) in deleted_by_channel {
+        shared
+            .remove_pending_queue_exit_placeholder_clears(channel_id, &cards)
+            .await;
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🧹 QUEUE-EXIT: deleted {deleted} pending queued placeholder card(s) after ctx ready (failed {failed})",
+    );
+    (deleted, failed)
 }
 
 async fn enqueue_internal_followup(
@@ -4138,16 +4304,20 @@ mod tests {
             super::queue_exit_drain_queued_placeholders(&shared, channel_id, &event_refs).await;
 
         assert_eq!(cards.len(), 3);
+        let card_tuples: Vec<(MessageId, super::QueueExitKind)> = cards
+            .iter()
+            .map(|card| (card.placeholder_msg_id, card.kind))
+            .collect();
         assert!(
-            cards.contains(&(cancelled_card, QueueExitKind::Cancelled)),
+            card_tuples.contains(&(cancelled_card, QueueExitKind::Cancelled)),
             "cancelled card should surface for visible-card cleanup"
         );
         assert!(
-            cards.contains(&(expired_card, QueueExitKind::Expired)),
+            card_tuples.contains(&(expired_card, QueueExitKind::Expired)),
             "expired card should surface for visible-card cleanup"
         );
         assert!(
-            cards.contains(&(superseded_card, QueueExitKind::Superseded)),
+            card_tuples.contains(&(superseded_card, QueueExitKind::Superseded)),
             "superseded card should surface for visible-card cleanup"
         );
         assert!(
@@ -4228,13 +4398,135 @@ mod tests {
             3,
             "all three source-id placeholders should be drained"
         );
-        let ids: std::collections::HashSet<MessageId> = cards.iter().map(|(id, _)| *id).collect();
+        let ids: std::collections::HashSet<MessageId> =
+            cards.iter().map(|card| card.placeholder_msg_id).collect();
         assert!(ids.contains(&head_card));
         assert!(ids.contains(&merged_card_a));
         assert!(ids.contains(&merged_card_b));
         assert!(
             shared.queued_placeholders.is_empty(),
             "every merged source id must be drained from queued_placeholders"
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_ROOT_DIR");
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_exit_ctx_missing_persists_pending_clears_and_drain_deletes_them() {
+        use super::QueueExitEvent;
+        use super::QueueExitKind;
+        use crate::services::discord::queued_placeholders_store;
+        use crate::services::discord::runtime_store::lock_test_env;
+
+        struct RecordingDeleter {
+            calls: std::sync::Arc<std::sync::Mutex<Vec<(ChannelId, MessageId)>>>,
+        }
+
+        impl super::runtime_bootstrap::StalePlaceholderDeleter for RecordingDeleter {
+            fn delete<'a>(
+                &'a self,
+                channel_id: ChannelId,
+                placeholder_msg_id: MessageId,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+            {
+                let calls = self.calls.clone();
+                Box::pin(async move {
+                    calls.lock().unwrap().push((channel_id, placeholder_msg_id));
+                    Ok(())
+                })
+            }
+        }
+
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap());
+        }
+
+        let shared = super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(925_000_000_000_001);
+        let head_msg = MessageId::new(825_000_000_000_001);
+        let head_card = MessageId::new(725_000_000_000_001);
+        let merged_msg = MessageId::new(825_000_000_000_002);
+        let merged_card = MessageId::new(725_000_000_000_002);
+
+        shared
+            .insert_queued_placeholder(channel_id, head_msg, head_card)
+            .await;
+        shared
+            .insert_queued_placeholder(channel_id, merged_msg, merged_card)
+            .await;
+
+        let event = QueueExitEvent {
+            intervention: Intervention {
+                author_id: UserId::new(50),
+                message_id: head_msg,
+                source_message_ids: vec![head_msg, merged_msg],
+                text: "merged".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: true,
+            },
+            kind: QueueExitKind::Cancelled,
+        };
+
+        super::apply_queue_exit_feedback(&shared, channel_id, std::slice::from_ref(&event)).await;
+
+        assert!(
+            shared.queued_placeholders.is_empty(),
+            "queue-exit must still drain the active queued-placeholder handoff"
+        );
+        assert_eq!(
+            shared.queue_exit_placeholder_clears.len(),
+            2,
+            "ctx-missing queue-exit must keep visible card ids pending in memory"
+        );
+
+        let restored_pending = queued_placeholders_store::load_queue_exit_placeholder_clears(
+            &shared.provider,
+            &shared.token_hash,
+        );
+        assert_eq!(
+            restored_pending.len(),
+            2,
+            "ctx-missing queue-exit must mirror pending visible card ids to the sidecar"
+        );
+        assert_eq!(
+            restored_pending.get(&(channel_id, head_msg)),
+            Some(&head_card)
+        );
+        assert_eq!(
+            restored_pending.get(&(channel_id, merged_msg)),
+            Some(&merged_card)
+        );
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deleter = RecordingDeleter {
+            calls: calls.clone(),
+        };
+        let (deleted, failed) =
+            super::drain_pending_queue_exit_placeholder_clears_with(&shared, &deleter).await;
+
+        assert_eq!((deleted, failed), (2, 0));
+        let call_set: std::collections::HashSet<(ChannelId, MessageId)> =
+            calls.lock().unwrap().iter().copied().collect();
+        assert!(call_set.contains(&(channel_id, head_card)));
+        assert!(call_set.contains(&(channel_id, merged_card)));
+        assert!(
+            shared.queue_exit_placeholder_clears.is_empty(),
+            "successful ready-time drain must clear pending memory"
+        );
+        assert!(
+            queued_placeholders_store::load_queue_exit_placeholder_clears(
+                &shared.provider,
+                &shared.token_hash,
+            )
+            .is_empty(),
+            "successful ready-time drain must remove the pending sidecar"
         );
 
         unsafe {

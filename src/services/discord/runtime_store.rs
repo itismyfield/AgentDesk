@@ -62,6 +62,14 @@ pub(crate) fn discord_queued_placeholders_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_queued_placeholders"))
 }
 
+/// #1362: sidecar for queued placeholder cards that exited the queue before
+/// the Serenity context was available. The regular queued-placeholder mapping
+/// is already drained at queue-exit time; this store preserves the visible card
+/// ids until the cached Discord HTTP client can delete them.
+pub(crate) fn discord_queue_exit_placeholder_clears_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_queue_exit_placeholder_clears"))
+}
+
 pub(super) fn discord_handoff_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_handoff"))
 }

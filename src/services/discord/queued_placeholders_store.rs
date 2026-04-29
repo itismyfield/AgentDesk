@@ -49,12 +49,28 @@ fn store_root() -> Option<PathBuf> {
     runtime_store::discord_queued_placeholders_root()
 }
 
+fn pending_clear_store_root() -> Option<PathBuf> {
+    runtime_store::discord_queue_exit_placeholder_clears_root()
+}
+
 fn channel_file_path(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
 ) -> Option<PathBuf> {
     store_root().map(|root| {
+        root.join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()))
+    })
+}
+
+fn pending_clear_channel_file_path(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> Option<PathBuf> {
+    pending_clear_store_root().map(|root| {
         root.join(provider.as_str())
             .join(token_hash)
             .join(format!("{}.json", channel_id.get()))
@@ -93,6 +109,41 @@ pub(super) fn save_channel_queued_placeholders(
     }
 }
 
+fn save_channel_entries(path: Option<PathBuf>, entries: &[(MessageId, MessageId)]) {
+    let Some(path) = path else {
+        return;
+    };
+    if entries.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let payload: Vec<QueuedPlaceholderEntry> = entries
+        .iter()
+        .map(|(user_msg_id, placeholder_msg_id)| QueuedPlaceholderEntry {
+            user_message_id: user_msg_id.get(),
+            placeholder_message_id: placeholder_msg_id.get(),
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&payload) {
+        let _ = runtime_store::atomic_write(&path, &json);
+    }
+}
+
+pub(super) fn save_channel_queue_exit_placeholder_clears(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    entries: &[(MessageId, MessageId)],
+) {
+    save_channel_entries(
+        pending_clear_channel_file_path(provider, token_hash, channel_id),
+        entries,
+    );
+}
+
 /// Load every persisted mapping under this bot's namespace and return them as
 /// a `(channel_id, user_msg_id) -> placeholder_msg_id` map ready for direct
 /// import into `SharedData::queued_placeholders`.
@@ -103,8 +154,23 @@ pub(super) fn load_queued_placeholders(
     provider: &ProviderKind,
     token_hash: &str,
 ) -> HashMap<(ChannelId, MessageId), MessageId> {
+    load_entries(store_root(), provider, token_hash)
+}
+
+pub(super) fn load_queue_exit_placeholder_clears(
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> HashMap<(ChannelId, MessageId), MessageId> {
+    load_entries(pending_clear_store_root(), provider, token_hash)
+}
+
+fn load_entries(
+    root: Option<PathBuf>,
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> HashMap<(ChannelId, MessageId), MessageId> {
     let mut result: HashMap<(ChannelId, MessageId), MessageId> = HashMap::new();
-    let Some(root) = store_root() else {
+    let Some(root) = root else {
         return result;
     };
     let dir = root.join(provider.as_str()).join(token_hash);
@@ -173,6 +239,26 @@ pub(super) fn persist_channel_from_map(
         })
         .collect();
     save_channel_queued_placeholders(provider, token_hash, channel_id, &entries);
+}
+
+pub(super) fn persist_queue_exit_placeholder_clears_channel_from_map(
+    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) {
+    let entries: Vec<(MessageId, MessageId)> = map
+        .iter()
+        .filter_map(|kv| {
+            let (ch, user) = *kv.key();
+            if ch == channel_id {
+                Some((user, *kv.value()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    save_channel_queue_exit_placeholder_clears(provider, token_hash, channel_id, &entries);
 }
 
 #[cfg(test)]
