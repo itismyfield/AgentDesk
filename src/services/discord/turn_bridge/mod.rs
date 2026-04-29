@@ -14,6 +14,10 @@ mod tests;
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
+use crate::db::session_observability::{
+    BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
+    mark_session_tool_use_pg,
+};
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage};
 use crate::services::agent_protocol::TaskNotificationKind;
@@ -97,6 +101,61 @@ fn merge_task_notification_kind(
         Some(existing) if priority(existing) >= priority(new_kind) => Some(existing),
         _ => Some(new_kind),
     }
+}
+
+async fn close_next_tracked_background_child(
+    pg_pool: Option<&sqlx::PgPool>,
+    child_session_ids: &mut Vec<i64>,
+    status: &str,
+    reason: &str,
+) {
+    let Some(pg_pool) = pg_pool else {
+        return;
+    };
+    if child_session_ids.is_empty() {
+        return;
+    }
+    let child_session_id = child_session_ids.remove(0);
+    match close_background_child_pg(pg_pool, child_session_id, status).await {
+        Ok(_) => {}
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ Failed to close background child session {child_session_id} after {reason}: {error}"
+            );
+        }
+    }
+}
+
+async fn close_all_tracked_background_children(
+    pg_pool: Option<&sqlx::PgPool>,
+    child_session_ids: &mut Vec<i64>,
+    status: &str,
+    reason: &str,
+) {
+    while !child_session_ids.is_empty() {
+        close_next_tracked_background_child(pg_pool, child_session_ids, status, reason).await;
+    }
+}
+
+fn task_notification_closes_background_child(kind: TaskNotificationKind, status: &str) -> bool {
+    if !matches!(
+        kind,
+        TaskNotificationKind::Background | TaskNotificationKind::Subagent
+    ) {
+        return false;
+    }
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "completed"
+            | "done"
+            | "finished"
+            | "aborted"
+            | "cancelled"
+            | "canceled"
+            | "failed"
+            | "error"
+    )
 }
 
 fn thinking_status_line() -> String {
@@ -885,6 +944,7 @@ pub(super) fn spawn_turn_bridge(
             super::formatting::LongRunningCloseTrigger,
             bool, // ack_consumed
         )> = None;
+        let mut active_background_child_session_ids: Vec<i64> = Vec::new();
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
@@ -993,6 +1053,13 @@ pub(super) fn spawn_turn_bridge(
                     let _ = save_inflight_state(&inflight_state);
                 }
                 cancelled = true;
+                close_all_tracked_background_children(
+                    shared_owned.pg_pool.as_ref(),
+                    &mut active_background_child_session_ids,
+                    "aborted",
+                    "turn cancel",
+                )
+                .await;
                 break;
             }
 
@@ -1006,6 +1073,13 @@ pub(super) fn spawn_turn_bridge(
                     let _ = save_inflight_state(&inflight_state);
                 }
                 cancelled = true;
+                close_all_tracked_background_children(
+                    shared_owned.pg_pool.as_ref(),
+                    &mut active_background_child_session_ids,
+                    "aborted",
+                    "turn cancel",
+                )
+                .await;
                 break;
             }
 
@@ -1121,6 +1195,20 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
+                            if let (Some(pg_pool), Some(session_key)) =
+                                (shared_owned.pg_pool.as_ref(), adk_session_key.as_deref())
+                            {
+                                if let Err(error) =
+                                    mark_session_tool_use_pg(pg_pool, session_key).await
+                                {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ Failed to update last_tool_at for session {}: {}",
+                                        session_key,
+                                        error
+                                    );
+                                }
+                            }
                             if shared_owned.legacy_sqlite().is_some() || shared_owned.pg_pool.is_some() {
                                 match record_skill_usage_from_tool_use(
                                     shared_owned.legacy_sqlite(),
@@ -1185,12 +1273,47 @@ pub(super) fn spawn_turn_bridge(
                             // Done/Result write a generic background card
                             // over the planned restart notice. Skip setup
                             // for those.
-                            if long_running_placeholder_active.is_none()
-                                && !is_dcserver_restart_command(&input)
-                            {
-                                if let Some((reason, close_trigger)) =
+                            let long_running_tool =
+                                if !is_dcserver_restart_command(&input) {
                                     super::formatting::classify_long_running_tool(&name, &input)
+                                } else {
+                                    None
+                                };
+                            if matches!(
+                                long_running_tool,
+                                Some((
+                                    _,
+                                    super::formatting::LongRunningCloseTrigger::BackgroundDispatch
+                                ))
+                            ) {
+                                if let (Some(pg_pool), Some(parent_session_key)) =
+                                    (shared_owned.pg_pool.as_ref(), adk_session_key.as_deref())
                                 {
+                                    let spawn = BackgroundChildSpawn {
+                                        parent_session_key: parent_session_key.to_string(),
+                                        provider: Some(provider.as_str().to_string()),
+                                        tool_name: name.clone(),
+                                        tool_input: input.clone(),
+                                    };
+                                    match insert_background_child_pg(pg_pool, &spawn).await {
+                                        Ok(Some(child_session_id)) => {
+                                            active_background_child_session_ids
+                                                .push(child_session_id);
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            let ts = chrono::Local::now().format("%H:%M:%S");
+                                            tracing::warn!(
+                                                "  [{ts}] ⚠ Failed to insert background child session for {}: {}",
+                                                parent_session_key,
+                                                error
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            if long_running_placeholder_active.is_none() {
+                                if let Some((reason, close_trigger)) = long_running_tool {
                                     let started_at_unix = chrono::Utc::now().timestamp();
                                     let key =
                                         super::placeholder_controller::PlaceholderKey {
@@ -1327,6 +1450,15 @@ pub(super) fn spawn_turn_bridge(
                                 // would later mark it Completed and Discord
                                 // would report a failed background launch as ✅.
                                 if monitor_like || (is_dispatch_ack && is_error) {
+                                    if is_dispatch_ack && is_error {
+                                        close_next_tracked_background_child(
+                                            shared_owned.pg_pool.as_ref(),
+                                            &mut active_background_child_session_ids,
+                                            "aborted",
+                                            "failed background dispatch ack",
+                                        )
+                                        .await;
+                                    }
                                     let target = if is_error {
                                         super::placeholder_controller::PlaceholderLifecycle::Aborted
                                     } else {
@@ -1399,10 +1531,32 @@ pub(super) fn spawn_turn_bridge(
                                 },
                             );
                         }
-                        StreamMessage::TaskNotification { summary, kind, .. } => {
+                        StreamMessage::TaskNotification {
+                            summary,
+                            status,
+                            kind,
+                            ..
+                        } => {
                             inflight_state.task_notification_kind =
                                 merge_task_notification_kind(inflight_state.task_notification_kind, kind);
                             state_dirty = true;
+                            if task_notification_closes_background_child(kind, &status) {
+                                let close_status = if matches!(
+                                    status.trim().to_ascii_lowercase().as_str(),
+                                    "aborted" | "cancelled" | "canceled" | "failed" | "error"
+                                ) {
+                                    "aborted"
+                                } else {
+                                    "completed"
+                                };
+                                close_next_tracked_background_child(
+                                    shared_owned.pg_pool.as_ref(),
+                                    &mut active_background_child_session_ids,
+                                    close_status,
+                                    "task notification",
+                                )
+                                .await;
+                            }
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -1419,7 +1573,8 @@ pub(super) fn spawn_turn_bridge(
                             result,
                             session_id: sid,
                         } => {
-                            if result == "__session_died_retry__" {
+                            let session_died_retry = result == "__session_died_retry__";
+                            if session_died_retry {
                                 // Recovery reader requests the generic
                                 // Discord-history auto-retry path when the
                                 // resumed session dies before completion.
@@ -1433,7 +1588,7 @@ pub(super) fn spawn_turn_bridge(
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
-                                let target = if result == "__session_died_retry__" {
+                                let target = if session_died_retry {
                                     super::placeholder_controller::PlaceholderLifecycle::Aborted
                                 } else {
                                     super::placeholder_controller::PlaceholderLifecycle::Completed
@@ -1451,7 +1606,6 @@ pub(super) fn spawn_turn_bridge(
                                 use super::placeholder_controller::PlaceholderControllerOutcome::*;
                                 if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                                     inflight_state.long_running_placeholder_active = false;
-                                    state_dirty = true;
                                 } else {
                                     long_running_placeholder_active =
                                         Some((key, snapshot, close_trigger, ack_consumed));
@@ -1470,7 +1624,7 @@ pub(super) fn spawn_turn_bridge(
                                 new_session_id = Some(s.clone());
                                 inflight_state.session_id = Some(s);
                             }
-                            if result != "__session_died_retry__" {
+                            if !session_died_retry {
                                 push_transcript_event(
                                     &mut transcript_events,
                                     SessionTranscriptEvent {
@@ -1487,6 +1641,17 @@ pub(super) fn spawn_turn_bridge(
                                     },
                                 );
                             }
+                            close_all_tracked_background_children(
+                                shared_owned.pg_pool.as_ref(),
+                                &mut active_background_child_session_ids,
+                                if session_died_retry {
+                                    "aborted"
+                                } else {
+                                    "completed"
+                                },
+                                "turn done",
+                            )
+                            .await;
                             state_dirty = true;
                             done = true;
                         }
@@ -1563,6 +1728,13 @@ pub(super) fn spawn_turn_bridge(
                                 );
                             }
                             inflight_state.full_response = full_response.clone();
+                            close_all_tracked_background_children(
+                                shared_owned.pg_pool.as_ref(),
+                                &mut active_background_child_session_ids,
+                                "aborted",
+                                "stream error",
+                            )
+                            .await;
                             state_dirty = true;
                             done = true;
                         }
@@ -1947,6 +2119,17 @@ pub(super) fn spawn_turn_bridge(
                 }
                 let _ = save_inflight_state(&inflight_state);
             }
+            close_all_tracked_background_children(
+                shared_owned.pg_pool.as_ref(),
+                &mut active_background_child_session_ids,
+                if transport_error || rx_disconnected {
+                    "aborted"
+                } else {
+                    "completed"
+                },
+                "turn loop exit",
+            )
+            .await;
         }
 
         // #1113 stream-end finalization: the main turn loop has exited, which
@@ -2152,6 +2335,13 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if cancelled {
+            close_all_tracked_background_children(
+                shared_owned.pg_pool.as_ref(),
+                &mut active_background_child_session_ids,
+                "aborted",
+                "cancel cleanup",
+            )
+            .await;
             // #1255: cancelled turn → drive any active long-running placeholder
             // into Aborted before the rest of the cleanup machinery runs. The
             // controller's idempotent terminal transition guarantees this is

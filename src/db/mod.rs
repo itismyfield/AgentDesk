@@ -7,6 +7,7 @@ pub mod postgres;
 #[cfg(test)]
 pub(crate) mod schema;
 pub(crate) mod session_agent_resolution;
+pub mod session_observability;
 pub mod session_transcripts;
 pub mod table_metadata;
 pub mod turns;
