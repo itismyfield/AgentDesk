@@ -315,6 +315,23 @@ pub(in crate::services::discord) fn recovery_known_message_ids(
     ids
 }
 
+pub(in crate::services::discord) fn advance_last_message_checkpoint(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> u64 {
+    let message_id = message_id.get();
+    let checkpoint = shared
+        .last_message_ids
+        .get(&channel_id)
+        .map(|current| (*current).max(message_id))
+        .unwrap_or(message_id);
+    shared.last_message_ids.insert(channel_id, checkpoint);
+    runtime_store::save_last_message_id(provider.as_str(), channel_id.get(), checkpoint);
+    checkpoint
+}
+
 pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
@@ -3731,6 +3748,39 @@ mod tests {
         assert!(!should_phase2_recover_message(200, Some(250), &existing));
         assert!(!should_phase2_recover_message(250, Some(250), &existing));
         assert!(should_phase2_recover_message(251, Some(250), &existing));
+    }
+
+    #[test]
+    fn queue_cancel_checkpoint_blocks_phase2_recovery() {
+        let _lock = super::runtime_store::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path().to_str().unwrap()) };
+
+        let shared = super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(1479671301387059200);
+        let cancelled = MessageId::new(1499024414690250824);
+
+        let checkpoint =
+            super::advance_last_message_checkpoint(&shared, &provider, channel_id, cancelled);
+
+        assert_eq!(checkpoint, cancelled.get());
+        assert!(!should_phase2_recover_message(
+            cancelled.get(),
+            shared.last_message_ids.get(&channel_id).map(|v| *v),
+            &HashSet::new()
+        ));
+        let saved = std::fs::read_to_string(
+            tmp.path()
+                .join("runtime")
+                .join("last_message")
+                .join(provider.as_str())
+                .join(format!("{}.txt", channel_id.get())),
+        )
+        .expect("checkpoint should be persisted");
+        assert_eq!(saved.trim(), cancelled.get().to_string());
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 
     #[test]

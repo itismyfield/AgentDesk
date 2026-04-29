@@ -333,6 +333,12 @@ async fn handle_reaction_remove(
             )
             .await;
             if removed.is_some() {
+                super::super::advance_last_message_checkpoint(
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    removed_reaction.message_id,
+                );
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 📭 QUEUE-CANCEL: removed queued message {} in channel {} via reaction removal",
