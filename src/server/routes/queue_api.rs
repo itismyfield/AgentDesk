@@ -180,6 +180,7 @@ pub async fn cancel_turn(
 ///
 /// Core fields (#964): `{ provider, attached, tmux_session,
 /// last_relay_offset, inflight_state_present, last_relay_ts_ms,
+/// last_capture_offset, unread_bytes, desynced, reconnect_count,
 /// has_pending_queue }`.
 ///
 /// #1133 enriched read-only diagnostics (omitted when their source is
@@ -192,6 +193,9 @@ pub async fn cancel_turn(
 ///
 /// Used by operators to diagnose "watcher detached silently while tmux
 /// still producing output" incidents and pre-watcher mailbox queueing.
+/// `desynced=true` means a live tmux-backed inflight appears orphaned, or
+/// the capture file has unread bytes while relay telemetry is stale for
+/// at least 30 seconds.
 ///
 /// 404 is returned when no watcher, no inflight state, and no mailbox
 /// engagement (active turn or queued intervention) is known for the

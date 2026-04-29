@@ -787,6 +787,9 @@ pub(super) struct TmuxRelayCoord {
     /// `watcher-state` observability endpoint (#964). Monotonic is NOT
     /// required — this is a telemetry field only.
     pub(super) last_relay_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// Number of watcher reattach/reconnect spawns observed for this channel
+    /// in the current dcserver process. Exposed through watcher-state (#964).
+    pub(super) reconnect_count: Arc<std::sync::atomic::AtomicU64>,
     /// `.generation` marker file mtime (nanos since epoch) snapshotted the
     /// last time `confirmed_end_offset` was advanced. 0 = never observed.
     ///
@@ -813,6 +816,7 @@ impl TmuxRelayCoord {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            reconnect_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             confirmed_end_generation_mtime_ns: Arc::new(std::sync::atomic::AtomicI64::new(0)),
         }
     }
@@ -1108,6 +1112,16 @@ impl SharedData {
             .entry(channel_id)
             .or_insert_with(|| Arc::new(TmuxRelayCoord::new()))
             .clone()
+    }
+
+    /// Record that this process spawned a watcher after claiming/replacing a
+    /// tmux watcher slot. This is process-local telemetry for
+    /// `GET /api/channels/:id/watcher-state` (#964), not persisted dedupe
+    /// state.
+    pub(super) fn record_tmux_watcher_reconnect(&self, channel_id: ChannelId) {
+        self.tmux_relay_coord(channel_id)
+            .reconnect_count
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     pub(super) fn record_channel_speaker(

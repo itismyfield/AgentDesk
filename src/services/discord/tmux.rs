@@ -3488,6 +3488,7 @@ fn trigger_missing_inflight_reattach(
     );
     if claim.should_spawn() {
         record_recent_watcher_reattach_offset(channel_id, tmux_session_name, initial_offset);
+        shared.record_tmux_watcher_reconnect(channel_id);
         tokio::spawn(tmux_output_watcher(
             channel_id,
             http.clone(),
@@ -7625,6 +7626,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             pw.initial_offset
         );
 
+        shared.record_tmux_watcher_reconnect(pw.channel_id);
         tokio::spawn(tmux_output_watcher_with_restore(
             pw.channel_id,
             http.clone(),

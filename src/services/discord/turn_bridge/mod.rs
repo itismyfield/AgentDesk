@@ -1894,6 +1894,7 @@ pub(super) fn spawn_turn_bridge(
                                             *guard = Some(last_offset);
                                         }
                                         turn_delivered.store(false, Ordering::Relaxed);
+                                        shared_owned.record_tmux_watcher_reconnect(channel_id);
                                         tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                                             channel_id,
                                             http_bg,

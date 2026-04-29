@@ -22,6 +22,8 @@ use crate::services::discord::outbound::{
 };
 use crate::services::provider::ProviderKind;
 
+const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
+
 /// Per-provider snapshot for the health response.
 struct ProviderEntry {
     name: String,
@@ -57,6 +59,18 @@ pub struct WatcherStateSnapshot {
     pub last_relay_offset: u64,
     pub inflight_state_present: bool,
     pub last_relay_ts_ms: i64,
+    /// Current tmux output JSONL length when an inflight `output_path` is known.
+    /// `null` means the endpoint could not identify a capture file.
+    pub last_capture_offset: Option<u64>,
+    /// Bytes present in the capture file but not yet confirmed as relayed.
+    /// `null` when `last_capture_offset` is unknown.
+    pub unread_bytes: Option<u64>,
+    /// True when a live tmux-backed turn appears detached or its capture file
+    /// has unread bytes and a non-zero relay timestamp is stale by
+    /// `WATCHER_STATE_DESYNC_STALE_MS`.
+    pub desynced: bool,
+    /// Process-local watcher reattach/reconnect count for this channel.
+    pub reconnect_count: u64,
     /// #1133: Persisted `started_at` from the inflight JSON
     /// (`YYYY-MM-DD HH:MM:SS` localtime). `None` when no inflight is on disk.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -325,7 +339,7 @@ impl HealthRegistry {
             if !attached && !has_relay_coord && !inflight_state_present && !mailbox_engaged {
                 continue;
             }
-            let (last_relay_offset, last_relay_ts_ms) = shared
+            let (last_relay_offset, last_relay_ts_ms, reconnect_count) = shared
                 .tmux_relay_coords
                 .get(&channel)
                 .map(|coord| {
@@ -336,9 +350,12 @@ impl HealthRegistry {
                         coord
                             .last_relay_ts_ms
                             .load(std::sync::atomic::Ordering::Acquire),
+                        coord
+                            .reconnect_count
+                            .load(std::sync::atomic::Ordering::Acquire),
                     )
                 })
-                .unwrap_or((0, 0));
+                .unwrap_or((0, 0, 0));
             let watcher_owner_channel_id = watcher_binding
                 .as_ref()
                 .map(|binding| binding.owner_channel_id)
@@ -369,6 +386,33 @@ impl HealthRegistry {
                 }
                 None => None,
             };
+            let output_path_for_metadata = inflight
+                .as_ref()
+                .and_then(|state| state.output_path.as_deref())
+                .map(str::to_string);
+            let last_capture_offset = match output_path_for_metadata {
+                Some(path) => tokio::task::spawn_blocking(move || {
+                    std::fs::metadata(path).ok().map(|meta| meta.len())
+                })
+                .await
+                .unwrap_or(None),
+                None => None,
+            };
+            let unread_bytes =
+                last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset));
+            let relay_stale = last_relay_ts_ms > 0
+                && chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(last_relay_ts_ms)
+                    >= WATCHER_STATE_DESYNC_STALE_MS;
+            let capture_lagged = last_capture_offset
+                .map(|capture| {
+                    tmux_session_alive == Some(true) && capture > last_relay_offset && relay_stale
+                })
+                .unwrap_or(false);
+            let live_tmux_orphaned =
+                tmux_session_alive == Some(true) && inflight_state_present && !attached;
+            let desynced = capture_lagged || live_tmux_orphaned;
             return Some(WatcherStateSnapshot {
                 provider: entry.name.clone(),
                 attached,
@@ -377,6 +421,10 @@ impl HealthRegistry {
                 last_relay_offset,
                 inflight_state_present,
                 last_relay_ts_ms,
+                last_capture_offset,
+                unread_bytes,
+                desynced,
+                reconnect_count,
                 inflight_started_at,
                 inflight_updated_at,
                 inflight_user_msg_id,
@@ -1459,6 +1507,26 @@ impl TestHealthHarness {
             ChannelId::new(channel_id),
             super::TmuxWatcherHandle {
                 tmux_session_name: format!("test-seeded-watcher-{channel_id}"),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: cancel.clone(),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        cancel
+    }
+
+    pub(crate) fn seed_watcher_for_tmux(
+        &self,
+        channel_id: u64,
+        tmux_session_name: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.shared.tmux_watchers.insert(
+            ChannelId::new(channel_id),
+            super::TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.to_string(),
                 paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 resume_offset: Arc::new(std::sync::Mutex::new(None)),
                 cancel: cancel.clone(),
@@ -2996,6 +3064,42 @@ mod tests {
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use poise::serenity_prelude::{MessageId, UserId};
 
+    struct TestTmuxSession {
+        name: String,
+    }
+
+    impl Drop for TestTmuxSession {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &self.name])
+                .status();
+        }
+    }
+
+    fn start_test_tmux_session(label: &str) -> Option<TestTmuxSession> {
+        if !crate::services::claude::is_tmux_available() {
+            eprintln!("skipping watcher-state live tmux assertion: tmux is unavailable");
+            return None;
+        }
+        let name = format!(
+            "AgentDesk-health-{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &name, "sleep 30"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(
+            created,
+            "failed to create tmux session for watcher-state test"
+        );
+        Some(TestTmuxSession { name })
+    }
+
     fn test_db() -> Db {
         crate::db::test_db()
     }
@@ -3496,6 +3600,9 @@ mod tests {
         coord
             .last_relay_ts_ms
             .store(1_700_000_000_000, std::sync::atomic::Ordering::Release);
+        coord
+            .reconnect_count
+            .store(2, std::sync::atomic::Ordering::Release);
 
         let registry = harness.registry();
         let snapshot = registry
@@ -3508,6 +3615,10 @@ mod tests {
         assert_eq!(snapshot.watcher_owner_channel_id, Some(channel_id));
         assert_eq!(snapshot.last_relay_offset, 2048);
         assert_eq!(snapshot.last_relay_ts_ms, 1_700_000_000_000);
+        assert_eq!(snapshot.last_capture_offset, None);
+        assert_eq!(snapshot.unread_bytes, None);
+        assert!(!snapshot.desynced);
+        assert_eq!(snapshot.reconnect_count, 2);
         // No inflight JSON written to disk → field is false and #1133 inflight
         // diagnostics are absent.
         assert!(!snapshot.inflight_state_present);
@@ -3535,6 +3646,10 @@ mod tests {
             "last_relay_offset",
             "inflight_state_present",
             "last_relay_ts_ms",
+            "last_capture_offset",
+            "unread_bytes",
+            "desynced",
+            "reconnect_count",
             "has_pending_queue",
             "watcher_owner_channel_id",
         ] {
@@ -3682,6 +3797,8 @@ mod tests {
 
         let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
         let channel_id = 600_111_222_333_444_555;
+        let output_path = temp.path().join("watcher-state-inflight-output.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 96]).expect("seed output capture");
 
         let mut inflight = super::super::inflight::InflightTurnState::new(
             ProviderKind::Codex,
@@ -3694,7 +3811,7 @@ mod tests {
             /* session_id */ Some("session-inflight-1133".to_string()),
             /* tmux_session_name */
             Some("nonexistent-session-1133-test".to_string()),
-            /* output_path */ None,
+            /* output_path */ Some(output_path.to_string_lossy().into_owned()),
             /* input_fifo_path */ None,
             /* last_offset */ 0,
         );
@@ -3705,6 +3822,14 @@ mod tests {
         // string.
         inflight.started_at = "2026-04-25 03:00:00".to_string();
         super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+        let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
+        coord
+            .confirmed_end_offset
+            .store(32, std::sync::atomic::Ordering::Release);
+        coord.last_relay_ts_ms.store(
+            chrono::Utc::now().timestamp_millis(),
+            std::sync::atomic::Ordering::Release,
+        );
 
         let registry = harness.registry();
         let snapshot = registry
@@ -3727,6 +3852,13 @@ mod tests {
         );
         assert_eq!(snapshot.inflight_user_msg_id, Some(9_001));
         assert_eq!(snapshot.inflight_current_msg_id, Some(9_002));
+        assert_eq!(snapshot.last_capture_offset, Some(96));
+        assert_eq!(snapshot.unread_bytes, Some(64));
+        assert!(
+            !snapshot.desynced,
+            "non-live tmux session must not be marked desynced solely because a temp output file has unread bytes"
+        );
+        assert_eq!(snapshot.reconnect_count, 0);
         assert_eq!(
             snapshot.tmux_session.as_deref(),
             Some("nonexistent-session-1133-test")
@@ -3735,6 +3867,110 @@ mod tests {
         // field is Some(false), not None, because we DID know a session name
         // to probe.
         assert_eq!(snapshot.tmux_session_alive, Some(false));
+    }
+
+    #[tokio::test]
+    async fn snapshot_watcher_state_marks_capture_lag_desynced_for_live_tmux() {
+        let Some(tmux_guard) = start_test_tmux_session("capture-lag") else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 600_111_222_333_444_556;
+        harness.seed_watcher_for_tmux(channel_id, &tmux_guard.name);
+        let output_path = temp.path().join("watcher-state-desynced-output.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 96]).expect("seed output capture");
+
+        let inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watcher-state-desync".to_string()),
+            24,
+            9_011,
+            9_012,
+            String::new(),
+            Some("session-inflight-desync".to_string()),
+            Some(tmux_guard.name.clone()),
+            Some(output_path.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+        let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
+        coord
+            .confirmed_end_offset
+            .store(32, std::sync::atomic::Ordering::Release);
+        coord.last_relay_ts_ms.store(
+            chrono::Utc::now().timestamp_millis() - WATCHER_STATE_DESYNC_STALE_MS - 1_000,
+            std::sync::atomic::Ordering::Release,
+        );
+
+        let snapshot = harness
+            .registry()
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("live tmux watcher should surface a snapshot");
+
+        assert!(snapshot.attached);
+        assert_eq!(snapshot.tmux_session_alive, Some(true));
+        assert_eq!(snapshot.last_capture_offset, Some(96));
+        assert_eq!(snapshot.unread_bytes, Some(64));
+        assert!(snapshot.desynced);
+    }
+
+    #[tokio::test]
+    async fn snapshot_watcher_state_marks_live_tmux_inflight_without_watcher_desynced() {
+        let Some(tmux_guard) = start_test_tmux_session("orphaned") else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 600_111_222_333_444_557;
+        let inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watcher-state-orphan".to_string()),
+            24,
+            9_021,
+            9_022,
+            String::new(),
+            Some("session-inflight-orphan".to_string()),
+            Some(tmux_guard.name.clone()),
+            None,
+            None,
+            0,
+        );
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let snapshot = harness
+            .registry()
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("live orphaned tmux inflight should surface a snapshot");
+
+        assert!(!snapshot.attached);
+        assert_eq!(snapshot.tmux_session_alive, Some(true));
+        assert!(snapshot.desynced);
     }
 
     #[tokio::test]

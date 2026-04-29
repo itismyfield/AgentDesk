@@ -1435,6 +1435,7 @@ pub(super) async fn restore_inflight_turns(
                                         tmux_session_name,
                                         finish_mailbox_on_completion,
                                     );
+                                shared.record_tmux_watcher_reconnect(channel_id);
                                 tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                                     channel_id,
                                     http.clone(),
@@ -2319,6 +2320,7 @@ pub(super) async fn restore_inflight_turns(
                             &tmux_session_name,
                             finish_mailbox_on_completion,
                         );
+                        shared.record_tmux_watcher_reconnect(channel_id);
                         tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                             channel_id,
                             http.clone(),
@@ -2985,6 +2987,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                 "recovery_restore_inflight",
             );
             if claim.should_spawn() {
+                shared.record_tmux_watcher_reconnect(discord_channel_id);
                 tokio::spawn(super::tmux::tmux_output_watcher(
                     discord_channel_id,
                     http.clone(),
