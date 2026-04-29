@@ -399,7 +399,42 @@ fn render_dispatch_contract(
                  - accept는 피드백 수용 후 rework, dispute는 반박 후 재리뷰, dismiss는 무시 후 done 경로다."
             ))
         }
-        Some("e2e-test") | Some("consultation") | Some("phase-gate") | Some("pm-decision") => {
+        Some("phase-gate") => {
+            let dispatch_id = current_task.dispatch_id?;
+            let pass_verdict = parse_dispatch_context(current_task.dispatch_context)
+                .and_then(|context| {
+                    context
+                        .get("phase_gate")
+                        .and_then(|phase_gate| phase_gate.get("pass_verdict"))
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "phase_gate_passed".to_string());
+            let example_body = serde_json::json!({
+                "status": "completed",
+                "result": {
+                    "verdict": pass_verdict.clone(),
+                    "summary": "결과 요약",
+                    "checks": {
+                        "merge_verified": { "status": "pass" },
+                        "issue_closed": { "status": "pass" },
+                        "build_passed": { "status": "pass" }
+                    }
+                }
+            })
+            .to_string();
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                 - pass일 때 result.verdict는 반드시 `{pass_verdict}`로 넣는다.\n\
+                 - result.checks에는 phase gate checks 각각의 pass/fail 상태를 넣는다.\n\
+                 - 예시 body: `{example_body}`\n\
+                 - review verdict API는 사용하지 않는다."
+            ))
+        }
+        Some("e2e-test") | Some("consultation") | Some("pm-decision") => {
             let dispatch_id = current_task.dispatch_id?;
             Some(format!(
                 "[Dispatch Contract]\n\
@@ -932,6 +967,35 @@ pub(super) fn build_system_prompt(
     }
 
     system_prompt_owned
+}
+
+#[cfg(test)]
+mod dispatch_contract_tests {
+    use super::*;
+
+    #[test]
+    fn phase_gate_contract_requires_verdict_and_checks() {
+        let dispatch_context = serde_json::json!({
+            "phase_gate": {
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["merge_verified", "issue_closed", "build_passed"]
+            }
+        });
+        let dispatch_context_raw = dispatch_context.to_string();
+        let current_task = CurrentTaskContext {
+            dispatch_id: Some("dispatch-phase-gate-1"),
+            dispatch_context: Some(&dispatch_context_raw),
+            ..CurrentTaskContext::default()
+        };
+        let contract = render_dispatch_contract(Some("phase-gate"), &current_task)
+            .expect("phase-gate dispatch contract");
+
+        assert!(contract.contains("PATCH /api/dispatches/dispatch-phase-gate-1"));
+        assert!(contract.contains("result.verdict는 반드시 `phase_gate_passed`"));
+        assert!(contract.contains("\"verdict\":\"phase_gate_passed\""));
+        assert!(contract.contains("\"merge_verified\":{\"status\":\"pass\"}"));
+        assert!(contract.contains("review verdict API는 사용하지 않는다"));
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
