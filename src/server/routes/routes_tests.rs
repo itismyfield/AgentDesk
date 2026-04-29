@@ -5288,6 +5288,15 @@ async fn kanban_update_card_rejects_manual_non_backlog_transition_pg() {
             .contains("backlog"),
         "error must explain the restricted manual transition rule"
     );
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("/api/kanban-cards/{id}/transition"),
+        "error must point callers at the administrative transition endpoint: {error}"
+    );
+    assert!(
+        error.contains("/api/kanban-cards/{id}/rereview"),
+        "error must point callers at the rereview endpoint for review reruns: {error}"
+    );
 
     let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'c1'")
         .fetch_one(&pool)
@@ -7415,6 +7424,56 @@ async fn api_docs_category_exposes_kanban_params_and_examples() {
     assert_eq!(
         resume["example"]["response"]["action"]["type"],
         "new_implementation_dispatch"
+    );
+
+    let update = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "PATCH" && ep["path"] == "/api/kanban-cards/{id}")
+        .expect("kanban update endpoint must be present");
+    let update_description = update["description"].as_str().unwrap_or_default();
+    assert!(
+        update_description.contains("backlog -> ready")
+            && update_description.contains("/transition")
+            && update_description.contains("/rereview"),
+        "PATCH docs must describe restricted status semantics and canonical alternatives: {update_description}"
+    );
+    assert!(
+        update["params"]["status"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("backlog -> ready"),
+        "PATCH status param must not look like an unrestricted target status"
+    );
+    assert_eq!(update["error_example"]["status"], serde_json::json!(400));
+    assert!(
+        update["error_example"]["response"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/api/kanban-cards/{id}/transition"),
+        "PATCH error example must route force transitions to /transition"
+    );
+
+    let rereview = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/rereview")
+        .expect("kanban rereview endpoint must be present");
+    let rereview_description = rereview["description"].as_str().unwrap_or_default();
+    assert!(
+        rereview_description.contains("instead of PATCH status=review")
+            && rereview_description.contains("Bearer"),
+        "rereview docs must clarify review rerun semantics and auth: {rereview_description}"
+    );
+
+    let transition = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/transition")
+        .expect("kanban transition endpoint must be present");
+    let transition_description = transition["description"].as_str().unwrap_or_default();
+    assert!(
+        transition_description.contains("force-transition semantics")
+            && transition_description.contains("old /force-transition path is removed")
+            && transition_description.contains("Bearer"),
+        "transition docs must clarify force-transition semantics and canonical path: {transition_description}"
     );
 }
 
