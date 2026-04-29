@@ -3,7 +3,7 @@
 //! Architecture: spawns `opencode serve --hostname 127.0.0.1 --port <N>`, drives the
 //! HTTP REST + SSE API, and normalizes events to AgentDesk `StreamMessage`.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -669,9 +669,12 @@ fn consume_sse(
 #[derive(Default)]
 struct SseMessageState {
     accumulated_text: String,
+    message_roles: HashMap<String, String>,
     text_part_snapshots: HashMap<String, String>,
     part_types: HashMap<String, String>,
     pending_text_deltas: HashMap<String, String>,
+    prompt_echo_candidates: HashMap<String, String>,
+    suppressed_text_parts: HashSet<String>,
     terminal_error: bool,
 }
 
@@ -718,6 +721,15 @@ fn move_text_tracking_value(
     }
 }
 
+fn move_text_tracking_set(set: &mut HashSet<String>, from_key: &str, to_key: &str) {
+    if from_key == to_key {
+        return;
+    }
+    if set.remove(from_key) {
+        set.insert(to_key.to_string());
+    }
+}
+
 fn text_part_tracking_key(
     state: &mut SseMessageState,
     part_id: &str,
@@ -746,6 +758,17 @@ fn text_part_tracking_key(
         &unqualified_key,
         &snapshot_key,
         false,
+    );
+    move_text_tracking_value(
+        &mut state.prompt_echo_candidates,
+        &unqualified_key,
+        &snapshot_key,
+        true,
+    );
+    move_text_tracking_set(
+        &mut state.suppressed_text_parts,
+        &unqualified_key,
+        &snapshot_key,
     );
 
     snapshot_key
@@ -812,6 +835,87 @@ fn is_user_message_role(role: Option<&str>) -> bool {
     matches!(role, Some("user"))
 }
 
+fn is_assistant_message_role(role: Option<&str>) -> bool {
+    matches!(role, Some("assistant"))
+}
+
+fn is_agentdesk_user_prompt_echo(text: &str) -> bool {
+    let Some(first_line) = text.lines().next() else {
+        return false;
+    };
+    first_line.starts_with("[User: ") && first_line.contains(" (ID: ") && first_line.ends_with(']')
+}
+
+fn could_be_agentdesk_user_prompt_echo_prefix(text: &str) -> bool {
+    const PREFIX: &str = "[User: ";
+    if text.is_empty() {
+        return false;
+    }
+    PREFIX.starts_with(text) || (text.starts_with(PREFIX) && !text.contains('\n'))
+}
+
+fn suppress_text_part(state: &mut SseMessageState, snapshot_key: &str) {
+    state.pending_text_deltas.remove(snapshot_key);
+    state.text_part_snapshots.remove(snapshot_key);
+    state.prompt_echo_candidates.remove(snapshot_key);
+    state.suppressed_text_parts.insert(snapshot_key.to_string());
+}
+
+fn append_text_delta_if_visible(
+    sender: &Sender<StreamMessage>,
+    state: &mut SseMessageState,
+    message_role: Option<&str>,
+    snapshot_key: Option<&str>,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(snapshot_key) = snapshot_key {
+        if state.suppressed_text_parts.contains(snapshot_key) {
+            return;
+        }
+    }
+
+    if is_user_message_role(message_role) {
+        if let Some(snapshot_key) = snapshot_key {
+            suppress_text_part(state, snapshot_key);
+        }
+        return;
+    }
+
+    if !is_assistant_message_role(message_role) {
+        if let Some(snapshot_key) = snapshot_key {
+            let previous = state.prompt_echo_candidates.remove(snapshot_key);
+            let combined = previous
+                .as_deref()
+                .map(|prefix| format!("{prefix}{text}"))
+                .unwrap_or_else(|| text.to_string());
+
+            if is_agentdesk_user_prompt_echo(&combined) {
+                suppress_text_part(state, snapshot_key);
+                return;
+            }
+
+            if could_be_agentdesk_user_prompt_echo_prefix(&combined) {
+                state
+                    .prompt_echo_candidates
+                    .insert(snapshot_key.to_string(), combined);
+                return;
+            }
+
+            if let Some(previous) = previous {
+                append_text_delta(sender, state, &previous);
+            }
+        } else if is_agentdesk_user_prompt_echo(text) {
+            return;
+        }
+    }
+
+    append_text_delta(sender, state, text);
+}
+
 fn is_reasoning_part_type(part_type: &str) -> bool {
     matches!(part_type, "thinking" | "redactedThinking" | "reasoning")
 }
@@ -854,25 +958,17 @@ fn register_part_type(
         .insert(snapshot_key.clone(), part_type.to_string());
     if is_reasoning_part_type(part_type) || part_type != "text" {
         state.pending_text_deltas.remove(&snapshot_key);
+        state.prompt_echo_candidates.remove(&snapshot_key);
     }
     Some(snapshot_key)
 }
 
-fn flush_pending_text_delta(
-    sender: &Sender<StreamMessage>,
-    state: &mut SseMessageState,
-    snapshot_key: &str,
-) {
-    let Some(pending) = state.pending_text_deltas.remove(snapshot_key) else {
-        return;
-    };
+fn take_pending_text_delta(state: &mut SseMessageState, snapshot_key: &str) -> Option<String> {
+    let pending = state.pending_text_deltas.remove(snapshot_key)?;
     if pending.is_empty() {
-        return;
+        return None;
     }
-    state
-        .text_part_snapshots
-        .insert(snapshot_key.to_string(), pending.clone());
-    append_text_delta(sender, state, &pending);
+    Some(pending)
 }
 
 fn message_id_from_value(value: &Value) -> Option<&str> {
@@ -883,38 +979,75 @@ fn message_id_from_value(value: &Value) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+fn message_record_id_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("id")
+        .or_else(|| value.get("messageID"))
+        .or_else(|| value.get("messageId"))
+        .or_else(|| value.get("message_id"))
+        .and_then(|v| v.as_str())
+}
+
+fn register_message_role(state: &mut SseMessageState, message: &Value) {
+    let Some(message_id) = message_record_id_from_value(message) else {
+        return;
+    };
+    let Some(role) = role_field_from_value(message) else {
+        return;
+    };
+    state
+        .message_roles
+        .insert(message_id.to_string(), role.to_string());
+}
+
 fn emit_text_part(
     part: &Value,
     sender: &Sender<StreamMessage>,
     state: &mut SseMessageState,
     event_message_id: Option<&str>,
+    message_role: Option<&str>,
 ) {
     let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
     if text.is_empty() {
         return;
     }
 
-    let Some(part_id) = part_id_from_value(part) else {
-        append_text_delta(sender, state, text);
+    let part_id = part_id_from_value(part);
+    let message_id = message_id_from_value(part).or(event_message_id);
+    let snapshot_key = part_id.map(|part_id| text_part_tracking_key(state, part_id, message_id));
+
+    if let Some(snapshot_key) = snapshot_key.as_deref() {
+        if state.suppressed_text_parts.contains(snapshot_key) {
+            return;
+        }
+    }
+
+    let Some(snapshot_key) = snapshot_key else {
+        append_text_delta_if_visible(sender, state, message_role, None, text);
         return;
     };
-    let message_id = message_id_from_value(part).or(event_message_id);
-    let snapshot_key = text_part_tracking_key(state, part_id, message_id);
     state
         .part_types
         .insert(snapshot_key.clone(), "text".to_string());
-    flush_pending_text_delta(sender, state, &snapshot_key);
+    let pending = take_pending_text_delta(state, &snapshot_key);
 
     let previous = state
         .text_part_snapshots
         .get(&snapshot_key)
         .map(String::as_str)
         .unwrap_or("");
-    let delta = text.strip_prefix(previous).unwrap_or(text);
+    let effective_previous = pending
+        .as_deref()
+        .filter(|pending| previous.is_empty() && text.starts_with(*pending))
+        .unwrap_or(previous);
+    let delta = text.strip_prefix(effective_previous).unwrap_or(text);
     state
         .text_part_snapshots
-        .insert(snapshot_key, text.to_string());
-    append_text_delta(sender, state, delta);
+        .insert(snapshot_key.clone(), text.to_string());
+    if let Some(pending) = pending {
+        append_text_delta_if_visible(sender, state, message_role, Some(&snapshot_key), &pending);
+    }
+    append_text_delta_if_visible(sender, state, message_role, Some(&snapshot_key), delta);
 }
 
 fn stream_value(value: &Value) -> String {
@@ -976,18 +1109,29 @@ fn emit_part(
     event_message_role: Option<&str>,
 ) {
     let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let message_role = message_role_from_part(part, event_message_role);
+    let message_role = message_role_from_part(part, event_message_role)
+        .map(str::to_string)
+        .or_else(|| {
+            message_id_from_value(part)
+                .or(event_message_id)
+                .and_then(|message_id| state.message_roles.get(message_id).cloned())
+        });
     register_part_type(part, state, event_message_id);
-    if is_user_message_role(message_role) {
+    if is_user_message_role(message_role.as_deref()) {
         if let Some(snapshot_key) = snapshot_key_from_part(part, event_message_id) {
-            state.pending_text_deltas.remove(&snapshot_key);
-            state.text_part_snapshots.remove(&snapshot_key);
+            suppress_text_part(state, &snapshot_key);
         }
         return;
     }
 
     match part_type {
-        "text" => emit_text_part(part, sender, state, event_message_id),
+        "text" => emit_text_part(
+            part,
+            sender,
+            state,
+            event_message_id,
+            message_role.as_deref(),
+        ),
         "thinking" | "redactedThinking" | "reasoning" => {
             let _ = sender.send(StreamMessage::redacted_thinking());
         }
@@ -1066,6 +1210,14 @@ fn process_sse_event(
     match event_type {
         "session.created" | "server.connected" => None,
 
+        "message.updated" => {
+            let props = props?;
+            if let Some(message) = props.get("info").or_else(|| props.get("message")) {
+                register_message_role(state, message);
+            }
+            Some(false)
+        }
+
         "session.status" => {
             if let Some(status) = props
                 .and_then(|p| p.get("status"))
@@ -1118,15 +1270,20 @@ fn process_sse_event(
                     .or_else(|| props.get("part").and_then(part_id_from_value));
                 let message_id = message_id_from_value(props)
                     .or_else(|| props.get("part").and_then(message_id_from_value));
-                let snapshot_key =
-                    part_id.map(|part_id| text_part_tracking_key(state, part_id, message_id));
                 let message_role = props
                     .get("part")
                     .and_then(|part| message_role_from_part(part, message_role_from_props(props)))
-                    .or_else(|| message_role_from_props(props));
-                if is_user_message_role(message_role) {
-                    if let Some(snapshot_key) = snapshot_key {
-                        state.pending_text_deltas.remove(&snapshot_key);
+                    .or_else(|| message_role_from_props(props))
+                    .map(str::to_string)
+                    .or_else(|| {
+                        message_id
+                            .and_then(|message_id| state.message_roles.get(message_id).cloned())
+                    });
+                let snapshot_key =
+                    part_id.map(|part_id| text_part_tracking_key(state, part_id, message_id));
+                if is_user_message_role(message_role.as_deref()) {
+                    if let Some(snapshot_key) = snapshot_key.as_deref() {
+                        suppress_text_part(state, snapshot_key);
                     }
                     return Some(false);
                 }
@@ -1135,19 +1292,44 @@ fn process_sse_event(
 
                 match (snapshot_key, part_type.as_deref()) {
                     (Some(snapshot_key), Some("text")) => {
-                        flush_pending_text_delta(sender, state, &snapshot_key);
+                        let pending = take_pending_text_delta(state, &snapshot_key);
                         state
                             .part_types
                             .insert(snapshot_key.clone(), "text".to_string());
-                        let entry = state.text_part_snapshots.entry(snapshot_key).or_default();
-                        entry.push_str(delta);
-                        append_text_delta(sender, state, delta);
+                        let mut snapshot_text = state
+                            .text_part_snapshots
+                            .remove(&snapshot_key)
+                            .unwrap_or_default();
+                        snapshot_text.push_str(delta);
+                        if let Some(pending) = pending {
+                            append_text_delta_if_visible(
+                                sender,
+                                state,
+                                message_role.as_deref(),
+                                Some(&snapshot_key),
+                                &pending,
+                            );
+                        }
+                        append_text_delta_if_visible(
+                            sender,
+                            state,
+                            message_role.as_deref(),
+                            Some(&snapshot_key),
+                            delta,
+                        );
+                        if !state.suppressed_text_parts.contains(&snapshot_key) {
+                            state
+                                .text_part_snapshots
+                                .insert(snapshot_key, snapshot_text);
+                        }
                     }
                     (Some(snapshot_key), Some(part_type)) if is_reasoning_part_type(part_type) => {
                         state.pending_text_deltas.remove(&snapshot_key);
+                        state.prompt_echo_candidates.remove(&snapshot_key);
                     }
                     (Some(snapshot_key), Some(_)) => {
                         state.pending_text_deltas.remove(&snapshot_key);
+                        state.prompt_echo_candidates.remove(&snapshot_key);
                     }
                     (Some(snapshot_key), None) => {
                         state
@@ -1156,7 +1338,13 @@ fn process_sse_event(
                             .or_default()
                             .push_str(delta);
                     }
-                    (None, Some("text")) => append_text_delta(sender, state, delta),
+                    (None, Some("text")) => append_text_delta_if_visible(
+                        sender,
+                        state,
+                        message_role.as_deref(),
+                        None,
+                        delta,
+                    ),
                     (None, _) => {}
                 }
             }
@@ -1175,6 +1363,7 @@ fn process_sse_event(
         "message.completed" => {
             // Full assembled message — emit any final text parts not yet streamed
             if let Some(message) = props.and_then(|p| p.get("message")) {
+                register_message_role(state, message);
                 let message_role = role_field_from_value(message);
                 if is_user_message_role(message_role) {
                     return Some(false);
@@ -1359,6 +1548,51 @@ mod tests {
     }
 
     #[test]
+    fn test_message_updated_user_role_suppresses_later_part_text() {
+        let events = [
+            r#"{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-user","sessionID":"s1","role":"user","time":{"created":1},"agent":"build","model":{"providerID":"p","modelID":"m"}}}}"#,
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-user","sessionID":"s1","messageID":"msg-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"},"time":2}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "OpenCode user message parts must be filtered by message.updated role"
+        );
+    }
+
+    #[test]
+    fn test_message_updated_assistant_role_allows_later_part_text() {
+        let events = [
+            r#"{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-assistant","sessionID":"s1","role":"assistant","time":{"created":1},"parentID":"msg-user","modelID":"m","providerID":"p","mode":"build","agent":"build","path":{"cwd":"/tmp","root":"/"},"cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}}"#,
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-assistant","sessionID":"s1","messageID":"msg-assistant","type":"text","text":"OK"},"time":2}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, StreamMessage::Text { content } if content == "OK")),
+            "assistant role tracked from message.updated should permit text"
+        );
+    }
+
+    #[test]
+    fn test_message_updated_user_role_suppresses_later_text_delta() {
+        let events = [
+            r#"{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-user","sessionID":"s1","role":"user","time":{"created":1},"agent":"build","model":{"providerID":"p","modelID":"m"}}}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","partID":"part-user","partType":"text","field":"text","delta":"[User: Alice (ID: 1)]\n하이"}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "OpenCode user text deltas must be filtered by message.updated role"
+        );
+    }
+
+    #[test]
     fn test_message_part_delta_user_text_ignored() {
         let events = [
             r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","message":{"role":"user"},"partID":"part-user","partType":"text","field":"text","delta":"[User: Alice (ID: 1)]\n"}}"#,
@@ -1370,6 +1604,34 @@ mod tests {
             msgs.iter()
                 .all(|m| !matches!(m, StreamMessage::Text { .. })),
             "user-role text deltas must not be emitted as assistant output"
+        );
+    }
+
+    #[test]
+    fn test_unknown_role_agentdesk_user_prompt_echo_ignored() {
+        let data = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"part-user","messageID":"msg-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "AgentDesk prompt wrapper echoes must not be emitted even when OpenCode omits role metadata"
+        );
+    }
+
+    #[test]
+    fn test_unknown_role_split_agentdesk_user_prompt_echo_delta_ignored() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","partID":"part-user","partType":"text","field":"text","delta":"[User: "}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","partID":"part-user","field":"text","delta":"Alice (ID: 1)]\n"}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"msg-user","partID":"part-user","field":"text","delta":"하이"}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "split AgentDesk prompt wrapper echoes must keep the whole text part suppressed"
         );
     }
 
