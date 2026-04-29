@@ -2319,6 +2319,13 @@ mod tests {
             }
             drop_result.expect("drop kanban postgres test db");
         }
+
+        async fn close_pool_and_drop(self, pool: sqlx::PgPool) {
+            crate::db::postgres::close_test_pool(pool, "kanban tests")
+                .await
+                .expect("close kanban postgres test pool");
+            self.drop().await;
+        }
     }
 
     impl Drop for KanbanPgDatabase {
@@ -2591,7 +2598,7 @@ mod tests {
             err.contains("active dispatch"),
             "error should mention active dispatch"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2615,7 +2622,7 @@ mod tests {
             result.is_ok(),
             "pending dispatch should authorize transition"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2639,7 +2646,7 @@ mod tests {
             result.is_ok(),
             "dispatched status should authorize transition"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2660,7 +2667,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "no dispatch should block transition");
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2683,7 +2690,7 @@ mod tests {
             result.is_ok(),
             "backlog → ready should work without dispatch"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2704,7 +2711,7 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "force=true should bypass dispatch check");
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[test]
@@ -2788,7 +2795,7 @@ mod tests {
             status, "review",
             "stale review verdict must leave the card in review"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2826,7 +2833,7 @@ mod tests {
             result.is_ok(),
             "cards without review_entered_at must preserve the legacy pass verdict behavior"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -2858,7 +2865,7 @@ mod tests {
             status, "requested",
             "cleanup failure must roll back the card status change"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[test]
@@ -2990,7 +2997,7 @@ mod tests {
         .expect("card should be updated by dispatch.create()");
         assert_eq!(card_status, "in_progress");
         assert_eq!(latest_dispatch_id, dispatch_id);
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     /// Regression guard for the known-hook path: try_fire_hook_by_name() must
@@ -3350,7 +3357,7 @@ mod tests {
             entry_status, "done",
             "Rust must mark auto_queue_entry as done"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     #[tokio::test]
@@ -3461,7 +3468,7 @@ mod tests {
             content.contains("자동큐 완료: repo-1 / run run-noti / 1개"),
             "notify message should summarize the completed run"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     /// #110: non-terminal manual recovery transitions must not complete auto-queue entries.
@@ -3513,7 +3520,7 @@ mod tests {
             entry_status, "dispatched",
             "requested must NOT mark auto_queue_entry as done"
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     /// #128: started_at must reset on every in_progress re-entry (rework/resume).
@@ -3574,7 +3581,7 @@ mod tests {
             "started_at should be preserved (coalesce mode), but was only {} seconds ago",
             age_seconds
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     /// When started_at is NULL (first-time entry), coalesce mode sets it to now.
@@ -3612,7 +3619,7 @@ mod tests {
             "started_at should be set to now on first entry, but was {} seconds ago",
             age_seconds
         );
-        pg_db.drop().await;
+        pg_db.close_pool_and_drop(pool).await;
     }
 
     /// #800: `reset_full=true` reopens must scrub recorded worktree metadata
