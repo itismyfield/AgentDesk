@@ -125,8 +125,10 @@ fn apply_review_counter_model_provider_context(
         return;
     };
 
-    obj.entry("from_provider".to_string())
-        .or_insert_with(|| json!(resolution.source_provider.as_str()));
+    obj.insert(
+        "from_provider".to_string(),
+        json!(resolution.source_provider.as_str()),
+    );
     obj.insert(
         "target_provider".to_string(),
         json!(resolution.target_provider.as_str()),
@@ -2638,6 +2640,26 @@ mod tests {
             assert_eq!(resolution.target_provider.as_str(), expected_target);
             assert!(resolution.reason.starts_with("explicit_from_provider:"));
         }
+    }
+
+    #[test]
+    fn review_counter_model_provider_implementer_wins_over_stale_from_provider() {
+        let bindings = bindings_with_provider("codex");
+        let context = json!({
+            "implementer_provider": "claude",
+            "from_provider": "codex"
+        });
+
+        let resolution = resolve_review_counter_model_provider(&bindings, &context)
+            .expect("review counter-model provider resolution");
+
+        assert_eq!(resolution.source_provider.as_str(), "claude");
+        assert_eq!(resolution.target_provider.as_str(), "codex");
+        assert!(
+            resolution
+                .reason
+                .starts_with("explicit_implementer_provider:")
+        );
     }
 
     #[test]

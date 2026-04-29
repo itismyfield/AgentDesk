@@ -2169,7 +2169,8 @@ mod tests {
             "Review explicit implementer",
             &json!({
                 "review_mode": "noop_verification",
-                "implementer_provider": "claude"
+                "implementer_provider": "claude",
+                "from_provider": "codex"
             }),
             DispatchCreateOptions {
                 skip_outbox: true,
