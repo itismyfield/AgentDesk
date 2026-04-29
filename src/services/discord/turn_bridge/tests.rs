@@ -26,7 +26,7 @@ use super::stale_resume::{
 use super::tmux_runtime::should_resume_watcher_after_turn;
 use super::{
     advance_tmux_relay_confirmed_end, monitor_handoff_tool_context,
-    turn_bridge_replace_outcome_committed,
+    should_delegate_bridge_relay_to_watcher, turn_bridge_replace_outcome_committed,
 };
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
@@ -2372,6 +2372,35 @@ fn work_outcome_parser_rejects_non_explicit_noop_mentions() {
         ),
         None
     );
+}
+
+#[test]
+fn bridge_relay_delegation_requires_fresh_watcher_task() {
+    assert!(!should_delegate_bridge_relay_to_watcher(
+        true, false, false, false, false, false
+    ));
+    assert!(should_delegate_bridge_relay_to_watcher(
+        true, true, false, false, false, false
+    ));
+}
+
+#[test]
+fn bridge_relay_delegation_stays_disabled_for_terminal_error_paths() {
+    for (cancelled, prompt_too_long, transport_error, recovery_retry) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+    ] {
+        assert!(!should_delegate_bridge_relay_to_watcher(
+            true,
+            true,
+            cancelled,
+            prompt_too_long,
+            transport_error,
+            recovery_retry,
+        ));
+    }
 }
 
 // ========== resolve_done_response tests ==========
