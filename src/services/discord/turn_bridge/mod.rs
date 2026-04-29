@@ -52,7 +52,8 @@ use memory_lifecycle::{
 };
 use recall_feedback::{
     analyze_recall_feedback_turn, build_voluntary_feedback_reminder, reminder_transcript_event,
-    submit_pending_feedbacks, transcript_contains_explicit_memento_tool_call,
+    should_submit_automatic_feedback_fallback, submit_pending_feedbacks,
+    transcript_contains_explicit_memento_tool_call,
 };
 use retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
@@ -2835,10 +2836,12 @@ pub(super) fn spawn_turn_bridge(
         } else {
             None
         };
+        let mut voluntary_feedback_reminder_injected = false;
         if let Some(analysis) = recall_feedback_analysis.as_ref()
             && let Some(reminder) = build_voluntary_feedback_reminder(analysis)
         {
             push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
+            voluntary_feedback_reminder_injected = true;
             recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
         }
         let model_token_usage = TurnTokenUsage {
@@ -2979,7 +2982,10 @@ pub(super) fn spawn_turn_bridge(
 
         let mut auto_feedback_count = 0usize;
         if let Some(analysis) = recall_feedback_analysis.as_ref()
-            && !analysis.pending_feedbacks.is_empty()
+            && should_submit_automatic_feedback_fallback(
+                analysis,
+                voluntary_feedback_reminder_injected,
+            )
         {
             let submit_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(20),

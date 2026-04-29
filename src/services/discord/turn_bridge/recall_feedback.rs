@@ -78,6 +78,13 @@ pub(super) fn build_voluntary_feedback_reminder(
     ))
 }
 
+pub(super) fn should_submit_automatic_feedback_fallback(
+    analysis: &RecallFeedbackTurnAnalysis,
+    voluntary_reminder_injected: bool,
+) -> bool {
+    !voluntary_reminder_injected && !analysis.pending_feedbacks.is_empty()
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct RecallFeedbackAutoSubmitResult {
     pub submitted_count: usize,
@@ -747,6 +754,28 @@ mod tests {
         assert!(reminder.contains("search-1"));
         assert!(reminder.contains("search-2"));
         assert!(reminder.contains("tool_feedback(search_event_id, relevant, sufficient)"));
+    }
+
+    #[test]
+    fn automatic_fallback_waits_when_voluntary_reminder_was_injected() {
+        let analysis = RecallFeedbackTurnAnalysis {
+            recall_count: 1,
+            manual_feedback_count: 0,
+            manual_covered_recall_count: 0,
+            pending_feedbacks: vec![PendingRecallFeedback {
+                session_id: None,
+                search_event_id: Some("search-1".to_string()),
+                fragment_ids: vec!["frag-1".to_string()],
+                relevant: true,
+                sufficient: true,
+            }],
+        };
+
+        assert!(should_submit_automatic_feedback_fallback(&analysis, false));
+        assert!(
+            !should_submit_automatic_feedback_fallback(&analysis, true),
+            "automatic fallback must not run in the same turn that injects the voluntary reminder"
+        );
     }
 
     #[test]
