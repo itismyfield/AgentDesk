@@ -55,12 +55,18 @@ python3 scripts/generate_inventory_docs.py
 
 Run `python3 scripts/check_agent_maintenance_docs.py` before landing changes
 to migration-sensitive surfaces. The gate requires each guarded page to carry
-the `Last refreshed: <date> (against main @ <sha>)` header shape, verifies the
-referenced commit is an ancestor of `HEAD`, warns when copied line counts in
-`change-surfaces.md` drift from `docs/generated/module-inventory.md`, and
-requires the matching maintenance page to be touched when guarded code globs
-change. CI runs this gate in `--warning-only` mode during the initial rollout
-for #1432; remove that flag when the quiet-week promotion is approved.
+the preferred ``Last refreshed: <date> (against `main` @ `<sha>`)`` header
+shape and verifies the referenced commit is an ancestor of `HEAD`. When a
+refresh is intentionally anchored to review context instead of a commit, use
+`Last refreshed: <date> (against #<issue> <reason>)` or
+`Last refreshed: <date> (manual: <reason>)`; those forms still get date
+freshness checks but skip commit ancestry validation. The gate warns when
+copied line counts in `change-surfaces.md` drift from
+`docs/generated/module-inventory.md`, and requires the matching maintenance
+page to be touched when guarded code globs change. That touch rule is a
+presence check only; reviewers still confirm the content was refreshed. CI runs
+this gate in `--warning-only` mode during the initial rollout for #1432; remove
+that flag when the quiet-week promotion is approved.
 
 ## Schema (Common to All Pages)
 

@@ -4,8 +4,10 @@
 The agent-maintenance pages are an authority for migration-sensitive code
 surfaces. This script keeps that authority explicit:
 
-* every guarded page carries a ``Last refreshed`` header tied to ``main``;
-* the referenced commit is an ancestor of the current checkout;
+* every guarded page carries a ``Last refreshed`` header tied to ``main`` or
+  an explicit manual refresh anchor;
+* referenced commits are ancestors of the current checkout when the header is
+  commit-anchored;
 * PRs that touch guarded code paths also touch the matching maintenance page;
 * line counts copied into ``change-surfaces.md`` are compared with the
   generated module inventory.
@@ -29,11 +31,19 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FRESHNESS_DAYS = 90
+# Keep the scan bounded so examples later in a doc cannot satisfy the header.
+HEADER_SCAN_LINE_LIMIT = 80
 
 LAST_REFRESHED_RE = re.compile(
     r"^>\s*Last refreshed:\s*"
     r"(?P<date>\d{4}-\d{2}-\d{2})\s*"
-    r"\(against\s+`main`\s+@\s+`(?P<commit>[0-9a-f]{7,40})`\)\.?\s*$"
+    r"\("
+    r"(?:"
+    r"against\s+`main`\s+@\s+`(?P<commit>[0-9a-f]{7,40})`"
+    r"|manual:\s+(?P<manual_anchor>[^)]+)"
+    r"|against\s+(?P<issue_anchor>#\d+[^)]*)"
+    r")"
+    r"\)\.?\s*$"
 )
 MODULE_INVENTORY_ROW_RE = re.compile(
     r"^\|\s*`[^`]+`\s*\|\s*`(?P<path>[^`]+\.rs)`\s*\|\s*(?P<lines>\d+)\s*\|"
@@ -56,6 +66,14 @@ class TouchRule:
     patterns: tuple[str, ...]
     required_doc: str
     reason: str
+
+
+@dataclass(frozen=True)
+class LastRefreshed:
+    refreshed_on: dt.date
+    commit: str | None
+    anchor: str
+    line: int
 
 
 MIGRATION_SENSITIVE_DOCS: tuple[str, ...] = (
@@ -100,6 +118,11 @@ def run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str
     )
 
 
+def is_shallow_checkout(repo_root: Path) -> bool:
+    result = run_git(repo_root, ["rev-parse", "--is-shallow-repository"])
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def rel_posix(path: Path, repo_root: Path) -> str:
     try:
         return path.relative_to(repo_root).as_posix()
@@ -107,8 +130,9 @@ def rel_posix(path: Path, repo_root: Path) -> str:
         return path.as_posix()
 
 
-def parse_last_refreshed(text: str) -> tuple[dt.date, str, int] | None:
-    for line_no, line in enumerate(text.splitlines()[:24], start=1):
+def parse_last_refreshed(text: str) -> LastRefreshed | None:
+    lines = text.splitlines()[:HEADER_SCAN_LINE_LIMIT]
+    for line_no, line in enumerate(lines, start=1):
         match = LAST_REFRESHED_RE.match(line.strip())
         if match is None:
             continue
@@ -116,7 +140,9 @@ def parse_last_refreshed(text: str) -> tuple[dt.date, str, int] | None:
             refreshed_on = dt.date.fromisoformat(match.group("date"))
         except ValueError:
             return None
-        return refreshed_on, match.group("commit"), line_no
+        commit = match.group("commit")
+        anchor = commit or match.group("manual_anchor") or match.group("issue_anchor") or ""
+        return LastRefreshed(refreshed_on, commit, anchor.strip(), line_no)
     return None
 
 
@@ -138,23 +164,26 @@ def check_doc_headers(
                 Finding(
                     "error",
                     rel_path,
-                    "missing header: Last refreshed: YYYY-MM-DD (against `main` @ `<sha>`).",
+                    (
+                        "missing header: Last refreshed: YYYY-MM-DD "
+                        "(against `main` @ `<sha>`), (against #<issue> <reason>), "
+                        "or (manual: <reason>)."
+                    ),
                 )
             )
             continue
 
-        refreshed_on, commit, line_no = parsed
-        if refreshed_on > today:
+        if parsed.refreshed_on > today:
             findings.append(
                 Finding(
                     "error",
                     rel_path,
-                    f"Last refreshed date {refreshed_on.isoformat()} is in the future.",
-                    line_no,
+                    f"Last refreshed date {parsed.refreshed_on.isoformat()} is in the future.",
+                    parsed.line,
                 )
             )
 
-        age_days = (today - refreshed_on).days
+        age_days = (today - parsed.refreshed_on).days
         if age_days > freshness_days:
             findings.append(
                 Finding(
@@ -164,18 +193,36 @@ def check_doc_headers(
                         f"Last refreshed is {age_days} days old; re-audit within "
                         f"{freshness_days} days."
                     ),
-                    line_no,
+                    parsed.line,
                 )
             )
 
-        resolved = run_git(repo_root, ["rev-parse", "--verify", f"{commit}^{{commit}}"])
+        if parsed.commit is None:
+            continue
+
+        resolved = run_git(
+            repo_root, ["rev-parse", "--verify", f"{parsed.commit}^{{commit}}"]
+        )
         if resolved.returncode != 0:
+            if is_shallow_checkout(repo_root):
+                findings.append(
+                    Finding(
+                        "warning",
+                        rel_path,
+                        (
+                            f"Last refreshed commit {parsed.commit} is not present in this "
+                            "shallow checkout; fetch full history to verify ancestry."
+                        ),
+                        parsed.line,
+                    )
+                )
+                continue
             findings.append(
                 Finding(
                     "error",
                     rel_path,
-                    f"Last refreshed commit {commit} does not resolve in this checkout.",
-                    line_no,
+                    f"Last refreshed commit {parsed.commit} does not resolve in this checkout.",
+                    parsed.line,
                 )
             )
             continue
@@ -189,8 +236,8 @@ def check_doc_headers(
                 Finding(
                     "error",
                     rel_path,
-                    f"Last refreshed commit {commit} is not an ancestor of HEAD.",
-                    line_no,
+                    f"Last refreshed commit {parsed.commit} is not an ancestor of HEAD.",
+                    parsed.line,
                 )
             )
     return findings
