@@ -2515,6 +2515,19 @@ async fn handle_tmux_watcher_observed_death(
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
         );
+        let outcome = trigger_missing_inflight_reattach(
+            http,
+            shared,
+            watcher_provider,
+            channel_id,
+            tmux_session_name,
+        );
+        log_missing_inflight_reattach_outcome(
+            channel_id,
+            tmux_session_name,
+            outcome,
+            "cancel_induced_watcher_death",
+        );
     } else if !is_normal_completion {
         if let Some(reason_text) = tmux_death_lifecycle_notification_reason(reason_short.as_deref())
         {
@@ -3202,16 +3215,67 @@ fn missing_inflight_fallback_plan(
     dispatch_resolved: bool,
     terminal_output_committed: bool,
     recent_turn_stop: bool,
-    placeholder_cleanup_committed: bool,
+    _placeholder_cleanup_committed: bool,
     tmux_alive: bool,
 ) -> MissingInflightFallbackPlan {
     let would_trigger =
         inflight_missing && !dispatch_resolved && terminal_output_committed && tmux_alive;
-    let suppressed = recent_turn_stop || placeholder_cleanup_committed;
+    let suppressed = recent_turn_stop;
     MissingInflightFallbackPlan {
         warn: inflight_missing,
         trigger_reattach: would_trigger && !suppressed,
         suppressed_by_recent_stop: would_trigger && suppressed,
+    }
+}
+
+fn should_flush_post_terminal_success_continuation(
+    terminal_success_seen: bool,
+    found_result: bool,
+    full_response: &str,
+) -> bool {
+    terminal_success_seen && !found_result && !full_response.trim().is_empty()
+}
+
+fn log_missing_inflight_reattach_outcome(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    outcome: MissingInflightReattachOutcome,
+    origin: &str,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    match outcome {
+        MissingInflightReattachOutcome::Spawned { replaced_existing } => {
+            tracing::info!(
+                "  [{ts}] ↻ watcher: 재부착 성공 for channel {} (tmux={}, replaced={}, origin={})",
+                channel_id.get(),
+                tmux_session_name,
+                replaced_existing,
+                origin
+            );
+        }
+        MissingInflightReattachOutcome::SessionDead => {
+            tracing::warn!(
+                "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — session not live, origin={})",
+                channel_id.get(),
+                tmux_session_name,
+                origin
+            );
+        }
+        MissingInflightReattachOutcome::InflightAlreadyExists => {
+            tracing::info!(
+                "  [{ts}] ↻ watcher: 재부착 생략 for channel {} — concurrent inflight already present (origin={})",
+                channel_id.get(),
+                origin
+            );
+        }
+        MissingInflightReattachOutcome::SaveFailed => {
+            tracing::error!(
+                "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — inflight save failed, origin={})",
+                channel_id.get(),
+                tmux_session_name,
+                origin
+            );
+        }
     }
 }
 
@@ -4336,6 +4400,19 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let mut task_notification_kind = stream_seed.task_notification_kind;
         if let Some(kind) = initial_outcome.task_notification_kind {
             task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
+        }
+        let post_terminal_success_continuation_flush =
+            should_flush_post_terminal_success_continuation(
+                turn_result_relayed,
+                found_result,
+                &full_response,
+            );
+        if post_terminal_success_continuation_flush {
+            found_result = true;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] 👁 post-terminal-success continuation: flushing relayed output for {tmux_session_name} immediately (offset {data_start_offset} -> {current_offset})"
+            );
         }
         if matches!(
             task_notification_kind,
@@ -6331,37 +6408,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     channel_id,
                     &tmux_session_name,
                 );
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                match outcome {
-                    MissingInflightReattachOutcome::Spawned { replaced_existing } => {
-                        tracing::info!(
-                            "  [{ts}] ↻ watcher: 재부착 성공 for channel {} (tmux={}, replaced={})",
-                            channel_id.get(),
-                            tmux_session_name,
-                            replaced_existing
-                        );
-                    }
-                    MissingInflightReattachOutcome::SessionDead => {
-                        tracing::warn!(
-                            "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — session not live)",
-                            channel_id.get(),
-                            tmux_session_name
-                        );
-                    }
-                    MissingInflightReattachOutcome::InflightAlreadyExists => {
-                        tracing::info!(
-                            "  [{ts}] ↻ watcher: 재부착 생략 for channel {} — concurrent inflight already present",
-                            channel_id.get()
-                        );
-                    }
-                    MissingInflightReattachOutcome::SaveFailed => {
-                        tracing::error!(
-                            "  [{ts}] ↻ watcher: 재부착 실패 — 추가 진단 필요 for channel {} (tmux={} — inflight save failed)",
-                            channel_id.get(),
-                            tmux_session_name
-                        );
-                    }
-                }
+                log_missing_inflight_reattach_outcome(
+                    channel_id,
+                    &tmux_session_name,
+                    outcome,
+                    "missing_inflight_db_fallback",
+                );
             }
         } else if missing_inflight_plan.suppressed_by_recent_stop {
             if placeholder_cleanup_committed {
@@ -7816,6 +7868,7 @@ mod tests {
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
+        should_flush_post_terminal_success_continuation,
         should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
@@ -8807,16 +8860,50 @@ mod tests {
 
         let cleaned = missing_inflight_fallback_plan(true, false, true, false, true, true);
         assert!(cleaned.warn);
-        assert!(!cleaned.trigger_reattach);
+        assert!(cleaned.trigger_reattach);
         assert!(
-            cleaned.suppressed_by_recent_stop,
-            "terminal placeholder cleanup tombstone suppresses stale reattach"
+            !cleaned.suppressed_by_recent_stop,
+            "terminal placeholder cleanup alone must not suppress live-session reattach"
         );
 
         let dead_tmux = missing_inflight_fallback_plan(true, false, true, false, false, false);
         assert!(dead_tmux.warn);
         assert!(!dead_tmux.trigger_reattach);
         assert!(!dead_tmux.suppressed_by_recent_stop);
+    }
+
+    #[test]
+    fn missing_inflight_recent_stop_still_suppresses_placeholder_cleanup_reattach() {
+        let stopped_and_cleaned =
+            missing_inflight_fallback_plan(true, false, true, true, true, true);
+
+        assert!(stopped_and_cleaned.warn);
+        assert!(!stopped_and_cleaned.trigger_reattach);
+        assert!(
+            stopped_and_cleaned.suppressed_by_recent_stop,
+            "recent cancel/stop remains the suppression authority for stale output"
+        );
+    }
+
+    #[test]
+    fn post_terminal_success_continuation_with_text_flushes_without_result_event() {
+        assert!(should_flush_post_terminal_success_continuation(
+            true,
+            false,
+            "PR #1333 opened. Routes batch 3 still running."
+        ));
+        assert!(
+            !should_flush_post_terminal_success_continuation(true, true, "already terminal"),
+            "a real result event should use the normal terminal relay path"
+        );
+        assert!(
+            !should_flush_post_terminal_success_continuation(true, false, "   "),
+            "tool/status-only continuation should not fabricate an empty relay"
+        );
+        assert!(
+            !should_flush_post_terminal_success_continuation(false, false, "pre-terminal text"),
+            "pre-terminal output must continue waiting for its normal result"
+        );
     }
 
     #[test]
