@@ -118,7 +118,7 @@
 | `error` | `src/error.rs` | 188 |  |
 | `github` | `src/github/mod.rs` | 844 |  |
 | `github::dod` | `src/github/dod.rs` | 395 |  |
-| `github::sync` | `src/github/sync.rs` | 997 |  |
+| `github::sync` | `src/github/sync.rs` | 994 |  |
 | `github::triage` | `src/github/triage.rs` | 159 |  |
 | `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 651 |  |
 | `integration_tests::discord_flow` | `src/integration_tests/discord_flow/mod.rs` | 46 |  |
@@ -148,7 +148,7 @@
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1973 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 8171 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 8173 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 152 |  |
@@ -209,7 +209,7 @@
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 199 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 24 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
-| `services::api_friction` | `src/services/api_friction.rs` | 1711 | giant-file |
+| `services::api_friction` | `src/services/api_friction.rs` | 1708 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1046 | giant-file |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 987 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 329 |  |

@@ -1858,7 +1858,19 @@ function HomeOverviewPage({
         .slice(0, 6),
     [agents, stats?.top_agents],
   );
-  const doneCards = kanbanCards.filter((card) => card.status === "done").length;
+  /* Home kanban snapshot is meant for "what shipped today" rather than the
+     full archive: the cumulative `done` count crosses 800+ on long-running
+     workspaces and floods the column. Keep only the cards completed within
+     the last 24h, sorted by completion time so the three preview rows show
+     the most recent shipments. */
+  const KANBAN_DONE_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const recentDoneCards = useMemo(() => {
+    const cutoff = Date.now() - KANBAN_DONE_RECENT_WINDOW_MS;
+    return kanbanCards
+      .filter((card) => card.status === "done" && (card.completed_at ?? 0) >= cutoff)
+      .sort((a, b) => (b.completed_at ?? 0) - (a.completed_at ?? 0));
+  }, [kanbanCards]);
+  const recentDoneCount = recentDoneCards.length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
   const totalActionableCards = requestedCards + inProgressCards + blockedCards;
   const totalMeetings = meetings.length;
@@ -2242,25 +2254,42 @@ function HomeOverviewPage({
            panel (`MiniRateLimitBar`). One card now shows every provider's
            5h/7d bucket utilization with the same color/glow language as
            /stats, and fetches its own data on a 30 s timer so the home
-           tile no longer needs the manual fetch + summary state. */
+           tile no longer needs the manual fetch + summary state.
+           The header mirrors HomeMetricTile (icon + uppercase title +
+           trailing badge slot) and the gauge uses the comfortable density
+           so this card's vertical rhythm matches its row neighbours
+           (오늘 토큰 / API 비용 / 진행 중). */
         render: () => (
           <div
-            className="h-full overflow-hidden rounded-[1.15rem] border"
+            className="flex h-full flex-col overflow-hidden rounded-[1.15rem] border"
             style={{
               borderColor: "var(--th-border-subtle)",
               background:
                 "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
             }}
           >
-            <div className="px-4 py-4 sm:px-5">
-              <div
-                className="flex items-center gap-2 text-[11.5px] font-medium uppercase tracking-[0.08em]"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                <Gauge size={14} />
-                <span>{tr("한도", "Rate limit")}</span>
+            <div className="flex flex-1 flex-col px-4 py-4 sm:px-5">
+              <div className="flex items-center justify-between gap-3">
+                <div
+                  className="flex items-center gap-2 text-[11.5px] font-medium uppercase tracking-[0.08em]"
+                  style={{ color: "var(--th-text-muted)" }}
+                >
+                  <Gauge size={14} />
+                  <span>{tr("한도", "Rate limit")}</span>
+                </div>
+                <span
+                  className="rounded-md px-1.5 py-0.5 text-[11px] font-medium"
+                  style={{
+                    background: "var(--th-overlay-medium)",
+                    color: "var(--th-text-muted)",
+                  }}
+                >
+                  {tr("30s 갱신", "30s refresh")}
+                </span>
               </div>
-              <MiniRateLimitBar isKo={isKo} />
+              <div className="mt-auto">
+                <MiniRateLimitBar isKo={isKo} density="comfortable" />
+              </div>
             </div>
           </div>
         ),
@@ -2454,12 +2483,26 @@ function HomeOverviewPage({
           >
             <div className="grid gap-3 lg:grid-cols-4">
               {kanbanColumns.map((column) => {
-                const cards = kanbanCards.filter((card) => card.status === column.id).slice(0, 3);
+                /* The done column shows only the last 24h of shipments
+                   (count + preview cards) so the snapshot stays focused
+                   on today's throughput rather than the full archive. */
+                const cards =
+                  column.id === "done"
+                    ? recentDoneCards.slice(0, 3)
+                    : kanbanCards.filter((card) => card.status === column.id).slice(0, 3);
                 return (
                   <div key={column.id} className="rounded-[1.5rem] border p-3" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)" }}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
                         {column.label}
+                        {column.id === "done" ? (
+                          <span
+                            className="ml-1.5 align-middle text-[10px] font-medium uppercase tracking-[0.06em]"
+                            style={{ color: "var(--th-text-muted)" }}
+                          >
+                            {tr("· 최근 24h", "· last 24h")}
+                          </span>
+                        ) : null}
                       </div>
                       <span className="rounded-full px-2 py-1 text-[11px] font-semibold" style={{ background: "var(--th-overlay-medium)", color: column.accent }}>
                         {column.id === "requested"
@@ -2468,7 +2511,7 @@ function HomeOverviewPage({
                             ? kanbanCards.filter((card) => card.status === "in_progress").length
                             : column.id === "review"
                               ? kanbanCards.filter((card) => card.status === "review").length
-                              : doneCards}
+                              : recentDoneCount}
                       </span>
                     </div>
                     <div className="mt-3 space-y-2">
@@ -2508,7 +2551,8 @@ function HomeOverviewPage({
       blockedCards,
       costTrend,
       currentOfficeLabel,
-      doneCards,
+      recentDoneCards,
+      recentDoneCount,
       fallbackActivity,
       inProgressCards,
       inProgressTrend,
@@ -2658,7 +2702,7 @@ function HomeOverviewPage({
                 .filter(Boolean)
                 .join(" ")}
             >
-              <div className="relative">
+              <div className="relative h-full">
                 {editing && (
                   <div className="pointer-events-none absolute right-4 top-4 z-10 flex h-8 w-8 items-center justify-center rounded-full border" style={{ borderColor: "var(--th-border-subtle)", background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)", color: "var(--th-text-muted)" }}>
                     <GripVertical size={14} />

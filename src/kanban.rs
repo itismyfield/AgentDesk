@@ -1003,7 +1003,7 @@ pub(crate) async fn resolve_pipeline_with_pg(
 ) -> Result<crate::pipeline::PipelineConfig> {
     let repo_override = if let Some(repo_id) = repo_id {
         sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config
+            "SELECT pipeline_config::text AS pipeline_config
              FROM github_repos
              WHERE id = $1",
         )
@@ -1022,7 +1022,7 @@ pub(crate) async fn resolve_pipeline_with_pg(
 
     let agent_override = if let Some(agent_id) = agent_id {
         sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config
+            "SELECT pipeline_config::text AS pipeline_config
              FROM agents
              WHERE id = $1",
         )
