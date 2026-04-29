@@ -1745,7 +1745,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
-             VALUES ($1, $2, 'completed', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
+             VALUES ($1, $2, 'idle', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
         )
         .bind("qwen-session-1")
         .bind("qwen")
@@ -1774,7 +1774,7 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, created_at, last_heartbeat)
-             VALUES ($1, $2, 'completed', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
+             VALUES ($1, $2, 'idle', TO_TIMESTAMP($3), TO_TIMESTAMP($4))",
         )
         .bind("opencode-session-1")
         .bind("opencode")

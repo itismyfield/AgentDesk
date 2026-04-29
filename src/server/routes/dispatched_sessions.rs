@@ -17,7 +17,7 @@ use crate::db::session_agent_resolution::{
     parse_thread_channel_name, resolve_agent_id_for_session_pg,
 };
 use crate::db::session_status::{
-    IDLE, is_live_status, is_user_wait_status, normalize_incoming_session_status,
+    is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
 use crate::services::message_outbox::enqueue_lifecycle_notification_pg;
 use crate::services::provider::ProviderKind;
@@ -752,7 +752,7 @@ async fn hook_session_pg(
             tokens = EXCLUDED.tokens,
             cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
             active_dispatch_id = CASE
-              WHEN lower(EXCLUDED.status) IN ('disconnected', 'aborted', 'idle') THEN NULL
+              WHEN lower(EXCLUDED.status) IN ('disconnected', 'aborted') THEN NULL
               WHEN EXCLUDED.active_dispatch_id IS NOT NULL THEN EXCLUDED.active_dispatch_id
               ELSE sessions.active_dispatch_id
             END,
@@ -877,7 +877,7 @@ fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
 }
 
 fn normalize_hook_active_dispatch_id(status: &str, dispatch_id: Option<&str>) -> Option<String> {
-    if !is_live_status(status) || status.eq_ignore_ascii_case(IDLE) {
+    if !is_live_status(status) {
         return None;
     }
 
@@ -1043,7 +1043,7 @@ async fn hook_session_sqlite_for_tests(
             tokens = excluded.tokens,
             cwd = COALESCE(excluded.cwd, sessions.cwd),
             active_dispatch_id = CASE
-              WHEN lower(excluded.status) IN ('disconnected', 'aborted', 'idle') THEN NULL
+              WHEN lower(excluded.status) IN ('disconnected', 'aborted') THEN NULL
               WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
               ELSE sessions.active_dispatch_id
             END,
