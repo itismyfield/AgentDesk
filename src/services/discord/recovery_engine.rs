@@ -1386,6 +1386,9 @@ pub(super) async fn restore_inflight_turns(
                         let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                         let turn_delivered =
                             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let last_heartbeat_ts_ms = std::sync::Arc::new(
+                            std::sync::atomic::AtomicI64::new(super::tmux_watcher_now_ms()),
+                        );
                         let handle = TmuxWatcherHandle {
                             tmux_session_name: tmux_session_name.clone(),
                             paused: paused.clone(),
@@ -1393,6 +1396,7 @@ pub(super) async fn restore_inflight_turns(
                             cancel: cancel.clone(),
                             pause_epoch: pause_epoch.clone(),
                             turn_delivered: turn_delivered.clone(),
+                            last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
                         };
                         let watcher_claimed = {
                             #[cfg(unix)]
@@ -1448,6 +1452,7 @@ pub(super) async fn restore_inflight_turns(
                                     resume_offset,
                                     pause_epoch,
                                     turn_delivered,
+                                    last_heartbeat_ts_ms,
                                     restored_turn,
                                 ));
                             }
@@ -2272,6 +2277,9 @@ pub(super) async fn restore_inflight_turns(
                 let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
                 let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::tmux_watcher_now_ms(),
+                ));
                 let handle = TmuxWatcherHandle {
                     tmux_session_name: tmux_session_name.clone(),
                     paused: paused.clone(),
@@ -2279,6 +2287,7 @@ pub(super) async fn restore_inflight_turns(
                     cancel: cancel.clone(),
                     pause_epoch: pause_epoch.clone(),
                     turn_delivered: turn_delivered.clone(),
+                    last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
                 };
                 let watcher_claimed = {
                     #[cfg(unix)]
@@ -2333,6 +2342,7 @@ pub(super) async fn restore_inflight_turns(
                             resume_offset,
                             pause_epoch,
                             turn_delivered,
+                            last_heartbeat_ts_ms,
                             restored_turn,
                         ));
                     }
@@ -2968,6 +2978,9 @@ pub(crate) async fn rebind_inflight_for_channel(
             let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
             let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let last_heartbeat_ts_ms = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                super::tmux_watcher_now_ms(),
+            ));
             let handle = TmuxWatcherHandle {
                 tmux_session_name: tmux_session_name.clone(),
                 paused: paused.clone(),
@@ -2975,6 +2988,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                 cancel: cancel.clone(),
                 pause_epoch: pause_epoch.clone(),
                 turn_delivered: turn_delivered.clone(),
+                last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
             };
             // `claim_or_reuse_watcher` reuses a live watcher for the same
             // tmux session and only spawns when it claimed or replaced a
@@ -3000,6 +3014,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                     resume_offset,
                     pause_epoch,
                     turn_delivered,
+                    last_heartbeat_ts_ms,
                 ));
             }
             (claim.should_spawn(), claim.replaced_existing())

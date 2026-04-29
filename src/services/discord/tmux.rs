@@ -3471,6 +3471,9 @@ fn trigger_missing_inflight_reattach(
     let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
     let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
+        super::tmux_watcher_now_ms(),
+    ));
     let handle = TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.to_string(),
         paused: paused.clone(),
@@ -3478,6 +3481,7 @@ fn trigger_missing_inflight_reattach(
         cancel: cancel.clone(),
         pause_epoch: pause_epoch.clone(),
         turn_delivered: turn_delivered.clone(),
+        last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
     };
     let claim = claim_or_reuse_watcher(
         &shared.tmux_watchers,
@@ -3501,6 +3505,7 @@ fn trigger_missing_inflight_reattach(
             resume_offset,
             pause_epoch,
             turn_delivered,
+            last_heartbeat_ts_ms,
         ));
     } else {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3982,6 +3987,7 @@ pub(super) async fn tmux_output_watcher(
     resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
 ) {
     tmux_output_watcher_with_restore(
         channel_id,
@@ -3995,6 +4001,7 @@ pub(super) async fn tmux_output_watcher(
         resume_offset,
         pause_epoch,
         turn_delivered,
+        last_heartbeat_ts_ms,
         None,
     )
     .await;
@@ -4014,6 +4021,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
     resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
     restored_turn: Option<RestoredWatcherTurn>,
 ) {
     use std::io::{Read, Seek, SeekFrom};
@@ -4105,6 +4113,10 @@ pub(super) async fn tmux_output_watcher_with_restore(
     const ROTATION_CHECK_EVERY: u32 = 60; // ~30s at 500ms base cadence
 
     'watcher_loop: loop {
+        last_heartbeat_ts_ms.store(
+            super::tmux_watcher_now_ms(),
+            std::sync::atomic::Ordering::Release,
+        );
         // Always consume resume_offset first — the turn bridge may have set it
         // between the previous paused check and now, so reading it here prevents
         // the watcher from using a stale current_offset after unpausing.
@@ -7601,6 +7613,9 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
         let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
+            super::tmux_watcher_now_ms(),
+        ));
 
         let handle = TmuxWatcherHandle {
             tmux_session_name: pw.session_name.clone(),
@@ -7609,6 +7624,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             cancel: cancel.clone(),
             pause_epoch: pause_epoch.clone(),
             turn_delivered: turn_delivered.clone(),
+            last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
         if !try_claim_watcher(&shared.tmux_watchers, pw.channel_id, handle) {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -7639,6 +7655,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             resume_offset,
             pause_epoch,
             turn_delivered,
+            last_heartbeat_ts_ms,
             pw.restored_turn,
         ));
     }
@@ -7912,6 +7929,9 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             pause_epoch: Arc::new(AtomicU64::new(0)),
             turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                super::super::tmux_watcher_now_ms(),
+            )),
         }
     }
 
@@ -8176,6 +8196,40 @@ mod tests {
         );
         assert!(!incoming_paused.load(Ordering::Relaxed));
         assert!(!incoming_turn_delivered.load(Ordering::Relaxed));
+        watchers.assert_invariants_for_tests();
+    }
+
+    #[test]
+    fn claim_or_reuse_watcher_replaces_stale_heartbeat_same_tmux_session() {
+        let watchers = TmuxWatcherRegistry::new();
+        let channel_a = ChannelId::new(1485506232256168144);
+        let channel_b = ChannelId::new(1485506232256168145);
+        let tmux_name = "AgentDesk-codex-adk-cdx-stale-heartbeat";
+
+        let initial = test_watcher_handle(tmux_name);
+        let initial_cancel = initial.cancel.clone();
+        initial.last_heartbeat_ts_ms.store(
+            super::super::tmux_watcher_now_ms() - super::super::TMUX_WATCHER_STALE_HEARTBEAT_MS - 1,
+            Ordering::Release,
+        );
+        assert!(super::try_claim_watcher(&watchers, channel_a, initial));
+
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            channel_b,
+            test_watcher_handle(tmux_name),
+            &ProviderKind::Codex,
+            "unit-test-stale-heartbeat",
+        );
+
+        assert_eq!(outcome.action(), WatcherClaimAction::SpawnReplacedStale);
+        assert_eq!(outcome.owner_channel_id(), channel_b);
+        assert!(
+            initial_cancel.load(Ordering::Relaxed),
+            "stale incumbent must be cancelled before replacement"
+        );
+        assert!(!watchers.contains_key(&channel_a));
+        assert!(watchers.contains_key(&channel_b));
         watchers.assert_invariants_for_tests();
     }
 

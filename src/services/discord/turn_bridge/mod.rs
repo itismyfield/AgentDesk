@@ -1843,6 +1843,10 @@ pub(super) fn spawn_turn_bridge(
                             let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
                             let turn_delivered =
                                 Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let last_heartbeat_ts_ms =
+                                Arc::new(std::sync::atomic::AtomicI64::new(
+                                    super::tmux_watcher_now_ms(),
+                                ));
                             let handle = TmuxWatcherHandle {
                                 tmux_session_name: tmux_session_name.clone(),
                                 paused: paused.clone(),
@@ -1850,6 +1854,7 @@ pub(super) fn spawn_turn_bridge(
                                 cancel: cancel.clone(),
                                 pause_epoch: pause_epoch.clone(),
                                 turn_delivered: turn_delivered.clone(),
+                                last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
                             };
                             #[cfg(unix)]
                             let (watcher_claimed, watcher_claim_replaced_existing) = {
@@ -1907,6 +1912,7 @@ pub(super) fn spawn_turn_bridge(
                                             resume_offset,
                                             pause_epoch,
                                             turn_delivered,
+                                            last_heartbeat_ts_ms,
                                             restored_turn,
                                         ));
                                         let _ = save_inflight_state(&inflight_state);
