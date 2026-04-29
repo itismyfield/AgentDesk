@@ -104,7 +104,7 @@
   - `src/services/discord/watchers/lifecycle.rs` (2135 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (9864 lines after #1435 lifecycle
+  - `src/services/discord/tmux.rs` (9866 lines after #1435 lifecycle
     extraction; still giant-file territory).
   - `src/services/discord/recovery_engine.rs` (4682 lines).
   - `src/services/discord/health.rs` (4527 lines).
