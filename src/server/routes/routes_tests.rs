@@ -5244,19 +5244,26 @@ async fn kanban_update_card_status() {
 
 #[tokio::test]
 async fn kanban_update_card_rejects_manual_non_backlog_transition() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', datetime('now'), datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+         VALUES ('c1', 'Card1', 'ready', 'medium', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -5282,15 +5289,14 @@ async fn kanban_update_card_rejects_manual_non_backlog_transition() {
         "error must explain the restricted manual transition rule"
     );
 
-    let conn = db.lock().unwrap();
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'c1'",
-            [],
-            |row| row.get(0),
-        )
+    let status: String = sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'c1'")
+        .fetch_one(&pool)
+        .await
         .unwrap();
     assert_eq!(status, "ready");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -12306,6 +12312,21 @@ fn seed_card_with_status(db: &Db, card_id: &str, status: &str) {
     .unwrap();
 }
 
+async fn seed_card_with_status_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+         VALUES ($1, 'test', $2, 'medium', NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE
+         SET status = EXCLUDED.status,
+             updated_at = NOW()",
+    )
+    .bind(card_id)
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn set_pmd_channel(db: &Db, channel_id: &str) {
     let conn = db.lock().unwrap();
     conn.execute(
@@ -13682,12 +13703,19 @@ async fn stats_pg_only_without_sqlite_mirror() {
 
 #[tokio::test]
 async fn force_transition_succeeds_with_correct_channel() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_card_with_status(&db, "card-ft3", "requested");
-    set_pmd_channel(&db, "pmd-chan-123");
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_card_with_status_pg(&pool, "card-ft3", "requested").await;
 
-    let app = test_api_router(db, engine, None);
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -13707,6 +13735,9 @@ async fn force_transition_succeeds_with_correct_channel() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["forced"], true);
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]
@@ -26584,39 +26615,45 @@ async fn idle_sync_preserves_repeated_finding_round_markers() {
 async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-backlog-rr");
-    set_pmd_channel(&db, "pmd-chan-123");
-    ensure_auto_queue_tables(&db);
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_agent_pg(&pool, "agent-backlog-rr").await;
+    seed_repo_pg(&pool, "test-repo").await;
 
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO kanban_cards (
-                id, title, status, priority, assigned_agent_id, repo_id,
-                github_issue_number, created_at, updated_at
-            ) VALUES (
-                'card-backlog-rr', 'Issue #301', 'backlog', 'medium', 'agent-backlog-rr', 'test-repo',
-                301, datetime('now'), datetime('now')
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (
-                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
-                created_at, updated_at
-            ) VALUES (
-                'impl-backlog-rr', 'card-backlog-rr', 'agent-backlog-rr', 'implementation', 'completed',
-                'impl', datetime('now', '-30 minutes'), datetime('now', '-30 minutes')
-            )",
-            [],
-        )
-        .unwrap();
-    }
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, created_at, updated_at
+        ) VALUES (
+            'card-backlog-rr', 'Issue #301', 'backlog', 'medium', 'agent-backlog-rr', 'test-repo',
+            301, NOW(), NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+            created_at, updated_at
+        ) VALUES (
+            'impl-backlog-rr', 'card-backlog-rr', 'agent-backlog-rr', 'implementation', 'completed',
+            'impl', NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '30 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let app = test_api_router(db.clone(), engine, None);
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -26641,15 +26678,15 @@ async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
         "should have a dispatch id"
     );
 
-    let conn = db.lock().unwrap();
-    let card_status: String = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = 'card-backlog-rr'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let card_status: String =
+        sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = 'card-backlog-rr'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(card_status, "review", "card should transition to review");
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test]

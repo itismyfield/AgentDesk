@@ -148,7 +148,7 @@
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1973 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 93 |  |
-| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 8171 | giant-file |
+| `server::routes::auto_queue` | `src/server/routes/auto_queue.rs` | 8173 | giant-file |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 300 |  |
 | `server::routes::discord` | `src/server/routes/discord.rs` | 152 |  |

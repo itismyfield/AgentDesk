@@ -1798,7 +1798,7 @@ async fn resolve_activate_pipeline_pg(
 
     let repo_override = if let Some(repo_id) = repo_id {
         sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config FROM github_repos WHERE id = $1",
+            "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
         )
         .bind(repo_id)
         .fetch_optional(pool)
@@ -1814,16 +1814,18 @@ async fn resolve_activate_pipeline_pg(
     };
 
     let agent_override = if let Some(agent_id) = agent_id {
-        sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
-            .bind(agent_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
-            .flatten()
-            .map(|json| crate::pipeline::parse_override(&json))
-            .transpose()
-            .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
-            .flatten()
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
+        .flatten()
+        .map(|json| crate::pipeline::parse_override(&json))
+        .transpose()
+        .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
+        .flatten()
     } else {
         None
     };
