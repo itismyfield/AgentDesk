@@ -129,10 +129,13 @@
 ### `dashboard_routes`
 
 - canonical_modules: `src/server/routes/*.rs` (per-domain route module).
+  `src/server/routes/auto_queue.rs` (151 lines) is now an HTTP-only facade;
+  its query/command/view/FSM behavior lives under
+  `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
+  smaller route-delegation slices.
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/auto_queue.rs` (8173 lines).
   - `src/server/routes/dispatches/discord_delivery.rs` (5328 lines).
   - `src/server/routes/kanban.rs` (4037 lines).
   - `src/server/routes/dispatched_sessions.rs` (3998 lines).
@@ -152,8 +155,10 @@
   - Dashboard routes never write to canonical config files; they read DB
     state and emit events.
 - allowed_changes: `bugfix` only on giant routes; `new_feature` only when
-  added to a sub-1000-line module or after splitting. New routes must register
-  in the route inventory generator.
+  added to a sub-1000-line module or after splitting. Auto-queue domain logic
+  changes must go under `src/services/auto_queue/*`; the route facade should
+  remain extraction/delegation only. New routes must register in the route
+  inventory generator.
 - tests: `src/server/routes/routes_tests.rs`, plus per-route module tests.
 - related_issues: split issues TBD (file under follow-up).
 
@@ -198,7 +203,8 @@
 The remaining giant-file modules under `src/services/` not covered above:
 
 - `src/services/api_friction.rs` (1808).
-- `src/services/auto_queue.rs` (1050) and `auto_queue/cancel_run.rs` (1782).
+- `src/services/auto_queue.rs` (1047); auto-queue route behavior is split
+  across `src/services/auto_queue/*` slices, each currently below 1000 lines.
 - `src/services/claude.rs` (2477), `gemini.rs` (2546), `qwen.rs` (2446),
   `codex.rs` (1679), `provider.rs` (2100) — provider adapters.
 - `src/services/memory/memento.rs` (2479).

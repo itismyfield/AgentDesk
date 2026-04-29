@@ -2401,7 +2401,7 @@ fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a st
         .filter(|value| !value.is_empty())
 }
 
-pub(super) fn require_explicit_bearer_token(
+pub(crate) fn require_explicit_bearer_token(
     headers: &HeaderMap,
     operation: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -2497,7 +2497,7 @@ pub(super) fn resolve_requesting_agent_id_on_conn(
         .and_then(|channel_id| resolve_agent_id_from_channel_id_on_conn(conn, channel_id))
 }
 
-pub(super) async fn resolve_requesting_agent_id_with_pg(
+pub(crate) async fn resolve_requesting_agent_id_with_pg(
     pool: &sqlx::PgPool,
     headers: &HeaderMap,
 ) -> Option<String> {

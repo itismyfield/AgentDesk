@@ -201,8 +201,28 @@ src/
 │   │   ├── mod.rs
 │   │   └── regression_alerts.rs
 │   ├── auto_queue/
+│   │   ├── activate_bridge.rs
+│   │   ├── activate_command.rs
+│   │   ├── activate_preflight.rs
+│   │   ├── activate_route.rs
 │   │   ├── cancel_run.rs
-│   │   └── runtime.rs
+│   │   ├── command.rs
+│   │   ├── control_routes.rs
+│   │   ├── dispatch_command.rs
+│   │   ├── dispatch_query.rs
+│   │   ├── fsm.rs
+│   │   ├── order_routes.rs
+│   │   ├── phase_gate.rs
+│   │   ├── planning.rs
+│   │   ├── query.rs
+│   │   ├── route.rs
+│   │   ├── route_dispatch.rs
+│   │   ├── route_generate.rs
+│   │   ├── route_types.rs
+│   │   ├── runtime.rs
+│   │   ├── slot_routes.rs
+│   │   ├── view.rs
+│   │   └── view_routes.rs
 │   ├── discord/
 │   │   ├── commands/
 │   │   │   ├── command_policy.rs
