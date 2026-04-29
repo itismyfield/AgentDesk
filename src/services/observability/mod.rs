@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 // `watcher_latency` → #1134 attach→first-relay latency histogram + counters.
 pub mod events;
 pub mod metrics;
+pub mod session_inventory;
 pub mod watcher_latency;
 
 const EVENT_BATCH_SIZE: usize = 64;

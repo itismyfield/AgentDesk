@@ -24,6 +24,9 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
+use crate::services::observability::session_inventory::{
+    format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
+};
 use crate::services::provider::cancel_requested;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
@@ -123,6 +126,34 @@ async fn close_next_tracked_background_child(
             tracing::warn!(
                 "  [{ts}] ⚠ Failed to close background child session {child_session_id} after {reason}: {error}"
             );
+        }
+    }
+}
+
+fn first_request_line(user_text: &str) -> Option<String> {
+    user_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+async fn child_progress_line(
+    pg_pool: Option<&sqlx::PgPool>,
+    parent_session_key: Option<&str>,
+) -> Option<String> {
+    let (Some(pg_pool), Some(parent_session_key)) = (pg_pool, parent_session_key) else {
+        return None;
+    };
+    match load_child_inventory_by_parent_key_pg(pg_pool, parent_session_key).await {
+        Ok(summary) => format_child_inventory_progress(&summary, chrono::Utc::now()),
+        Err(error) => {
+            tracing::warn!(
+                "Failed to load background child inventory for {}: {}",
+                parent_session_key,
+                error
+            );
+            None
         }
     }
 }
@@ -1328,6 +1359,12 @@ pub(super) fn spawn_turn_bridge(
                                             tool_summary: Some(name.clone()),
                                             command_summary: Some(display_summary.clone()),
                                             context_line: last_assistant_text_line.clone(),
+                                            request_line: first_request_line(&user_text_owned),
+                                            progress_line: child_progress_line(
+                                                shared_owned.pg_pool.as_ref(),
+                                                adk_session_key.as_deref(),
+                                            )
+                                            .await,
                                         };
                                     let outcome = shared_owned
                                         .placeholder_controller
@@ -2511,6 +2548,12 @@ pub(super) fn spawn_turn_bridge(
                 tool_summary: current_tool_line.clone(),
                 command_summary: None,
                 context_line: last_assistant_text_line.clone(),
+                request_line: first_request_line(&user_text_owned),
+                progress_line: child_progress_line(
+                    shared_owned.pg_pool.as_ref(),
+                    adk_session_key.as_deref(),
+                )
+                .await,
             };
             let controller_outcome = shared_owned
                 .placeholder_controller

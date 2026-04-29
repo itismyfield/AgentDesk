@@ -1335,12 +1335,16 @@ mod tests {
             Some("Bash"),
             Some("ls -la"),
             Some("⏳ context"),
+            Some("user request"),
+            Some("2 alive (#A 4m12s) / 0 closed"),
         );
         assert!(text.starts_with("📬 **메시지 대기 중**\n"));
         assert!(text.contains("> **사유**: 앞선 턴 진행 중"));
         assert!(!text.contains("> **도구**:"));
         assert!(!text.contains("> **명령**:"));
         assert!(!text.contains("> **요약**:"));
+        assert!(!text.contains("> **요청**:"));
+        assert!(!text.contains("> **진행**:"));
         assert!(text.contains("> **시작**: <t:1700000000:R>"));
         assert!(text.ends_with("현재 진행 중인 턴 완료 후 처리 시작합니다."));
     }
@@ -1473,7 +1477,11 @@ mod tests {
             Some("Monitor"),
             None,
             Some("⏳ CI 통과 신호 대기"),
+            Some("배포 상태 확인해줘\n두 번째 줄은 제외"),
+            Some("2 alive (#A 4m12s, #B 1m05s) / 1 closed"),
         );
+        assert!(text.contains("**요청**: 배포 상태 확인해줘"));
+        assert!(text.contains("**진행**: 2 alive (#A 4m12s, #B 1m05s) / 1 closed"));
         assert!(text.contains("**요약**: ⏳ CI 통과 신호 대기"));
         assert!(text.contains("**도구**: Monitor"));
     }
@@ -2824,10 +2832,14 @@ pub(super) fn build_monitor_handoff_placeholder(
         tool_summary,
         command_summary,
         None,
+        None,
+        None,
     )
 }
 
 const MONITOR_HANDOFF_CONTEXT_MAX_BYTES: usize = 200;
+const MONITOR_HANDOFF_REQUEST_MAX_BYTES: usize = 200;
+const MONITOR_HANDOFF_PROGRESS_MAX_BYTES: usize = 200;
 
 /// Variant of `build_monitor_handoff_placeholder` that surfaces an additional
 /// `context_line` slot — typically the last assistant prose line emitted just
@@ -2841,6 +2853,8 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
     tool_summary: Option<&str>,
     command_summary: Option<&str>,
     context_line: Option<&str>,
+    request_line: Option<&str>,
+    progress_line: Option<&str>,
 ) -> String {
     let header = monitor_handoff_header(status);
     let footer = monitor_handoff_footer(status);
@@ -2880,7 +2894,31 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
         }
     });
 
-    let mut lines = Vec::with_capacity(6);
+    let request_line = request_line.and_then(|raw| {
+        let trimmed = raw.lines().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(truncate_for_status_bytes(
+                trimmed,
+                MONITOR_HANDOFF_REQUEST_MAX_BYTES,
+            ))
+        }
+    });
+
+    let progress_line = progress_line.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(truncate_for_status_bytes(
+                trimmed,
+                MONITOR_HANDOFF_PROGRESS_MAX_BYTES,
+            ))
+        }
+    });
+
+    let mut lines = Vec::with_capacity(8);
     lines.push(header);
     // #1332 — the Queued card has no tool/command yet (turn has not started),
     // so collapse to a reason-only sub-line. Active/terminal cards keep the
@@ -2893,8 +2931,14 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
             "> **도구**: {tool_field} · **사유**: {reason}",
             reason = reason.label()
         ));
+        if let Some(request) = request_line {
+            lines.push(format!("> **요청**: {request}"));
+        }
         if let Some(command) = command_line {
             lines.push(format!("> **명령**: `{command}`"));
+        }
+        if let Some(progress) = progress_line {
+            lines.push(format!("> **진행**: {progress}"));
         }
         if let Some(context) = context_line {
             lines.push(format!("> **요약**: {context}"));

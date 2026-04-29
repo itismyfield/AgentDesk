@@ -12,6 +12,9 @@ use std::sync::OnceLock;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
+use crate::services::observability::session_inventory::{
+    derive_visual_status, load_child_inventory_by_parent_key_pg,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
@@ -135,6 +138,19 @@ struct AgentTurnSession {
     effective_status: &'static str,
     effective_active_dispatch_id: Option<String>,
     is_working: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AgentDiagSession {
+    session_key: String,
+    agent_id: Option<String>,
+    agent_name: Option<String>,
+    provider: Option<String>,
+    status: Option<String>,
+    last_tool_at: Option<DateTime<Utc>>,
+    active_children: i32,
+    thread_channel_id: Option<String>,
+    created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -574,7 +590,193 @@ async fn find_agent_turn_session_pg(
     Ok(latest)
 }
 
+async fn find_diag_session_pg(
+    pool: &sqlx::PgPool,
+    identifier: &str,
+) -> Result<Option<AgentDiagSession>, sqlx::Error> {
+    let identifier = identifier.trim();
+    if identifier.is_empty() {
+        return Ok(None);
+    }
+
+    let row = sqlx::query(
+        "SELECT COALESCE(s.session_key, '') AS session_key,
+                s.agent_id,
+                a.name AS agent_name,
+                s.provider,
+                s.status,
+                s.last_tool_at,
+                COALESCE(s.active_children, 0) AS active_children,
+                s.thread_channel_id::TEXT AS thread_channel_id,
+                s.created_at
+           FROM sessions s
+           LEFT JOIN agents a ON a.id = s.agent_id
+          WHERE s.agent_id = $1
+             OR s.thread_channel_id::TEXT = $1
+             OR a.discord_channel_id = $1
+             OR a.discord_channel_alt = $1
+             OR a.discord_channel_cc = $1
+             OR a.discord_channel_cdx = $1
+          ORDER BY CASE WHEN s.status = 'working' THEN 0 ELSE 1 END,
+                   s.last_heartbeat DESC NULLS LAST,
+                   s.last_tool_at DESC NULLS LAST,
+                   s.created_at DESC NULLS LAST,
+                   s.id DESC
+          LIMIT 1",
+    )
+    .bind(identifier)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(AgentDiagSession {
+            session_key: row.try_get("session_key")?,
+            agent_id: row.try_get("agent_id").ok().flatten(),
+            agent_name: row.try_get("agent_name").ok().flatten(),
+            provider: row.try_get("provider").ok().flatten(),
+            status: row.try_get("status").ok().flatten(),
+            last_tool_at: row.try_get("last_tool_at").ok().flatten(),
+            active_children: row.try_get("active_children").unwrap_or(0),
+            thread_channel_id: row.try_get("thread_channel_id").ok().flatten(),
+            created_at: row.try_get("created_at").ok().flatten(),
+        })
+    })
+    .transpose()
+}
+
+fn loop_suspicion(events: &[TurnToolEvent]) -> serde_json::Value {
+    let mut tail = events
+        .iter()
+        .rev()
+        .filter(|event| event.kind == "tool")
+        .filter_map(|event| {
+            let tool = event.tool_name.as_deref()?.trim();
+            if tool.is_empty() {
+                return None;
+            }
+            let prefix: String = event.summary.chars().take(80).collect();
+            Some((tool.to_ascii_lowercase(), prefix))
+        });
+
+    let Some((tool, prefix)) = tail.next() else {
+        return json!({
+            "suspected": false,
+            "reason": null,
+            "repeat_count": 0,
+            "tool": null,
+        });
+    };
+    let mut count = 1usize;
+    for (next_tool, next_prefix) in tail {
+        if next_tool == tool && next_prefix == prefix {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+
+    if count >= 5 {
+        json!({
+            "suspected": true,
+            "reason": format!("same tool/input prefix repeated {count} times"),
+            "repeat_count": count,
+            "tool": tool,
+        })
+    } else {
+        json!({
+            "suspected": false,
+            "reason": null,
+            "repeat_count": count,
+            "tool": tool,
+        })
+    }
+}
+
 // ── Handlers ─────────────────────────────────────────────────
+
+/// GET /api/agents/diag/:identifier
+pub async fn agent_diag(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_required_response();
+    };
+
+    let session = match find_diag_session_pg(pool, &identifier).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "agent/channel session not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("query diag session: {error}")})),
+            );
+        }
+    };
+
+    let now = Utc::now();
+    let visual = derive_visual_status(
+        session.status.as_deref(),
+        session.last_tool_at,
+        session.active_children,
+        now,
+    );
+    let last_tool_elapsed_secs = session
+        .last_tool_at
+        .map(|last| now.signed_duration_since(last).num_seconds().max(0));
+
+    let tmux_name = extract_tmux_name(&session.session_key);
+    let inflight = load_inflight_snapshot(session.provider.as_deref(), tmux_name.as_deref());
+    let recent_output = tmux_name
+        .as_deref()
+        .and_then(capture_recent_tmux_output)
+        .or_else(|| inflight.as_ref().and_then(inflight_recent_output));
+    let events = collect_turn_tool_events(recent_output.as_deref(), inflight.as_ref());
+    let last_tool = events.iter().rev().find(|event| event.kind == "tool");
+    let child_inventory = load_child_inventory_by_parent_key_pg(pool, &session.session_key)
+        .await
+        .unwrap_or_default();
+    let oldest_child_spawned_at = child_inventory
+        .alive
+        .iter()
+        .filter_map(|child| child.spawned_at)
+        .min()
+        .map(|value| value.to_rfc3339());
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "target": identifier,
+            "agent_id": session.agent_id,
+            "agent_name": session.agent_name,
+            "provider": session.provider,
+            "session_key": session.session_key,
+            "status": session.status,
+            "visual_status": visual.display(),
+            "visual_status_emoji": visual.emoji(),
+            "visual_status_code": visual.code(),
+            "thread_channel_id": session.thread_channel_id,
+            "created_at": session.created_at.map(|value| value.to_rfc3339()),
+            "last_tool_at": session.last_tool_at.map(|value| value.to_rfc3339()),
+            "last_tool_elapsed_secs": last_tool_elapsed_secs,
+            "active_children": session.active_children,
+            "oldest_child_spawned_at": oldest_child_spawned_at,
+            "children": child_inventory,
+            "last_tool": last_tool.map(|event| json!({
+                "tool_name": event.tool_name,
+                "summary": event.summary,
+                "status": event.status,
+                "line": event.line,
+            })),
+            "recent_loop_suspicion": loop_suspicion(&events),
+        })),
+    )
+}
 
 /// GET /api/agents/:id/offices
 pub async fn agent_offices(
@@ -1696,6 +1898,41 @@ mod tests {
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
         PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    fn tool_event(tool_name: &str, summary: &str) -> TurnToolEvent {
+        TurnToolEvent {
+            kind: "tool",
+            status: "ok",
+            tool_name: Some(tool_name.to_string()),
+            summary: summary.to_string(),
+            line: format!("{tool_name}: {summary}"),
+        }
+    }
+
+    #[test]
+    fn loop_suspicion_keeps_json_shape_for_empty_events() {
+        let value = loop_suspicion(&[]);
+        assert_eq!(value["suspected"], false);
+        assert_eq!(value["reason"], serde_json::Value::Null);
+        assert_eq!(value["repeat_count"], 0);
+        assert_eq!(value["tool"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn loop_suspicion_reports_repeated_tail() {
+        let events = vec![
+            tool_event("read", "different"),
+            tool_event("bash", "same input"),
+            tool_event("bash", "same input"),
+            tool_event("bash", "same input"),
+            tool_event("bash", "same input"),
+            tool_event("bash", "same input"),
+        ];
+        let value = loop_suspicion(&events);
+        assert_eq!(value["suspected"], true);
+        assert_eq!(value["repeat_count"], 5);
+        assert_eq!(value["tool"], "bash");
     }
 
     /// Per-test Postgres database lifecycle for the #1238 migration of

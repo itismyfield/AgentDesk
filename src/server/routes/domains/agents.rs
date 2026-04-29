@@ -21,6 +21,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/agents/quality/ranking",
                 get(agents::agents_quality_ranking),
             )
+            .route("/agents/diag/{identifier}", get(agents::agent_diag))
             .route(
                 "/agents/{id}",
                 get(agents_crud::get_agent)
