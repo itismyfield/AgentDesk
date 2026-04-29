@@ -33,6 +33,8 @@ pub struct Config {
     pub runtime: RuntimeSettingsConfig,
     #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
     pub automation: AutomationConfig,
+    #[serde(default, skip_serializing_if = "RoutinesConfig::is_default")]
+    pub routines: RoutinesConfig,
     #[serde(default, skip_serializing_if = "EscalationConfig::is_empty")]
     pub escalation: EscalationConfig,
     #[serde(default, skip_serializing_if = "OnboardingConfig::is_empty")]
@@ -1157,6 +1159,64 @@ impl Default for PoliciesConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct RoutinesConfig {
+    /// Master on/off switch. Defaults to false; requires PostgreSQL.
+    /// SQLite-only deployments are unaffected when this is false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory containing *.js routine scripts. Defaults to `./routines`.
+    #[serde(default = "default_routines_dir")]
+    pub dir: PathBuf,
+    /// How often the due-scan tick runs, in seconds. Defaults to 30.
+    #[serde(default = "default_routines_tick_interval_secs")]
+    pub tick_interval_secs: u64,
+    /// Maximum routines to claim per tick. Defaults to 10.
+    #[serde(default = "default_routines_max_due_per_tick")]
+    pub max_due_per_tick: u32,
+    /// IANA timezone name used when no per-routine timezone is set.
+    #[serde(default = "default_routines_timezone")]
+    pub default_timezone: String,
+    /// Watch `dir` for script changes and reload without restart.
+    #[serde(default = "default_true")]
+    pub hot_reload: bool,
+}
+
+impl Default for RoutinesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: default_routines_dir(),
+            tick_interval_secs: default_routines_tick_interval_secs(),
+            max_due_per_tick: default_routines_max_due_per_tick(),
+            default_timezone: default_routines_timezone(),
+            hot_reload: true,
+        }
+    }
+}
+
+impl RoutinesConfig {
+    pub fn is_default(&self) -> bool {
+        *self == RoutinesConfig::default()
+    }
+}
+
+fn default_routines_dir() -> PathBuf {
+    PathBuf::from("./routines")
+}
+
+fn default_routines_tick_interval_secs() -> u64 {
+    30
+}
+
+fn default_routines_max_due_per_tick() -> u32 {
+    10
+}
+
+fn default_routines_timezone() -> String {
+    "UTC".to_string()
+}
+
 impl Default for DataConfig {
     fn default() -> Self {
         Self {
@@ -1215,6 +1275,7 @@ impl Default for Config {
             review: ReviewConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
             automation: AutomationConfig::default(),
+            routines: RoutinesConfig::default(),
             escalation: EscalationConfig::default(),
             onboarding: OnboardingConfig::default(),
             memory: None,

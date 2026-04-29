@@ -3279,3 +3279,18 @@ async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
         crate::services::discord::retry_failed_dm_notifications(None, Some(pg_pool.as_ref())).await;
     }
 }
+
+async fn routine_runtime_loop(pg_pool: Arc<PgPool>, tick_interval_secs: u64) {
+    use crate::services::routines::RoutineStore;
+    let store = RoutineStore::new(pg_pool);
+    match store.recover_stale_running_runs().await {
+        Ok(n) if n > 0 => tracing::info!(recovered = n, "routine boot recovery: stale runs marked interrupted"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "routine boot recovery failed"),
+    }
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(tick_interval_secs));
+    loop {
+        interval.tick().await;
+        // ORDER-P0-002: due-claim tick loop and JS executor land here
+    }
+}
