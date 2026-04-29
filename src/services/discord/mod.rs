@@ -113,7 +113,7 @@ use settings::{
     validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
-use tmux::{restore_tmux_watchers, tmux_output_watcher};
+use tmux::restore_tmux_watchers;
 #[cfg(unix)]
 use tmux_reaper::{cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions};
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};

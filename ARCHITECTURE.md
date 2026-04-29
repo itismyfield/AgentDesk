@@ -277,6 +277,8 @@ src/
 │   │   │   ├── stale_resume.rs
 │   │   │   ├── tests.rs
 │   │   │   └── tmux_runtime.rs
+│   │   ├── watchers/
+│   │   │   └── lifecycle.rs
 │   │   ├── adk_session.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── discord_io.rs

@@ -316,18 +316,25 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
 
 fn should_delegate_bridge_relay_to_watcher(
     watcher_owns_assistant_relay: bool,
-    watcher_relay_task_spawned_for_turn: bool,
+    watcher_relay_available_for_turn: bool,
     cancelled: bool,
     is_prompt_too_long: bool,
     transport_error: bool,
     recovery_retry: bool,
 ) -> bool {
     watcher_owns_assistant_relay
-        && watcher_relay_task_spawned_for_turn
+        && watcher_relay_available_for_turn
         && !cancelled
         && !is_prompt_too_long
         && !transport_error
         && !recovery_retry
+}
+
+fn live_watcher_registered_for_relay(shared: &SharedData, owner_channel_id: ChannelId) -> bool {
+    shared
+        .tmux_watchers
+        .get(&owner_channel_id)
+        .is_some_and(|watcher| !watcher.cancel.load(Ordering::Relaxed))
 }
 
 fn record_turn_bridge_invariant(
@@ -986,7 +993,8 @@ pub(super) fn spawn_turn_bridge(
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
         let mut watcher_owns_assistant_relay = bridge.inflight_state.watcher_owns_live_relay;
-        let mut watcher_relay_task_spawned_for_turn = false;
+        let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
+            && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
         // #1255 live-turn long-running tool placeholder card.
         //
         // `last_assistant_text_line` captures the last non-empty single-line
@@ -1932,7 +1940,7 @@ pub(super) fn spawn_turn_bridge(
                                             last_heartbeat_ts_ms,
                                             restored_turn,
                                         ));
-                                        watcher_relay_task_spawned_for_turn = true;
+                                        watcher_relay_available_for_turn = true;
                                         let _ = save_inflight_state(&inflight_state);
                                         watcher_ready_for_relay = true;
                                     } else {
@@ -1957,6 +1965,7 @@ pub(super) fn spawn_turn_bridge(
                                 if let Some(watcher) =
                                     shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
                                 {
+                                    watcher_relay_available_for_turn = true;
                                     if let Ok(mut guard) = watcher.resume_offset.lock() {
                                         *guard = Some(last_offset);
                                     }
@@ -2318,7 +2327,7 @@ pub(super) fn spawn_turn_bridge(
         }
         let bridge_relay_delegated_to_watcher = should_delegate_bridge_relay_to_watcher(
             watcher_owns_assistant_relay,
-            watcher_relay_task_spawned_for_turn,
+            watcher_relay_available_for_turn,
             cancelled,
             is_prompt_too_long,
             transport_error,
