@@ -2573,7 +2573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_dispatch_only_does_not_authorize_transition() {
+    async fn completed_dispatch_only_does_not_authorize_transition_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2602,7 +2602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_dispatch_authorizes_transition() {
+    async fn pending_dispatch_authorizes_transition_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2626,7 +2626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatched_status_authorizes_transition() {
+    async fn dispatched_status_authorizes_transition_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2650,7 +2650,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_dispatch_blocks_non_free_transition() {
+    async fn no_dispatch_blocks_non_free_transition_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2671,7 +2671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn free_transition_works_without_dispatch() {
+    async fn free_transition_works_without_dispatch_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2837,7 +2837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transition_status_with_on_conn_rolls_back_on_cleanup_error() {
+    async fn transition_status_with_on_conn_rolls_back_on_cleanup_error_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -2915,7 +2915,7 @@ mod tests {
     /// through try_fire_hook_by_name(), and dispatch.create() in that path must
     /// return with the dispatch row + notify outbox already materialized.
     #[tokio::test]
-    async fn transition_status_custom_on_enter_hook_materializes_dispatch_outbox() {
+    async fn transition_status_custom_on_enter_hook_materializes_dispatch_outbox_pg() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("ready-enter-hook.js"),
@@ -3323,7 +3323,7 @@ mod tests {
     /// #110: Rust transition_status marks auto_queue_entries as done,
     /// and this single update is sufficient (no JS triple-update).
     #[tokio::test]
-    async fn transition_to_done_marks_auto_queue_entry() {
+    async fn transition_to_done_marks_auto_queue_entry_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -3473,7 +3473,7 @@ mod tests {
 
     /// #110: non-terminal manual recovery transitions must not complete auto-queue entries.
     #[tokio::test]
-    async fn requested_force_transition_does_not_complete_auto_queue_entry() {
+    async fn requested_force_transition_does_not_complete_auto_queue_entry_pg() {
         let pg_db = KanbanPgDatabase::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let engine = test_engine_with_pg(pool.clone());

@@ -3146,7 +3146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_done_defers_run_completion_until_policy_hook() {
+    async fn entry_transition_done_defers_run_completion_until_policy_hook_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3203,7 +3203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_done_keeps_slot_assignment_until_multi_phase_run_finishes() {
+    async fn entry_transition_done_keeps_slot_assignment_until_multi_phase_run_finishes_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3256,7 +3256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_done_is_idempotent_without_duplicate_side_effects() {
+    async fn entry_transition_done_is_idempotent_without_duplicate_side_effects_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3313,7 +3313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_pending_clears_dispatch_binding() {
+    async fn entry_transition_pending_clears_dispatch_binding_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3437,7 +3437,7 @@ mod tests {
     /// transition straight to `skipped`, exercising the same allowed
     /// `dispatched -> skipped` path the SQLite test ultimately verified.
     #[tokio::test]
-    async fn stale_allowed_transition_retries_from_latest_status() {
+    async fn stale_allowed_transition_retries_from_latest_status_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3510,7 +3510,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_allows_skipped_restore_to_dispatched() {
+    async fn entry_transition_allows_skipped_restore_to_dispatched_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3565,7 +3565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_allows_done_restore_to_dispatched_for_recovery_sources() {
+    async fn entry_transition_allows_done_restore_to_dispatched_for_recovery_sources_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3623,7 +3623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_blocks_invalid_done_to_pending_restore() {
+    async fn entry_transition_blocks_invalid_done_to_pending_restore_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3654,7 +3654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_blocks_invalid_done_to_dispatched_restore() {
+    async fn entry_transition_blocks_invalid_done_to_dispatched_restore_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -3695,7 +3695,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_transition_blocks_invalid_done_to_skipped_restore() {
+    async fn entry_transition_blocks_invalid_done_to_skipped_restore_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(
@@ -4080,7 +4080,7 @@ mod tests {
     /// intact, mirroring what the SQLite test asserted via a synthetic
     /// trigger.
     #[tokio::test]
-    async fn terminal_transition_done_defers_slot_release_failures_until_policy_hook() {
+    async fn terminal_transition_done_defers_slot_release_failures_until_policy_hook_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         sqlx::query(

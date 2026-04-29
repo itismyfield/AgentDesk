@@ -2097,7 +2097,7 @@ mod tests {
     // `block_in_place + handle.block_on` cannot acquire a connection. A
     // multi-threaded runtime keeps the pool drivers alive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn queued_review_enter_replays_terminal_transition_hooks() {
+    async fn queued_review_enter_replays_terminal_transition_hooks_pg() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("deferred-review-terminal.js"),

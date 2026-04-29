@@ -5243,7 +5243,7 @@ async fn kanban_update_card_status() {
 }
 
 #[tokio::test]
-async fn kanban_update_card_rejects_manual_non_backlog_transition() {
+async fn kanban_update_card_rejects_manual_non_backlog_transition_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
@@ -8313,7 +8313,7 @@ async fn create_issue_route_pg_builds_pmd_body_and_agent_label() {
     let row: (
         Option<String>,
         String,
-        Option<i32>,
+        Option<i64>,
         Option<String>,
         Option<String>,
     ) = sqlx::query_as(
@@ -13702,7 +13702,7 @@ async fn stats_pg_only_without_sqlite_mirror() {
 }
 
 #[tokio::test]
-async fn force_transition_succeeds_with_correct_channel() {
+async fn force_transition_succeeds_with_correct_channel_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
@@ -13786,7 +13786,7 @@ async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configu
 // worker thread, so a multi-thread runtime is required for the test to
 // drive the pool while the actor thread is dispatching JS hooks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_it_up() {
+async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_it_up_pg() {
     crate::pipeline::ensure_loaded();
     let (repo, _repo_override) = setup_test_repo();
     let _gh = install_mock_gh_pr_tracking(
@@ -26612,7 +26612,7 @@ async fn idle_sync_preserves_repeated_finding_round_markers() {
 }
 
 #[tokio::test]
-async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
+async fn rereview_backlog_card_transitions_to_review_with_dispatch_pg() {
     crate::pipeline::ensure_loaded();
     let (_repo, _repo_guard) = setup_test_repo();
     let pg_db = TestPostgresDb::create().await;

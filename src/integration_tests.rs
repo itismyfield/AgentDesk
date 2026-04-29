@@ -4470,7 +4470,7 @@ mod tests {
     // ── Scenario 9: QA pipeline override with custom qa_test state (#136) ──
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn scenario_9_qa_pipeline_override_transitions() {
+    async fn scenario_9_qa_pipeline_override_transitions_pg() {
         let pg_db = IntegrationPgDatabase::create().await;
         let pool = pg_db.migrate().await;
         let engine = test_engine_with_pg(pool.clone());
@@ -7077,7 +7077,7 @@ mod tests {
     /// bridges now route through PG when the engine has a pg_pool.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition() {
+    async fn scenario_701_mark_pr_create_failed_marker_survives_terminal_transition_pg() {
         let (_repo, _repo_guard) = setup_test_repo();
 
         let pg_db = IntegrationPgDatabase::create().await;
