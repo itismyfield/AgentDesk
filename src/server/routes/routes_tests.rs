@@ -354,6 +354,92 @@ struct MockDiscordDispatchState {
     thread_parents: std::collections::HashMap<String, String>,
 }
 
+#[derive(Default)]
+struct MockIssueAnnouncementDiscordState {
+    posts: Vec<(String, String)>,
+    edits: Vec<(String, String, String)>,
+}
+
+async fn spawn_mock_issue_announcement_discord_server() -> (
+    String,
+    Arc<std::sync::Mutex<MockIssueAnnouncementDiscordState>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        response::IntoResponse,
+        routing::{patch, post},
+    };
+
+    async fn create_message(
+        State(state): State<Arc<std::sync::Mutex<MockIssueAnnouncementDiscordState>>>,
+        Path(channel_id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let content = body
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        state
+            .lock()
+            .unwrap()
+            .posts
+            .push((channel_id.clone(), content));
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": format!("issue-announcement-{channel_id}")
+            })),
+        )
+    }
+
+    async fn edit_message(
+        State(state): State<Arc<std::sync::Mutex<MockIssueAnnouncementDiscordState>>>,
+        Path((channel_id, message_id)): Path<(String, String)>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let content = body
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        state
+            .lock()
+            .unwrap()
+            .edits
+            .push((channel_id.clone(), message_id.clone(), content));
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": message_id
+            })),
+        )
+    }
+
+    let state = Arc::new(std::sync::Mutex::new(
+        MockIssueAnnouncementDiscordState::default(),
+    ));
+    let app = Router::new()
+        .route("/channels/{channel_id}/messages", post(create_message))
+        .route(
+            "/channels/{channel_id}/messages/{message_id}",
+            patch(edit_message),
+        )
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (format!("http://{addr}"), state, handle)
+}
+
 async fn spawn_mock_dispatch_delivery_server() -> (
     String,
     Arc<std::sync::Mutex<MockDiscordDispatchState>>,
@@ -546,7 +632,7 @@ fn install_mock_gh_issue_create(repo: &str, issue_number: i64) -> MockGhOverride
     let dir = tempfile::tempdir().unwrap();
     let gh_path = dir.path().join("gh");
     let script = format!(
-        "#!/bin/sh\nset -eu\ncapture_dir=\"$(dirname \"$0\")\"\nif [ \"${{1-}}\" = \"--version\" ]; then\n  echo 'gh mock 1.0'\n  exit 0\nfi\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"$capture_dir/issue-create-args.txt\"\n  body_file=''\n  prev=''\n  for arg in \"$@\"; do\n    if [ \"$prev\" = '--body-file' ]; then\n      body_file=\"$arg\"\n      break\n    fi\n    prev=\"$arg\"\n  done\n  if [ -n \"$body_file\" ]; then\n    cp \"$body_file\" \"$capture_dir/issue-create-body.md\"\n  fi\n  echo 'https://github.com/{repo}/issues/{issue_number}'\n  exit 0\nfi\necho 'gh mock: unexpected args: $*' >&2\nexit 1\n"
+        "#!/bin/sh\nset -eu\ncapture_dir=\"$(dirname \"$0\")\"\nif [ \"${{1-}}\" = \"--version\" ]; then\n  echo 'gh mock 1.0'\n  exit 0\nfi\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"create\" ]; then\n  printf '%s\\n' \"$@\" > \"$capture_dir/issue-create-args.txt\"\n  body_file=''\n  prev=''\n  for arg in \"$@\"; do\n    if [ \"$prev\" = '--body-file' ]; then\n      body_file=\"$arg\"\n      break\n    fi\n    prev=\"$arg\"\n  done\n  if [ -n \"$body_file\" ]; then\n    cp \"$body_file\" \"$capture_dir/issue-create-body.md\"\n  fi\n  echo 'https://github.com/{repo}/issues/{issue_number}'\n  exit 0\nfi\nif [ \"${{1-}}\" = \"issue\" ] && [ \"${{2-}}\" = \"view\" ] && [ \"${{3-}}\" = \"{issue_number}\" ]; then\n  shift 3\n  args=\"$*\"\n  if printf '%s\\n' \"$args\" | grep -F -q -- '--repo {repo}' && printf '%s\\n' \"$args\" | grep -F -q -- '--json state' && printf '%s\\n' \"$args\" | grep -F -q -- '--jq .state'; then\n    echo 'OPEN'\n    exit 0\n  fi\nfi\necho 'gh mock: unexpected args: $*' >&2\nexit 1\n"
     );
     fs::write(&gh_path, script).unwrap();
     let mut perms = fs::metadata(&gh_path).unwrap().permissions();
@@ -618,7 +704,7 @@ fn install_mock_gh_issue_create(repo: &str, issue_number: i64) -> MockGhOverride
     let dir = tempfile::tempdir().unwrap();
     let gh_path = dir.path().join("gh.ps1");
     let script = format!(
-        "$captureDir = $PSScriptRoot\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'issue' -and $args[1] -eq 'create') {{\n  $args | Set-Content -Path (Join-Path $captureDir 'issue-create-args.txt')\n  for ($i = 0; $i -lt $args.Count - 1; $i++) {{\n    if ($args[$i] -eq '--body-file') {{\n      Copy-Item -LiteralPath $args[$i + 1] -Destination (Join-Path $captureDir 'issue-create-body.md') -Force\n      break\n    }}\n  }}\n  'https://github.com/{repo}/issues/{issue_number}' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $($args -join ' ')\"\nexit 1\n"
+        "$captureDir = $PSScriptRoot\n$joined = $args -join ' '\nif ($args.Count -gt 0 -and $args[0] -eq '--version') {{\n  Write-Output 'gh mock 1.0'\n  exit 0\n}}\nif ($args.Count -ge 2 -and $args[0] -eq 'issue' -and $args[1] -eq 'create') {{\n  $args | Set-Content -Path (Join-Path $captureDir 'issue-create-args.txt')\n  for ($i = 0; $i -lt $args.Count - 1; $i++) {{\n    if ($args[$i] -eq '--body-file') {{\n      Copy-Item -LiteralPath $args[$i + 1] -Destination (Join-Path $captureDir 'issue-create-body.md') -Force\n      break\n    }}\n  }}\n  'https://github.com/{repo}/issues/{issue_number}' | Write-Output\n  exit 0\n}}\nif ($args.Count -ge 3 -and $args[0] -eq 'issue' -and $args[1] -eq 'view' -and $args[2] -eq '{issue_number}' -and $joined.Contains('--repo {repo}') -and $joined.Contains('--json state') -and $joined.Contains('--jq .state')) {{\n  'OPEN' | Write-Output\n  exit 0\n}}\nWrite-Error \"gh mock: unexpected args: $joined\"\nexit 1\n"
     );
     fs::write(&gh_path, script).unwrap();
     let env = EnvVarGuard::set_path("AGENTDESK_GH_PATH", &gh_path);
@@ -8556,6 +8642,198 @@ async fn create_issue_route_pg_returns_kanban_card_id() {
     .unwrap();
     assert_eq!(metadata_json["labels"], "agent:adk-backend");
 
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn create_issue_route_pg_posts_and_persists_issue_announcement() {
+    let _env_lock = env_lock();
+    let _gh = install_mock_gh_issue_create("itismyfield/AgentDesk", 1331);
+    let (discord_base, discord_state, discord_handle) =
+        spawn_mock_issue_announcement_discord_server().await;
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &discord_base);
+    write_announce_token(runtime_root.path());
+
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/github/issues/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "repo": "ADK",
+                        "title": "Issue announcement lifecycle",
+                        "background": "A created issue should post a Discord card.",
+                        "content": ["post an announcement"],
+                        "dod": ["announcement is persisted"],
+                        "agent_id": "project-agentdesk",
+                        "announcement_channel_id": "1490000000000000001"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["announcement_channel_id"], "1490000000000000001");
+    assert_eq!(
+        json["announcement_message_id"],
+        "issue-announcement-1490000000000000001"
+    );
+    assert!(json["announcement_sync_error"].is_null());
+
+    let posts = {
+        let state = discord_state.lock().unwrap();
+        state.posts.clone()
+    };
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].0, "1490000000000000001");
+    assert!(posts[0].1.contains("📋 **새 이슈 #1331**"));
+    assert!(posts[0].1.contains("> 상태: 🟡 open"));
+    assert!(posts[0].1.contains("> 담당: agent:project-agentdesk"));
+
+    let row = sqlx::query(
+        "SELECT repo, issue_number, channel_id, message_id, completed_at
+         FROM issue_announcements
+         WHERE repo = 'itismyfield/AgentDesk' AND issue_number = 1331",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.try_get::<String, _>("channel_id").unwrap(),
+        "1490000000000000001"
+    );
+    assert_eq!(
+        row.try_get::<String, _>("message_id").unwrap(),
+        "issue-announcement-1490000000000000001"
+    );
+    assert!(
+        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
+            .unwrap()
+            .is_none()
+    );
+
+    discord_handle.abort();
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn github_sync_pg_edits_issue_announcement_on_pr_merge_completion() {
+    let _env_lock = env_lock();
+    let (discord_base, discord_state, discord_handle) =
+        spawn_mock_issue_announcement_discord_server().await;
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+    let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &discord_base);
+    write_announce_token(runtime_root.path());
+
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO issue_announcements (
+            repo, issue_number, issue_url, title, agent_id,
+            channel_id, message_id, created_at, updated_at
+         )
+         VALUES (
+            'itismyfield/AgentDesk', 1332,
+            'https://github.com/itismyfield/AgentDesk/issues/1332',
+            'PR-backed completion', 'project-agentdesk',
+            '1490000000000000002', 'message-1332',
+            NOW() - INTERVAL '2 hours 13 minutes', NOW()
+         )",
+    )
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    crate::github::sync::sync_github_issues_for_repo_pg(
+        &pg_pool,
+        "itismyfield/AgentDesk",
+        &[crate::github::sync::GhIssue {
+            number: 1332,
+            state: "CLOSED".to_string(),
+            title: "PR-backed completion".to_string(),
+            labels: Vec::new(),
+            body: None,
+            url: Some("https://github.com/itismyfield/AgentDesk/issues/1332".to_string()),
+            closed_at: Some("2026-04-29T00:00:00Z".to_string()),
+            closed_by_pull_requests_references: vec![crate::github::sync::GhPullRequestReference {
+                number: Some(1410),
+                url: Some("https://github.com/itismyfield/AgentDesk/pull/1410".to_string()),
+            }],
+        }],
+    )
+    .await
+    .unwrap();
+
+    let edits = {
+        let state = discord_state.lock().unwrap();
+        state.edits.clone()
+    };
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].0, "1490000000000000002");
+    assert_eq!(edits[0].1, "message-1332");
+    assert!(edits[0].2.contains("✅ **#1332 완료**"));
+    assert!(
+        edits[0]
+            .2
+            .contains("> 머지: PR #1410 https://github.com/itismyfield/AgentDesk/pull/1410")
+    );
+
+    let row = sqlx::query(
+        "SELECT completion_kind, completion_pr_number, completed_at, last_edit_error
+         FROM issue_announcements
+         WHERE repo = 'itismyfield/AgentDesk' AND issue_number = 1332",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.try_get::<Option<String>, _>("completion_kind").unwrap(),
+        Some("merged".to_string())
+    );
+    assert_eq!(
+        row.try_get::<Option<i64>, _>("completion_pr_number")
+            .unwrap(),
+        Some(1410)
+    );
+    assert!(
+        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        row.try_get::<Option<String>, _>("last_edit_error")
+            .unwrap()
+            .is_none()
+    );
+
+    discord_handle.abort();
     pg_pool.close().await;
     pg_db.drop().await;
 }

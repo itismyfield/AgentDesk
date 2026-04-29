@@ -3541,6 +3541,9 @@ mod tests {
                 title: "Issue #9662".to_string(),
                 labels: vec![],
                 body: Some("review-off mainline sync".to_string()),
+                url: None,
+                closed_at: None,
+                closed_by_pull_requests_references: Vec::new(),
             }],
         )
         .await

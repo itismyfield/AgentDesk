@@ -194,6 +194,27 @@ fn comment_issue_with(
         .map(|_| ())
 }
 
+fn issue_state_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    issue_number: i64,
+) -> Result<String, String> {
+    let issue_number = issue_number.to_string();
+    adapter
+        .run(&[
+            "issue",
+            "view",
+            &issue_number,
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "--jq",
+            ".state",
+        ])
+        .map(|value| value.trim().to_string())
+}
+
 fn create_issue_with_options<'a>(
     adapter: &'a dyn GitHubAdapter,
     repo: &'a str,
@@ -383,6 +404,10 @@ pub struct IssueComments {
 
 pub fn close_issue(repo: &str, issue_number: i64) -> Result<(), String> {
     close_issue_with(adapter(), repo, issue_number)
+}
+
+pub fn issue_state(repo: &str, issue_number: i64) -> Result<String, String> {
+    issue_state_with(adapter(), repo, issue_number)
 }
 
 pub fn comment_issue(repo: &str, issue_number: i64, body: &str) -> Result<(), String> {

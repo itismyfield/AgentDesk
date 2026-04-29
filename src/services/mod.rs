@@ -13,6 +13,7 @@ pub mod disk_monitor;
 pub mod dispatches;
 pub mod dispatches_followup;
 pub mod gemini;
+pub mod issue_announcements;
 pub mod kanban;
 pub mod maintenance;
 pub mod mcp_config;

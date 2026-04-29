@@ -4,7 +4,8 @@ use chrono::{Duration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 
-const ISSUE_JSON_FIELDS: &str = "number,state,title,labels,body";
+const ISSUE_JSON_FIELDS: &str =
+    "number,state,title,labels,body,url,closedAt,closedByPullRequestsReferences";
 const PRIMARY_FETCH_LIMIT: u32 = 100;
 const RECENTLY_CLOSED_FETCH_LIMIT: u32 = 50;
 const RECENTLY_CLOSED_LOOKBACK_DAYS: i64 = 30;
@@ -19,11 +20,23 @@ pub struct GhIssue {
     pub labels: Vec<GhLabel>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default, rename = "closedAt")]
+    pub closed_at: Option<String>,
+    #[serde(default, rename = "closedByPullRequestsReferences")]
+    pub closed_by_pull_requests_references: Vec<GhPullRequestReference>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct GhLabel {
     pub name: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct GhPullRequestReference {
+    pub number: Option<i64>,
+    pub url: Option<String>,
 }
 
 /// Fetch open issues for a repo via `gh` CLI.
@@ -213,6 +226,19 @@ pub async fn sync_github_issues_for_repo_pg(
                 );
             }
         }
+
+        if issue.state == "CLOSED" {
+            let event = issue_completion_event(repo, issue);
+            if let Err(error) =
+                crate::services::issue_announcements::complete_issue_announcement_pg(pool, event)
+                    .await
+            {
+                tracing::warn!(
+                    "[github-sync] {repo}#{}: issue announcement completion edit failed: {error}",
+                    issue.number
+                );
+            }
+        }
     }
 
     let mainline_issue_numbers = mainline_issue_numbers_for_repo(repo);
@@ -243,6 +269,25 @@ pub async fn sync_github_issues_for_repo_pg(
                     card.id
                 );
             }
+
+            if let Err(error) =
+                crate::services::issue_announcements::complete_issue_announcement_pg(
+                    pool,
+                    crate::services::issue_announcements::IssueCompletionEvent {
+                        repo: repo.to_string(),
+                        issue_number,
+                        title: None,
+                        kind: crate::services::issue_announcements::IssueCompletionKind::Merged,
+                        pr_number: None,
+                        pr_url: None,
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    "[github-sync] {repo}#{issue_number}: mainline issue announcement completion edit failed: {error}"
+                );
+            }
         }
 
         if mainline_done_count > 0 {
@@ -260,6 +305,26 @@ pub async fn sync_github_issues_for_repo_pg(
         .map_err(|error| format!("update last_synced_at: {error}"))?;
 
     Ok(result)
+}
+
+fn issue_completion_event(
+    repo: &str,
+    issue: &GhIssue,
+) -> crate::services::issue_announcements::IssueCompletionEvent {
+    let first_pr = issue.closed_by_pull_requests_references.first();
+    let kind = if first_pr.is_some() {
+        crate::services::issue_announcements::IssueCompletionKind::Merged
+    } else {
+        crate::services::issue_announcements::IssueCompletionKind::Closed
+    };
+    crate::services::issue_announcements::IssueCompletionEvent {
+        repo: repo.to_string(),
+        issue_number: issue.number,
+        title: Some(issue.title.clone()),
+        kind,
+        pr_number: first_pr.and_then(|pr| pr.number),
+        pr_url: first_pr.and_then(|pr| pr.url.clone()),
+    }
 }
 
 async fn load_pg_cards_for_issue(

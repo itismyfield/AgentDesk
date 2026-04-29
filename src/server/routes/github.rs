@@ -42,6 +42,7 @@ pub struct CreateIssueBody {
     pub hints: Option<Vec<String>>,
     pub auto_dispatch: Option<bool>,
     pub block_on: Option<Vec<i64>>,
+    pub announcement_channel_id: Option<String>,
 }
 
 const PMD_FORMAT_VERSION: u32 = 1;
@@ -335,6 +336,77 @@ pub async fn create_issue(
             } else {
                 (None, Some("postgres pool unavailable".to_string()))
             };
+            let (announcement_channel_id, announcement_message_id, announcement_sync_error) =
+                if let Some(pool) = state.pg_pool_ref() {
+                    match crate::services::issue_announcements::create_issue_announcement_pg(
+                        pool,
+                        crate::services::issue_announcements::IssueAnnouncementCreate {
+                            repo: repo.clone(),
+                            issue_number: created.number,
+                            issue_url: created.url.clone(),
+                            title: title.clone(),
+                            agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
+                            announcement_channel_id: body
+                                .announcement_channel_id
+                                .as_deref()
+                                .and_then(trim_non_empty),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(Some(announcement)) => {
+                            if matches!(
+                                github::issue_state(&repo, created.number).as_deref(),
+                                Ok("CLOSED")
+                            ) {
+                                if let Err(error) =
+                                    crate::services::issue_announcements::complete_issue_announcement_pg(
+                                        pool,
+                                        crate::services::issue_announcements::IssueCompletionEvent {
+                                            repo: repo.clone(),
+                                            issue_number: created.number,
+                                            title: Some(title.clone()),
+                                            kind: crate::services::issue_announcements::IssueCompletionKind::Closed,
+                                            pr_number: None,
+                                            pr_url: None,
+                                        },
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "[issues] immediate completion announcement edit failed for {}#{}: {}",
+                                        repo,
+                                        created.number,
+                                        error
+                                    );
+                                }
+                            }
+                            (
+                                Some(announcement.channel_id),
+                                Some(announcement.message_id),
+                                None,
+                            )
+                        }
+                        Ok(None) => (None, None, None),
+                        Err(error) => {
+                            tracing::warn!(
+                                "[issues] created GitHub issue {}#{} but failed to announce: {}",
+                                repo,
+                                created.number,
+                                error
+                            );
+                            (None, None, Some(error))
+                        }
+                    }
+                } else if body.announcement_channel_id.as_ref().is_some() {
+                    (
+                        None,
+                        None,
+                        Some("postgres pool unavailable for issue announcement".to_string()),
+                    )
+                } else {
+                    (None, None, None)
+                };
 
             (
                 StatusCode::CREATED,
@@ -346,6 +418,9 @@ pub async fn create_issue(
                     },
                     "kanban_card_id": kanban_card_id,
                     "kanban_card_sync_error": kanban_card_sync_error,
+                    "announcement_channel_id": announcement_channel_id,
+                    "announcement_message_id": announcement_message_id,
+                    "announcement_sync_error": announcement_sync_error,
                     "applied_labels": applied_labels,
                     "pmd_format_version": PMD_FORMAT_VERSION,
                 })),
