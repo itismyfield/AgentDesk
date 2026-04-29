@@ -5,6 +5,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::db::Db;
+use crate::db::agents::AgentChannelBindings;
 #[cfg(test)]
 use crate::db::agents::load_agent_channel_bindings;
 use crate::db::agents::load_agent_channel_bindings_pg;
@@ -53,6 +54,87 @@ pub(super) fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> 
         .get(key)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewCounterModelProviderResolution {
+    pub source_provider: ProviderKind,
+    pub target_provider: ProviderKind,
+    pub reason: String,
+}
+
+fn review_context_provider(context: &serde_json::Value, key: &str) -> Option<ProviderKind> {
+    json_string_field(context, key).and_then(ProviderKind::from_str)
+}
+
+fn review_main_provider(bindings: &AgentChannelBindings) -> Option<(ProviderKind, &'static str)> {
+    bindings
+        .provider
+        .as_deref()
+        .and_then(ProviderKind::from_str)
+        .map(|provider| (provider, "agent_main_provider"))
+        .or_else(|| {
+            bindings
+                .resolved_primary_provider_kind()
+                .map(|provider| (provider, "agent_current_provider"))
+        })
+        .or_else(|| {
+            bindings
+                .primary_channel()
+                .as_deref()
+                .and_then(provider_from_channel_suffix)
+                .and_then(ProviderKind::from_str)
+                .map(|provider| (provider, "agent_primary_channel_suffix"))
+        })
+}
+
+pub(crate) fn resolve_review_counter_model_provider(
+    bindings: &AgentChannelBindings,
+    context: &serde_json::Value,
+) -> Option<ReviewCounterModelProviderResolution> {
+    let (source_provider, source_reason) =
+        if let Some(provider) = review_context_provider(context, "implementer_provider") {
+            (provider, "explicit_implementer_provider")
+        } else if let Some(provider) = review_context_provider(context, "from_provider") {
+            (provider, "explicit_from_provider")
+        } else {
+            review_main_provider(bindings)?
+        };
+
+    let target_provider = source_provider.counterpart();
+    let reason = format!(
+        "{}:{}=>{}",
+        source_reason,
+        source_provider.as_str(),
+        target_provider.as_str()
+    );
+
+    Some(ReviewCounterModelProviderResolution {
+        source_provider,
+        target_provider,
+        reason,
+    })
+}
+
+fn apply_review_counter_model_provider_context(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    bindings: &AgentChannelBindings,
+) {
+    let context = serde_json::Value::Object(obj.clone());
+    let Some(resolution) = resolve_review_counter_model_provider(bindings, &context) else {
+        return;
+    };
+
+    obj.entry("from_provider".to_string())
+        .or_insert_with(|| json!(resolution.source_provider.as_str()));
+    obj.insert(
+        "target_provider".to_string(),
+        json!(resolution.target_provider.as_str()),
+    );
+    obj.insert(
+        "counter_model_resolution_reason".to_string(),
+        json!(resolution.reason),
+    );
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1483,36 +1565,9 @@ pub(super) fn build_review_context_sqlite_test(
         inject_review_quality_context(obj);
         inject_review_dispatch_identifiers_sqlite_test(db, kanban_card_id, "review", obj);
 
-        if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
-            if let Ok(conn) = db.separate_conn() {
-                if let Ok(Some(bindings)) = load_agent_channel_bindings(&conn, to_agent_id) {
-                    let primary_provider = bindings
-                        .provider
-                        .as_deref()
-                        .and_then(ProviderKind::from_str);
-                    if !obj.contains_key("from_provider") {
-                        if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
-                            obj.insert("from_provider".to_string(), json!(fp));
-                        } else if let Some(fp) = bindings
-                            .primary_channel()
-                            .as_deref()
-                            .and_then(provider_from_channel_suffix)
-                        {
-                            obj.insert("from_provider".to_string(), json!(fp));
-                        }
-                    }
-                    if !obj.contains_key("target_provider") {
-                        if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
-                            obj.insert("target_provider".to_string(), json!(tp.as_str()));
-                        } else if let Some(tp) = bindings
-                            .counter_model_channel()
-                            .as_deref()
-                            .and_then(provider_from_channel_suffix)
-                        {
-                            obj.insert("target_provider".to_string(), json!(tp));
-                        }
-                    }
-                }
+        if let Ok(conn) = db.separate_conn() {
+            if let Ok(Some(bindings)) = load_agent_channel_bindings(&conn, to_agent_id) {
+                apply_review_counter_model_provider_context(obj, &bindings);
             }
         }
     }
@@ -2475,35 +2530,8 @@ pub(super) async fn build_review_context(
     inject_review_quality_context(&mut obj);
     inject_review_dispatch_identifiers(pool, kanban_card_id, "review", &mut obj).await;
 
-    if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
-        if let Ok(Some(bindings)) = load_agent_channel_bindings_pg(pool, to_agent_id).await {
-            let primary_provider = bindings
-                .provider
-                .as_deref()
-                .and_then(ProviderKind::from_str);
-            if !obj.contains_key("from_provider") {
-                if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
-                    obj.insert("from_provider".to_string(), json!(fp));
-                } else if let Some(fp) = bindings
-                    .primary_channel()
-                    .as_deref()
-                    .and_then(provider_from_channel_suffix)
-                {
-                    obj.insert("from_provider".to_string(), json!(fp));
-                }
-            }
-            if !obj.contains_key("target_provider") {
-                if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
-                    obj.insert("target_provider".to_string(), json!(tp.as_str()));
-                } else if let Some(tp) = bindings
-                    .counter_model_channel()
-                    .as_deref()
-                    .and_then(provider_from_channel_suffix)
-                {
-                    obj.insert("target_provider".to_string(), json!(tp));
-                }
-            }
-        }
+    if let Ok(Some(bindings)) = load_agent_channel_bindings_pg(pool, to_agent_id).await {
+        apply_review_counter_model_provider_context(&mut obj, &bindings);
     }
 
     Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
@@ -2562,6 +2590,71 @@ mod tests {
     fn test_engine(db: &Db) -> PolicyEngine {
         let config = crate::config::Config::default();
         PolicyEngine::new_with_legacy_db(&config, db.clone()).unwrap()
+    }
+
+    fn bindings_with_provider(provider: &str) -> AgentChannelBindings {
+        AgentChannelBindings {
+            provider: Some(provider.to_string()),
+            discord_channel_id: Some("111".to_string()),
+            discord_channel_alt: Some("222".to_string()),
+            discord_channel_cc: Some("111".to_string()),
+            discord_channel_cdx: Some("222".to_string()),
+        }
+    }
+
+    #[test]
+    fn review_counter_model_provider_uses_explicit_implementer_symmetrically() {
+        let cases = [("codex", "claude", "codex"), ("claude", "codex", "claude")];
+
+        for (main_provider, implementer_provider, expected_target) in cases {
+            let bindings = bindings_with_provider(main_provider);
+            let context = json!({ "implementer_provider": implementer_provider });
+
+            let resolution = resolve_review_counter_model_provider(&bindings, &context)
+                .expect("review counter-model provider resolution");
+
+            assert_eq!(resolution.source_provider.as_str(), implementer_provider);
+            assert_eq!(resolution.target_provider.as_str(), expected_target);
+            assert!(
+                resolution
+                    .reason
+                    .starts_with("explicit_implementer_provider:")
+            );
+        }
+    }
+
+    #[test]
+    fn review_counter_model_provider_uses_explicit_from_provider_symmetrically() {
+        let cases = [("codex", "claude", "codex"), ("claude", "codex", "claude")];
+
+        for (main_provider, from_provider, expected_target) in cases {
+            let bindings = bindings_with_provider(main_provider);
+            let context = json!({ "from_provider": from_provider });
+
+            let resolution = resolve_review_counter_model_provider(&bindings, &context)
+                .expect("review counter-model provider resolution");
+
+            assert_eq!(resolution.source_provider.as_str(), from_provider);
+            assert_eq!(resolution.target_provider.as_str(), expected_target);
+            assert!(resolution.reason.starts_with("explicit_from_provider:"));
+        }
+    }
+
+    #[test]
+    fn review_counter_model_provider_falls_back_to_agent_main_provider() {
+        let cases = [("codex", "claude"), ("claude", "codex")];
+
+        for (main_provider, expected_target) in cases {
+            let bindings = bindings_with_provider(main_provider);
+            let context = json!({});
+
+            let resolution = resolve_review_counter_model_provider(&bindings, &context)
+                .expect("review counter-model provider resolution");
+
+            assert_eq!(resolution.source_provider.as_str(), main_provider);
+            assert_eq!(resolution.target_provider.as_str(), expected_target);
+            assert!(resolution.reason.starts_with("agent_main_provider:"));
+        }
     }
 
     fn run_git(dir: &str, args: &[&str]) {

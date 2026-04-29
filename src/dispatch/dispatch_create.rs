@@ -4,11 +4,15 @@ use sqlx::{PgPool, Postgres, Row as SqlxRow};
 
 use crate::db::Db;
 #[cfg(test)]
-use crate::db::agents::resolve_agent_dispatch_channel_on_conn;
-use crate::db::agents::resolve_agent_dispatch_channel_pg;
+use crate::db::agents::{
+    resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
+};
+use crate::db::agents::{resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg};
 use crate::engine::PolicyEngine;
 
-use super::dispatch_channel::{dispatch_uses_alt_channel, resolve_dispatch_channel_id};
+use super::dispatch_channel::{
+    dispatch_destination_provider_override, dispatch_uses_alt_channel, resolve_dispatch_channel_id,
+};
 use super::dispatch_context::{
     ReviewTargetTrust, TargetRepoSource, build_review_context,
     dispatch_context_with_session_strategy, dispatch_context_worktree_target,
@@ -251,19 +255,27 @@ fn validate_dispatch_target_on_conn(
     card_id: &str,
     to_agent_id: &str,
     dispatch_type: &str,
+    context_json: Option<&str>,
 ) -> Result<()> {
-    let channel_role = if dispatch_uses_alt_channel(dispatch_type) {
-        "counter-model"
+    let provider_override =
+        dispatch_destination_provider_override(Some(dispatch_type), context_json);
+    let channel_role = if let Some(provider) = provider_override.as_deref() {
+        format!("{provider} provider")
+    } else if dispatch_uses_alt_channel(dispatch_type) {
+        "counter-model".to_string()
     } else {
-        "primary"
+        "primary".to_string()
     };
 
-    let channel_value: Option<String> =
+    let channel_value: Option<String> = (if let Some(provider) = provider_override.as_deref() {
+        resolve_agent_channel_for_provider_on_conn(conn, to_agent_id, Some(provider))
+    } else {
         resolve_agent_dispatch_channel_on_conn(conn, to_agent_id, Some(dispatch_type))
-            .ok()
-            .flatten()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+    })
+    .ok()
+    .flatten()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty());
 
     let channel_value = channel_value.ok_or_else(|| {
         anyhow::anyhow!(
@@ -306,20 +318,27 @@ async fn validate_dispatch_target_on_pg(
     card_id: &str,
     to_agent_id: &str,
     dispatch_type: &str,
+    context_json: Option<&str>,
 ) -> Result<()> {
-    let channel_role = if dispatch_uses_alt_channel(dispatch_type) {
-        "counter-model"
+    let provider_override =
+        dispatch_destination_provider_override(Some(dispatch_type), context_json);
+    let channel_role = if let Some(provider) = provider_override.as_deref() {
+        format!("{provider} provider")
+    } else if dispatch_uses_alt_channel(dispatch_type) {
+        "counter-model".to_string()
     } else {
-        "primary"
+        "primary".to_string()
     };
 
-    let channel_value: Option<String> =
-        resolve_agent_dispatch_channel_pg(pool, to_agent_id, Some(dispatch_type))
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+    let channel_value: Option<String> = (if let Some(provider) = provider_override.as_deref() {
+        resolve_agent_channel_for_provider_pg(pool, to_agent_id, Some(provider)).await
+    } else {
+        resolve_agent_dispatch_channel_pg(pool, to_agent_id, Some(dispatch_type)).await
+    })
+    .ok()
+    .flatten()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty());
 
     let channel_value = channel_value.ok_or_else(|| {
         anyhow::anyhow!(
@@ -495,7 +514,6 @@ async fn create_dispatch_core_internal(
         ));
     }
 
-    validate_dispatch_target_on_pg(pg_pool, kanban_card_id, to_agent_id, dispatch_type).await?;
     if dispatch_context_requests_sidecar(context) {
         options.sidecar_dispatch = true;
     }
@@ -615,6 +633,14 @@ async fn create_dispatch_core_internal(
         || dispatch_type == "review-decision"
         || dispatch_type == "rework"
         || dispatch_type == "consultation";
+    validate_dispatch_target_on_pg(
+        pg_pool,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        Some(&context_str),
+    )
+    .await?;
 
     let attach_result = apply_dispatch_attached_intents_pg(
         pg_pool,
@@ -805,7 +831,6 @@ pub(crate) fn create_dispatch_record_with_id_sqlite_test(
             kanban_card_id
         ));
     }
-    validate_dispatch_target_on_conn(&conn, kanban_card_id, to_agent_id, dispatch_type)?;
     if dispatch_context_requests_sidecar(context) {
         options.sidecar_dispatch = true;
     }
@@ -920,6 +945,13 @@ pub(crate) fn create_dispatch_record_with_id_sqlite_test(
         dispatch_type,
         "review" | "review-decision" | "rework" | "consultation"
     );
+    validate_dispatch_target_on_conn(
+        &conn,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        Some(&context_str),
+    )?;
 
     if dispatch_type == "review-decision" {
         let mut stmt = conn.prepare(
@@ -2081,6 +2113,116 @@ mod tests {
         .expect("seed sqlite card");
     }
 
+    fn seed_sqlite_card_and_agent_provider(
+        db: &Db,
+        card_id: &str,
+        status: &str,
+        agent_id: &str,
+        provider: &str,
+    ) {
+        let conn = db.lock().expect("lock sqlite test db");
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+             ) VALUES (?1, ?2, ?3, '111', '222', '111', '222')",
+            rusqlite::params![agent_id, format!("Agent {agent_id}"), provider],
+        )
+        .expect("seed sqlite provider agent");
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES (?1, 'Test Card', ?2, ?3)",
+            rusqlite::params![card_id, status, agent_id],
+        )
+        .expect("seed sqlite card");
+    }
+
+    fn sqlite_dispatch_context(db: &Db, dispatch_id: &str) -> serde_json::Value {
+        let conn = db.separate_conn().expect("open sqlite conn");
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .expect("load dispatch context");
+        serde_json::from_str(&context).expect("dispatch context json")
+    }
+
+    #[test]
+    fn create_review_dispatch_context_targets_opposite_explicit_implementer_provider() {
+        let db = crate::db::test_db();
+        seed_sqlite_card_and_agent_provider(
+            &db,
+            "card-review-counter-explicit",
+            "ready",
+            "agent-review-counter-explicit",
+            "codex",
+        );
+
+        create_dispatch_record_with_id_sqlite_test(
+            &db,
+            "dispatch-review-counter-explicit",
+            "card-review-counter-explicit",
+            "agent-review-counter-explicit",
+            "review",
+            "Review explicit implementer",
+            &json!({
+                "review_mode": "noop_verification",
+                "implementer_provider": "claude"
+            }),
+            DispatchCreateOptions {
+                skip_outbox: true,
+                sidecar_dispatch: false,
+            },
+        )
+        .expect("create review dispatch");
+
+        let context = sqlite_dispatch_context(&db, "dispatch-review-counter-explicit");
+        assert_eq!(context["implementer_provider"], "claude");
+        assert_eq!(context["from_provider"], "claude");
+        assert_eq!(context["target_provider"], "codex");
+        assert_eq!(
+            context["counter_model_resolution_reason"],
+            "explicit_implementer_provider:claude=>codex"
+        );
+    }
+
+    #[test]
+    fn create_review_dispatch_context_falls_back_to_agent_main_provider() {
+        let db = crate::db::test_db();
+        seed_sqlite_card_and_agent_provider(
+            &db,
+            "card-review-counter-fallback",
+            "ready",
+            "agent-review-counter-fallback",
+            "codex",
+        );
+
+        create_dispatch_record_with_id_sqlite_test(
+            &db,
+            "dispatch-review-counter-fallback",
+            "card-review-counter-fallback",
+            "agent-review-counter-fallback",
+            "review",
+            "Review fallback",
+            &json!({ "review_mode": "noop_verification" }),
+            DispatchCreateOptions {
+                skip_outbox: true,
+                sidecar_dispatch: false,
+            },
+        )
+        .expect("create review dispatch");
+
+        let context = sqlite_dispatch_context(&db, "dispatch-review-counter-fallback");
+        assert_eq!(context["from_provider"], "codex");
+        assert_eq!(context["target_provider"], "claude");
+        assert_eq!(
+            context["counter_model_resolution_reason"],
+            "agent_main_provider:codex=>claude"
+        );
+    }
+
     async fn pg_count_dispatches(pool: &PgPool, dispatch_id: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*)
@@ -2547,7 +2689,7 @@ mod tests {
 
         pg_seed_agent(&pool, "agent-valid", Some("111"), Some("222")).await;
         pg_seed_card(&pool, "card-valid", None, None).await;
-        validate_dispatch_target_on_pg(&pool, "card-valid", "agent-valid", "implementation")
+        validate_dispatch_target_on_pg(&pool, "card-valid", "agent-valid", "implementation", None)
             .await
             .expect("happy-path validation");
 
@@ -2558,6 +2700,7 @@ mod tests {
             "card-missing-channel",
             "agent-missing-channel",
             "implementation",
+            None,
         )
         .await
         .expect_err("missing primary channel must fail");
@@ -2578,6 +2721,7 @@ mod tests {
             "card-invalid-thread",
             "agent-valid",
             "implementation",
+            None,
         )
         .await
         .expect_err("invalid cached thread id must fail");

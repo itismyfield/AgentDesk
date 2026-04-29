@@ -11,6 +11,7 @@ use crate::db::agents::{
     resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg,
     resolve_agent_primary_channel_pg,
 };
+use crate::dispatch::dispatch_destination_provider_override;
 #[cfg(test)]
 use rusqlite::OptionalExtension;
 use sqlx::{PgPool, Row as SqlxRow};
@@ -1587,14 +1588,6 @@ async fn build_slot_thread_name_pg(
         .collect())
 }
 
-fn review_source_provider_from_context(dispatch_context: Option<&str>) -> Option<String> {
-    dispatch_context_value(dispatch_context).and_then(|ctx| {
-        ctx.get("from_provider")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
-    })
-}
-
 async fn latest_completed_review_provider_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1765,8 +1758,10 @@ pub(super) fn resolve_dispatch_delivery_channel_on_conn(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let provider_override = if dispatch_type == Some("review-decision") {
-        match review_source_provider_from_context(dispatch_context) {
+    let provider_override = if dispatch_type == Some("review") {
+        dispatch_destination_provider_override(dispatch_type, dispatch_context)
+    } else if dispatch_type == Some("review-decision") {
+        match dispatch_destination_provider_override(dispatch_type, dispatch_context) {
             Some(provider) => Some(provider),
             None => latest_completed_review_provider_on_conn(conn, card_id)?,
         }
@@ -1825,8 +1820,10 @@ async fn resolve_dispatch_delivery_channel_pg(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let provider_override = if dispatch_type == Some("review-decision") {
-        match review_source_provider_from_context(dispatch_context) {
+    let provider_override = if dispatch_type == Some("review") {
+        dispatch_destination_provider_override(dispatch_type, dispatch_context)
+    } else if dispatch_type == Some("review-decision") {
+        match dispatch_destination_provider_override(dispatch_type, dispatch_context) {
             Some(provider) => Some(provider),
             None => latest_completed_review_provider_pg(pool, card_id).await?,
         }
@@ -3148,6 +3145,31 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    #[test]
+    fn review_delivery_channel_uses_target_provider_from_context() {
+        let db = test_db();
+        let conn = db.lock().expect("sqlite conn");
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+             ) VALUES ('agent-review-route', 'Agent', 'codex', '111', '222', '111', '222')",
+            [],
+        )
+        .expect("seed agent");
+
+        let channel = resolve_dispatch_delivery_channel_on_conn(
+            &conn,
+            "agent-review-route",
+            "card-review-route",
+            Some("review"),
+            Some(r#"{"target_provider":"codex"}"#),
+        )
+        .expect("resolve delivery channel");
+
+        assert_eq!(channel.as_deref(), Some("222"));
     }
 
     struct EnvVarGuard {

@@ -126,7 +126,7 @@ pub async fn create_dispatch(
                     } else {
                         StatusCode::CREATED
                     },
-                    Json(json!({"dispatch": dispatch})),
+                    Json(create_dispatch_response(dispatch)),
                 ),
                 Err(error) => internal_error(format!("{error}")),
             }
@@ -240,6 +240,18 @@ fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": "postgres pool unavailable"})),
     )
+}
+
+fn create_dispatch_response(dispatch: serde_json::Value) -> serde_json::Value {
+    let reason = dispatch
+        .get("context")
+        .and_then(|context| context.get("counter_model_resolution_reason"))
+        .cloned();
+    let mut response = json!({ "dispatch": dispatch });
+    if let Some(reason) = reason {
+        response["counter_model_resolution_reason"] = reason;
+    }
+    response
 }
 
 fn internal_error(error: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {

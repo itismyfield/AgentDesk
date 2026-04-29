@@ -12,6 +12,7 @@ mod dispatch_context;
 mod dispatch_create;
 mod dispatch_status;
 
+pub(crate) use dispatch_channel::dispatch_destination_provider_override;
 #[cfg(test)]
 use dispatch_channel::provider_from_channel_suffix;
 #[cfg(test)]
