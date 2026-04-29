@@ -1300,6 +1300,9 @@ fn process_sse_event(
                             .text_part_snapshots
                             .remove(&snapshot_key)
                             .unwrap_or_default();
+                        if let Some(pending) = pending.as_deref() {
+                            snapshot_text.push_str(pending);
+                        }
                         snapshot_text.push_str(delta);
                         if let Some(pending) = pending {
                             append_text_delta_if_visible(
@@ -1364,20 +1367,40 @@ fn process_sse_event(
             // Full assembled message — emit any final text parts not yet streamed
             if let Some(message) = props.and_then(|p| p.get("message")) {
                 register_message_role(state, message);
-                let message_role = role_field_from_value(message);
-                if is_user_message_role(message_role) {
+                let message_role =
+                    role_field_from_value(message)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            message_record_id_from_value(message)
+                                .and_then(|message_id| state.message_roles.get(message_id).cloned())
+                        });
+                if is_user_message_role(message_role.as_deref()) {
                     return Some(false);
                 }
                 if let Some(parts) = message.get("parts").and_then(|p| p.as_array()) {
                     for part in parts {
-                        if is_user_message_role(message_role_from_part(part, message_role)) {
+                        let part_message_role =
+                            message_role_from_part(part, message_role.as_deref())
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    message_id_from_value(part).and_then(|message_id| {
+                                        state.message_roles.get(message_id).cloned()
+                                    })
+                                });
+                        if is_user_message_role(part_message_role.as_deref()) {
                             continue;
                         }
                         if part.get("type").and_then(|v| v.as_str()) == Some("text") {
                             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                                 // Only emit if we haven't already streamed it
                                 if state.accumulated_text.is_empty() && !text.trim().is_empty() {
-                                    append_text_delta(sender, state, text);
+                                    append_text_delta_if_visible(
+                                        sender,
+                                        state,
+                                        part_message_role.as_deref(),
+                                        None,
+                                        text,
+                                    );
                                 }
                             }
                         }
@@ -1474,6 +1497,16 @@ mod tests {
             .collect::<Vec<_>>();
         drop(tx);
         (rx.try_iter().collect(), stops)
+    }
+
+    fn collect_text(messages: &[StreamMessage]) -> String {
+        messages
+            .iter()
+            .filter_map(|msg| match msg {
+                StreamMessage::Text { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
     }
 
     #[test]
@@ -1648,6 +1681,41 @@ mod tests {
     }
 
     #[test]
+    fn test_message_completed_uses_tracked_user_role() {
+        let events = [
+            r#"{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg-user","sessionID":"s1","role":"user","time":{"created":1},"agent":"build","model":{"providerID":"p","modelID":"m"}}}}"#,
+            r#"{"type":"message.completed","properties":{"sessionID":"s1","message":{"id":"msg-user","parts":[{"id":"part-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"}]}}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false)]);
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "completed messages must honor user role cached from message.updated"
+        );
+    }
+
+    #[test]
+    fn test_message_completed_unknown_role_prompt_echo_ignored() {
+        let data = r#"{"type":"message.completed","properties":{"sessionID":"s1","message":{"id":"msg-user","parts":[{"id":"part-user","type":"text","text":"[User: Alice (ID: 1)]\n하이"}]}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert!(
+            msgs.iter()
+                .all(|m| !matches!(m, StreamMessage::Text { .. })),
+            "completed fallback must suppress unknown-role AgentDesk prompt wrapper echoes"
+        );
+    }
+
+    #[test]
+    fn test_message_completed_assistant_text_emitted() {
+        let data = r#"{"type":"message.completed","properties":{"sessionID":"s1","message":{"id":"msg-assistant","role":"assistant","parts":[{"id":"part-assistant","type":"text","text":"OK"}]}}}"#;
+        let (msgs, stop) = parse_event(data, "s1");
+        assert_eq!(stop, Some(false));
+        assert_eq!(collect_text(&msgs), "OK");
+    }
+
+    #[test]
     fn test_message_part_delta_then_updated_does_not_duplicate_text() {
         let events = [
             r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"O"}}"#,
@@ -1664,6 +1732,18 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn test_unknown_delta_typed_flush_then_updated_does_not_duplicate_text() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"O"}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","partType":"text","field":"text","delta":"K"}}"#,
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","messageID":"m1","part":{"id":"part-1","sessionID":"s1","type":"text","text":"OK"}}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(stops, vec![Some(false), Some(false), Some(false)]);
+        assert_eq!(collect_text(&msgs), "OK");
     }
 
     #[test]
