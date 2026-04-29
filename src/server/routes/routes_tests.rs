@@ -1693,8 +1693,25 @@ async fn stats_memento_endpoint_reports_hourly_counts_and_dedup_hits() {
     crate::services::memory::note_memento_dedup_hit("recall");
     crate::services::memory::note_memento_tool_request("remember");
     crate::services::memory::note_memento_remote_call("remember");
+    crate::services::memory::note_memento_tool_feedback_trigger("automatic");
+    crate::services::memory::note_memento_tool_feedback_trigger("manual");
 
     let db = test_db();
+    crate::db::memento_feedback_stats::upsert_turn_stat(
+        &db,
+        &crate::db::memento_feedback_stats::MementoFeedbackTurnStat {
+            turn_id: "turn-memento-stats".to_string(),
+            stat_date: "2026-04-29".to_string(),
+            agent_id: "project-agentdesk".to_string(),
+            provider: "codex".to_string(),
+            recall_count: 2,
+            manual_tool_feedback_count: 1,
+            manual_covered_recall_count: 1,
+            auto_tool_feedback_count: 1,
+            covered_recall_count: 2,
+        },
+    )
+    .unwrap();
     let engine = test_engine(&db);
     let app = test_api_router(db, engine, None);
 
@@ -1722,6 +1739,22 @@ async fn stats_memento_endpoint_reports_hourly_counts_and_dedup_hits() {
     assert_eq!(json["tools"]["recall"]["dedup_hit_count"], 1);
     assert_eq!(json["tools"]["remember"]["remote_call_count"], 1);
     assert_eq!(json["hours"][0]["counts"]["request_count"], 3);
+    assert_eq!(
+        json["searchObservability"]["feedback_counts_by_trigger_type"]["automatic"],
+        1
+    );
+    assert_eq!(
+        json["searchObservability"]["feedback_counts_by_trigger_type"]["voluntary"],
+        1
+    );
+    assert_eq!(
+        json["searchObservability"]["persisted_feedback_counts_by_trigger_type"]["automatic"],
+        1
+    );
+    assert_eq!(
+        json["searchObservability"]["persisted_feedback_counts_by_trigger_type"]["voluntary"],
+        1
+    );
 
     crate::services::memory::reset_memento_throttle_for_tests();
 }

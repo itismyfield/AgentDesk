@@ -24,8 +24,8 @@ pub(crate) use memento_throttle::{
 };
 #[cfg(test)]
 pub(crate) use memento_throttle::{
-    note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_request,
-    reset_memento_throttle_for_tests,
+    note_memento_dedup_hit, note_memento_remote_call, note_memento_tool_feedback_trigger,
+    note_memento_tool_request, reset_memento_throttle_for_tests,
 };
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 #[cfg(test)]

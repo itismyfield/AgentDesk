@@ -40,6 +40,12 @@ struct MementoMetricEvent {
     action: MementoMetricAction,
 }
 
+#[derive(Clone, Debug)]
+struct MementoFeedbackTriggerEvent {
+    timestamp: chrono::DateTime<Utc>,
+    trigger_type: String,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct CallCounts {
     request_count: u64,
@@ -89,6 +95,7 @@ struct MementoThrottleState {
     recall_cache: HashMap<String, CachedRecallEntry>,
     remember_cache: HashMap<String, CachedRememberEntry>,
     metrics: VecDeque<MementoMetricEvent>,
+    feedback_triggers: VecDeque<MementoFeedbackTriggerEvent>,
 }
 
 impl MementoThrottleState {
@@ -106,6 +113,14 @@ impl MementoThrottleState {
             .unwrap_or(false)
         {
             self.metrics.pop_front();
+        }
+        while self
+            .feedback_triggers
+            .front()
+            .map(|event| event.timestamp < cutoff)
+            .unwrap_or(false)
+        {
+            self.feedback_triggers.pop_front();
         }
     }
 }
@@ -143,6 +158,18 @@ pub(crate) fn note_memento_remote_call(tool_name: &'static str) {
 
 pub(crate) fn note_memento_dedup_hit(tool_name: &'static str) {
     record_metric(tool_name, MementoMetricAction::DedupHit);
+}
+
+pub(crate) fn note_memento_tool_feedback_trigger(trigger_type: &str) {
+    let trigger_type = normalize_feedback_trigger_type(trigger_type);
+    with_state(|state| {
+        state
+            .feedback_triggers
+            .push_back(MementoFeedbackTriggerEvent {
+                timestamp: Utc::now(),
+                trigger_type,
+            });
+    });
 }
 
 pub(crate) fn cached_recall_response(key: &str) -> Option<Option<String>> {
@@ -205,6 +232,7 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
     let mut summary = CallCounts::default();
     let mut tools = BTreeMap::<String, CallCounts>::new();
     let mut hour_buckets = BTreeMap::<i64, HourBucket>::new();
+    let mut feedback_trigger_counts = BTreeMap::<String, u64>::new();
 
     with_state(|state| {
         for event in state.metrics.iter() {
@@ -227,6 +255,16 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
                 .entry(event.tool_name.to_string())
                 .or_default()
                 .record(event.action);
+        }
+
+        for event in state.feedback_triggers.iter() {
+            if event.timestamp.timestamp() < first_bucket_ts {
+                continue;
+            }
+            let count = feedback_trigger_counts
+                .entry(event.trigger_type.clone())
+                .or_default();
+            *count = count.saturating_add(1);
         }
     });
 
@@ -258,6 +296,10 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         .into_iter()
         .map(|(tool_name, counts)| (tool_name, counts.as_json()))
         .collect::<serde_json::Map<String, Value>>();
+    let feedback_trigger_json = feedback_trigger_counts
+        .into_iter()
+        .map(|(trigger_type, count)| (trigger_type, json!(count)))
+        .collect::<serde_json::Map<String, Value>>();
 
     json!({
         "generated_at": now.with_timezone(&kst).to_rfc3339(),
@@ -265,8 +307,19 @@ pub(crate) fn memento_call_metrics_snapshot(window_hours: usize) -> Value {
         "window_hours": window_hours,
         "summary": summary.as_json(),
         "tools": tools_json,
+        "searchObservability": {
+            "feedback_counts_by_trigger_type": feedback_trigger_json,
+        },
         "hours": hours,
     })
+}
+
+fn normalize_feedback_trigger_type(trigger_type: &str) -> String {
+    match trigger_type.trim().to_ascii_lowercase().as_str() {
+        "automatic" => "automatic".to_string(),
+        "manual" | "voluntary" => "voluntary".to_string(),
+        _ => "voluntary".to_string(),
+    }
 }
 
 // #1083: Track recall context size emitted per mode so #1083 can compare

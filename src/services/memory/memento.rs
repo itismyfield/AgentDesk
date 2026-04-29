@@ -11,8 +11,8 @@ use super::{
     extract_token_usage,
     memento_throttle::{
         cached_recall_response, note_memento_dedup_hit, note_memento_remote_call,
-        note_memento_tool_request, should_dedup_remember, store_recall_response,
-        store_remember_fingerprint,
+        note_memento_tool_feedback_trigger, note_memento_tool_request, should_dedup_remember,
+        store_recall_response, store_remember_fingerprint,
     },
 };
 use crate::runtime_layout;
@@ -501,9 +501,18 @@ impl MementoBackend {
 
         insert_optional_arg(&mut args, "suggestion", request.suggestion);
         insert_optional_arg(&mut args, "context", request.context);
-        insert_optional_arg(&mut args, "triggerType", request.trigger_type);
+        insert_optional_arg(
+            &mut args,
+            "triggerType",
+            Some(normalize_tool_feedback_trigger_type(request.trigger_type)),
+        );
 
         note_memento_tool_request("tool_feedback");
+        note_memento_tool_feedback_trigger(
+            args.get("triggerType")
+                .and_then(Value::as_str)
+                .unwrap_or("voluntary"),
+        );
         note_memento_remote_call("tool_feedback");
         self.call_tool(&config, "tool_feedback", Value::Object(args))
             .await
@@ -524,6 +533,20 @@ fn normalize_memento_endpoint(endpoint: &str) -> String {
         .strip_suffix(MEMENTO_MCP_PATH)
         .unwrap_or(trimmed)
         .to_string()
+}
+
+fn normalize_tool_feedback_trigger_type(trigger_type: Option<String>) -> String {
+    match trigger_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("automatic") => "automatic".to_string(),
+        Some("voluntary") | Some("manual") => "voluntary".to_string(),
+        _ => "voluntary".to_string(),
+    }
 }
 
 fn mcp_url(endpoint: &str) -> String {
@@ -1006,6 +1029,10 @@ fn format_skip_line(item: &Map<String, Value>) -> Option<(String, String)> {
 fn format_context_payload_for_identity_only(payload: &Value) -> Option<String> {
     let mut sections = vec!["[External Recall — Identity Lite]".to_string()];
 
+    if let Some(hint) = search_event_feedback_hint(payload) {
+        sections.push(hint);
+    }
+
     if let Some(identity) = payload
         .get("identity")
         .and_then(Value::as_str)
@@ -1046,6 +1073,10 @@ fn format_context_payload_for_identity_only(payload: &Value) -> Option<String> {
 
 fn format_context_payload_for_external_recall(payload: &Value) -> Option<String> {
     let mut sections = vec!["[External Recall]".to_string()];
+
+    if let Some(hint) = search_event_feedback_hint(payload) {
+        sections.push(hint);
+    }
 
     if let Some(identity) = payload
         .get("identity")
@@ -1246,6 +1277,27 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
         }
         Some(guarded.text)
     }
+}
+
+fn search_event_feedback_hint(payload: &Value) -> Option<String> {
+    let search_event_id = payload
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| {
+            meta.get("searchEventId")
+                .or_else(|| meta.get("search_event_id"))
+                .or_else(|| meta.get("_searchEventId"))
+        })
+        .or_else(|| payload.get("searchEventId"))
+        .or_else(|| payload.get("search_event_id"))
+        .or_else(|| payload.get("_searchEventId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    Some(format!(
+        "Memento searchEventId: {search_event_id}\ntool_feedback(search_event_id={search_event_id}, relevant, sufficient) before turn end"
+    ))
 }
 
 impl MemoryBackend for MementoBackend {
@@ -1551,6 +1603,31 @@ mod tests {
     #[test]
     fn test_format_context_payload_for_external_recall_returns_none_when_empty() {
         assert!(format_context_payload_for_external_recall(&json!({})).is_none());
+    }
+
+    #[test]
+    fn context_formatter_puts_feedback_hint_next_to_search_event_id() {
+        let payload = json!({
+            "_meta": {
+                "searchEventId": "search-1344"
+            },
+            "rankedInjection": {
+                "items": [
+                    {
+                        "content": "Use tool feedback before ending the turn.",
+                        "type": "procedure",
+                        "score": 0.8
+                    }
+                ]
+            }
+        });
+
+        let external = format_context_payload_for_external_recall(&payload).unwrap();
+
+        assert!(external.contains("Memento searchEventId: search-1344"));
+        assert!(external.contains(
+            "tool_feedback(search_event_id=search-1344, relevant, sufficient) before turn end"
+        ));
     }
 
     #[test]

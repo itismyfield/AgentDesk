@@ -517,13 +517,70 @@ pub async fn get_stats(
 
 /// GET /api/stats/memento
 pub async fn get_memento_stats(
+    State(state): State<AppState>,
     Query(params): Query<MementoStatsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let hours = params.hours.unwrap_or(24).clamp(1, 24 * 7);
-    (
-        StatusCode::OK,
-        Json(crate::services::memory::memento_call_metrics_snapshot(
-            hours,
-        )),
-    )
+    let mut snapshot = crate::services::memory::memento_call_metrics_snapshot(hours);
+    append_memento_feedback_stats(&mut snapshot, &state).await;
+    (StatusCode::OK, Json(snapshot))
+}
+
+async fn append_memento_feedback_stats(snapshot: &mut serde_json::Value, state: &AppState) {
+    let Some((automatic, voluntary)) = load_memento_feedback_counts(state).await else {
+        return;
+    };
+
+    if let Some(observability) = snapshot
+        .get_mut("searchObservability")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        observability.insert(
+            "persisted_feedback_counts_by_trigger_type".to_string(),
+            json!({
+                "automatic": automatic,
+                "voluntary": voluntary,
+            }),
+        );
+    }
+}
+
+async fn load_memento_feedback_counts(state: &AppState) -> Option<(i64, i64)> {
+    if let Some(pool) = state.pg_pool_ref() {
+        let row = sqlx::query(
+            "SELECT
+                COALESCE(SUM(auto_tool_feedback_count), 0)::BIGINT AS automatic,
+                COALESCE(SUM(manual_tool_feedback_count), 0)::BIGINT AS voluntary
+             FROM memento_feedback_turn_stats",
+        )
+        .fetch_one(pool)
+        .await
+        .ok()?;
+        return Some((
+            row.try_get::<i64, _>("automatic").ok()?,
+            row.try_get::<i64, _>("voluntary").ok()?,
+        ));
+    }
+
+    load_memento_feedback_counts_legacy(state)
+}
+
+#[cfg(test)]
+fn load_memento_feedback_counts_legacy(state: &AppState) -> Option<(i64, i64)> {
+    let db = state.legacy_db()?;
+    let conn = db.lock().ok()?;
+    let stats = crate::db::memento_feedback_stats::list_daily_stats(&conn).ok()?;
+
+    Some((
+        stats.iter().map(|stat| stat.auto_tool_feedback_count).sum(),
+        stats
+            .iter()
+            .map(|stat| stat.manual_tool_feedback_count)
+            .sum(),
+    ))
+}
+
+#[cfg(not(test))]
+fn load_memento_feedback_counts_legacy(_state: &AppState) -> Option<(i64, i64)> {
+    None
 }

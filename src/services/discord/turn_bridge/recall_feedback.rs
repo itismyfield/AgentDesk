@@ -48,6 +48,34 @@ impl RecallFeedbackTurnAnalysis {
             .saturating_add(auto_feedback_count)
             .min(self.recall_count)
     }
+
+    pub(super) fn needs_voluntary_feedback_reminder(&self) -> bool {
+        self.recall_count > 0 && !self.pending_feedbacks.is_empty()
+    }
+}
+
+pub(super) fn build_voluntary_feedback_reminder(
+    analysis: &RecallFeedbackTurnAnalysis,
+) -> Option<String> {
+    if !analysis.needs_voluntary_feedback_reminder() {
+        return None;
+    }
+
+    let search_event_ids = analysis
+        .pending_feedbacks
+        .iter()
+        .filter_map(|feedback| feedback.search_event_id.as_deref())
+        .collect::<Vec<_>>();
+    let id_list = if search_event_ids.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", search_event_ids.join(", "))
+    };
+
+    Some(format!(
+        "이번 턴 recall {}건 중 tool_feedback {}/{}. 다음 search_event_ids에 대해 tool_feedback(search_event_id, relevant, sufficient)을 평가 후 턴 종료: {}",
+        analysis.recall_count, analysis.manual_covered_recall_count, analysis.recall_count, id_list
+    ))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -433,6 +461,17 @@ fn normalized_opt(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+pub(super) fn reminder_transcript_event(content: String) -> SessionTranscriptEvent {
+    SessionTranscriptEvent {
+        kind: SessionTranscriptEventKind::System,
+        tool_name: None,
+        summary: Some("memento voluntary tool_feedback reminder".to_string()),
+        content,
+        status: Some("info".to_string()),
+        is_error: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +714,39 @@ mod tests {
                 .as_deref(),
             Some("session-keep")
         );
+    }
+
+    #[test]
+    fn reminder_names_pending_search_event_ids_before_fallback() {
+        let analysis = RecallFeedbackTurnAnalysis {
+            recall_count: 2,
+            manual_feedback_count: 0,
+            manual_covered_recall_count: 0,
+            pending_feedbacks: vec![
+                PendingRecallFeedback {
+                    session_id: None,
+                    search_event_id: Some("search-1".to_string()),
+                    fragment_ids: vec!["frag-1".to_string()],
+                    relevant: true,
+                    sufficient: false,
+                },
+                PendingRecallFeedback {
+                    session_id: None,
+                    search_event_id: Some("search-2".to_string()),
+                    fragment_ids: vec!["frag-2".to_string()],
+                    relevant: false,
+                    sufficient: true,
+                },
+            ],
+        };
+
+        let reminder = build_voluntary_feedback_reminder(&analysis).unwrap();
+
+        assert!(reminder.contains("recall 2건"));
+        assert!(reminder.contains("tool_feedback 0/2"));
+        assert!(reminder.contains("search-1"));
+        assert!(reminder.contains("search-2"));
+        assert!(reminder.contains("tool_feedback(search_event_id, relevant, sufficient)"));
     }
 
     #[test]
