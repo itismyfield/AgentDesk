@@ -14,7 +14,11 @@ pub use binary_resolver::{
     with_provider_execution_context,
 };
 pub use dump_tool::capture_process_dump;
-pub use shell::{
-    find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit, hostname_short,
-    resolve_repo_dir, resolve_repo_dir_for_id,
+pub use shell::hostname_short;
+
+// Compatibility re-exports while git helpers move out of platform::shell.
+#[allow(unused_imports)]
+pub use crate::services::git::{
+    find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit, resolve_repo_dir,
+    resolve_repo_dir_for_id, resolve_repo_dir_for_target,
 };

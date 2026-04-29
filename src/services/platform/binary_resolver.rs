@@ -40,6 +40,53 @@ pub fn resolve_binary(name: &str) -> Option<String> {
         .map(|path| path.to_string_lossy().to_string())
 }
 
+pub fn git_binary() -> &'static OsString {
+    static GIT_BINARY: OnceLock<OsString> = OnceLock::new();
+    GIT_BINARY.get_or_init(|| {
+        for key in ["AGENTDESK_TEST_GIT", "AGENTDESK_GIT"] {
+            if let Some(configured) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+                return configured;
+            }
+        }
+        #[cfg(windows)]
+        {
+            if let Ok(output) = Command::new(r"C:\Windows\System32\where.exe")
+                .arg("git")
+                .output()
+            {
+                if output.status.success() {
+                    if let Some(path) = String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                    {
+                        return path.into();
+                    }
+                }
+            }
+            for candidate in [
+                r"C:\Program Files\Git\cmd\git.exe",
+                r"C:\Program Files\Git\bin\git.exe",
+                r"C:\Program Files (x86)\Git\cmd\git.exe",
+                r"C:\Program Files (x86)\Git\bin\git.exe",
+            ] {
+                if Path::new(candidate).exists() {
+                    return candidate.into();
+                }
+            }
+            "git.exe".into()
+        }
+        #[cfg(not(windows))]
+        {
+            "git".into()
+        }
+    })
+}
+
+pub fn git_command() -> Command {
+    Command::new(git_binary())
+}
+
 pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
     let cwd = current_dir_fallback();
     if let Some(path) = resolve_in_paths(name, std::env::var_os("PATH"), &cwd) {
