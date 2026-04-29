@@ -597,7 +597,7 @@ pub async fn update_card(
                     StatusCode::BAD_REQUEST,
                     Json(json!({
                         "error": format!(
-                            "Manual status transitions only allow backlog → ready and any → backlog (requested: {} → {})",
+                            "PATCH /api/kanban-cards/{{id}} only allows manual status transitions backlog -> ready and any -> backlog (requested: {} -> {}). Use POST /api/kanban-cards/{{id}}/transition for administrative force transitions, or POST /api/kanban-cards/{{id}}/rereview for review reruns.",
                             old_status,
                             new_s,
                         ),

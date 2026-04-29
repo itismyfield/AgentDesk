@@ -1237,13 +1237,22 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 json!({"error": "card not found: ghost-card"}),
             )
             .with_curl("curl http://localhost:8787/api/kanban-cards/card-1"),
-        ep("PATCH", "/api/kanban-cards/{id}", "kanban", "Update card")
+        ep(
+            "PATCH",
+            "/api/kanban-cards/{id}",
+            "kanban",
+            "Update card fields. Status edits are limited to backlog -> ready and any -> backlog; use /transition for administrative force transitions and /rereview for review reruns.",
+        )
             .with_params([
                 ("id", path_param("Kanban card ID")),
                 ("title", body_param("string", false, "Updated title")),
                 (
                     "status",
-                    body_param("string", false, "Target pipeline status"),
+                    body_param(
+                        "string",
+                        false,
+                        "Limited manual status edit: backlog -> ready or any -> backlog only",
+                    ),
                 ),
                 (
                     "priority",
@@ -1291,11 +1300,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 json!({"card": {"id": "card-1", "status": "ready", "priority": "high"}}),
             )
             .with_error_example(
-                404,
-                json!({"path": {"id": "ghost-card"}, "body": {"status": "ready"}}),
-                json!({"error": "card not found: ghost-card"}),
+                400,
+                json!({"path": {"id": "card-1"}, "body": {"status": "done"}}),
+                json!({"error": "PATCH /api/kanban-cards/{id} only allows manual status transitions backlog -> ready and any -> backlog (requested: review -> done). Use POST /api/kanban-cards/{id}/transition for administrative force transitions, or POST /api/kanban-cards/{id}/rereview for review reruns."}),
             )
-            .with_curl("curl -X PATCH http://localhost:8787/api/kanban-cards/card-1 -H 'Content-Type: application/json' -d '{\"status\":\"ready\",\"priority\":\"high\"}'"),
+            .with_curl("curl -X PATCH http://localhost:8787/api/kanban-cards/card-1 -H 'Content-Type: application/json' -d '{\"priority\":\"high\"}'"),
         ep(
             "DELETE",
             "/api/kanban-cards/{id}",
@@ -1321,7 +1330,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/rereview",
             "kanban",
-            "Force a card back through review",
+            "Force a card back through review and create or reuse a fresh review dispatch. Use this instead of PATCH status=review for review reruns; requires explicit Bearer auth.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -1395,17 +1404,24 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/transition",
             "kanban",
-            "Transition a single card with administrative force semantics",
+            "Transition a single card with administrative force-transition semantics. Canonical runtime path is /transition; the old /force-transition path is removed. Requires explicit Bearer auth.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
-            ("status", body_param("string", true, "Target pipeline status")),
+            (
+                "status",
+                body_param(
+                    "string",
+                    true,
+                    "Target pipeline status for the administrative force transition",
+                ),
+            ),
             (
                 "cancel_dispatches",
                 body_param(
                     "boolean",
                     false,
-                    "When transitioning to backlog/ready, also cancel active dispatches",
+                    "When cleanup applies, cancel active dispatches and skip affected auto-queue entries",
                 )
                 .with_default(true),
             ),
