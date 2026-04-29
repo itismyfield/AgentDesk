@@ -861,20 +861,34 @@ fn suppress_text_part(state: &mut SseMessageState, snapshot_key: &str) {
     state.suppressed_text_parts.insert(snapshot_key.to_string());
 }
 
+enum TextDeltaVisibility {
+    Emitted(String),
+    Deferred,
+    Suppressed,
+}
+
+fn combine_prompt_echo_candidate(previous: Option<String>, text: &str) -> String {
+    match previous {
+        Some(previous) if text.starts_with(&previous) => text.to_string(),
+        Some(previous) => format!("{previous}{text}"),
+        None => text.to_string(),
+    }
+}
+
 fn append_text_delta_if_visible(
     sender: &Sender<StreamMessage>,
     state: &mut SseMessageState,
     message_role: Option<&str>,
     snapshot_key: Option<&str>,
     text: &str,
-) {
+) -> TextDeltaVisibility {
     if text.is_empty() {
-        return;
+        return TextDeltaVisibility::Emitted(String::new());
     }
 
     if let Some(snapshot_key) = snapshot_key {
         if state.suppressed_text_parts.contains(snapshot_key) {
-            return;
+            return TextDeltaVisibility::Suppressed;
         }
     }
 
@@ -882,38 +896,53 @@ fn append_text_delta_if_visible(
         if let Some(snapshot_key) = snapshot_key {
             suppress_text_part(state, snapshot_key);
         }
-        return;
+        return TextDeltaVisibility::Suppressed;
     }
 
-    if !is_assistant_message_role(message_role) {
-        if let Some(snapshot_key) = snapshot_key {
-            let previous = state.prompt_echo_candidates.remove(snapshot_key);
-            let combined = previous
-                .as_deref()
-                .map(|prefix| format!("{prefix}{text}"))
-                .unwrap_or_else(|| text.to_string());
+    if is_assistant_message_role(message_role) {
+        let visible_text = snapshot_key
+            .and_then(|snapshot_key| state.prompt_echo_candidates.remove(snapshot_key))
+            .map(|previous| combine_prompt_echo_candidate(Some(previous), text))
+            .unwrap_or_else(|| text.to_string());
+        append_text_delta(sender, state, &visible_text);
+        return TextDeltaVisibility::Emitted(visible_text);
+    }
 
-            if is_agentdesk_user_prompt_echo(&combined) {
-                suppress_text_part(state, snapshot_key);
-                return;
-            }
+    if let Some(snapshot_key) = snapshot_key {
+        let previous = state.prompt_echo_candidates.remove(snapshot_key);
+        let combined = combine_prompt_echo_candidate(previous, text);
 
-            if could_be_agentdesk_user_prompt_echo_prefix(&combined) {
-                state
-                    .prompt_echo_candidates
-                    .insert(snapshot_key.to_string(), combined);
-                return;
-            }
-
-            if let Some(previous) = previous {
-                append_text_delta(sender, state, &previous);
-            }
-        } else if is_agentdesk_user_prompt_echo(text) {
-            return;
+        if is_agentdesk_user_prompt_echo(&combined) {
+            suppress_text_part(state, snapshot_key);
+            return TextDeltaVisibility::Suppressed;
         }
+
+        if could_be_agentdesk_user_prompt_echo_prefix(&combined) {
+            state
+                .prompt_echo_candidates
+                .insert(snapshot_key.to_string(), combined);
+            return TextDeltaVisibility::Deferred;
+        }
+
+        append_text_delta(sender, state, &combined);
+        return TextDeltaVisibility::Emitted(combined);
+    } else if is_agentdesk_user_prompt_echo(text) {
+        return TextDeltaVisibility::Suppressed;
     }
 
     append_text_delta(sender, state, text);
+    TextDeltaVisibility::Emitted(text.to_string())
+}
+
+fn update_visible_snapshot(snapshot_text: &mut String, visibility: TextDeltaVisibility) -> bool {
+    match visibility {
+        TextDeltaVisibility::Emitted(text) => {
+            snapshot_text.push_str(&text);
+            true
+        }
+        TextDeltaVisibility::Deferred => true,
+        TextDeltaVisibility::Suppressed => false,
+    }
 }
 
 fn is_reasoning_part_type(part_type: &str) -> bool {
@@ -1023,7 +1052,7 @@ fn emit_text_part(
     }
 
     let Some(snapshot_key) = snapshot_key else {
-        append_text_delta_if_visible(sender, state, message_role, None, text);
+        let _ = append_text_delta_if_visible(sender, state, message_role, None, text);
         return;
     };
     state
@@ -1031,23 +1060,41 @@ fn emit_text_part(
         .insert(snapshot_key.clone(), "text".to_string());
     let pending = take_pending_text_delta(state, &snapshot_key);
 
-    let previous = state
+    let mut snapshot_text = state
         .text_part_snapshots
         .get(&snapshot_key)
-        .map(String::as_str)
-        .unwrap_or("");
-    let effective_previous = pending
-        .as_deref()
-        .filter(|pending| previous.is_empty() && text.starts_with(*pending))
-        .unwrap_or(previous);
-    let delta = text.strip_prefix(effective_previous).unwrap_or(text);
-    state
-        .text_part_snapshots
-        .insert(snapshot_key.clone(), text.to_string());
+        .cloned()
+        .unwrap_or_default();
+    let mut should_store_snapshot = true;
     if let Some(pending) = pending {
-        append_text_delta_if_visible(sender, state, message_role, Some(&snapshot_key), &pending);
+        should_store_snapshot = update_visible_snapshot(
+            &mut snapshot_text,
+            append_text_delta_if_visible(
+                sender,
+                state,
+                message_role,
+                Some(&snapshot_key),
+                &pending,
+            ),
+        );
     }
-    append_text_delta_if_visible(sender, state, message_role, Some(&snapshot_key), delta);
+    if should_store_snapshot {
+        let delta = if text.starts_with(&snapshot_text) {
+            &text[snapshot_text.len()..]
+        } else {
+            snapshot_text.clear();
+            text
+        };
+        should_store_snapshot = update_visible_snapshot(
+            &mut snapshot_text,
+            append_text_delta_if_visible(sender, state, message_role, Some(&snapshot_key), delta),
+        );
+    }
+    if should_store_snapshot && !state.suppressed_text_parts.contains(&snapshot_key) {
+        state
+            .text_part_snapshots
+            .insert(snapshot_key, snapshot_text);
+    }
 }
 
 fn stream_value(value: &Value) -> String {
@@ -1300,27 +1347,34 @@ fn process_sse_event(
                             .text_part_snapshots
                             .remove(&snapshot_key)
                             .unwrap_or_default();
-                        if let Some(pending) = pending.as_deref() {
-                            snapshot_text.push_str(pending);
-                        }
-                        snapshot_text.push_str(delta);
+                        let mut should_store_snapshot = true;
                         if let Some(pending) = pending {
-                            append_text_delta_if_visible(
-                                sender,
-                                state,
-                                message_role.as_deref(),
-                                Some(&snapshot_key),
-                                &pending,
+                            should_store_snapshot = update_visible_snapshot(
+                                &mut snapshot_text,
+                                append_text_delta_if_visible(
+                                    sender,
+                                    state,
+                                    message_role.as_deref(),
+                                    Some(&snapshot_key),
+                                    &pending,
+                                ),
                             );
                         }
-                        append_text_delta_if_visible(
-                            sender,
-                            state,
-                            message_role.as_deref(),
-                            Some(&snapshot_key),
-                            delta,
-                        );
-                        if !state.suppressed_text_parts.contains(&snapshot_key) {
+                        if should_store_snapshot {
+                            should_store_snapshot = update_visible_snapshot(
+                                &mut snapshot_text,
+                                append_text_delta_if_visible(
+                                    sender,
+                                    state,
+                                    message_role.as_deref(),
+                                    Some(&snapshot_key),
+                                    delta,
+                                ),
+                            );
+                        }
+                        if should_store_snapshot
+                            && !state.suppressed_text_parts.contains(&snapshot_key)
+                        {
                             state
                                 .text_part_snapshots
                                 .insert(snapshot_key, snapshot_text);
@@ -1341,13 +1395,15 @@ fn process_sse_event(
                             .or_default()
                             .push_str(delta);
                     }
-                    (None, Some("text")) => append_text_delta_if_visible(
-                        sender,
-                        state,
-                        message_role.as_deref(),
-                        None,
-                        delta,
-                    ),
+                    (None, Some("text")) => {
+                        let _ = append_text_delta_if_visible(
+                            sender,
+                            state,
+                            message_role.as_deref(),
+                            None,
+                            delta,
+                        );
+                    }
                     (None, _) => {}
                 }
             }
@@ -1744,6 +1800,25 @@ mod tests {
         let (msgs, stops) = parse_events(&events, "s1");
         assert_eq!(stops, vec![Some(false), Some(false), Some(false)]);
         assert_eq!(collect_text(&msgs), "OK");
+    }
+
+    #[test]
+    fn test_unknown_prompt_echo_candidate_later_assistant_full_update_preserves_prefix() {
+        let events = [
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","field":"text","delta":"[User: "}}"#,
+            r#"{"type":"message.part.delta","properties":{"sessionID":"s1","messageID":"m1","partID":"part-1","partType":"text","field":"text","delta":"Alice"}}"#,
+            r#"{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"m1","sessionID":"s1","role":"assistant","time":{"created":1},"parentID":"msg-user","modelID":"m","providerID":"p","mode":"build","agent":"build","path":{"cwd":"/tmp","root":"/"},"cost":0,"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}}}"#,
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","messageID":"m1","part":{"id":"part-1","sessionID":"s1","messageID":"m1","type":"text","text":"[User: Alice wrote an assistant-visible example"}}}"#,
+        ];
+        let (msgs, stops) = parse_events(&events, "s1");
+        assert_eq!(
+            stops,
+            vec![Some(false), Some(false), Some(false), Some(false)]
+        );
+        assert_eq!(
+            collect_text(&msgs),
+            "[User: Alice wrote an assistant-visible example"
+        );
     }
 
     #[test]
