@@ -16,6 +16,9 @@ use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
     parse_thread_channel_name, resolve_agent_id_for_session_pg,
 };
+use crate::db::session_status::{
+    IDLE, is_live_status, is_user_wait_status, normalize_incoming_session_status,
+};
 use crate::services::message_outbox::enqueue_lifecycle_notification_pg;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
@@ -700,7 +703,7 @@ async fn hook_session_pg(
     )
     .await;
 
-    let status = body.status.as_deref().unwrap_or("working");
+    let status = normalize_incoming_session_status(body.status.as_deref());
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
@@ -749,7 +752,7 @@ async fn hook_session_pg(
             tokens = EXCLUDED.tokens,
             cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
             active_dispatch_id = CASE
-              WHEN lower(EXCLUDED.status) = 'disconnected' THEN NULL
+              WHEN lower(EXCLUDED.status) IN ('disconnected', 'aborted', 'idle') THEN NULL
               WHEN EXCLUDED.active_dispatch_id IS NOT NULL THEN EXCLUDED.active_dispatch_id
               ELSE sessions.active_dispatch_id
             END,
@@ -792,7 +795,7 @@ async fn hook_session_pg(
                 }),
             );
 
-            if status == "idle"
+            if is_user_wait_status(status)
                 && let Some(aid) = agent_id.as_ref()
             {
                 spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
@@ -874,7 +877,7 @@ fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
 }
 
 fn normalize_hook_active_dispatch_id(status: &str, dispatch_id: Option<&str>) -> Option<String> {
-    if status.eq_ignore_ascii_case("disconnected") {
+    if !is_live_status(status) || status.eq_ignore_ascii_case(IDLE) {
         return None;
     }
 
@@ -1009,7 +1012,7 @@ async fn hook_session_sqlite_for_tests(
         body.dispatch_id.as_deref(),
     );
 
-    let status = body.status.as_deref().unwrap_or("working");
+    let status = normalize_incoming_session_status(body.status.as_deref());
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
@@ -1040,7 +1043,7 @@ async fn hook_session_sqlite_for_tests(
             tokens = excluded.tokens,
             cwd = COALESCE(excluded.cwd, sessions.cwd),
             active_dispatch_id = CASE
-              WHEN lower(excluded.status) = 'disconnected' THEN NULL
+              WHEN lower(excluded.status) IN ('disconnected', 'aborted', 'idle') THEN NULL
               WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
               ELSE sessions.active_dispatch_id
             END,
@@ -1084,7 +1087,7 @@ async fn hook_session_sqlite_for_tests(
                 }),
             );
 
-            if status == "idle" {
+            if is_user_wait_status(status) {
                 if let Some(aid) = agent_id {
                     spawn_auto_queue_activate_for_agent(state.clone(), aid);
                 }
@@ -1415,7 +1418,7 @@ pub async fn gc_stale_thread_sessions_pg(pool: &PgPool) -> usize {
     match sqlx::query(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
-           AND status IN ('idle', 'disconnected')
+           AND status IN ('idle', 'awaiting_user', 'disconnected', 'aborted')
            AND (
              (active_dispatch_id IS NULL
                AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '1 hour')
@@ -1442,7 +1445,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
         "SELECT active_dispatch_id
          FROM sessions
          WHERE thread_channel_id IS NULL
-           AND status = 'working'
+           AND status IN ('working', 'turn_active')
            AND active_dispatch_id IS NOT NULL
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
@@ -1486,7 +1489,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
              claude_session_id = NULL,
              raw_provider_session_id = NULL
          WHERE thread_channel_id IS NULL
-           AND status = 'working'
+           AND status IN ('working', 'turn_active')
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
     .execute(pool)
@@ -1508,7 +1511,7 @@ async fn disconnect_stale_fixed_session_by_key_pg(pool: &PgPool, session_key: &s
          FROM sessions
          WHERE session_key = $1
            AND thread_channel_id IS NULL
-           AND status = 'working'
+           AND status IN ('working', 'turn_active')
            AND active_dispatch_id IS NOT NULL
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
@@ -1556,7 +1559,7 @@ async fn disconnect_stale_fixed_session_by_key_pg(pool: &PgPool, session_key: &s
              raw_provider_session_id = NULL
          WHERE session_key = $1
            AND thread_channel_id IS NULL
-           AND status = 'working'
+           AND status IN ('working', 'turn_active')
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
     .bind(session_key)
@@ -1605,7 +1608,11 @@ pub async fn update_dispatched_session(
                  session_info = COALESCE($6, session_info)
              WHERE id = $7",
         )
-        .bind(body.status.as_deref())
+        .bind(
+            body.status
+                .as_deref()
+                .map(|status| normalize_incoming_session_status(Some(status))),
+        )
         .bind(body.active_dispatch_id.as_deref())
         .bind(body.model.as_deref())
         .bind(body.tokens)
@@ -2221,7 +2228,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO sessions
              (session_key, agent_id, status, active_dispatch_id, provider, last_heartbeat, created_at)
-             VALUES ($1, $2, 'working', $3, 'codex', NOW(), NOW())",
+             VALUES ($1, $2, 'turn_active', $3, 'codex', NOW(), NOW())",
         )
         .bind(session_key)
         .bind(agent_id)
@@ -2239,7 +2246,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO sessions
              (session_key, agent_id, status, provider, last_heartbeat, created_at)
-             VALUES ($1, $2, 'working', 'codex', NOW(), NOW())",
+             VALUES ($1, $2, 'turn_active', 'codex', NOW(), NOW())",
         )
         .bind(session_key)
         .bind(agent_id)
@@ -2369,7 +2376,7 @@ mod tests {
                 provider,
                 last_heartbeat,
                 created_at
-            ) VALUES ($1, $2, 'working', $3, 'codex', NOW(), NOW())",
+            ) VALUES ($1, $2, 'turn_active', $3, 'codex', NOW(), NOW())",
         )
         .bind("host:codex-agent-force-pg")
         .bind("agent-force-pg")
@@ -3113,7 +3120,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO sessions
              (session_key, provider, status, active_dispatch_id, last_heartbeat, created_at)
-             VALUES ('session-cleared', 'codex', 'working', 'dispatch-cleared', NOW(), NOW())",
+             VALUES ('session-cleared', 'codex', 'turn_active', 'dispatch-cleared', NOW(), NOW())",
         )
         .execute(&pool)
         .await
@@ -3784,7 +3791,7 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, active_dispatch_id, last_heartbeat)
-             VALUES ($1, 'ch-ad', 'claude', 'working', 'stale session', 'dispatch-stale', NOW())",
+             VALUES ($1, 'ch-ad', 'claude', 'turn_active', 'stale session', 'dispatch-stale', NOW())",
         )
         .bind(&session_key)
         .execute(&pool)
@@ -3854,7 +3861,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO sessions
              (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES ($1, 'agent-1067', 'codex', 'working', NOW(), NOW())",
+             VALUES ($1, 'agent-1067', 'codex', 'turn_active', NOW(), NOW())",
         )
         .bind(&session_key)
         .execute(&pool)
@@ -3882,7 +3889,7 @@ mod tests {
         assert_eq!(body["tmux_name"], tmux_name);
         assert_eq!(body["agent_id"], "agent-1067");
         assert_eq!(body["provider"], "codex");
-        assert_eq!(body["status"], "working");
+        assert_eq!(body["status"], "turn_active");
         assert_eq!(body["lines_requested"], 20);
         assert_eq!(body["lines_effective"], 20);
         // tmux session was never created, so capture_pane returns None → empty string + alive=false.

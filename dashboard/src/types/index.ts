@@ -745,7 +745,14 @@ export const DEFAULT_SETTINGS: CompanySettings = {
 };
 
 // Dispatched Session (파견 인력)
-export type DispatchedSessionStatus = "working" | "idle" | "disconnected";
+export type DispatchedSessionStatus =
+  | "turn_active"
+  | "awaiting_bg"
+  | "awaiting_user"
+  | "idle"
+  | "disconnected"
+  | "aborted"
+  | "working";
 
 export interface DispatchedSession {
   id: string;

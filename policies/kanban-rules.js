@@ -336,7 +336,8 @@ var rules = {
 
     // Boot grace period: 서버 부팅 후 10분간 세션 상태 변경으로 인한 카드 전환 유예.
     // 재시작 직후 세션이 disconnected/idle로 보고되면서 진행 중인 카드가 오판되는 것을 방지.
-    if (payload.status !== "working") {
+    var isActiveSession = payload.status === "turn_active" || payload.status === "working";
+    if (!isActiveSession) {
       var bootRows = agentdesk.db.query(
         "SELECT value FROM kv_meta WHERE key = 'server_boot_at'"
       );
@@ -361,7 +362,7 @@ var rules = {
 
     // working → nextFromInitial: only for implementation/rework dispatches
     // Review dispatches should NOT advance the card to in_progress
-    if (payload.status === "working" && card.status === initialState) {
+    if (isActiveSession && card.status === initialState) {
       var dispatch = agentdesk.db.query(
         "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?",
         [payload.dispatch_id]

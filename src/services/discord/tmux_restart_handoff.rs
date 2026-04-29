@@ -101,7 +101,7 @@ fn resolve_dispatched_thread_dispatch(
         conn.query_row(
             "SELECT active_dispatch_id FROM sessions
              WHERE thread_channel_id = ?1
-               AND status = 'working'
+               AND status IN ('turn_active', 'working')
                AND active_dispatch_id IS NOT NULL
              ORDER BY datetime(COALESCE(last_heartbeat, created_at)) DESC, id DESC
              LIMIT 1",
@@ -139,7 +139,7 @@ pub(super) fn resolve_dispatched_thread_dispatch_from_db(
                 sqlx::query_scalar::<_, String>(
                     "SELECT active_dispatch_id FROM sessions
                      WHERE thread_channel_id = $1
-                       AND status = 'working'
+                       AND status IN ('turn_active', 'working')
                        AND active_dispatch_id IS NOT NULL
                      ORDER BY COALESCE(last_heartbeat, created_at) DESC, id DESC
                      LIMIT 1",
@@ -536,7 +536,7 @@ mod tests {
                 ('older-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:42'),
                 ('latest-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:43');
             INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-            VALUES ('working', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091375422930966');
+            VALUES ('turn_active', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091375422930966');
             ",
         )
         .unwrap();
@@ -573,7 +573,7 @@ mod tests {
                 thread_channel_id TEXT
             );
             INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
-            VALUES ('working', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091380045189131');
+            VALUES ('turn_active', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091380045189131');
             ",
         )
         .unwrap();

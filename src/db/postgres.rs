@@ -1114,7 +1114,7 @@ mod tests {
         sqlx::query("INSERT INTO sessions (session_key, agent_id, status) VALUES ($1, $2, $3)")
             .bind("sess-1")
             .bind("openclaw-maker")
-            .bind("working")
+            .bind("turn_active")
             .execute(&pool)
             .await
             .expect("insert session");

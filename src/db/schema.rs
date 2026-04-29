@@ -2700,7 +2700,7 @@ mod tests {
             "INSERT INTO sessions (
                 session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
              ) VALUES (
-                ?1, NULL, 'codex', 'working', 'dispatch-backfill-agent', datetime('now'), datetime('now')
+                ?1, NULL, 'codex', 'turn_active', 'dispatch-backfill-agent', datetime('now'), datetime('now')
              )",
             [session_key],
         )

@@ -425,7 +425,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
                 AND NOT EXISTS (
                     SELECT 1 FROM sessions s
                      WHERE s.agent_id = d.to_agent_id
-                       AND s.status = 'working'
+                       AND s.status IN ('turn_active', 'working')
                 )
                 AND NOT EXISTS (
                     SELECT 1 FROM task_dispatches d2

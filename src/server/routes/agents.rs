@@ -617,7 +617,11 @@ async fn find_diag_session_pg(
              OR a.discord_channel_alt = $1
              OR a.discord_channel_cc = $1
              OR a.discord_channel_cdx = $1
-          ORDER BY CASE WHEN s.status = 'working' THEN 0 ELSE 1 END,
+          ORDER BY CASE
+                       WHEN s.status IN ('turn_active', 'working') THEN 0
+                       WHEN s.status = 'awaiting_bg' THEN 1
+                       ELSE 2
+                   END,
                    s.last_heartbeat DESC NULLS LAST,
                    s.last_tool_at DESC NULLS LAST,
                    s.created_at DESC NULLS LAST,

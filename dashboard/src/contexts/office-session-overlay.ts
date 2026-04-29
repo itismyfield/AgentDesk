@@ -1,8 +1,12 @@
 import type { Agent, DispatchedSession, SubAgent } from "../types";
 
+function sessionIsWorking(status: DispatchedSession["status"]): boolean {
+  return status === "turn_active" || status === "awaiting_bg" || status === "working";
+}
+
 export function deriveSubAgents(sessions: DispatchedSession[]): SubAgent[] {
   return sessions
-    .filter((s) => s.status === "working" && s.linked_agent_id)
+    .filter((s) => sessionIsWorking(s.status) && s.linked_agent_id)
     .map((s) => ({
       id: s.id,
       parentAgentId: s.linked_agent_id!,
@@ -24,7 +28,7 @@ export function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[]
       avatar_emoji: s.avatar_emoji || "📡",
       sprite_number: s.sprite_number,
       personality: null,
-      status: s.status === "working" ? ("working" as const) : ("idle" as const),
+      status: sessionIsWorking(s.status) ? ("working" as const) : ("idle" as const),
       current_task_id: null,
       stats_tasks_done: 0,
       stats_xp: s.stats_xp,
@@ -51,7 +55,7 @@ export function applySessionOverlay(baseAgents: Agent[], sessions: DispatchedSes
       session.linked_agent_id ??
       (session as DispatchedSession & { agent_id?: string | null }).agent_id ??
       null;
-    const isWorking = session.status === "working";
+    const isWorking = sessionIsWorking(session.status);
     if (!agentId || !isWorking) continue;
 
     const ts = session.last_seen_at ?? session.connected_at ?? 0;

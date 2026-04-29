@@ -74,6 +74,7 @@ use stale_resume::{
 use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
 
 use super::formatting::ReplaceLongMessageOutcome;
+use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE};
 
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
@@ -1678,17 +1679,15 @@ pub(super) fn spawn_turn_bridge(
                                     },
                                 );
                             }
-                            close_all_tracked_background_children(
-                                shared_owned.pg_pool.as_ref(),
-                                &mut active_background_child_session_ids,
-                                if session_died_retry {
-                                    "aborted"
-                                } else {
-                                    "completed"
-                                },
-                                "turn done",
-                            )
-                            .await;
+                            if session_died_retry {
+                                close_all_tracked_background_children(
+                                    shared_owned.pg_pool.as_ref(),
+                                    &mut active_background_child_session_ids,
+                                    "aborted",
+                                    "turn done",
+                                )
+                                .await;
+                            }
                             state_dirty = true;
                             done = true;
                         }
@@ -2156,17 +2155,15 @@ pub(super) fn spawn_turn_bridge(
                 }
                 let _ = save_inflight_state(&inflight_state);
             }
-            close_all_tracked_background_children(
-                shared_owned.pg_pool.as_ref(),
-                &mut active_background_child_session_ids,
-                if transport_error || rx_disconnected {
-                    "aborted"
-                } else {
-                    "completed"
-                },
-                "turn loop exit",
-            )
-            .await;
+            if transport_error || rx_disconnected {
+                close_all_tracked_background_children(
+                    shared_owned.pg_pool.as_ref(),
+                    &mut active_background_child_session_ids,
+                    "aborted",
+                    "turn loop exit",
+                )
+                .await;
+            }
         }
 
         // #1113 stream-end finalization: the main turn loop has exited, which
@@ -2250,11 +2247,19 @@ pub(super) fn spawn_turn_bridge(
             .await;
         }
 
+        let final_session_status = if cancelled || transport_error {
+            IDLE
+        } else if active_background_child_session_ids.is_empty() {
+            AWAITING_USER
+        } else {
+            AWAITING_BG
+        };
+
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
             Some(provider.as_str()),
-            "idle",
+            final_session_status,
             &provider,
             adk_session_info.as_deref(),
             persisted_context_tokens(

@@ -63,7 +63,7 @@ async fn build_slot_clear_target_pg(
             "SELECT provider, session_key
              FROM sessions
              WHERE thread_channel_id = $1
-             ORDER BY CASE status WHEN 'working' THEN 0 WHEN 'idle' THEN 1 ELSE 2 END,
+             ORDER BY CASE status WHEN 'turn_active' THEN 0 WHEN 'working' THEN 0 WHEN 'awaiting_bg' THEN 1 WHEN 'awaiting_user' THEN 2 WHEN 'idle' THEN 3 ELSE 4 END,
                       COALESCE(last_heartbeat, created_at) DESC,
                       id DESC
              LIMIT 1",
@@ -129,7 +129,7 @@ pub async fn clear_slot_sessions_pg(
                  tokens = 0,
                  last_heartbeat = NOW()
              WHERE thread_channel_id = $2
-               AND status IN ('working', 'idle')",
+               AND status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle')",
         )
         .bind("Slot thread reset")
         .bind(thread_channel_id.to_string())

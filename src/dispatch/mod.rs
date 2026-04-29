@@ -412,7 +412,7 @@ pub fn cancel_active_dispatches_for_card_on_conn(
 
     conn.execute(
         "UPDATE sessions \
-         SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END, \
+         SET status = CASE WHEN status IN ('turn_active', 'working') THEN 'idle' ELSE status END, \
              active_dispatch_id = NULL \
          WHERE active_dispatch_id IN (
              SELECT id FROM task_dispatches

@@ -167,6 +167,7 @@ pub(super) async fn post_adk_session_status(
     let Some(session_key) = session_key else {
         return;
     };
+    let status = crate::db::session_status::normalize_incoming_session_status(Some(status));
 
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),

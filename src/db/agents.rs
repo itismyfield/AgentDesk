@@ -703,7 +703,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_key, agent_id, status) VALUES ('sess-1', 'openclaw-maker', 'working')",
+            "INSERT INTO sessions (session_key, agent_id, status) VALUES ('sess-1', 'openclaw-maker', 'turn_active')",
             [],
         )
         .unwrap();

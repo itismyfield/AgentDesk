@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::net::SocketAddr;
 
+use crate::db::session_status::is_active_status;
 use crate::services::discord::health;
 use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
@@ -338,7 +339,7 @@ async fn mark_channel_sessions_disconnected(
                 SET status = 'disconnected',
                     active_dispatch_id = NULL
               WHERE thread_channel_id = $1
-                AND status = 'working'
+                AND status IN ('turn_active', 'working')
                 AND (active_dispatch_id IS NULL OR active_dispatch_id = '')",
         )
         .bind(&channel_id)
@@ -605,7 +606,7 @@ pub async fn stale_mailbox_repair_handler(
     let residual_working_session = after_session_state
         .as_ref()
         .and_then(|session| session.status.as_deref())
-        == Some("working");
+        .is_some_and(is_active_status);
     let status =
         if residual_inflight || residual_working_session || session_disconnect_error.is_some() {
             "partial_repair"

@@ -12,6 +12,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 
 use crate::config::Config;
+use crate::db::session_status::{TURN_ACTIVE, normalize_session_status};
 use crate::utils::format::expand_tilde_path;
 
 #[derive(Clone, Debug, Args)]
@@ -1777,7 +1778,7 @@ fn sqlite_cutover_counts(conn: &Connection) -> Result<SqliteCutoverCounts, Strin
         working_sessions: query_count_if_table_exists(
             conn,
             "sessions",
-            "SELECT COUNT(*) FROM sessions WHERE status = 'working'",
+            "SELECT COUNT(*) FROM sessions WHERE status IN ('turn_active', 'working')",
         )?,
         open_dispatch_outbox: query_count_if_table_exists(
             conn,
@@ -3508,7 +3509,7 @@ fn load_live_sessions(conn: &Connection) -> Result<Vec<SessionRow>, String> {
                     raw_provider_session_id,
                     created_at
              FROM sessions
-             WHERE status = 'working' OR active_dispatch_id IS NOT NULL
+             WHERE status IN ('turn_active', 'working') OR active_dispatch_id IS NOT NULL
              ORDER BY created_at ASC, session_key ASC",
         )
         .map_err(|e| format!("prepare sessions export: {e}"))?;
@@ -3913,7 +3914,7 @@ async fn load_pg_cutover_counts(pool: &PgPool) -> Result<PgCutoverCounts, String
     .await
     .map_err(|e| format!("count postgres active task_dispatches: {e}"))?;
     let working_sessions = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sessions WHERE status = 'working' OR active_dispatch_id IS NOT NULL",
+        "SELECT COUNT(*) FROM sessions WHERE status IN ('turn_active', 'working') OR active_dispatch_id IS NOT NULL",
     )
     .fetch_one(pool)
     .await
@@ -4316,6 +4317,11 @@ async fn import_live_state_into_pg(
 
     let mut upserted_sessions = 0i64;
     for row in sessions {
+        let normalized_status = row
+            .status
+            .as_deref()
+            .map(|status| normalize_session_status(Some(status), 0))
+            .or_else(|| row.active_dispatch_id.as_ref().map(|_| TURN_ACTIVE));
         let result = sqlx::query(
             "INSERT INTO sessions (
                 session_key,
@@ -4366,7 +4372,7 @@ async fn import_live_state_into_pg(
         .bind(&row.session_key)
         .bind(&row.agent_id)
         .bind(&row.provider)
-        .bind(&row.status)
+        .bind(normalized_status)
         .bind(&row.active_dispatch_id)
         .bind(&row.model)
         .bind(&row.session_info)
@@ -6411,7 +6417,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_key, status) VALUES ('session-cutover', 'working')",
+            "INSERT INTO sessions (session_key, status) VALUES ('session-cutover', 'turn_active')",
             [],
         )
         .unwrap();
@@ -6731,7 +6737,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id) VALUES ('session-cutover', 'project-agentdesk', 'working', 'dispatch-cutover')",
+            "INSERT INTO sessions (session_key, agent_id, status, active_dispatch_id) VALUES ('session-cutover', 'project-agentdesk', 'turn_active', 'dispatch-cutover')",
             [],
         )
         .unwrap();
@@ -7086,7 +7092,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load imported session");
-        assert_eq!(session.get::<String, _>("status"), "working");
+        assert_eq!(session.get::<String, _>("status"), "turn_active");
         assert_eq!(
             session
                 .get::<Option<String>, _>("active_dispatch_id")

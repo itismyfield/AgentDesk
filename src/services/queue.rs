@@ -425,7 +425,7 @@ impl QueueService {
                     END::BIGINT AS match_rank
              FROM sessions s
              LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
-             WHERE s.status = 'working'
+             WHERE s.status IN ('turn_active', 'working')
                AND (
                  COALESCE(s.thread_channel_id, '') = $1
                  OR s.session_key LIKE '%' || $1 || '%'
