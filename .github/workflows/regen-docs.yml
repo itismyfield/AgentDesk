@@ -14,6 +14,7 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
 
 jobs:
   regen:
@@ -50,15 +51,40 @@ jobs:
         run: python3 scripts/generate_inventory_docs.py
 
       - name: Commit regenerated docs
+        id: commit
         if: steps.guard.outputs.skip != 'true'
         shell: bash
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           if git diff --quiet -- ARCHITECTURE.md docs/generated; then
             echo "No inventory docs drift detected."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git add ARCHITECTURE.md docs/generated
           git commit -m "chore: regenerate inventory docs [skip regen]"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          git push origin "HEAD:${PR_HEAD_REF}"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish post-regen commit status
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          STATUS_CONTEXT: regen-docs
+          STATUS_SHA: ${{ steps.commit.outputs.sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            "/repos/${REPOSITORY}/statuses/${STATUS_SHA}" \
+            -f state=success \
+            -f context="${STATUS_CONTEXT}" \
+            -f description="Inventory docs regenerated and pushed" \
+            -f target_url="${TARGET_URL}" \
+            --silent
