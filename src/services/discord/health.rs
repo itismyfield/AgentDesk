@@ -65,9 +65,10 @@ pub struct WatcherStateSnapshot {
     /// Bytes present in the capture file but not yet confirmed as relayed.
     /// `null` when `last_capture_offset` is unknown.
     pub unread_bytes: Option<u64>,
-    /// True when a live tmux-backed turn appears detached or its capture file
-    /// has unread bytes and a non-zero relay timestamp is stale by
-    /// `WATCHER_STATE_DESYNC_STALE_MS`.
+    /// True when a live tmux-backed turn appears detached/cross-owned or its
+    /// capture file diverges from relay telemetry after
+    /// `WATCHER_STATE_DESYNC_STALE_MS`. Never-relayed turns use the inflight
+    /// `started_at` timestamp as the stale anchor.
     pub desynced: bool,
     /// Process-local watcher reattach/reconnect count for this channel.
     pub reconnect_count: u64,
@@ -328,9 +329,24 @@ impl HealthRegistry {
             let inflight_owner_channel_id = inflight_tmux_session
                 .as_deref()
                 .and_then(|tmux| shared.tmux_watchers.owner_channel_for_tmux_session(tmux));
-            let attached = watcher_binding.is_some() || inflight_owner_channel_id.is_some();
+            let inflight_owner_matches_channel = inflight_owner_channel_id == Some(channel);
+            let attached = watcher_binding.is_some() || inflight_owner_matches_channel;
+            let watcher_binding_tmux_session = watcher_binding
+                .as_ref()
+                .map(|binding| binding.tmux_session_name.clone());
+            let relay_state_matches_inflight = match (
+                inflight_tmux_session.as_deref(),
+                watcher_binding_tmux_session.as_deref(),
+            ) {
+                (Some(inflight_tmux), Some(binding_tmux)) => inflight_tmux == binding_tmux,
+                _ => true,
+            };
             let has_relay_coord = shared.tmux_relay_coords.contains_key(&channel);
             let inflight_state_present = inflight.is_some();
+            let tmux_session_mismatch = inflight_state_present
+                && !relay_state_matches_inflight
+                && watcher_binding_tmux_session.is_some()
+                && inflight_tmux_session.is_some();
             let mailbox_snapshot = super::mailbox_snapshot(&shared, channel).await;
             let mailbox_active_user_msg_id =
                 mailbox_snapshot.active_user_message_id.map(|id| id.get());
@@ -398,21 +414,37 @@ impl HealthRegistry {
                 .unwrap_or(None),
                 None => None,
             };
-            let unread_bytes =
-                last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset));
-            let relay_stale = last_relay_ts_ms > 0
-                && chrono::Utc::now()
-                    .timestamp_millis()
-                    .saturating_sub(last_relay_ts_ms)
-                    >= WATCHER_STATE_DESYNC_STALE_MS;
+            let unread_bytes = relay_state_matches_inflight
+                .then(|| {
+                    last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset))
+                })
+                .flatten();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let relay_stale_anchor_ms = if last_relay_ts_ms > 0 {
+                Some(last_relay_ts_ms)
+            } else {
+                inflight
+                    .as_ref()
+                    .and_then(|state| super::inflight::parse_started_at_unix(&state.started_at))
+                    .and_then(|seconds| seconds.checked_mul(1000))
+            };
+            let relay_stale = relay_stale_anchor_ms
+                .map(|anchor_ms| now_ms.saturating_sub(anchor_ms) >= WATCHER_STATE_DESYNC_STALE_MS)
+                .unwrap_or(false);
             let capture_lagged = last_capture_offset
                 .map(|capture| {
-                    tmux_session_alive == Some(true) && capture > last_relay_offset && relay_stale
+                    relay_state_matches_inflight
+                        && inflight_state_present
+                        && capture != last_relay_offset
+                        && relay_stale
                 })
                 .unwrap_or(false);
-            let live_tmux_orphaned =
-                tmux_session_alive == Some(true) && inflight_state_present && !attached;
-            let desynced = capture_lagged || live_tmux_orphaned;
+            let live_tmux_orphaned = tmux_session_alive == Some(true)
+                && inflight_state_present
+                && !attached
+                && relay_stale;
+            let desynced =
+                capture_lagged || live_tmux_orphaned || (tmux_session_mismatch && relay_stale);
             return Some(WatcherStateSnapshot {
                 provider: entry.name.clone(),
                 attached,
@@ -3089,7 +3121,7 @@ mod tests {
                 .unwrap_or(0)
         );
         let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &name, "sleep 30"])
+            .args(["new-session", "-d", "-s", &name, "sleep 600"])
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
@@ -3689,7 +3721,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_watcher_state_reports_tmux_owner_for_inflight_channel() {
+    async fn snapshot_watcher_state_reports_cross_owner_tmux_as_desynced() {
+        let Some(tmux_guard) = start_test_tmux_session("cross-owner") else {
+            return;
+        };
         let temp = tempfile::tempdir().expect("create temp runtime root");
         let prev_override = crate::config::current_test_runtime_root_override();
         crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
@@ -3704,10 +3739,10 @@ mod tests {
         let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
         let owner_channel_id = 523_456_789_012_345_679;
         let inflight_channel_id = 523_456_789_012_345_680;
-        let tmux_session_name = format!("test-seeded-watcher-{owner_channel_id}");
-        harness.seed_watcher(owner_channel_id);
+        let tmux_session_name = tmux_guard.name.clone();
+        harness.seed_watcher_for_tmux(owner_channel_id, &tmux_session_name);
 
-        let inflight = super::super::inflight::InflightTurnState::new(
+        let mut inflight = super::super::inflight::InflightTurnState::new(
             ProviderKind::Codex,
             inflight_channel_id,
             Some("watcher-state-owner-diagnostic".to_string()),
@@ -3721,7 +3756,19 @@ mod tests {
             /* input_fifo_path */ None,
             /* last_offset */ 0,
         );
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
         super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let owner_snapshot = harness
+            .registry()
+            .snapshot_watcher_state(owner_channel_id)
+            .await
+            .expect("owner channel should still report its attached watcher");
+        assert!(owner_snapshot.attached);
+        assert_eq!(
+            owner_snapshot.tmux_session.as_deref(),
+            Some(tmux_session_name.as_str())
+        );
 
         let snapshot = harness
             .registry()
@@ -3729,11 +3776,19 @@ mod tests {
             .await
             .expect("inflight tmux owner should surface channel diagnostics");
 
-        assert!(snapshot.attached);
         assert_eq!(snapshot.watcher_owner_channel_id, Some(owner_channel_id));
         assert_eq!(
             snapshot.tmux_session.as_deref(),
             Some(tmux_session_name.as_str())
+        );
+        assert!(
+            !snapshot.attached,
+            "a tmux watcher owned by another channel must not make this channel attached"
+        );
+        assert_eq!(snapshot.tmux_session_alive, Some(true));
+        assert!(
+            snapshot.desynced,
+            "live cross-owner inflight must surface as desynced for the inflight channel"
         );
         assert!(snapshot.inflight_state_present);
     }
@@ -3891,7 +3946,7 @@ mod tests {
         let output_path = temp.path().join("watcher-state-desynced-output.jsonl");
         std::fs::write(&output_path, vec![b'x'; 96]).expect("seed output capture");
 
-        let inflight = super::super::inflight::InflightTurnState::new(
+        let mut inflight = super::super::inflight::InflightTurnState::new(
             ProviderKind::Codex,
             channel_id,
             Some("watcher-state-desync".to_string()),
@@ -3905,6 +3960,7 @@ mod tests {
             None,
             0,
         );
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
         super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
         let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
         coord
@@ -3929,6 +3985,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_watcher_state_marks_never_relayed_stale_capture_desynced() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 600_111_222_333_444_558;
+        let output_path = temp.path().join("watcher-state-never-relayed-output.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 96]).expect("seed output capture");
+
+        let mut inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watcher-state-never-relayed".to_string()),
+            24,
+            9_031,
+            9_032,
+            String::new(),
+            Some("session-inflight-never-relayed".to_string()),
+            Some("nonexistent-session-never-relayed".to_string()),
+            Some(output_path.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+
+        let snapshot = harness
+            .registry()
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("stale never-relayed inflight should surface a snapshot");
+
+        assert_eq!(snapshot.last_relay_ts_ms, 0);
+        assert_eq!(snapshot.last_capture_offset, Some(96));
+        assert_eq!(snapshot.unread_bytes, Some(96));
+        assert!(
+            snapshot.desynced,
+            "a stale inflight with capture bytes and no relay must be marked desynced"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_watcher_state_marks_capture_regression_desynced() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let prev_override = crate::config::current_test_runtime_root_override();
+        crate::config::set_test_runtime_root_override(Some(temp.path().to_path_buf()));
+        struct OverrideGuard(Option<std::path::PathBuf>);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                crate::config::set_test_runtime_root_override(self.0.clone());
+            }
+        }
+        let _guard = OverrideGuard(prev_override);
+
+        let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
+        let channel_id = 600_111_222_333_444_559;
+        let output_path = temp.path().join("watcher-state-regressed-output.jsonl");
+        std::fs::write(&output_path, vec![b'x'; 16]).expect("seed truncated output capture");
+
+        let mut inflight = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("watcher-state-regressed".to_string()),
+            24,
+            9_041,
+            9_042,
+            String::new(),
+            Some("session-inflight-regressed".to_string()),
+            Some("nonexistent-session-regressed".to_string()),
+            Some(output_path.to_string_lossy().into_owned()),
+            None,
+            0,
+        );
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
+        super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
+        let coord = harness.shared.tmux_relay_coord(ChannelId::new(channel_id));
+        coord
+            .confirmed_end_offset
+            .store(32, std::sync::atomic::Ordering::Release);
+        coord.last_relay_ts_ms.store(
+            chrono::Utc::now().timestamp_millis() - WATCHER_STATE_DESYNC_STALE_MS - 1_000,
+            std::sync::atomic::Ordering::Release,
+        );
+
+        let snapshot = harness
+            .registry()
+            .snapshot_watcher_state(channel_id)
+            .await
+            .expect("capture regression should surface a snapshot");
+
+        assert_eq!(snapshot.last_capture_offset, Some(16));
+        assert_eq!(
+            snapshot.unread_bytes,
+            Some(0),
+            "unread_bytes remains saturating for compatibility"
+        );
+        assert!(
+            snapshot.desynced,
+            "capture size behind relay offset should be marked desynced when stale"
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_watcher_state_marks_live_tmux_inflight_without_watcher_desynced() {
         let Some(tmux_guard) = start_test_tmux_session("orphaned") else {
             return;
@@ -3946,7 +4113,7 @@ mod tests {
 
         let harness = TestHealthHarness::new_with_provider(ProviderKind::Codex).await;
         let channel_id = 600_111_222_333_444_557;
-        let inflight = super::super::inflight::InflightTurnState::new(
+        let mut inflight = super::super::inflight::InflightTurnState::new(
             ProviderKind::Codex,
             channel_id,
             Some("watcher-state-orphan".to_string()),
@@ -3960,6 +4127,7 @@ mod tests {
             None,
             0,
         );
+        inflight.started_at = "2026-04-25 03:00:00".to_string();
         super::super::inflight::save_inflight_state(&inflight).expect("write seeded inflight JSON");
 
         let snapshot = harness

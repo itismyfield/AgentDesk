@@ -1114,10 +1114,9 @@ impl SharedData {
             .clone()
     }
 
-    /// Record that this process spawned a watcher after claiming/replacing a
-    /// tmux watcher slot. This is process-local telemetry for
-    /// `GET /api/channels/:id/watcher-state` (#964), not persisted dedupe
-    /// state.
+    /// Record that this process spawned a watcher during recovery/reattach.
+    /// This is process-local telemetry for `GET /api/channels/:id/watcher-state`
+    /// (#964), not persisted dedupe state and not counted on first-turn attach.
     pub(super) fn record_tmux_watcher_reconnect(&self, channel_id: ChannelId) {
         self.tmux_relay_coord(channel_id)
             .reconnect_count

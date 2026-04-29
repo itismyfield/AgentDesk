@@ -2999,7 +2999,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Read-only snapshot of the tmux-watcher lifecycle state for a channel. \
              Core fields (#964): provider, attached, tmux_session, last_relay_offset, \
              inflight_state_present, last_relay_ts_ms, last_capture_offset, unread_bytes, \
-             desynced (30s stale-relay threshold), reconnect_count, has_pending_queue. \
+             desynced (orphan/cross-owner/stale capture divergence, 30s threshold), \
+             reconnect_count, has_pending_queue. \
              #1133 enriched diagnostics (omitted when source is absent): \
              inflight_started_at, inflight_updated_at, inflight_user_msg_id, \
              inflight_current_msg_id, watcher_owner_channel_id, tmux_session_alive \

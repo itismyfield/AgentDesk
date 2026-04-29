@@ -1851,27 +1851,25 @@ pub(super) fn spawn_turn_bridge(
                                 pause_epoch: pause_epoch.clone(),
                                 turn_delivered: turn_delivered.clone(),
                             };
-                            let watcher_claimed = {
-                                #[cfg(unix)]
-                                {
-                                    // #1135: Reuse a live watcher for the same
-                                    // tmux session; replace only stale or
-                                    // different-session incumbents.
-                                    let claim = super::tmux::claim_or_reuse_watcher(
-                                        &shared_owned.tmux_watchers,
-                                        channel_id,
-                                        handle,
-                                        &provider,
-                                        "turn_bridge_tmux_ready",
-                                    );
-                                    watcher_owner_channel_id = claim.owner_channel_id();
-                                    claim.should_spawn()
-                                }
-                                #[cfg(not(unix))]
-                                {
-                                    let _ = handle;
-                                    false
-                                }
+                            #[cfg(unix)]
+                            let (watcher_claimed, watcher_claim_replaced_existing) = {
+                                // #1135: Reuse a live watcher for the same
+                                // tmux session; replace only stale or
+                                // different-session incumbents.
+                                let claim = super::tmux::claim_or_reuse_watcher(
+                                    &shared_owned.tmux_watchers,
+                                    channel_id,
+                                    handle,
+                                    &provider,
+                                    "turn_bridge_tmux_ready",
+                                );
+                                watcher_owner_channel_id = claim.owner_channel_id();
+                                (claim.should_spawn(), claim.replaced_existing())
+                            };
+                            #[cfg(not(unix))]
+                            let (watcher_claimed, watcher_claim_replaced_existing) = {
+                                let _ = handle;
+                                (false, false)
                             };
                             #[cfg(unix)]
                             let mut watcher_ready_for_relay = !watcher_claimed;
@@ -1894,7 +1892,9 @@ pub(super) fn spawn_turn_bridge(
                                             *guard = Some(last_offset);
                                         }
                                         turn_delivered.store(false, Ordering::Relaxed);
-                                        shared_owned.record_tmux_watcher_reconnect(channel_id);
+                                        if watcher_claim_replaced_existing {
+                                            shared_owned.record_tmux_watcher_reconnect(channel_id);
+                                        }
                                         tokio::spawn(super::tmux::tmux_output_watcher_with_restore(
                                             channel_id,
                                             http_bg,
