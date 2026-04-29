@@ -3,6 +3,8 @@
 > Code paths that are intentionally legacy on `main`. Each entry has a cleanup
 > owner issue. Touch these paths only inside the scope of the listed issue or
 > for a single narrow bugfix; do not extend them with new logic.
+>
+> Last refreshed: 2026-04-29 (against `main` @ `1d165cd3844e94015ab30cda8e4b1bba717f934d`).
 
 ## Schema Reminder
 

@@ -285,3 +285,6 @@ jobs:
 
       - name: Generated docs and architecture drift check
         run: python3 scripts/generate_inventory_docs.py --check
+
+      - name: Agent maintenance freshness gate (warn, #1432)
+        run: python3 scripts/check_agent_maintenance_docs.py --warning-only

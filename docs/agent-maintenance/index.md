@@ -47,6 +47,17 @@ Regenerate with:
 python3 scripts/generate_inventory_docs.py
 ```
 
+## Freshness Gate
+
+Run `python3 scripts/check_agent_maintenance_docs.py` before landing changes
+to migration-sensitive surfaces. The gate requires each guarded page to carry
+the `Last refreshed: <date> (against main @ <sha>)` header shape, verifies the
+referenced commit is an ancestor of `HEAD`, warns when copied line counts in
+`change-surfaces.md` drift from `docs/generated/module-inventory.md`, and
+requires the matching maintenance page to be touched when guarded code globs
+change. CI runs this gate in `--warning-only` mode during the initial rollout
+for #1432; remove that flag when the quiet-week promotion is approved.
+
 ## Schema (Common to All Pages)
 
 Each row in `change-surfaces.md` and `known-legacy.md`, and each entry in

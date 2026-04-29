@@ -332,6 +332,9 @@ jobs:
             echo "::warning::Generated docs drift detected — the Regen inventory docs workflow will push a fix commit. If CI PR does not re-run on the new commit (a known GitHub Actions limitation when bots push via GITHUB_TOKEN), push an empty commit or rerun this workflow."
           fi
 
+      - name: Agent maintenance freshness gate (warn, #1432)
+        run: python3 scripts/check_agent_maintenance_docs.py --warning-only
+
       - name: Maintainability audit (non-blocking, #1282)
         id: maintainability_audit
         continue-on-error: true
