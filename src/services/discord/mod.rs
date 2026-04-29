@@ -342,15 +342,26 @@ pub(super) fn turn_watchdog_timeout() -> Duration {
     })
 }
 
-/// Extend the watchdog deadline for a channel. Returns the new deadline_ms or None if at cap.
-pub async fn extend_watchdog_deadline(channel_id: u64, extend_by_secs: u64) -> Option<i64> {
-    ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id))?
-        .extend_timeout(extend_by_secs)
-        .await
+/// Extend the watchdog deadline for a channel and move the per-turn max cap with it.
+pub async fn extend_watchdog_deadline(
+    channel_id: u64,
+    extend_by_secs: u64,
+) -> Result<
+    crate::services::turn_orchestrator::WatchdogDeadlineExtension,
+    crate::services::turn_orchestrator::WatchdogDeadlineExtensionError,
+> {
+    let Some(handle) = ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id)) else {
+        return Err(
+            crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable,
+        );
+    };
+    handle.extend_timeout(extend_by_secs).await
 }
 
 /// Read and consume the deadline override for a channel (if any).
-pub(super) async fn take_watchdog_deadline_override(channel_id: u64) -> Option<i64> {
+pub(super) async fn take_watchdog_deadline_override(
+    channel_id: u64,
+) -> Option<crate::services::turn_orchestrator::WatchdogDeadlineExtension> {
     ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id))?
         .take_timeout_override()
         .await

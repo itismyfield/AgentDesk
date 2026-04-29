@@ -113,6 +113,21 @@ fn should_send_watchdog_deadlock_prealert(
         && last_notified_deadline_ms != Some(deadline_ms)
 }
 
+fn apply_watchdog_deadline_extension(
+    watchdog_token: &CancelToken,
+    extension: crate::services::turn_orchestrator::WatchdogDeadlineExtension,
+) -> i64 {
+    watchdog_token.watchdog_max_deadline_ms.store(
+        extension.max_deadline_ms,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    watchdog_token.watchdog_deadline_ms.store(
+        extension.new_deadline_ms,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    extension.new_deadline_ms
+}
+
 fn build_watchdog_deadlock_prealert_message(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -1103,16 +1118,10 @@ pub(in crate::services::discord) async fn start_headless_turn(
                     super::super::clear_watchdog_deadline_override(watchdog_channel_id_num).await;
                     return;
                 }
-                if let Some(new_deadline) =
+                if let Some(extension) =
                     super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
                 {
-                    let max_dl = watchdog_token
-                        .watchdog_max_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let clamped = std::cmp::min(new_deadline, max_dl);
-                    watchdog_token
-                        .watchdog_deadline_ms
-                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    apply_watchdog_deadline_extension(&watchdog_token, extension);
                     last_deadlock_prealert_deadline_ms = None;
                 }
                 {
@@ -1171,6 +1180,9 @@ pub(in crate::services::discord) async fn start_headless_turn(
                             .await;
                         return;
                     }
+                    let current_max_deadline = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     if maybe_send_watchdog_deadlock_prealert(
                         &watchdog_shared,
                         &watchdog_provider,
@@ -1178,23 +1190,17 @@ pub(in crate::services::discord) async fn start_headless_turn(
                         now,
                         current_deadline,
                         turn_started_ms,
-                        max_deadline_ms,
+                        current_max_deadline,
                     )
                     .await
                     {
                         last_deadlock_prealert_deadline_ms = Some(current_deadline);
                     }
                 }
-                if let Some(new_deadline) =
+                if let Some(extension) =
                     super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
                 {
-                    let max_dl = watchdog_token
-                        .watchdog_max_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let clamped = std::cmp::min(new_deadline, max_dl);
-                    watchdog_token
-                        .watchdog_deadline_ms
-                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    apply_watchdog_deadline_extension(&watchdog_token, extension);
                     last_deadlock_prealert_deadline_ms = None;
                 }
                 let current_deadline = watchdog_token
@@ -3485,20 +3491,15 @@ pub(in crate::services::discord) async fn handle_text_message(
                 }
 
                 // Check for API-based deadline extension
-                if let Some(new_deadline) =
+                if let Some(extension) =
                     super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
                 {
-                    let max_dl = watchdog_token
-                        .watchdog_max_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let clamped = std::cmp::min(new_deadline, max_dl);
-                    watchdog_token
-                        .watchdog_deadline_ms
-                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    let effective_deadline =
+                        apply_watchdog_deadline_extension(&watchdog_token, extension);
                     last_deadlock_prealert_deadline_ms = None;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     let remaining_min =
-                        (clamped - chrono::Utc::now().timestamp_millis()) / 1000 / 60;
+                        (effective_deadline - chrono::Utc::now().timestamp_millis()) / 1000 / 60;
                     tracing::info!(
                         "  [{ts}] ⏰ WATCHDOG: deadline extended for channel {} — {remaining_min}m remaining",
                         channel_id
@@ -3571,6 +3572,9 @@ pub(in crate::services::discord) async fn handle_text_message(
                             .await;
                         return;
                     }
+                    let current_max_deadline = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
                     if maybe_send_watchdog_deadlock_prealert(
                         &watchdog_shared,
                         &watchdog_provider,
@@ -3578,7 +3582,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                         now,
                         current_deadline,
                         turn_started_ms,
-                        max_deadline_ms,
+                        current_max_deadline,
                     )
                     .await
                     {
@@ -3586,16 +3590,10 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                 }
 
-                if let Some(new_deadline) =
+                if let Some(extension) =
                     super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
                 {
-                    let max_dl = watchdog_token
-                        .watchdog_max_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let clamped = std::cmp::min(new_deadline, max_dl);
-                    watchdog_token
-                        .watchdog_deadline_ms
-                        .store(clamped, std::sync::atomic::Ordering::Relaxed);
+                    apply_watchdog_deadline_extension(&watchdog_token, extension);
                     last_deadlock_prealert_deadline_ms = None;
                 }
                 let current_deadline = watchdog_token
@@ -6488,6 +6486,43 @@ mod tests {
         assert!(message.contains("provider: codex"));
         assert!(message.contains("remaining: 4분"));
         assert!(message.contains("POST /api/turns/42/extend-timeout"));
+    }
+
+    #[test]
+    fn watchdog_deadline_extension_moves_deadline_and_cap() {
+        let token = CancelToken::new();
+        token
+            .watchdog_deadline_ms
+            .store(1_000, std::sync::atomic::Ordering::Relaxed);
+        token
+            .watchdog_max_deadline_ms
+            .store(2_000, std::sync::atomic::Ordering::Relaxed);
+        let extension = crate::services::turn_orchestrator::WatchdogDeadlineExtension {
+            requested_deadline_ms: 4_000,
+            new_deadline_ms: 4_000,
+            max_deadline_ms: 4_000,
+            applied_extend_secs: 2,
+            requested_extend_secs: 2,
+            extension_count: 1,
+            extension_count_limit: 6,
+            extension_total_secs: 2,
+            extension_total_secs_limit: 10_800,
+            clamped: false,
+        };
+
+        assert_eq!(apply_watchdog_deadline_extension(&token, extension), 4_000);
+        assert_eq!(
+            token
+                .watchdog_deadline_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            4_000
+        );
+        assert_eq!(
+            token
+                .watchdog_max_deadline_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            4_000
+        );
     }
 
     #[test]

@@ -247,7 +247,10 @@ fn default_extend_secs() -> u64 {
 }
 
 /// Extend the watchdog timeout for an active turn in a channel.
-/// The deadline will be clamped to 3 hours from the original turn start.
+///
+/// The per-turn hard cap moves with accepted operator extensions and is bounded
+/// by `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT` and
+/// `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS`.
 pub async fn extend_turn_timeout(
     Path(channel_id): Path<String>,
     Json(body): Json<ExtendTimeoutBody>,
@@ -263,22 +266,56 @@ pub async fn extend_turn_timeout(
     };
 
     match crate::services::discord::extend_watchdog_deadline(channel_num, body.extend_secs).await {
-        Some(new_deadline_ms) => {
-            let remaining_min =
-                (new_deadline_ms - chrono::Utc::now().timestamp_millis()) / 1000 / 60;
+        Ok(extension) => {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let remaining_min = (extension.new_deadline_ms - now_ms) / 1000 / 60;
+            let max_remaining_min = (extension.max_deadline_ms - now_ms) / 1000 / 60;
             (
                 StatusCode::OK,
                 Json(json!({
                     "ok": true,
                     "channel_id": channel_id,
-                    "new_deadline_ms": new_deadline_ms,
+                    "requested_deadline_ms": extension.requested_deadline_ms,
+                    "new_deadline_ms": extension.new_deadline_ms,
+                    "effective_deadline_ms": extension.new_deadline_ms,
+                    "max_deadline_ms": extension.max_deadline_ms,
                     "remaining_minutes": remaining_min,
+                    "effective_remaining_minutes": remaining_min,
+                    "max_remaining_minutes": max_remaining_min,
+                    "requested_extend_secs": extension.requested_extend_secs,
+                    "applied_extend_secs": extension.applied_extend_secs,
+                    "extension_count": extension.extension_count,
+                    "extension_count_limit": extension.extension_count_limit,
+                    "extension_total_secs": extension.extension_total_secs,
+                    "extension_total_secs_limit": extension.extension_total_secs_limit,
+                    "clamped": extension.clamped,
                 })),
             )
         }
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "failed to extend watchdog deadline"})),
+        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no mailbox for channel", "channel_id": channel_id})),
+        ),
+        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::NoActiveTurn) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "no active turn for channel", "channel_id": channel_id})),
+        ),
+        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::ExtensionLimitReached {
+            extension_count,
+            extension_count_limit,
+            extension_total_secs,
+            extension_total_secs_limit,
+        }) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": "watchdog extension limit reached",
+                "channel_id": channel_id,
+                "extension_count": extension_count,
+                "extension_count_limit": extension_count_limit,
+                "extension_total_secs": extension_total_secs,
+                "extension_total_secs_limit": extension_total_secs_limit,
+                "clamped": true,
+            })),
         ),
     }
 }
@@ -312,4 +349,51 @@ fn pending_dispatch_row_to_json_pg(
         "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").map_err(|error| format!("decode pending github_issue_number: {error}"))?,
         "card_status": row.try_get::<String, _>("card_status").map_err(|error| format!("decode pending card_status: {error}"))?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn extend_turn_timeout_reports_effective_deadline_and_cap() {
+        let channel_id = ChannelId::new(1_417_000_001);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let token = Arc::new(CancelToken::new());
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now_ms + 60_000, Ordering::Relaxed);
+        token
+            .watchdog_max_deadline_ms
+            .store(now_ms + 120_000, Ordering::Relaxed);
+        assert!(
+            handle
+                .try_start_turn(token.clone(), UserId::new(7), MessageId::new(11))
+                .await
+        );
+
+        let (status, Json(body)) = extend_turn_timeout(
+            Path(channel_id.get().to_string()),
+            Json(ExtendTimeoutBody { extend_secs: 30 }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["clamped"], false);
+        assert_eq!(body["requested_extend_secs"], 30);
+        assert_eq!(body["applied_extend_secs"], 30);
+        assert_eq!(body["new_deadline_ms"], body["effective_deadline_ms"]);
+        assert!(body["effective_remaining_minutes"].as_i64().unwrap() >= 1);
+        assert!(
+            body["max_deadline_ms"].as_i64().unwrap() >= body["new_deadline_ms"].as_i64().unwrap()
+        );
+    }
 }

@@ -3,6 +3,7 @@ use std::fs;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -907,18 +908,21 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    pub(crate) async fn extend_timeout(&self, extend_by_secs: u64) -> Option<i64> {
+    pub(crate) async fn extend_timeout(
+        &self,
+        extend_by_secs: u64,
+    ) -> Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError> {
         self.request(
             |reply| ChannelMailboxMsg::ExtendTimeout {
                 extend_by_secs,
                 reply,
             },
-            None,
+            Err(WatchdogDeadlineExtensionError::MailboxUnavailable),
         )
         .await
     }
 
-    pub(crate) async fn take_timeout_override(&self) -> Option<i64> {
+    pub(crate) async fn take_timeout_override(&self) -> Option<WatchdogDeadlineExtension> {
         self.request(
             |reply| ChannelMailboxMsg::TakeTimeoutOverride { reply },
             None,
@@ -934,6 +938,54 @@ impl ChannelMailboxHandle {
             )
             .await;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WatchdogDeadlineExtension {
+    pub(crate) requested_deadline_ms: i64,
+    pub(crate) new_deadline_ms: i64,
+    pub(crate) max_deadline_ms: i64,
+    pub(crate) applied_extend_secs: u64,
+    pub(crate) requested_extend_secs: u64,
+    pub(crate) extension_count: u32,
+    pub(crate) extension_count_limit: u32,
+    pub(crate) extension_total_secs: u64,
+    pub(crate) extension_total_secs_limit: u64,
+    pub(crate) clamped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WatchdogDeadlineExtensionError {
+    MailboxUnavailable,
+    NoActiveTurn,
+    ExtensionLimitReached {
+        extension_count: u32,
+        extension_count_limit: u32,
+        extension_total_secs: u64,
+        extension_total_secs_limit: u64,
+    },
+}
+
+fn watchdog_extension_count_limit() -> u32 {
+    static CACHED: LazyLock<u32> = LazyLock::new(|| {
+        std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(6)
+    });
+    *CACHED
+}
+
+fn watchdog_extension_total_secs_limit() -> u64 {
+    static CACHED: LazyLock<u64> = LazyLock::new(|| {
+        std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(3 * 3600)
+    });
+    *CACHED
 }
 
 #[derive(Clone, Default)]
@@ -1083,10 +1135,10 @@ enum ChannelMailboxMsg {
     },
     ExtendTimeout {
         extend_by_secs: u64,
-        reply: oneshot::Sender<Option<i64>>,
+        reply: oneshot::Sender<Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError>>,
     },
     TakeTimeoutOverride {
-        reply: oneshot::Sender<Option<i64>>,
+        reply: oneshot::Sender<Option<WatchdogDeadlineExtension>>,
     },
     ClearTimeoutOverride {
         reply: oneshot::Sender<()>,
@@ -1105,7 +1157,9 @@ struct ChannelMailboxState {
     /// `cancel_token.is_some()` lifetime so the idle-detector freshness
     /// anchor is always source-of-truth from the mailbox actor itself.
     turn_started_at: Option<DateTime<Utc>>,
-    watchdog_deadline_override_ms: Option<i64>,
+    watchdog_deadline_override: Option<WatchdogDeadlineExtension>,
+    watchdog_extension_count: u32,
+    watchdog_extension_total_secs: u64,
 }
 
 fn persist_queue(
@@ -1132,7 +1186,7 @@ fn finalize_turn_state(
     state.active_user_message_id = None;
     state.recovery_started_at = None;
     state.turn_started_at = None;
-    state.watchdog_deadline_override_ms = None;
+    reset_watchdog_extension_state(state);
     let previous_len = state.intervention_queue.len();
     let pending_result = has_soft_intervention(&mut state.intervention_queue);
     if let Some(persistence) = persistence {
@@ -1146,6 +1200,91 @@ fn finalize_turn_state(
         mailbox_online: true,
         queue_exit_events: pending_result.queue_exit_events,
     }
+}
+
+fn reset_watchdog_extension_state(state: &mut ChannelMailboxState) {
+    state.watchdog_deadline_override = None;
+    state.watchdog_extension_count = 0;
+    state.watchdog_extension_total_secs = 0;
+}
+
+fn extend_active_watchdog_deadline(
+    state: &mut ChannelMailboxState,
+    requested_extend_secs: u64,
+) -> Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError> {
+    let Some(cancel_token) = state.cancel_token.as_ref() else {
+        return Err(WatchdogDeadlineExtensionError::NoActiveTurn);
+    };
+
+    let count_limit = watchdog_extension_count_limit();
+    let total_secs_limit = watchdog_extension_total_secs_limit();
+    if state.watchdog_extension_count >= count_limit
+        || state.watchdog_extension_total_secs >= total_secs_limit
+    {
+        return Err(WatchdogDeadlineExtensionError::ExtensionLimitReached {
+            extension_count: state.watchdog_extension_count,
+            extension_count_limit: count_limit,
+            extension_total_secs: state.watchdog_extension_total_secs,
+            extension_total_secs_limit: total_secs_limit,
+        });
+    }
+
+    let remaining_total_secs = total_secs_limit.saturating_sub(state.watchdog_extension_total_secs);
+    let applied_extend_secs = requested_extend_secs.min(remaining_total_secs);
+    if applied_extend_secs == 0 {
+        return Err(WatchdogDeadlineExtensionError::ExtensionLimitReached {
+            extension_count: state.watchdog_extension_count,
+            extension_count_limit: count_limit,
+            extension_total_secs: state.watchdog_extension_total_secs,
+            extension_total_secs_limit: total_secs_limit,
+        });
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let current_deadline = cancel_token.watchdog_deadline_ms.load(Ordering::Relaxed);
+    let current_deadline = if current_deadline > 0 {
+        current_deadline
+    } else {
+        now_ms
+    };
+    let current_max_deadline = cancel_token
+        .watchdog_max_deadline_ms
+        .load(Ordering::Relaxed);
+    let current_max_deadline = if current_max_deadline > 0 {
+        current_max_deadline
+    } else {
+        current_deadline
+    };
+    let requested_deadline_ms =
+        std::cmp::max(current_deadline, now_ms) + requested_extend_secs as i64 * 1000;
+    let new_deadline_ms =
+        std::cmp::max(current_deadline, now_ms) + applied_extend_secs as i64 * 1000;
+    let max_deadline_ms = std::cmp::max(current_max_deadline, new_deadline_ms);
+
+    cancel_token
+        .watchdog_deadline_ms
+        .store(new_deadline_ms, Ordering::Relaxed);
+    cancel_token
+        .watchdog_max_deadline_ms
+        .store(max_deadline_ms, Ordering::Relaxed);
+
+    state.watchdog_extension_count += 1;
+    state.watchdog_extension_total_secs += applied_extend_secs;
+
+    let extension = WatchdogDeadlineExtension {
+        requested_deadline_ms,
+        new_deadline_ms,
+        max_deadline_ms,
+        applied_extend_secs,
+        requested_extend_secs,
+        extension_count: state.watchdog_extension_count,
+        extension_count_limit: count_limit,
+        extension_total_secs: state.watchdog_extension_total_secs,
+        extension_total_secs_limit: total_secs_limit,
+        clamped: applied_extend_secs < requested_extend_secs,
+    };
+    state.watchdog_deadline_override = Some(extension);
+    Ok(extension)
 }
 
 fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
@@ -1201,7 +1340,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.active_user_message_id = Some(user_message_id);
                         state.recovery_started_at = None;
                         state.turn_started_at = Some(Utc::now());
-                        state.watchdog_deadline_override_ms = None;
+                        reset_watchdog_extension_state(&mut state);
                         true
                     };
                     let _ = reply.send(started);
@@ -1219,7 +1358,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if was_idle || state.turn_started_at.is_none() {
                         state.turn_started_at = Some(Utc::now());
                     }
-                    state.watchdog_deadline_override_ms = None;
+                    reset_watchdog_extension_state(&mut state);
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::RecoveryKickoff {
@@ -1236,7 +1375,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if activated_turn || state.turn_started_at.is_none() {
                         state.turn_started_at = Some(Utc::now());
                     }
-                    state.watchdog_deadline_override_ms = None;
+                    reset_watchdog_extension_state(&mut state);
                     let _ = reply.send(RecoveryKickoffResult { activated_turn });
                 }
                 ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
@@ -1328,7 +1467,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.active_user_message_id = None;
                     state.recovery_started_at = None;
                     state.turn_started_at = None;
-                    state.watchdog_deadline_override_ms = None;
+                    reset_watchdog_extension_state(&mut state);
                     let queue_exit_events = state
                         .intervention_queue
                         .drain(..)
@@ -1363,18 +1502,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     extend_by_secs,
                     reply,
                 } => {
-                    let extend_ms = extend_by_secs as i64 * 1000;
-                    let now_ms = chrono::Utc::now().timestamp_millis();
-                    let current = state.watchdog_deadline_override_ms.unwrap_or(now_ms);
-                    let new_deadline = std::cmp::max(current, now_ms) + extend_ms;
-                    state.watchdog_deadline_override_ms = Some(new_deadline);
-                    let _ = reply.send(Some(new_deadline));
+                    let _ = reply.send(extend_active_watchdog_deadline(&mut state, extend_by_secs));
                 }
                 ChannelMailboxMsg::TakeTimeoutOverride { reply } => {
-                    let _ = reply.send(state.watchdog_deadline_override_ms.take());
+                    let _ = reply.send(state.watchdog_deadline_override.take());
                 }
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
-                    state.watchdog_deadline_override_ms = None;
+                    state.watchdog_deadline_override = None;
                     let _ = reply.send(());
                 }
             }
@@ -2066,12 +2200,42 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(ChannelId::new(46));
 
-        let extended = handle.extend_timeout(30).await;
-        assert!(extended.is_some());
-        assert_eq!(handle.take_timeout_override().await, extended);
+        assert_eq!(
+            handle.extend_timeout(30).await,
+            Err(WatchdogDeadlineExtensionError::NoActiveTurn)
+        );
+
+        let token = Arc::new(CancelToken::new());
+        let now_ms = Utc::now().timestamp_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now_ms + 60_000, Ordering::Relaxed);
+        token
+            .watchdog_max_deadline_ms
+            .store(now_ms + 120_000, Ordering::Relaxed);
+        assert!(
+            handle
+                .try_start_turn(token.clone(), UserId::new(7), MessageId::new(11))
+                .await
+        );
+
+        let extended = handle.extend_timeout(30).await.unwrap();
+        assert_eq!(extended.applied_extend_secs, 30);
+        assert!(!extended.clamped);
+        assert!(extended.new_deadline_ms >= now_ms + 90_000);
+        assert_eq!(
+            token.watchdog_deadline_ms.load(Ordering::Relaxed),
+            extended.new_deadline_ms
+        );
+        assert_eq!(
+            token.watchdog_max_deadline_ms.load(Ordering::Relaxed),
+            extended.max_deadline_ms
+        );
+        assert!(extended.max_deadline_ms >= extended.new_deadline_ms);
+        assert_eq!(handle.take_timeout_override().await, Some(extended));
         assert_eq!(handle.take_timeout_override().await, None);
 
-        assert!(handle.extend_timeout(15).await.is_some());
+        assert!(handle.extend_timeout(15).await.is_ok());
         handle.clear_timeout_override().await;
         assert_eq!(handle.take_timeout_override().await, None);
     }

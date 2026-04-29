@@ -537,9 +537,9 @@ pub struct CancelToken {
     pub tmux_session: Mutex<Option<String>>,
     /// Watchdog deadline as Unix timestamp in milliseconds.
     /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
-    /// Maximum absolute cap: initial deadline + MAX_EXTENSION (3 hours).
+    /// Operator extensions may move this and the max cap together within configured limits.
     pub watchdog_deadline_ms: AtomicI64,
-    /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
+    /// The current ceiling for watchdog_deadline_ms. Operator extensions may move this forward.
     pub watchdog_max_deadline_ms: AtomicI64,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
