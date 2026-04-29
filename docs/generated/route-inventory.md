@@ -96,10 +96,10 @@
 | `GET` | `/api/github-issues` | `github_dashboard::list_issues` | `src/server/routes/github_dashboard.rs:60` | `src/server/routes/domains/integrations.rs:27` |
 | `PATCH` | `/api/github-issues/{owner}/{repo}/{number}/close` | `github_dashboard::close_issue` | `src/server/routes/github_dashboard.rs:103` | `src/server/routes/domains/integrations.rs:28` |
 | `GET` | `/api/github-repos` | `github_dashboard::list_repos` | `src/server/routes/github_dashboard.rs:26` | `src/server/routes/domains/integrations.rs:26` |
-| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:211` | `src/server/routes/domains/integrations.rs:19` |
-| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:362` | `src/server/routes/domains/integrations.rs:21` |
-| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:400` | `src/server/routes/domains/integrations.rs:21` |
-| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:452` | `src/server/routes/domains/integrations.rs:25` |
+| `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:212` | `src/server/routes/domains/integrations.rs:19` |
+| `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:437` | `src/server/routes/domains/integrations.rs:21` |
+| `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:475` | `src/server/routes/domains/integrations.rs:21` |
+| `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:527` | `src/server/routes/domains/integrations.rs:25` |
 | `GET` | `/api/health` | `health_api::health_handler` | `src/server/routes/health_api.rs:390` | `src/server/routes/domains/access.rs:19` |
 | `GET` | `/api/health/detail` | `health_api::health_detail_handler` | `src/server/routes/health_api.rs:395` | `src/server/routes/domains/ops.rs:24` |
 | `GET` | `/api/help` | `docs::api_help` | `src/server/routes/docs.rs:3514` | `src/server/routes/domains/ops.rs:230` |

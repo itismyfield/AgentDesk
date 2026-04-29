@@ -354,6 +354,7 @@ src/
 │   ├── dispatches.rs
 │   ├── dispatches_followup.rs
 │   ├── gemini.rs
+│   ├── issue_announcements.rs
 │   ├── kanban.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
