@@ -199,7 +199,7 @@
 | `server::routes::settings` | `src/server/routes/settings.rs` | 1476 | giant-file |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 328 |  |
 | `server::routes::skills_api` | `src/server/routes/skills_api.rs` | 708 |  |
-| `server::routes::stats` | `src/server/routes/stats.rs` | 529 |  |
+| `server::routes::stats` | `src/server/routes/stats.rs` | 586 |  |
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1855 | giant-file |
 | `server::state` | `src/server/state.rs` | 235 |  |
@@ -294,11 +294,11 @@
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 347 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 589 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 3253 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 3259 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2096 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
-| `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 698 |  |
+| `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 770 |  |
 | `services::discord::turn_bridge::recovery_text` | `src/services/discord/turn_bridge/recovery_text.rs` | 339 |  |
 | `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 191 |  |
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 145 |  |
@@ -321,8 +321,8 @@
 | `services::mcp_config` | `src/services/mcp_config.rs` | 871 |  |
 | `services::memory` | `src/services/memory/mod.rs` | 372 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 115 |  |
-| `services::memory::memento` | `src/services/memory/memento.rs` | 2479 | giant-file |
-| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 344 |  |
+| `services::memory::memento` | `src/services/memory/memento.rs` | 2556 | giant-file |
+| `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 397 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 331 |  |
 | `services::observability` | `src/services/observability/mod.rs` | 3392 | giant-file |
