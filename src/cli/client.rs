@@ -533,7 +533,12 @@ pub fn cmd_status() -> Result<(), String> {
     let total_sessions = sessions_list.len();
     let working_sessions = sessions_list
         .iter()
-        .filter(|session| session.get("status").and_then(Value::as_str) == Some("working"))
+        .filter(|session| {
+            matches!(
+                session.get("status").and_then(Value::as_str),
+                Some("turn_active" | "awaiting_bg" | "working")
+            )
+        })
         .count();
     let active_dispatch_sessions = sessions_list
         .iter()

@@ -256,11 +256,11 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
         result: []
       },
       {
-        match: "SELECT session_key FROM sessions WHERE status = 'working' AND last_heartbeat < datetime('now', '-10 minutes')",
+        match: "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') AND last_heartbeat < datetime('now', '-10 minutes')",
         result: []
       },
       {
-        match: "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat FROM sessions WHERE status = 'working'",
+        match: "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat FROM sessions WHERE status IN ('turn_active', 'working')",
         result: [
           {
             session_key: sessionKey,

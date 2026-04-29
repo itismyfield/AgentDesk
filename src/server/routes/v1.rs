@@ -19,6 +19,7 @@ use super::{
     ApiRouter, AppState, health_api, protected_api_domain,
     session_activity::SessionActivityResolver, settings,
 };
+use crate::db::session_status::is_active_status;
 
 const CACHE_OVERVIEW: &str = "max-age=30";
 const CACHE_AGENTS: &str = "max-age=10";
@@ -880,8 +881,8 @@ async fn load_agent_counts(state: AppState) -> Result<Value, Response> {
     let mut on_break = 0_i64;
     let mut offline = 0_i64;
     for agent in &agents {
-        let effective_working =
-            working_agents.contains(&agent.id) || agent.status.as_deref() == Some("working");
+        let effective_working = working_agents.contains(&agent.id)
+            || agent.status.as_deref().is_some_and(is_active_status);
         if effective_working {
             working += 1;
             continue;

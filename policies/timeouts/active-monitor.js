@@ -53,7 +53,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
 
       // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
       var freshSessions = agentdesk.db.query(
-        "SELECT session_key FROM sessions WHERE status = 'working' " +
+        "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') " +
         "AND last_heartbeat >= datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
       );
       for (var fs = 0; fs < freshSessions.length; fs++) {
@@ -66,7 +66,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       // #219: Increased grace period from 3min to 10min — agents running long tool
       // calls (cargo build, subagents) may not send heartbeats for several minutes.
       var staleWorkingSessions = agentdesk.db.query(
-        "SELECT session_key FROM sessions WHERE status = 'working' " +
+        "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') " +
         "AND last_heartbeat < datetime('now', '-10 minutes')"
       );
       for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
@@ -100,7 +100,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           agentdesk.db.execute(
             "UPDATE sessions " +
             "SET status = 'idle', active_dispatch_id = NULL, last_heartbeat = datetime('now') " +
-            "WHERE session_key = ? AND status = 'working'",
+            "WHERE session_key = ? AND status IN ('turn_active', 'working')",
             [swKey]
           );
           agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
@@ -111,7 +111,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       // deadlock-manager 자신의 세션은 제외 (자기 자신을 오탐하는 무한 루프 방지)
       var staleSessions = agentdesk.db.query(
         "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
-        "FROM sessions WHERE status = 'working' " +
+        "FROM sessions WHERE status IN ('turn_active', 'working') " +
         "AND session_key NOT LIKE '%deadlock-manager%' " +
         "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
       );
@@ -167,7 +167,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           agentdesk.db.execute(
             "UPDATE sessions " +
             "SET status = 'idle', last_heartbeat = datetime('now') " +
-            "WHERE session_key = ? AND status = 'working'",
+            "WHERE session_key = ? AND status IN ('turn_active', 'working')",
             [sess.session_key]
           );
           agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
@@ -312,7 +312,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       for (var ak = 0; ak < activeKeys.length; ak++) {
         var sessKey = activeKeys[ak].key.replace("deadlock_check:", "");
         var stillWorking = agentdesk.db.query(
-          "SELECT COUNT(*) as cnt FROM sessions WHERE session_key = ? AND status = 'working'",
+          "SELECT COUNT(*) as cnt FROM sessions WHERE session_key = ? AND status IN ('turn_active', 'working')",
           [sessKey]
         );
         if (stillWorking.length > 0 && stillWorking[0].cnt === 0) {

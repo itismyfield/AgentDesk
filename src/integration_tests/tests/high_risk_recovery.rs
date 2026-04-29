@@ -1132,7 +1132,7 @@ mod delayed_worker {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT INTO sessions (session_key, agent_id, provider, status, last_heartbeat, created_at) \
-                 VALUES (?1, 'agent-1', 'codex', 'working', datetime('now', '-31 minutes'), datetime('now', '-90 minutes'))",
+                 VALUES (?1, 'agent-1', 'codex', 'turn_active', datetime('now', '-31 minutes'), datetime('now', '-90 minutes'))",
                 [session_key],
             )
             .unwrap();
@@ -1196,7 +1196,7 @@ mod delayed_worker {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT INTO sessions (session_key, agent_id, provider, status, last_heartbeat, created_at) \
-                 VALUES (?1, 'agent-1', 'codex', 'working', datetime('now', '-31 minutes'), datetime('now', '-90 minutes'))",
+                 VALUES (?1, 'agent-1', 'codex', 'turn_active', datetime('now', '-31 minutes'), datetime('now', '-90 minutes'))",
                 [session_key],
             )
             .unwrap();

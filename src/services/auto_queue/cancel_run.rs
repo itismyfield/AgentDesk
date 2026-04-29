@@ -260,7 +260,7 @@ pub(crate) async fn clear_sessions_for_dispatches_pg(
                  tokens = 0,
                  last_heartbeat = NOW()
              WHERE active_dispatch_id = $2
-               AND status IN ('working', 'idle')",
+               AND status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle')",
         )
         .bind("Dispatch cancelled")
         .bind(dispatch_id)

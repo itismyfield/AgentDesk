@@ -61,7 +61,7 @@ module.exports = function attachOrphanDispatch(timeouts, helpers) {
         "AND td.created_at < datetime('now', '-5 minutes') " +
         "AND NOT EXISTS (" +
         "  SELECT 1 FROM sessions s " +
-        "  WHERE s.active_dispatch_id = td.id AND s.status = 'working'" +
+        "  WHERE s.active_dispatch_id = td.id AND s.status IN ('turn_active', 'working')" +
         ")",
         [kInProgress]
       );

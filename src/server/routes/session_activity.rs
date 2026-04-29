@@ -3,6 +3,11 @@ use std::process::Command;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+use crate::db::session_status::{
+    AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, is_active_status, is_bg_wait_status,
+    is_terminal_status, is_user_wait_status, normalize_session_status,
+};
+
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::tmux_session_has_live_pane;
 
@@ -115,16 +120,16 @@ where
     LiveProbe: FnMut(&str) -> bool,
     ReadyProbe: FnMut(&str) -> bool,
 {
-    let status = raw_status.unwrap_or("idle").trim();
-    if status.eq_ignore_ascii_case("disconnected") {
+    let status = normalize_session_status(raw_status, 0);
+    if is_terminal_status(status) {
         return EffectiveSessionState {
-            status: "disconnected",
+            status,
             active_dispatch_id: None,
             is_working: false,
         };
     }
 
-    let has_work_signal = status.eq_ignore_ascii_case("working") || active_dispatch_id.is_some();
+    let has_work_signal = is_active_status(status) || active_dispatch_id.is_some();
     let is_live = if has_work_signal {
         match session_key.and_then(parse_session_key) {
             Some((host, tmux_name)) if local_host_aliases.contains(&host) => {
@@ -138,19 +143,27 @@ where
     } else {
         false
     };
+    let effective_status = if is_live && has_work_signal {
+        crate::db::session_status::TURN_ACTIVE
+    } else if is_bg_wait_status(status) {
+        AWAITING_BG
+    } else if is_user_wait_status(status) {
+        if status == IDLE { IDLE } else { AWAITING_USER }
+    } else if status == DISCONNECTED {
+        DISCONNECTED
+    } else {
+        IDLE
+    };
 
     EffectiveSessionState {
-        status: if is_live && has_work_signal {
-            "working"
-        } else {
-            "idle"
-        },
+        status: effective_status,
         active_dispatch_id: if is_live {
             active_dispatch_id.map(str::to_string)
         } else {
             None
         },
-        is_working: is_live && has_work_signal,
+        is_working: effective_status == crate::db::session_status::TURN_ACTIVE
+            || effective_status == AWAITING_BG,
     }
 }
 
@@ -229,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_fresh_heartbeat_stays_working() {
+    fn remote_fresh_heartbeat_stays_turn_active() {
         let now = Utc::now();
         let heartbeat = (now - Duration::seconds(30))
             .format("%Y-%m-%d %H:%M:%S")
@@ -247,7 +260,7 @@ mod tests {
             &mut probe_ready,
         );
 
-        assert_eq!(state.status, "working");
+        assert_eq!(state.status, "turn_active");
         assert_eq!(state.active_dispatch_id.as_deref(), Some("dispatch-2"));
         assert!(state.is_working);
     }
@@ -303,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn local_live_tmux_without_ready_prompt_stays_working() {
+    fn local_live_tmux_without_ready_prompt_stays_turn_active() {
         let now = Utc::now();
         let mut probe_live = |_name: &str| true;
         let mut probe_ready = |_name: &str| false;
@@ -322,8 +335,29 @@ mod tests {
             &mut probe_ready,
         );
 
-        assert_eq!(state.status, "working");
+        assert_eq!(state.status, "turn_active");
         assert_eq!(state.active_dispatch_id.as_deref(), Some("dispatch-4"));
+        assert!(state.is_working);
+    }
+
+    #[test]
+    fn awaiting_background_stays_visible_without_foreground_dispatch() {
+        let now = Utc::now();
+        let mut probe_live = |_name: &str| false;
+        let mut probe_ready = |_name: &str| false;
+        let state = resolve_effective_state_with(
+            &local_aliases(),
+            Some("remote-host:AgentDesk-codex-adk-cdx"),
+            Some("awaiting_bg"),
+            None,
+            None,
+            now,
+            &mut probe_live,
+            &mut probe_ready,
+        );
+
+        assert_eq!(state.status, "awaiting_bg");
+        assert_eq!(state.active_dispatch_id, None);
         assert!(state.is_working);
     }
 

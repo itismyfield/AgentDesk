@@ -445,7 +445,7 @@ async fn active_turn_output_offset_refreshes_session_heartbeat_before_done() {
         .execute(
             "INSERT INTO sessions
              (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
-             VALUES (?1, ?2, 'working', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+             VALUES (?1, ?2, 'turn_active', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
             [
                 session_key.as_str(),
                 provider.as_str(),
@@ -564,7 +564,7 @@ fn active_turn_activity_heartbeat_refreshes_once_per_interval_window() {
     conn.execute(
         "INSERT INTO sessions
          (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
-         VALUES (?1, ?2, 'working', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
+         VALUES (?1, ?2, 'turn_active', ?3, '2026-04-09 01:02:03', '2026-04-09 01:02:03')",
         [
             session_key.as_str(),
             provider.as_str(),

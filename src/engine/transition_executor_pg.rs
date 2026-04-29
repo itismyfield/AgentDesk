@@ -165,7 +165,7 @@ pub(crate) async fn cancel_live_dispatches_for_terminal_card_pg(
             .map_err(|error| format!("read live dispatch id for {card_id}: {error}"))?;
         sqlx::query(
             "UPDATE sessions
-             SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END,
+             SET status = CASE WHEN status IN ('turn_active', 'working') THEN 'idle' ELSE status END,
                  active_dispatch_id = NULL
              WHERE active_dispatch_id = $1",
         )

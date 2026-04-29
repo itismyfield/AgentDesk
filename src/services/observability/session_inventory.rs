@@ -2,6 +2,10 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
+use crate::db::session_status::{
+    AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, LEGACY_WORKING, TURN_ACTIVE,
+};
+
 pub const ACTIVE_TOOL_WINDOW_SECS: i64 = 5;
 pub const STUCK_TOOL_WINDOW_SECS: i64 = 5 * 60;
 
@@ -59,24 +63,34 @@ pub fn derive_visual_status(
     active_children: i32,
     now: DateTime<Utc>,
 ) -> VisualStatus {
-    if last_tool_at
-        .map(|last| now.signed_duration_since(last).num_seconds() < ACTIVE_TOOL_WINDOW_SECS)
-        .unwrap_or(false)
+    let normalized = raw_status
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(IDLE)
+        .to_ascii_lowercase();
+
+    if normalized == TURN_ACTIVE
+        && last_tool_at
+            .map(|last| now.signed_duration_since(last).num_seconds() > STUCK_TOOL_WINDOW_SECS)
+            .unwrap_or(false)
+        && active_children == 0
+    {
+        return VisualStatus::StuckSuspect;
+    }
+
+    if normalized == TURN_ACTIVE
+        || last_tool_at
+            .map(|last| now.signed_duration_since(last).num_seconds() < ACTIVE_TOOL_WINDOW_SECS)
+            .unwrap_or(false)
     {
         return VisualStatus::Active;
     }
 
-    if active_children > 0 {
+    if normalized == AWAITING_BG || active_children > 0 {
         return VisualStatus::IdleBgWait;
     }
 
-    let normalized = raw_status
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("idle")
-        .to_ascii_lowercase();
-
-    if normalized == "working"
+    if normalized == LEGACY_WORKING
         && last_tool_at
             .map(|last| now.signed_duration_since(last).num_seconds() > STUCK_TOOL_WINDOW_SECS)
             .unwrap_or(false)
@@ -84,7 +98,10 @@ pub fn derive_visual_status(
         return VisualStatus::StuckSuspect;
     }
 
-    if normalized == "idle" || normalized == "disconnected" {
+    if matches!(
+        normalized.as_str(),
+        AWAITING_USER | IDLE | DISCONNECTED | "error" | "aborted"
+    ) {
         return VisualStatus::IdleNoPending;
     }
 
@@ -203,23 +220,50 @@ mod tests {
     fn visual_status_distinguishes_four_states() {
         let now = Utc::now();
         assert_eq!(
-            derive_visual_status(Some("working"), Some(now - Duration::seconds(4)), 0, now),
+            derive_visual_status(
+                Some("turn_active"),
+                Some(now - Duration::seconds(4)),
+                0,
+                now
+            ),
             VisualStatus::Active
         );
         assert_eq!(
-            derive_visual_status(Some("working"), Some(now - Duration::seconds(30)), 2, now),
+            derive_visual_status(
+                Some("awaiting_bg"),
+                Some(now - Duration::seconds(30)),
+                2,
+                now
+            ),
             VisualStatus::IdleBgWait
         );
         assert_eq!(
-            derive_visual_status(Some("working"), Some(now - Duration::minutes(6)), 0, now),
+            derive_visual_status(
+                Some("turn_active"),
+                Some(now - Duration::minutes(6)),
+                0,
+                now
+            ),
             VisualStatus::StuckSuspect
+        );
+        assert_eq!(
+            derive_visual_status(Some("awaiting_user"), None, 0, now),
+            VisualStatus::IdleNoPending
         );
         assert_eq!(
             derive_visual_status(Some("idle"), None, 0, now),
             VisualStatus::IdleNoPending
         );
         assert_eq!(
-            derive_visual_status(Some("error"), None, 0, now),
+            derive_visual_status(Some("working"), Some(now - Duration::seconds(4)), 0, now),
+            VisualStatus::Active
+        );
+        assert_eq!(
+            derive_visual_status(Some("working"), Some(now - Duration::minutes(6)), 0, now),
+            VisualStatus::StuckSuspect
+        );
+        assert_eq!(
+            derive_visual_status(Some("aborted"), None, 0, now),
             VisualStatus::IdleNoPending
         );
     }

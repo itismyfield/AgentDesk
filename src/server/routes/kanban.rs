@@ -2105,7 +2105,7 @@ pub async fn pm_decision(
                 "SELECT COUNT(*)::BIGINT
                  FROM task_dispatches td
                  JOIN sessions s ON s.active_dispatch_id = td.id
-                    AND s.status IN ('working', 'idle')
+                    AND s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle')
                  WHERE td.kanban_card_id = $1
                    AND td.status IN ('pending', 'dispatched')",
             )

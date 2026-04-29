@@ -355,7 +355,7 @@ impl RuntimeSupervisor {
                            AND td.created_at < NOW() - INTERVAL '5 minutes'
                            AND NOT EXISTS (
                              SELECT 1 FROM sessions s
-                             WHERE s.active_dispatch_id = td.id AND s.status = 'working'
+                             WHERE s.active_dispatch_id = td.id AND s.status IN ('turn_active', 'working')
                            )",
                     )
                     .bind(&dispatch_id)

@@ -2309,7 +2309,7 @@ async fn agent_turn_pg_returns_recent_output_from_inflight_snapshot() {
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
-         VALUES ($1, 'agent-turn', 'codex', 'working', 'dispatch-turn', NOW(), '2026-04-06 10:00:00')",
+         VALUES ($1, 'agent-turn', 'codex', 'turn_active', 'dispatch-turn', NOW(), '2026-04-06 10:00:00')",
     )
     .bind(format!("mac-mini:{tmux_name}"))
     .execute(&pool)
@@ -2340,7 +2340,7 @@ async fn agent_turn_pg_returns_recent_output_from_inflight_snapshot() {
         .unwrap();
     assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "working");
+    assert_eq!(json["status"], "turn_active");
     assert_eq!(json["started_at"], "2026-04-06 10:11:12");
     assert_eq!(json["updated_at"], "2026-04-06 10:11:13");
     assert_eq!(json["recent_output_source"], "inflight");
@@ -2486,7 +2486,7 @@ async fn stop_agent_turn_preserves_matching_tmux_session() {
         conn.execute(
             "INSERT INTO sessions
              (session_key, agent_id, provider, status, last_heartbeat, created_at)
-             VALUES (?1, 'agent-stop', 'codex', 'working', datetime('now'), datetime('now'))",
+             VALUES (?1, 'agent-stop', 'codex', 'turn_active', datetime('now'), datetime('now'))",
             [session_key.clone()],
         )
         .unwrap();
@@ -2577,7 +2577,7 @@ async fn stop_agent_turn_pg_preserves_pending_queue_via_mailbox_fallback_cleanup
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'agent-stop-canonical', 'codex', 'working', NOW(), NOW())",
+         VALUES ($1, 'agent-stop-canonical', 'codex', 'turn_active', NOW(), NOW())",
     )
     .bind(session_key.as_str())
     .execute(&pool)
@@ -2674,7 +2674,7 @@ async fn stop_agent_turn_tmux_only_pg_fallback_clears_mailbox_without_detaching_
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'agent-stop-tmux-only', 'codex', 'working', NOW(), NOW())",
+         VALUES ($1, 'agent-stop-tmux-only', 'codex', 'turn_active', NOW(), NOW())",
     )
     .bind(session_key.as_str())
     .execute(&pool)
@@ -2924,7 +2924,7 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
         conn.execute(
             "INSERT INTO sessions
              (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
-             VALUES (?1, 'agent-queue-stop', 'codex', 'working', 'dispatch-turn-cancel', datetime('now'), datetime('now'))",
+             VALUES (?1, 'agent-queue-stop', 'codex', 'turn_active', 'dispatch-turn-cancel', datetime('now'), datetime('now'))",
             [session_key.clone()],
         )
         .unwrap();
@@ -3030,7 +3030,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup_pg() {
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'agent-cancel-canonical', 'claude', 'working', NOW(), NOW())",
+         VALUES ($1, 'agent-cancel-canonical', 'claude', 'turn_active', NOW(), NOW())",
     )
     .bind(session_key)
     .execute(&pool)
@@ -3142,7 +3142,7 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'project-agentdesk', 'claude', 'working', NOW() - INTERVAL '1 minute', NOW())",
+         VALUES ($1, 'project-agentdesk', 'claude', 'turn_active', NOW() - INTERVAL '1 minute', NOW())",
     )
     .bind(cc_session_key)
     .execute(&pool)
@@ -3151,7 +3151,7 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'project-agentdesk', 'codex', 'working', NOW(), NOW())",
+         VALUES ($1, 'project-agentdesk', 'codex', 'turn_active', NOW(), NOW())",
     )
     .bind(cdx_session_key)
     .execute(&pool)
@@ -3203,7 +3203,7 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
             .await
             .unwrap();
     assert_eq!(cc_status, "disconnected");
-    assert_eq!(cdx_status, "working");
+    assert_eq!(cdx_status, "turn_active");
 
     pool.close().await;
     pg_db.drop().await;
@@ -3340,7 +3340,7 @@ async fn agents_pg_include_current_thread_channel_id_from_working_session() {
     .unwrap();
     sqlx::query(
         "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat)
-         VALUES ($1, 'a1', 'codex', 'working', '1485506232256168011', NOW())",
+         VALUES ($1, 'a1', 'codex', 'turn_active', '1485506232256168011', NOW())",
     )
     .bind("mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011")
     .execute(&pool)
@@ -3500,7 +3500,7 @@ async fn claude_session_id_pg_get_clears_stale_fixed_working_session() {
         "INSERT INTO sessions (
             session_key, provider, status, active_dispatch_id, claude_session_id, last_heartbeat, created_at
          ) VALUES (
-            'test:stale-working', 'claude', 'working', 'dispatch-123', 'stale-sid',
+            'test:stale-working', 'claude', 'turn_active', 'dispatch-123', 'stale-sid',
             NOW() - INTERVAL '7 hours', NOW() - INTERVAL '7 hours'
          )",
     )
@@ -4602,7 +4602,7 @@ async fn hooks_disconnect_session_pg_only_without_sqlite_mirror() {
     .bind("session-pg-hook-disconnect")
     .bind("agent-pg-hook-session")
     .bind("claude")
-    .bind("working")
+    .bind("turn_active")
     .execute(&pg_pool)
     .await
     .unwrap();
@@ -5481,7 +5481,7 @@ async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns
             "INSERT INTO sessions (
                 session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
             ) VALUES (
-                ?1, 'agent-manual-backlog', 'codex', 'working', 'dispatch-manual-backlog',
+                ?1, 'agent-manual-backlog', 'codex', 'turn_active', 'dispatch-manual-backlog',
                 datetime('now', '-9 minutes'), datetime('now', '-9 minutes')
             )",
             sqlite_params![session_key],
@@ -8263,7 +8263,7 @@ async fn agent_pg_archive_rejects_when_active_turn_present() {
     // Seed an active turn for the managed-agent (status='working').
     sqlx::query(
         "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat)
-         VALUES ('sess-active', 'managed-agent', 'codex', 'working', 'dispatch-1', NOW())",
+         VALUES ('sess-active', 'managed-agent', 'codex', 'turn_active', 'dispatch-1', NOW())",
     )
     .execute(&pool)
     .await
@@ -8961,7 +8961,7 @@ async fn sessions_tmux_output_pg_http_route_returns_shape_for_seeded_session() {
     sqlx::query(
         "INSERT INTO sessions
          (session_key, agent_id, provider, status, last_heartbeat, created_at)
-         VALUES ($1, 'agent-1067-http', 'codex', 'working', NOW(), NOW())",
+         VALUES ($1, 'agent-1067-http', 'codex', 'turn_active', NOW(), NOW())",
     )
     .bind(&session_key)
     .execute(&pool)
@@ -9002,7 +9002,7 @@ async fn sessions_tmux_output_pg_http_route_returns_shape_for_seeded_session() {
     assert_eq!(json["tmux_name"], tmux_name);
     assert_eq!(json["agent_id"], "agent-1067-http");
     assert_eq!(json["provider"], "codex");
-    assert_eq!(json["status"], "working");
+    assert_eq!(json["status"], "turn_active");
     assert_eq!(json["lines_requested"], 25);
     assert_eq!(json["lines_effective"], 25);
     // tmux session was never created, so capture returns empty and tmux_alive=false.
@@ -13903,7 +13903,7 @@ async fn stats_pg_only_without_sqlite_mirror() {
     )
     .bind("session-pg-stats")
     .bind("agent-pg-stats")
-    .bind("working")
+    .bind("turn_active")
     .bind("dispatch-working-pg-stats")
     .bind(123_i32)
     .execute(&pg_pool)
@@ -14307,7 +14307,7 @@ async fn force_transition_to_done_tracks_pr_from_live_work_dispatch_and_cleans_i
         "INSERT INTO sessions (
             session_key, agent_id, provider, status, cwd, active_dispatch_id, last_heartbeat, created_at
         ) VALUES (
-            'session-ft-terminal', 'agent-ft-terminal', 'codex', 'working', $1, 'dispatch-ft-terminal',
+            'session-ft-terminal', 'agent-ft-terminal', 'codex', 'turn_active', $1, 'dispatch-ft-terminal',
             NOW() - INTERVAL '4 minutes', NOW() - INTERVAL '4 minutes'
         )",
     )
@@ -14606,7 +14606,7 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
     .bind("session-ft-clean-pg")
     .bind("agent-ft-clean-pg")
     .bind("codex")
-    .bind("working")
+    .bind("turn_active")
     .bind("dispatch-ft-clean-pg")
     .execute(&pg_pool)
     .await
@@ -15826,7 +15826,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
             "INSERT INTO sessions (
                 session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
             ) VALUES (
-                'session-reopen-reset', 'agent-reopen-reset', 'codex', 'working', 'dispatch-reopen-reset',
+                'session-reopen-reset', 'agent-reopen-reset', 'codex', 'turn_active', 'dispatch-reopen-reset',
                 datetime('now', '-9 minutes'), datetime('now', '-9 minutes')
             )",
             [],
@@ -18980,7 +18980,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-slot-thread-0', 'agent-slot', 'claude', 'working',
+                'host:AgentDesk-claude-slot-thread-0', 'agent-slot', 'claude', 'turn_active',
                 'slot 0 seed', 41, 'dispatch-slot-old-0', '222000000000000001', 'claude-slot-0',
                 datetime('now'), datetime('now')
             )",
@@ -18993,7 +18993,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-slot-thread-1', 'agent-slot', 'claude', 'working',
+                'host:AgentDesk-claude-slot-thread-1', 'agent-slot', 'claude', 'turn_active',
                 'slot 1 seed', 73, 'dispatch-slot-old-1', '222000000000000002', 'claude-slot-1',
                 datetime('now'), datetime('now')
             )",
@@ -19128,7 +19128,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         assert_eq!(second_slot, Some(1));
         conn.execute(
             "UPDATE sessions
-             SET status = 'working',
+             SET status = 'turn_active',
                  session_info = 'slot 0 in-progress context',
                  tokens = 99,
                  active_dispatch_id = 'dispatch-slot-in-progress',
@@ -19139,7 +19139,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         .unwrap();
         conn.execute(
             "UPDATE sessions
-             SET status = 'working',
+             SET status = 'turn_active',
                  session_info = 'slot 1 should stay hot',
                  tokens = 123,
                  active_dispatch_id = 'dispatch-slot-1-hot',
@@ -19267,7 +19267,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
     assert_eq!(
         untouched_slot_session,
         (
-            "working".to_string(),
+            "turn_active".to_string(),
             Some("dispatch-slot-1-hot".to_string()),
             123,
             Some("claude-slot-1-hot".to_string())
@@ -19418,7 +19418,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-same-group-thread', 'agent-same-group', 'claude', 'working',
+                'host:AgentDesk-claude-same-group-thread', 'agent-same-group', 'claude', 'turn_active',
                 'slot seed', 17, 'dispatch-same-group-seed', '222000000000000101', 'claude-same-group-seed',
                 datetime('now'), datetime('now')
             )",
@@ -19488,7 +19488,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
         );
         conn.execute(
             "UPDATE sessions
-             SET status = 'working',
+             SET status = 'turn_active',
                  session_info = 'group context retained',
                  tokens = 77,
                  active_dispatch_id = 'dispatch-same-group-hot',
@@ -23136,7 +23136,7 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
+                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'turn_active',
                 'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
                 datetime('now'), datetime('now')
             )",
@@ -23148,7 +23148,7 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
                 session_key, agent_id, provider, status, session_info, tokens,
                 active_dispatch_id, claude_session_id, last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'working',
+                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'turn_active',
                 'pause sidecar seed', 7, 'dispatch-pause-phase-gate', 'claude-pause-sidecar',
                 datetime('now'), datetime('now')
             )",
@@ -23246,7 +23246,7 @@ async fn auto_queue_pause_soft_does_not_cancel_live_dispatches_or_release_slots(
     assert_eq!(
         session,
         (
-            "working".to_string(),
+            "turn_active".to_string(),
             Some("dispatch-pause-slot".to_string()),
             19,
             Some("claude-pause-slot".to_string()),
@@ -23374,7 +23374,7 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'working',
+                'host:AgentDesk-claude-pause-slot', 'agent-pause-slot', 'claude', 'turn_active',
                 'pause slot seed', 19, 'dispatch-pause-slot', '222000000000004496', 'claude-pause-slot',
                 datetime('now'), datetime('now')
             )",
@@ -23386,7 +23386,7 @@ async fn auto_queue_pause_force_cancels_live_dispatches_and_releases_slots() {
                 session_key, agent_id, provider, status, session_info, tokens,
                 active_dispatch_id, claude_session_id, last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'working',
+                'host:AgentDesk-claude-pause-sidecar', 'agent-pause-slot', 'claude', 'turn_active',
                 'pause sidecar seed', 7, 'dispatch-pause-phase-gate', 'claude-pause-sidecar',
                 datetime('now'), datetime('now')
             )",
@@ -23669,7 +23669,7 @@ async fn auto_queue_pause_pg_soft_does_not_cancel_live_dispatches_or_release_slo
     .bind("host:AgentDesk-claude-pause-slot-pg")
     .bind("agent-pause-slot-pg")
     .bind("claude")
-    .bind("working")
+    .bind("turn_active")
     .bind("pause slot seed pg")
     .bind(19_i64)
     .bind("dispatch-pause-slot-pg")
@@ -23770,7 +23770,7 @@ async fn auto_queue_pause_pg_soft_does_not_cancel_live_dispatches_or_release_slo
     assert_eq!(
         session,
         (
-            "working".to_string(),
+            "turn_active".to_string(),
             Some("dispatch-pause-slot-pg".to_string()),
             19,
             Some("claude-pause-slot-pg".to_string()),
@@ -23953,7 +23953,7 @@ async fn auto_queue_cancel_cancels_live_dispatches_skips_entries_and_releases_sl
                 active_dispatch_id, thread_channel_id, claude_session_id,
                 last_heartbeat, created_at
             ) VALUES (
-                'host:AgentDesk-claude-cancel-slot', 'agent-cancel-slot', 'claude', 'working',
+                'host:AgentDesk-claude-cancel-slot', 'agent-cancel-slot', 'claude', 'turn_active',
                 'cancel slot seed', 23, 'dispatch-cancel-slot', '222000000000004597', 'claude-cancel-slot',
                 datetime('now'), datetime('now')
             )",
@@ -24607,7 +24607,7 @@ async fn auto_queue_cancel_pg_cancels_live_dispatches_skips_entries_and_releases
     .bind("host:AgentDesk-claude-cancel-slot-pg")
     .bind("agent-cancel-slot-pg")
     .bind("claude")
-    .bind("working")
+    .bind("turn_active")
     .bind("cancel slot seed pg")
     .bind(23_i64)
     .bind("dispatch-cancel-slot-pg")
@@ -27795,7 +27795,7 @@ async fn v1_routes_pg_surface_dashboard_contract() {
     .bind("host:session-v1")
     .bind("agent-v1")
     .bind("claude")
-    .bind("working")
+    .bind("turn_active")
     .bind("dispatch-current")
     .bind("v1 session")
     .bind(321_i64)
@@ -28155,7 +28155,7 @@ async fn v1_stream_pg_emits_snapshot_and_replays_shared_bus_events() {
     .bind("host:session-v1-stream")
     .bind("agent-v1-stream")
     .bind("claude")
-    .bind("working")
+    .bind("turn_active")
     .bind("dispatch-v1-stream")
     .bind("v1 stream session")
     .bind(321_i64)
