@@ -2878,7 +2878,7 @@ async fn cancel_turn_preserves_tmux_and_cancels_active_dispatch() {
 }
 
 #[tokio::test]
-async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
+async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup_pg() {
     let _env_lock = env_lock();
     let runtime_root = tempfile::tempdir().unwrap();
     let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
@@ -2995,7 +2995,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
 }
 
 #[tokio::test]
-async fn cancel_turn_targets_requested_provider_for_paired_agent() {
+async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
