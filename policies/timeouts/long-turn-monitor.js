@@ -22,6 +22,7 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var inspectInflightProgress = helpers.inspectInflightProgress;
+  var isSyntheticMissingInflightReattachPlaceholder = helpers.isSyntheticMissingInflightReattachPlaceholder;
   var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
@@ -37,7 +38,13 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
       var WATCHDOG_EXTENSION_COOLDOWN_MINUTES = 20;
       var WATCHDOG_EXTENSION_RECENT_PROGRESS_MINUTES = 5;
       try {
-        var inflights = agentdesk.inflight.list();
+        var rawInflights = agentdesk.inflight.list() || [];
+        var inflights = [];
+        for (var fi = 0; fi < rawInflights.length; fi++) {
+          if (!isSyntheticMissingInflightReattachPlaceholder(rawInflights[fi])) {
+            inflights.push(rawInflights[fi]);
+          }
+        }
         for (var li = 0; li < inflights.length; li++) {
           var inf = inflights[li];
           if (!inf.started_at) continue;

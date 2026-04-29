@@ -26,6 +26,68 @@ test("timeouts helper module parses session channel names", () => {
   );
 });
 
+test("timeouts helper module identifies synthetic missing-inflight reattach placeholders", () => {
+  const { module } = loadPolicy("policies/timeouts.js");
+
+  const synthetic = {
+    session_id: null,
+    request_owner_user_id: 0,
+    user_msg_id: 0,
+    any_tool_used: false,
+    has_post_tool_text: false,
+    rebind_origin: true
+  };
+
+  assert.equal(module.helpers.isSyntheticMissingInflightReattachPlaceholder(synthetic), true);
+  assert.equal(
+    module.helpers.isSyntheticMissingInflightReattachPlaceholder({
+      ...synthetic,
+      request_owner_user_id: 123
+    }),
+    false
+  );
+  assert.equal(
+    module.helpers.isSyntheticMissingInflightReattachPlaceholder({
+      ...synthetic,
+      any_tool_used: true
+    }),
+    false
+  );
+});
+
+test("timeouts helper module ignores synthetic reattach placeholders for inflight progress", () => {
+  const { module } = loadPolicy("policies/timeouts.js", {
+    inflights: [
+      {
+        provider: "codex",
+        channel_id: "channel-1",
+        channel_name: "project-agentdesk",
+        session_key: "provider:AgentDesk-codex-project-agentdesk",
+        tmux_session_name: "AgentDesk-codex-project-agentdesk",
+        session_id: null,
+        request_owner_user_id: 0,
+        user_msg_id: 0,
+        any_tool_used: false,
+        has_post_tool_text: false,
+        rebind_origin: true,
+        started_at: timestampMinutesAgo(95),
+        updated_at: timestampMinutesAgo(95)
+      }
+    ]
+  });
+
+  const progress = module.helpers.inspectInflightProgress(
+    "provider:AgentDesk-codex-project-agentdesk",
+    "AgentDesk-codex-project-agentdesk",
+    30,
+    180
+  );
+
+  assert.equal(progress.inflight, null);
+  assert.equal(progress.channel_id, null);
+  assert.equal(progress.recent, false);
+});
+
 test("timeouts reconciliation module scans pending fallback dispatch keys", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([
@@ -168,6 +230,69 @@ test("timeouts active monitor module checks tmux live panes exactly", () => {
   assert.equal(policy._tmuxHasLivePane("AgentDesk-codex-project-agentdesk"), true);
 });
 
+test("timeouts active monitor module treats synthetic reattach placeholders as absent", () => {
+  const sessionKey = "provider:AgentDesk-codex-project-agentdesk";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    inflights: [
+      {
+        provider: "codex",
+        channel_id: "channel-1",
+        channel_name: "project-agentdesk",
+        session_key: sessionKey,
+        tmux_session_name: "AgentDesk-codex-project-agentdesk",
+        session_id: null,
+        request_owner_user_id: 0,
+        user_msg_id: 0,
+        any_tool_used: false,
+        has_post_tool_text: false,
+        rebind_origin: true,
+        started_at: timestampMinutesAgo(95),
+        updated_at: timestampMinutesAgo(95)
+      }
+    ],
+    dbQuery: createSqlRouter([
+      {
+        match: "AND last_heartbeat >= datetime('now', '-30 minutes')",
+        result: []
+      },
+      {
+        match: "SELECT session_key FROM sessions WHERE status = 'working' AND last_heartbeat < datetime('now', '-10 minutes')",
+        result: []
+      },
+      {
+        match: "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat FROM sessions WHERE status = 'working'",
+        result: [
+          {
+            session_key: sessionKey,
+            agent_id: "agent-1",
+            active_dispatch_id: "dispatch-1",
+            last_heartbeat: "2026-04-29 10:00:00"
+          }
+        ]
+      },
+      {
+        match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_check:%'",
+        result: []
+      },
+      {
+        match: "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_history:%'",
+        result: []
+      }
+    ]),
+    exec() {
+      return "0\n";
+    }
+  });
+
+  policy._section_I();
+
+  assert.equal(state.deadlockAlerts.length, 0);
+  assert.equal(state.httpPosts.length, 0);
+  assert.match(state.executions[0].sql, /SET status = 'idle'/);
+  assert.deepEqual(toPlain(state.executions[0].params), [sessionKey]);
+  assert.deepEqual(toPlain(state.executions[1].params), ["deadlock_check:" + sessionKey]);
+});
+
 test("timeouts orphan dispatch module emits orphan recovery signals", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([
@@ -234,6 +359,39 @@ test("timeouts long turn monitor module alerts every 30-minute threshold", () =>
   assert.match(state.deadlockAlerts[0].message, /90분 단계/);
   assert.match(state.executions[0].sql, /INSERT OR REPLACE INTO kv_meta/);
   assert.deepEqual(toPlain(state.executions[0].params), ["long_turn_tier:codex:channel-1", "90"]);
+});
+
+test("timeouts long turn monitor module skips synthetic reattach placeholders", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    inflights: [
+      {
+        provider: "codex",
+        channel_id: "channel-1",
+        channel_name: "project-agentdesk",
+        session_key: "provider:AgentDesk-codex-project-agentdesk",
+        tmux_session_name: "AgentDesk-codex-project-agentdesk",
+        session_id: null,
+        request_owner_user_id: 0,
+        user_msg_id: 0,
+        any_tool_used: false,
+        has_post_tool_text: false,
+        rebind_origin: true,
+        started_at: timestampMinutesAgo(95),
+        updated_at: timestampMinutesAgo(95),
+        dispatch_id: null
+      }
+    ],
+    dbQuery: createSqlRouter([
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_alert:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_watchdog_extension:%'", result: [] }
+    ])
+  });
+
+  policy._section_L();
+
+  assert.equal(state.deadlockAlerts.length, 0);
+  assert.equal(state.executions.length, 0);
 });
 
 test("timeouts long turn monitor module skips repeated 30-minute threshold", () => {

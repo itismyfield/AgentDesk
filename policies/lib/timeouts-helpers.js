@@ -243,6 +243,7 @@ function findRecentInflightForSession(sessionKey, tmuxName) {
   for (var i = 0; i < inflights.length; i++) {
     var inf = inflights[i];
     if (!inf) continue;
+    if (isSyntheticMissingInflightReattachPlaceholder(inf)) continue;
     var sessionMatch = !!sessionKey && inf.session_key === sessionKey;
     var tmuxMatch = !!tmuxName && inf.tmux_session_name === tmuxName;
     if (!sessionMatch && !tmuxMatch) continue;
@@ -280,6 +281,20 @@ function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnM
     channel_id: inflight.channel_id || null,
     max_turn_reached: turnAgeMin !== null && turnAgeMin >= maxTurnMin
   };
+}
+
+function isZeroPlaceholderId(value) {
+  return value === 0 || value === "0";
+}
+
+function isSyntheticMissingInflightReattachPlaceholder(inf) {
+  if (!inf) return false;
+  return inf.rebind_origin === true &&
+    inf.session_id == null &&
+    isZeroPlaceholderId(inf.request_owner_user_id) &&
+    isZeroPlaceholderId(inf.user_msg_id) &&
+    inf.any_tool_used === false &&
+    inf.has_post_tool_text === false;
 }
 
 function requestTurnWatchdogExtension(channelId, extendMinutes) {
@@ -326,6 +341,7 @@ module.exports = {
   lookupThreadTargetAgentId: lookupThreadTargetAgentId,
   resolveSessionAgentContext: resolveSessionAgentContext,
   backfillMissingSessionAgentIds: backfillMissingSessionAgentIds,
+  isSyntheticMissingInflightReattachPlaceholder: isSyntheticMissingInflightReattachPlaceholder,
   findRecentInflightForSession: findRecentInflightForSession,
   inspectInflightProgress: inspectInflightProgress,
   requestTurnWatchdogExtension: requestTurnWatchdogExtension,
