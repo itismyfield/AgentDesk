@@ -155,6 +155,9 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         Commands::ForceKill { session_key, retry } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_force_kill(&session_key, retry),
         )),
+        Commands::Diag { identifier, json } => {
+            exit_for_cli(super::client::cmd_diag(&identifier, json))
+        }
         Commands::GithubSync { repo } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_github_sync(repo.as_deref()),
         )),

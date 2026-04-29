@@ -45,6 +45,21 @@ fn parse_error_message(body: &str) -> Option<String> {
         })
 }
 
+fn encode_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
+}
+
 fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
     let url = if path.starts_with('/') {
         format!("{}{}", api_base(), path)
@@ -685,6 +700,64 @@ pub fn cmd_agents() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk diag <agent_id_or_channel_id>`
+pub fn cmd_diag(identifier: &str, json_output: bool) -> Result<(), String> {
+    let identifier = identifier.trim();
+    if identifier.is_empty() {
+        return Err("identifier must not be empty".to_string());
+    }
+
+    let encoded_identifier = encode_path_segment(identifier);
+    let value = get_json(&format!("/api/agents/diag/{encoded_identifier}"))?;
+    if json_output {
+        print_json(&value);
+        return Ok(());
+    }
+
+    let target = value
+        .get("agent_name")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("agent_id").and_then(Value::as_str))
+        .unwrap_or(identifier);
+    let visual_status = value
+        .get("visual_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    println!("{target}: {visual_status}");
+
+    for key in [
+        "provider",
+        "session_key",
+        "status",
+        "last_tool_elapsed_secs",
+        "active_children",
+        "oldest_child_spawned_at",
+    ] {
+        if let Some(value) = value.get(key).filter(|value| !value.is_null()) {
+            println!("{key}: {}", render_diag_value(value));
+        }
+    }
+
+    if let Some(last_tool) = value.get("last_tool").filter(|value| !value.is_null()) {
+        println!("last_tool: {}", render_diag_value(last_tool));
+    }
+    if let Some(loop_suspicion) = value.get("recent_loop_suspicion") {
+        println!(
+            "recent_loop_suspicion: {}",
+            render_diag_value(loop_suspicion)
+        );
+    }
+
+    Ok(())
+}
+
+fn render_diag_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
 /// `agentdesk config get`
 pub fn cmd_config_get() -> Result<(), String> {
     let value = get_json("/api/settings/runtime-config")?;
@@ -973,7 +1046,7 @@ pub fn cmd_terminations(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_advance_completion_result, cmd_advance, cmd_dispatch,
+        build_cli_advance_completion_result, cmd_advance, cmd_dispatch, encode_path_segment,
         parse_github_repo_from_remote, render_cards_table, render_queue_thread_links,
         runtime_config_payload,
     };
@@ -990,6 +1063,15 @@ mod tests {
         crate::services::discord::runtime_store::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn encode_path_segment_preserves_unreserved_and_escapes_path_chars() {
+        assert_eq!(encode_path_segment("agent-01_~.x"), "agent-01_~.x");
+        assert_eq!(
+            encode_path_segment("thread/channel one"),
+            "thread%2Fchannel%20one"
+        );
     }
 
     struct EnvVarGuard {

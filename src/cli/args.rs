@@ -307,6 +307,14 @@ pub(crate) enum Commands {
     Deploy,
     /// List agents and their status
     Agents,
+    /// Show turn/session diagnostics for an agent ID or Discord channel ID
+    Diag {
+        /// Agent ID or Discord channel ID
+        identifier: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
     /// Runtime config get/set
     Config {
         #[command(subcommand)]

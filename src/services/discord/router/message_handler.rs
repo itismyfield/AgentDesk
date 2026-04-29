@@ -3073,6 +3073,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                     tool_summary: None,
                     command_summary: None,
                     context_line: None,
+                    request_line: Some(user_text.to_string()),
+                    progress_line: None,
                 };
                 let outcome = shared
                     .placeholder_controller
@@ -3190,6 +3192,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             tool_summary: None,
             command_summary: None,
             context_line: None,
+            request_line: Some(user_text.to_string()),
+            progress_line: None,
         };
         let gateway = super::super::gateway::DiscordGateway::new(
             ctx.http.clone(),

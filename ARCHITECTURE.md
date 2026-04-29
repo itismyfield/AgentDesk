@@ -326,6 +326,7 @@ src/
 │   │   ├── events.rs
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
+│   │   ├── session_inventory.rs
 │   │   └── watcher_latency.rs
 │   ├── platform/
 │   │   ├── binary_resolver.rs
