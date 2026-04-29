@@ -69,9 +69,11 @@ registry's provable stale marker. A different tmux session on the same Discord
 channel may still replace the channel slot so new-turn recovery is not blocked
 by an older session.
 
-The missing-inflight reattach fallback is the exception: it is triggered by an
-already-running watcher after relay ownership is broken, so it force-replaces
-the same-session handle and spawns a fresh watcher generation.
+The missing-inflight reattach fallback repairs metadata without breaking tmux
+ownership. When a live watcher already owns the same tmux session, the fallback
+persists a synthetic rebind-origin inflight record and reuses that owner slot;
+it does not cancel the incumbent watcher or spawn a fresh generation. A new
+watcher is spawned only when no live watcher owns the tmux session.
 
 ## Watcher Lifecycle And Route Ownership
 

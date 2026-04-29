@@ -266,15 +266,15 @@ pub(in crate::services::discord) fn cancel_active_token(
     let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     // `child_pid` is the wrapper PID — i.e. the foreground process of the
     // tmux pane. SIGKILL'ing it tears down the tmux session itself. For
-    // `PreserveSession` (user-initiated stop: ⏳ removal, !stop, /stop,
-    // watchdog) the caller has already sent the provider abort key
+    // `PreserveSession` / `PreserveSessionAndInflight` the caller has
+    // already sent the provider abort key
     // (`interrupt_provider_cli_turn` C-c + SIGINT fallback in
     // `stop_active_turn`), so the provider is being asked to exit
     // cooperatively and we MUST NOT take down the tmux pane underneath it
     // — otherwise the next turn re-spawns the session, the capture file
     // rotates, and the watcher floods Discord with stale scrollback. Only
-    // the tear-down policies kill the wrapper here.
-    if cleanup_policy != TmuxCleanupPolicy::PreserveSession
+    // the tear-down policy kills the wrapper here.
+    if cleanup_policy.should_cleanup_tmux()
         && let Some(pid) = child_pid
     {
         crate::services::process::kill_pid_tree(pid);
@@ -606,6 +606,13 @@ mod tests {
         assert_eq!(
             token.restart_mode(),
             Some(InflightRestartMode::HotSwapHandoff)
+        );
+        assert!(
+            !TmuxCleanupPolicy::PreserveSessionAndInflight {
+                restart_mode: InflightRestartMode::HotSwapHandoff,
+            }
+            .should_cleanup_tmux(),
+            "PreserveSessionAndInflight must not tear down the tmux wrapper"
         );
     }
 
