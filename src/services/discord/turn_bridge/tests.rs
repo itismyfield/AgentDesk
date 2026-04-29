@@ -24,7 +24,10 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
-use super::{advance_tmux_relay_confirmed_end, turn_bridge_replace_outcome_committed};
+use super::{
+    advance_tmux_relay_confirmed_end, monitor_handoff_tool_context,
+    turn_bridge_replace_outcome_committed,
+};
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::ChannelId;
@@ -236,6 +239,19 @@ fn advance_tmux_relay_confirmed_end_updates_shared_floor_monotonically() {
         relay_coord.confirmed_end_offset.load(Ordering::Acquire),
         128
     );
+}
+
+#[test]
+fn monitor_handoff_tool_context_prefers_last_tool_summary_over_finalized_line() {
+    let (tool, command) =
+        monitor_handoff_tool_context(Some("Bash"), Some("cargo test"), Some("⚠ Bash: cargo test"));
+    assert_eq!(tool.as_deref(), Some("Bash"));
+    assert_eq!(command.as_deref(), Some("cargo test"));
+
+    let (fallback_tool, fallback_command) =
+        monitor_handoff_tool_context(None, Some("…"), Some("⚠ Bash: cargo test"));
+    assert_eq!(fallback_tool.as_deref(), Some("⚠ Bash: cargo test"));
+    assert_eq!(fallback_command, None);
 }
 
 #[test]

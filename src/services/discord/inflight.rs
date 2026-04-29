@@ -59,6 +59,10 @@ pub(super) struct InflightTurnState {
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
+    pub last_tool_name: Option<String>,
+    #[serde(default)]
+    pub last_tool_summary: Option<String>,
+    #[serde(default)]
     pub prev_tool_status: Option<String>,
     #[serde(
         default,
@@ -169,6 +173,8 @@ impl InflightTurnState {
             full_response: String::new(),
             response_sent_offset: 0,
             current_tool_line: None,
+            last_tool_name: None,
+            last_tool_summary: None,
             prev_tool_status: None,
             task_notification_kind: None,
             started_at: now.clone(),
