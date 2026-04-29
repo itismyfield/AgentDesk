@@ -139,6 +139,28 @@ fn first_request_line(user_text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn monitor_handoff_tool_context(
+    last_tool_name: Option<&str>,
+    last_tool_summary: Option<&str>,
+    current_tool_line: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let tool_summary = last_tool_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            current_tool_line
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let command_summary = last_tool_summary
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "…")
+        .map(str::to_string);
+    (tool_summary, command_summary)
+}
+
 async fn child_progress_line(
     pg_pool: Option<&sqlx::PgPool>,
     parent_session_key: Option<&str>,
@@ -934,8 +956,8 @@ pub(super) fn spawn_turn_bridge(
         let mut rx_disconnected = false;
         let mut current_tool_line: Option<String> = bridge.inflight_state.current_tool_line.clone();
         let mut prev_tool_status: Option<String> = bridge.inflight_state.prev_tool_status.clone();
-        let mut last_tool_name: Option<String> = None;
-        let mut last_tool_summary: Option<String> = None;
+        let mut last_tool_name: Option<String> = bridge.inflight_state.last_tool_name.clone();
+        let mut last_tool_summary: Option<String> = bridge.inflight_state.last_tool_summary.clone();
         let mut accumulated_input_tokens: u64 = 0;
         let mut accumulated_cache_create_tokens: u64 = 0;
         let mut accumulated_cache_read_tokens: u64 = 0;
@@ -1315,7 +1337,8 @@ pub(super) fn spawn_turn_bridge(
                                 long_running_tool,
                                 Some((
                                     _,
-                                    super::formatting::LongRunningCloseTrigger::BackgroundDispatch
+                                    super::formatting::LongRunningCloseTrigger::BackgroundDispatch,
+                                    _
                                 ))
                             ) {
                                 if let (Some(pg_pool), Some(parent_session_key)) =
@@ -1345,7 +1368,9 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if long_running_placeholder_active.is_none() {
-                                if let Some((reason, close_trigger)) = long_running_tool {
+                                if let Some((reason, close_trigger, reason_detail)) =
+                                    long_running_tool
+                                {
                                     let started_at_unix = chrono::Utc::now().timestamp();
                                     let key =
                                         super::placeholder_controller::PlaceholderKey {
@@ -1359,6 +1384,7 @@ pub(super) fn spawn_turn_bridge(
                                             started_at_unix,
                                             tool_summary: Some(name.clone()),
                                             command_summary: Some(display_summary.clone()),
+                                            reason_detail,
                                             context_line: last_assistant_text_line.clone(),
                                             request_line: first_request_line(&user_text_owned),
                                             progress_line: child_progress_line(
@@ -2079,9 +2105,13 @@ pub(super) fn spawn_turn_bridge(
 
             if state_dirty
                 || inflight_state.current_tool_line != current_tool_line
+                || inflight_state.last_tool_name != last_tool_name
+                || inflight_state.last_tool_summary != last_tool_summary
                 || inflight_state.prev_tool_status != prev_tool_status
             {
                 inflight_state.current_tool_line = current_tool_line.clone();
+                inflight_state.last_tool_name = last_tool_name.clone();
+                inflight_state.last_tool_summary = last_tool_summary.clone();
                 inflight_state.prev_tool_status = prev_tool_status.clone();
                 let _ = save_inflight_state(&inflight_state);
             }
@@ -2547,11 +2577,17 @@ pub(super) fn spawn_turn_bridge(
                 channel_id,
                 message_id: current_msg_id,
             };
+            let (handoff_tool_summary, handoff_command_summary) = monitor_handoff_tool_context(
+                last_tool_name.as_deref(),
+                last_tool_summary.as_deref(),
+                current_tool_line.as_deref(),
+            );
             let controller_input = super::placeholder_controller::PlaceholderActiveInput {
                 reason: super::formatting::MonitorHandoffReason::AsyncDispatch,
                 started_at_unix,
-                tool_summary: current_tool_line.clone(),
-                command_summary: None,
+                tool_summary: handoff_tool_summary.clone(),
+                command_summary: handoff_command_summary.clone(),
+                reason_detail: None,
                 context_line: last_assistant_text_line.clone(),
                 request_line: first_request_line(&user_text_owned),
                 progress_line: child_progress_line(
@@ -2575,8 +2611,8 @@ pub(super) fn spawn_turn_bridge(
                             super::formatting::MonitorHandoffStatus::Active,
                             super::formatting::MonitorHandoffReason::AsyncDispatch,
                             started_at_unix,
-                            current_tool_line.as_deref(),
-                            None,
+                            handoff_tool_summary.as_deref(),
+                            handoff_command_summary.as_deref(),
                         );
                     gateway
                         .edit_message(channel_id, current_msg_id, &placeholder_text)

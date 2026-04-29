@@ -237,12 +237,12 @@
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 397 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1271 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 558 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3051 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3105 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 826 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 4123 | giant-file |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 587 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 1114 | giant-file |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 1120 | giant-file |
 | `services::discord::internal_api` | `src/services/discord/internal_api.rs` | 785 |  |
 | `services::discord::mcp_credential_watcher` | `src/services/discord/mcp_credential_watcher.rs` | 645 |  |
 | `services::discord::meeting_artifact_store` | `src/services/discord/meeting_artifact_store.rs` | 356 |  |
@@ -261,12 +261,12 @@
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 155 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 266 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
-| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 988 |  |
+| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 999 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 554 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 1963 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 570 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 412 |  |
-| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4673 | giant-file |
+| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 4677 | giant-file |
 | `services::discord::recovery_paths` | `src/services/discord/recovery_paths/mod.rs` | 29 |  |
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 59 |  |
 | `services::discord::response_sanitizer` | `src/services/discord/response_sanitizer.rs` | 192 |  |
@@ -277,7 +277,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 17 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1250 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7107 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7109 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 2647 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 373 |  |
@@ -296,7 +296,7 @@
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 347 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 589 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 3503 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 3539 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2096 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
