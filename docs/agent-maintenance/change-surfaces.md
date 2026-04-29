@@ -1,12 +1,12 @@
 # Change Surfaces
 
+> Last refreshed: 2026-04-29 (against `main` @ `a37ee652`).
+>
 > Source: [`docs/agent-maintenance/index.md`](index.md). For every "where do I
 > add this?" question, consult this page first. The giant-file list is the
 > auto-generated inventory in
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
->
-> Last refreshed: 2026-04-29 (against `main` @ `1d165cd3844e94015ab30cda8e4b1bba717f934d`).
 
 ## Read This First
 
@@ -94,12 +94,18 @@
 
 ### `tmux_watcher`
 
-- canonical_modules: `src/services/discord/tmux.rs` (single owner per #1222
-  single-relay-owner contract), `src/services/discord/inflight.rs` (state file
-  contract).
+- canonical_modules: `src/services/discord/watchers/lifecycle.rs` (watcher
+  stop/reattach/claim/restore lifecycle, including the #1222 single-owner
+  claim path and #1283 cancel-induced reattach contract),
+  `src/services/discord/tmux.rs` (watcher loop and remaining tmux relay
+  parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/tmux.rs` (11954 lines — largest in the repo).
+  - `src/services/discord/watchers/lifecycle.rs` (2135 lines — canonical
+    lifecycle extraction surface from #1435; split further before adding new
+    lifecycle behavior).
+  - `src/services/discord/tmux.rs` (9864 lines after #1435 lifecycle
+    extraction; still giant-file territory).
   - `src/services/discord/recovery_engine.rs` (4682 lines).
   - `src/services/discord/health.rs` (4527 lines).
   - `src/services/discord/router/message_handler.rs` (7112 lines).
@@ -120,7 +126,7 @@
   per #1112; `/api/inflight/rebind` is the only path that synthesises an
   inflight state file (`src/services/discord/inflight.rs:107`,
   `:415`, `:952`). Cancel-induced death must trigger immediate re-attach
-  (#1283 contract, see `src/services/discord/tmux.rs`).
+  (#1283 contract, see `src/services/discord/watchers/lifecycle.rs`).
 - allowed_changes: `bugfix` only on `tmux.rs` and the giant Discord modules.
   `extraction` requires a follow-up issue.
 - tests: `src/integration_tests/tests/*` cancel/recovery suites.
