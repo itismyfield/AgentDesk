@@ -702,38 +702,14 @@ fn review_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
 }
 
 async fn clear_review_round_advance_hint_on_pg(pool: &PgPool, card_id: &str) -> Result<(), String> {
-    let metadata_raw =
-        sqlx::query_scalar::<_, Option<String>>("SELECT metadata FROM kanban_cards WHERE id = $1")
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load postgres review metadata for {card_id}: {error}"))?
-            .flatten();
-    let Some(raw) = metadata_raw.filter(|value| !value.trim().is_empty()) else {
-        return Ok(());
-    };
-    let Ok(mut metadata) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Ok(());
-    };
-    let Some(object) = metadata.as_object_mut() else {
-        return Ok(());
-    };
-    if object.remove(ADVANCE_REVIEW_ROUND_HINT_KEY).is_none() {
-        return Ok(());
-    }
-
-    let stored_metadata = if object.is_empty() {
-        None
-    } else {
-        Some(metadata.to_string())
-    };
     sqlx::query(
         "UPDATE kanban_cards
-         SET metadata = $1,
+         SET metadata = NULLIF(metadata - $1::text, '{}'::jsonb),
              updated_at = NOW()
-         WHERE id = $2",
+         WHERE id = $2
+           AND metadata ? $1::text",
     )
-    .bind(stored_metadata)
+    .bind(ADVANCE_REVIEW_ROUND_HINT_KEY)
     .bind(card_id)
     .execute(pool)
     .await

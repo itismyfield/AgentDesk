@@ -1561,7 +1561,7 @@ async fn list_agent_transcripts_pg_json(
                 st.user_message,
                 st.assistant_message,
                 st.events_json::text AS events_json,
-                st.duration_ms,
+                st.duration_ms::BIGINT AS duration_ms,
                 to_char(st.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
          FROM session_transcripts st
          LEFT JOIN sessions s ON s.session_key = st.session_key

@@ -179,7 +179,7 @@ pub fn spawn_aggregate_if_needed_with_pg(pg_pool: Option<sqlx::PgPool>) {
     let Some(pool) = pg_pool else {
         return;
     };
-    tokio::spawn(async move {
+    let aggregate = async move {
         let max_outcome_id = sqlx::query(
             "SELECT COALESCE(MAX(id), 0)::BIGINT AS max_outcome_id
              FROM review_tuning_outcomes",
@@ -211,7 +211,31 @@ pub fn spawn_aggregate_if_needed_with_pg(pg_pool: Option<sqlx::PgPool>) {
         }
 
         let _ = aggregate_review_tuning_core_pg(&pool).await;
-    });
+    };
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(aggregate);
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("review-tuning-aggregate".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "[review-tuning] failed to build aggregate runtime"
+                    );
+                    return;
+                }
+            };
+            runtime.block_on(aggregate);
+        });
 }
 
 async fn aggregate_review_tuning_core_pg(pool: &sqlx::PgPool) -> (i64, i64, i64, i64, i64, usize) {

@@ -589,6 +589,28 @@ async fn enrich_meeting_with_issue_data_pg(
     );
 }
 
+async fn enrich_meeting_with_query_hashes_pg(
+    pool: &PgPool,
+    meeting_id: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let meeting_hash = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+        .bind(format!("meeting_query_hash:{meeting_id}"))
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    obj.insert("meeting_hash".to_string(), json!(meeting_hash));
+
+    let thread_hash = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
+        .bind(format!("meeting_thread_hash:{meeting_id}"))
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    obj.insert("thread_hash".to_string(), json!(thread_hash));
+}
+
 fn meeting_row_to_json_pg(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     let participant_names = row
         .try_get::<Option<String>, _>("participant_names")
@@ -620,7 +642,7 @@ async fn load_meeting_pg(
     id: &str,
 ) -> Result<Option<serde_json::Value>, sqlx::Error> {
     let Some(row) = sqlx::query(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds::BIGINT AS effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings WHERE id = $1",
     )
@@ -636,6 +658,7 @@ async fn load_meeting_pg(
     obj.insert("transcripts".to_string(), json!(&transcripts));
     obj.insert("entries".to_string(), json!(&transcripts));
     enrich_meeting_with_issue_data_pg(pool, id, obj).await;
+    enrich_meeting_with_query_hashes_pg(pool, id, obj).await;
     apply_selection_reason_fallback(obj, &transcripts);
     Ok(Some(meeting))
 }
@@ -652,7 +675,7 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
     };
 
     let rows = match sqlx::query(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds::BIGINT AS effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, selection_reason, created_at
          FROM meetings
          ORDER BY started_at DESC",
@@ -683,6 +706,7 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
             obj.insert("transcripts".to_string(), json!(&transcripts));
             obj.insert("entries".to_string(), json!(&transcripts));
             enrich_meeting_with_issue_data_pg(pool, &mid, obj).await;
+            enrich_meeting_with_query_hashes_pg(pool, &mid, obj).await;
             apply_selection_reason_fallback(obj, &transcripts);
         }
     }
@@ -2034,7 +2058,7 @@ mod tests {
             Option<String>,
             Option<String>,
         ) = sqlx::query_as(
-            "SELECT title, status, effective_rounds, completed_at, summary,
+            "SELECT title, status, effective_rounds::BIGINT AS effective_rounds, completed_at, summary,
                     participant_names, selection_reason
              FROM meetings WHERE id = $1",
         )
