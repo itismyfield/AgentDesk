@@ -263,6 +263,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
@@ -334,6 +336,9 @@ jobs:
 
       - name: Agent maintenance freshness gate (warn, #1432)
         run: python3 scripts/check_agent_maintenance_docs.py --warning-only
+
+      - name: Agent maintenance freshness tests
+        run: python3 -m unittest tests.test_agent_maintenance_docs
 
       - name: Maintainability audit (non-blocking, #1282)
         id: maintainability_audit

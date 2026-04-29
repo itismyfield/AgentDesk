@@ -242,6 +242,7 @@ src/
 │   │   │   └── text_commands.rs
 │   │   ├── outbound/
 │   │   │   ├── decision.rs
+│   │   │   ├── delivery.rs
 │   │   │   ├── legacy.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs

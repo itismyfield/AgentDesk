@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-04-29 (against `main` @ `1d165cd3844e94015ab30cda8e4b1bba717f934d`).
+> Last refreshed: 2026-04-30 (against `main` @ `58c26894784f12235ae33ee3b0963a248e0b23f5`).
 
 ## Read This First
 
@@ -26,8 +26,8 @@
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision}.rs`
-  (#1006 v3 domain types and pure planner).
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery}.rs`
+  (#1006 v3 domain types, pure planner, and delivery implementation).
 - legacy_modules: `src/services/discord/outbound/legacy.rs` (`deliver_outbound`,
   `OutboundDeduper`, `DiscordOutbound*` types).
 - do_not_edit_without_migration_plan:
@@ -60,9 +60,9 @@
 - do_not_edit_without_migration_plan:
   - `src/engine/mod.rs` (2590 lines, giant-file).
   - `src/engine/ops/review_automation_ops.rs` (2140 lines, giant-file).
-  - `src/engine/transition.rs` (1307 lines, giant-file).
+  - `src/engine/transition.rs` (1309 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1116 lines, giant-file).
-  - `src/engine/ops/db_ops.rs` (1193 lines, giant-file).
+  - `src/engine/ops/db_ops.rs` (1195 lines, giant-file).
   - `src/engine/intent.rs` (873 lines, retained migration-sensitive surface).
   - `src/pipeline.rs` (2125 lines, giant-file).
 - active_callsite_coverage: n/a (no canonical replacement yet).
@@ -81,10 +81,10 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/mod.rs` (4871 lines).
+  - `src/dispatch/mod.rs` (4875 lines).
   - `src/dispatch/dispatch_context.rs` (3913 lines).
   - `src/dispatch/dispatch_create.rs` (2737 lines).
-  - `src/dispatch/dispatch_status.rs` (1825 lines).
+  - `src/dispatch/dispatch_status.rs` (1828 lines).
 - active_callsite_coverage: n/a.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
   status transitions go through `dispatch_status`.
@@ -136,7 +136,7 @@
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/dispatches/discord_delivery.rs` (5328 lines).
+  - `src/server/routes/dispatches/discord_delivery.rs` (5402 lines).
   - `src/server/routes/kanban.rs` (4037 lines).
   - `src/server/routes/dispatched_sessions.rs` (3998 lines).
   - `src/server/routes/onboarding.rs` (5271 lines).
@@ -167,13 +167,12 @@
 - canonical_modules: `src/cli/*.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/cli/migrate/postgres_cutover.rs` (7675 lines, retention candidate
-    after #1239).
+  - `src/cli/migrate.rs` (348 lines, retired postgres-cutover facade).
   - `src/cli/doctor/orchestrator.rs` (4324 lines).
   - `src/cli/migrate/apply.rs` (3142 lines).
   - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
-  - `src/cli/{init.rs (1597), client.rs (1496), direct.rs (1536),
-    dcserver.rs (1541)}`.
+  - `src/cli/{init.rs (1600), client.rs (1583), direct.rs (1535),
+    dcserver.rs (1496)}`.
 - active_callsite_coverage: n/a.
 - invariants: LaunchAgent plist and runtime layout are generated only — see
   the matrix in `docs/source-of-truth.md`.

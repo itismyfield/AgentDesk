@@ -4,8 +4,9 @@
 > owner issue. Touch these paths only inside the scope of the listed issue or
 > for a single narrow bugfix; do not extend them with new logic.
 >
-> Last refreshed: 2026-04-29 (against #1438 PG-only cleanup; legacy SQLite
-> adapter crates are absent from the default `cargo tree`).
+> Last refreshed: 2026-04-30 (against `main` @ `58c26894784f12235ae33ee3b0963a248e0b23f5`).
+> Baseline note: legacy SQLite adapter crates are absent from the default
+> `cargo tree`.
 
 ## Schema Reminder
 
@@ -17,8 +18,8 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 ## Legacy Outbound (`outbound/legacy.rs`)
 
 - feature: `discord_outbound / legacy_helpers`
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision}.rs`
-  (v3 domain types and pure planner)
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery}.rs`
+  (v3 domain types, pure planner, and delivery implementation)
 - legacy_modules: `src/services/discord/outbound/legacy.rs` —
   `deliver_outbound`, `OutboundDeduper`, all `Discord*` types and policy
   enums. Also `src/services/discord/formatting.rs::send_long_message_raw`
