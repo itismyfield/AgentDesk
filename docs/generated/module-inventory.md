@@ -84,8 +84,8 @@
 | `db::turns` | `src/db/turns.rs` | 166 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 4871 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3891 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2736 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3913 | giant-file |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2737 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1825 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
