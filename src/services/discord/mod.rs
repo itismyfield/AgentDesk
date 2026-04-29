@@ -210,6 +210,23 @@ pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
     has_monitor_origin || sanitized.trim_start().starts_with("DISPATCH:")
 }
 
+/// Announce-bot variant of `should_process_allowed_bot_turn_text`.
+///
+/// Real announce-bot dispatch messages are wrapped in a divider header
+/// (`── implementation dispatch ──\nDISPATCH:<uuid>...`), so the
+/// `starts_with("DISPATCH:")` check used for generic allowed bots fails.
+/// At the same time, informational announcements like `📋 새 이슈 #N` and
+/// `✅ 종료됨` must NOT trigger an agent turn (#1448).
+///
+/// This helper accepts the message only when a `DISPATCH:` token appears
+/// anywhere in the sanitized body (after stripping the monitor auto-turn
+/// origin marker), gating announce-bot turn triggers on the dispatch
+/// signal itself.
+pub(super) fn should_process_announce_bot_turn_text(text: &str) -> bool {
+    let (sanitized, has_monitor_origin) = strip_monitor_auto_turn_origin(text);
+    has_monitor_origin || sanitized.contains("DISPATCH:")
+}
+
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
     shared: &SharedData,
 ) -> Option<u64> {
@@ -236,7 +253,7 @@ pub(in crate::services::discord) fn is_allowed_turn_sender(
     text: &str,
 ) -> bool {
     if announce_bot_id.is_some_and(|id| id == author_id) {
-        return true;
+        return should_process_announce_bot_turn_text(text);
     }
     if allowed_bot_ids.contains(&author_id) {
         return should_process_allowed_bot_turn_text(text);
@@ -3705,7 +3722,9 @@ mod tests {
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
     };
-    use crate::services::discord::should_process_allowed_bot_turn_text;
+    use crate::services::discord::{
+        should_process_allowed_bot_turn_text, should_process_announce_bot_turn_text,
+    };
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::GatewayIntents;
     use std::collections::HashSet;
@@ -3752,12 +3771,125 @@ mod tests {
             false,
             agent_msg
         ));
-        assert!(is_allowed_turn_sender(
+        // #1448: announce-bot informational text (no `DISPATCH:` token) must
+        // no longer trigger an agent turn. The `agent_msg` payload is plain
+        // chatter, so this should now return false instead of true.
+        assert!(!is_allowed_turn_sender(
             &allowed_bot_ids,
             announce_bot_id,
             456,
             true,
             agent_msg
+        ));
+    }
+
+    #[test]
+    fn announce_bot_issue_announcement_does_not_trigger_turn() {
+        // #1448 regression: announce-bot's "📋 새 이슈 #N — ..." informational
+        // card must NOT start an agent turn. Previously the announce-bot
+        // branch returned `true` unconditionally, causing every issue
+        // announcement to dispatch a spurious turn.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let announcement = "📋 새 이슈 #1448 — [ANNOUNCE-TURN-LEAK] issue announcement 메시지가 agent turn을 잘못 trigger";
+
+        assert!(!should_process_announce_bot_turn_text(announcement));
+        assert!(!is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            announcement,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_issue_completion_does_not_trigger_turn() {
+        // #1448 regression: announce-bot's "✅ 종료됨 ..." card must not
+        // trigger a turn either. Same root cause as the announcement case.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let completion = "✅ 종료됨 #1442 — [SOME-FIX] 작업 완료";
+
+        assert!(!should_process_announce_bot_turn_text(completion));
+        assert!(!is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            completion,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_real_dispatch_still_triggers_turn() {
+        // #1448 regression: real announce-bot dispatch payloads are wrapped
+        // in a divider header so `DISPATCH:` appears mid-body rather than as
+        // a prefix. They must still trigger a turn — the gating helper uses
+        // `contains("DISPATCH:")` (after stripping the monitor auto-turn
+        // origin marker) precisely to keep this path intact.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let dispatch =
+            "── implementation dispatch ──\nDISPATCH:abc-123 [📋 구현] - #1435 작업 시작";
+
+        assert!(should_process_announce_bot_turn_text(dispatch));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            dispatch,
+        ));
+    }
+
+    #[test]
+    fn allowed_bot_dispatch_prefix_unaffected_by_announce_helper() {
+        // Regression guard: the generic allowed-bot path keeps its strict
+        // `starts_with("DISPATCH:")` check, while announce-bot uses the
+        // looser `contains("DISPATCH:")`. Both must pass for their
+        // respective bot types when given the appropriate payload.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let prefix_dispatch = "DISPATCH: abc123\n작업 시작";
+        let wrapped_dispatch =
+            "── implementation dispatch ──\nDISPATCH:abc-123 [📋 구현] - #1435 작업 시작";
+
+        // Generic allowed-bot accepts strict prefix only.
+        assert!(should_process_allowed_bot_turn_text(prefix_dispatch));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            123,
+            true,
+            prefix_dispatch,
+        ));
+        // Announce-bot accepts both wrapped and prefix forms.
+        assert!(should_process_announce_bot_turn_text(wrapped_dispatch));
+        assert!(should_process_announce_bot_turn_text(prefix_dispatch));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            wrapped_dispatch,
+        ));
+    }
+
+    #[test]
+    fn non_bot_user_message_still_triggers_turn() {
+        // Regression guard for the existing non-bot path: human messages
+        // must keep triggering a turn regardless of content (no DISPATCH:
+        // gating applies to humans).
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            789, // human user id, neither in allowed_bot_ids nor the announce bot
+            false,
+            "그냥 사람 메시지",
         ));
     }
 
