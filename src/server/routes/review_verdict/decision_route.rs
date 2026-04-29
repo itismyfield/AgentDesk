@@ -518,43 +518,20 @@ async fn mark_next_review_round_advance_pg_first(
     let pool = state
         .pg_pool_ref()
         .ok_or_else(|| "postgres pool unavailable for review round advance".to_string())?;
-    let metadata_raw =
-        sqlx::query_scalar::<_, Option<String>>("SELECT metadata FROM kanban_cards WHERE id = $1")
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load postgres metadata for {card_id}: {error}"))?
-            .flatten();
-
-    let mut metadata = metadata_raw
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-        .filter(|value| value.is_object())
-        .unwrap_or_else(|| json!({}));
-    let object = metadata
-        .as_object_mut()
-        .expect("review round advance metadata must be an object");
-    if object
-        .get(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
-        .and_then(|value| value.as_bool())
-        == Some(true)
-    {
-        return Ok(false);
-    }
-
-    object.insert(
-        crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
-        serde_json::Value::Bool(true),
-    );
-
-    sqlx::query("UPDATE kanban_cards SET metadata = $1, updated_at = NOW() WHERE id = $2")
-        .bind(metadata.to_string())
-        .bind(card_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("update postgres metadata for {card_id}: {error}"))?;
-    Ok(true)
+    let rows = sqlx::query(
+        "UPDATE kanban_cards
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object($1::text, true),
+             updated_at = NOW()
+         WHERE id = $2
+           AND COALESCE((metadata ->> $1)::boolean, false) = false",
+    )
+    .bind(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
+    .bind(card_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("mark postgres review round advance for {card_id}: {error}"))?
+    .rows_affected();
+    Ok(rows > 0)
 }
 
 async fn dispatch_status_and_result_pg_first(
