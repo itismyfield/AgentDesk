@@ -126,7 +126,7 @@
 | `integration_tests::discord_flow::mock_discord` | `src/integration_tests/discord_flow/mock_discord.rs` | 154 |  |
 | `integration_tests::discord_flow::scenarios` | `src/integration_tests/discord_flow/scenarios.rs` | 652 |  |
 | `integration_tests::tests::high_risk_recovery` | `src/integration_tests/tests/high_risk_recovery.rs` | 1693 | giant-file |
-| `kanban` | `src/kanban.rs` | 3868 | giant-file |
+| `kanban` | `src/kanban.rs` | 3875 | giant-file |
 | `launch` | `src/launch.rs` | 57 |  |
 | `logging` | `src/logging.rs` | 160 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 65 |  |
