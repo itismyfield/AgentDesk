@@ -1297,6 +1297,11 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
 
     if should_archive {
         if let Some(ref tid) = info.thread_id {
+            if should_defer_done_card_thread_archive(pg_pool, tid, dispatch_id).await? {
+                return Err(format!(
+                    "defer completed dispatch followups for {dispatch_id}: thread {tid} still has an active turn"
+                ));
+            }
             if let Err(err) = archive_dispatch_thread(tid, dispatch_id, config).await {
                 tracing::warn!(
                     "[dispatch] Failed to archive thread {tid} for completed dispatch {dispatch_id}: {err}"
@@ -1399,6 +1404,44 @@ async fn load_card_status(
     }
 
     Err("card status lookup requires postgres pool".to_string())
+}
+
+async fn has_active_session_for_thread(
+    pg_pool: Option<&PgPool>,
+    thread_id: &str,
+) -> Result<bool, String> {
+    let Some(pool) = pg_pool else {
+        return Ok(false);
+    };
+
+    let row = sqlx::query(
+        "SELECT 1
+         FROM sessions
+         WHERE thread_channel_id = $1
+           AND LOWER(COALESCE(status, '')) IN ('turn_active', 'working')
+           AND COALESCE(last_heartbeat, created_at) > NOW() - INTERVAL '10 minutes'
+         LIMIT 1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load active session for thread {thread_id}: {error}"))?;
+
+    Ok(row.is_some())
+}
+
+async fn should_defer_done_card_thread_archive(
+    pg_pool: Option<&PgPool>,
+    thread_id: &str,
+    _dispatch_id: &str,
+) -> Result<bool, String> {
+    if let Ok(channel_id) = thread_id.parse::<u64>()
+        && crate::services::discord::has_fresh_inflight_for_channel(channel_id)
+    {
+        return Ok(true);
+    }
+
+    has_active_session_for_thread(pg_pool, thread_id).await
 }
 
 async fn clear_all_dispatch_threads(
@@ -2501,6 +2544,73 @@ mod tests {
             active_thread.is_none(),
             "done-card followup should clear active_thread_id in postgres"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn handle_completed_dispatch_followups_defers_archive_for_active_thread_turn() {
+        let sqlite = test_db();
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, active_thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, NOW(), NOW())",
+        )
+        .bind("card-active-thread")
+        .bind("Active Thread Card")
+        .bind("done")
+        .bind("1492434645395177545")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, dispatch_type, status, title, thread_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        )
+        .bind("dispatch-active-thread")
+        .bind("card-active-thread")
+        .bind("implementation")
+        .bind("completed")
+        .bind("Active Thread Card")
+        .bind("1492434645395177545")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (
+                session_key, provider, status, active_dispatch_id, thread_channel_id, created_at, last_heartbeat
+             ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
+        )
+        .bind("test:AgentDesk-claude-adk-cc-t1492434645395177545")
+        .bind("claude")
+        .bind("turn_active")
+        .bind("dispatch-active-thread")
+        .bind("1492434645395177545")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let err = handle_completed_dispatch_followups_with_pg(
+            Some(&sqlite),
+            Some(&pool),
+            "dispatch-active-thread",
+        )
+        .await
+        .expect_err("active thread turn should defer archive/followup processing");
+        assert!(err.contains("still has an active turn"));
+
+        let active_thread: Option<String> =
+            sqlx::query_scalar("SELECT active_thread_id FROM kanban_cards WHERE id = $1")
+                .bind("card-active-thread")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(active_thread.as_deref(), Some("1492434645395177545"));
 
         pool.close().await;
         pg_db.drop().await;
