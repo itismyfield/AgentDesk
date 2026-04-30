@@ -151,6 +151,19 @@ _resolve_dashboard_source() {
     return 1
 }
 
+_resolve_default_release_binary() {
+    local target_dir
+    target_dir="$(cd "$REPO" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory // empty' 2>/dev/null || true)"
+    if [ -z "$target_dir" ]; then
+        target_dir="${CARGO_TARGET_DIR:-$REPO/target}"
+    fi
+    case "$target_dir" in
+        /*) ;;
+        *) target_dir="$REPO/$target_dir" ;;
+    esac
+    printf '%s/release/agentdesk\n' "$target_dir"
+}
+
 _finalize_detached_helper() {
     local status="${1:-0}"
     [ "$DEPLOY_DETACHED_CHILD" = "1" ] || return 0
@@ -304,7 +317,11 @@ fi
 # Build the release binary from the current workspace by default so deploy
 # always ships code compiled from the current HEAD. When a validated external
 # artifact is provided explicitly, keep the existing override behavior.
-SOURCE_BINARY="${AGENTDESK_DEPLOY_BINARY:-$REPO/target/release/agentdesk}"
+if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
+else
+    SOURCE_BINARY="$(_resolve_default_release_binary)"
+fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     echo "▸ Building release binary..."
     (cd "$REPO" && cargo build --release --bin agentdesk)
