@@ -3726,10 +3726,10 @@ fn card_lifecycle_ops_body() -> Value {
                 "heading": "Section 3: Anti-pattern (today's #1435 incident)",
                 "wrong_pattern": [
                     "POST /api/kanban-cards/{id}/redispatch              # creates dispatch A",
-                    "POST /api/kanban-cards/{id}/transition status:ready # cancels A, creates dispatch B  <- WRONG: this is implicit",
-                    "POST /api/auto-queue/generate                       # creates dispatch C  <- WRONG: silent-skip works but caller did not know"
+                    "POST /api/kanban-cards/{id}/transition status:ready # cancels A, creates dispatch B  <- WRONG: this cancel+create is implicit; caller did not realize a fresh dispatch was made",
+                    "POST /api/auto-queue/generate                       # adds the card to a queue run; a subsequent /dispatch-next (or activate=true) then creates dispatch C  <- WRONG: silent-skip exists for cards with an active dispatch but is easy to miss in the response"
                 ],
-                "why_it_broke": "Each of /redispatch, /transition status:ready, and /auto-queue/generate is single-call complete. Chaining them produced three dispatches for one card and the runtime started executing all three, causing the duplicate-dispatch outage on 2026-04-30.",
+                "why_it_broke": "Each of /redispatch, /transition status:ready, and the /auto-queue/generate -> /dispatch-next chain is single-call complete for its intent. Chaining them produced multiple live dispatch rows for one card (dispatch A from /redispatch, dispatch B from /transition's force-transition cleanup, plus the queue-run path from /generate that the activate hook then turned into dispatch C). The runtime started executing the duplicates, causing the outage on 2026-04-30. Note: /generate by itself creates queue entries — dispatch rows are produced by /dispatch-next or the activate=true shortcut.",
                 "how_it_is_prevented_now": [
                     "#1442 added new_dispatch_id and cancelled_dispatch_id(s) to /redispatch, /retry, and /transition responses, plus a per-endpoint follow-up signal: /redispatch and /retry return `next_action` (a fixed marker such as 'none_required' or 'assign_agent_then_call_redispatch'); /transition returns `next_action_hint` (a free-form sentence naming the exact follow-up). On the success path both are 'none_required' / point at no further action — if a caller sees that and still chains another mutation, it is a caller bug, not a missing signal.",
                     "#1444 added a 409 Conflict guard on /transition status:ready when an active dispatch exists. Callers must explicitly opt in via force=true (or legacy cancel_dispatches=true) to override.",
@@ -3742,8 +3742,13 @@ fn card_lifecycle_ops_body() -> Value {
                 "fields": [
                     {
                         "field": "new_dispatch_id",
-                        "source": "/redispatch, /retry, /transition (when a fresh dispatch is created)",
-                        "notes": "String. Confirms that a new dispatch row was inserted; absence means the call was a no-op."
+                        "source": "/redispatch, /retry",
+                        "notes": "String. Confirms that a new dispatch row was inserted; absence means the call was a no-op. /transition uses a different name (`created_dispatch_id`) — see below."
+                    },
+                    {
+                        "field": "created_dispatch_id",
+                        "source": "/transition (force-transition path)",
+                        "notes": "String or null. Populated when the force-transition cleanup created a fresh dispatch as part of the move. Distinct from /redispatch's and /retry's `new_dispatch_id` field."
                     },
                     {
                         "field": "cancelled_dispatch_id (singular)",
