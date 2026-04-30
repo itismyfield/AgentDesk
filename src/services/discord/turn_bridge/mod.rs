@@ -2479,65 +2479,93 @@ pub(super) fn spawn_turn_bridge(
             );
             false
         } else {
-            // #1452 (Codex P1): non-delegation path. The watcher-unpause site
-            // unconditionally publishes `mailbox_finalize_owed = true` so we
-            // win any race with a fast watcher. If we're now finalizing on
-            // the bridge side instead (e.g. cancelled / prompt_too_long /
-            // transport_error / recovery_retry, or because the watcher never
-            // ended up owning relay), revoke that debt BEFORE we call
-            // `mailbox_finish_turn` — otherwise the watcher's later swap
-            // would observe `true` and call `mailbox_finish_turn` a second
-            // time on the next turn's freshly registered cancel_token.
+            // #1452 (Codex P2): non-delegation path. The watcher-unpause site
+            // optimistically publishes `mailbox_finalize_owed = true`, but
+            // we are now finalizing on the bridge side instead (cancelled /
+            // prompt_too_long / transport_error / recovery_retry, or the
+            // watcher never ended up owning relay). Two race outcomes are
+            // possible:
             //
-            // We always revoke regardless of whether the debt was set: the
-            // store is cheap and a conditional load would race with a
-            // concurrent watcher writer.
-            if let Some(watcher) =
+            //   (a) the watcher's terminal swap has NOT yet observed the
+            //       debt → we must revoke it (`true → false`) so a future
+            //       swap does not mistakenly clear the next turn's
+            //       cancel_token.
+            //   (b) the watcher's terminal swap ALREADY consumed the debt
+            //       and called `mailbox_finish_turn` itself → we must NOT
+            //       call `mailbox_finish_turn` again on this turn (it
+            //       would clear a turn we no longer own and could even
+            //       activate the next queued turn before our cleanup is
+            //       complete — Codex P2 from review iter 2).
+            //
+            // `compare_exchange(true, false, AcqRel, Acquire)` distinguishes
+            // the two atomically: `Ok` means we revoked unconsumed debt;
+            // `Err(false)` means the watcher beat us to it. (`Err(true)` is
+            // impossible because the slot is binary.)
+            let watcher_already_finalized = if let Some(watcher) =
                 shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
-                watcher
-                    .mailbox_finalize_owed
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
-            let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
-            record_turn_bridge_invariant(
-                finish.removed_token.is_some(),
-                &provider,
-                channel_id,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                Some(turn_id.as_str()),
-                "mailbox_active_turn_matches_dispatch",
-                "src/services/discord/turn_bridge/mod.rs:mailbox_finish_turn",
-                "turn_bridge finalization expected exactly one active mailbox turn",
-                serde_json::json!({
-                    "has_pending": finish.has_pending,
-                    "mailbox_online": finish.mailbox_online,
-                }),
-            );
-            if let Some(removed_token) = finish.removed_token {
-                // Mark the token as cancelled so any lingering watchdog timer exits cleanly
-                // instead of mistakenly firing on a newer turn's token.
-                removed_token
-                    .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                match watcher.mailbox_finalize_owed.compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                ) {
+                    Ok(_) => false,
+                    Err(_) => true,
+                }
+            } else {
+                false
+            };
+
+            if watcher_already_finalized {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] watcher_finalized_before_bridge_revoke: skipping bridge mailbox_finish_turn for channel {} (#1452)",
+                    channel_id.get()
+                );
+                false
+            } else {
+                let finish =
+                    super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+                record_turn_bridge_invariant(
+                    finish.removed_token.is_some(),
+                    &provider,
+                    channel_id,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "mailbox_active_turn_matches_dispatch",
+                    "src/services/discord/turn_bridge/mod.rs:mailbox_finish_turn",
+                    "turn_bridge finalization expected exactly one active mailbox turn",
+                    serde_json::json!({
+                        "has_pending": finish.has_pending,
+                        "mailbox_online": finish.mailbox_online,
+                    }),
+                );
+                if let Some(removed_token) = finish.removed_token {
+                    // Mark the token as cancelled so any lingering watchdog timer exits cleanly
+                    // instead of mistakenly firing on a newer turn's token.
+                    removed_token
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    shared_owned
+                        .global_active
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                // Clean up any pending watchdog deadline override for this channel
+                super::clear_watchdog_deadline_override(channel_id.get()).await;
+                // Clean up dispatch-thread parent mapping when the thread turn ends.
+                // Iterate and remove entries whose thread matches this channel_id.
                 shared_owned
-                    .global_active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    .dispatch_thread_parents
+                    .retain(|_, thread| *thread != channel_id);
+                // Keep the override while queued turns remain so review/reused-thread routing
+                // survives restart-preserve and same-runtime dequeue paths.
+                if !finish.has_pending {
+                    shared_owned.dispatch_role_overrides.remove(&channel_id);
+                }
+                finish.has_pending
             }
-            // Clean up any pending watchdog deadline override for this channel
-            super::clear_watchdog_deadline_override(channel_id.get()).await;
-            // Clean up dispatch-thread parent mapping when the thread turn ends.
-            // Iterate and remove entries whose thread matches this channel_id.
-            shared_owned
-                .dispatch_thread_parents
-                .retain(|_, thread| *thread != channel_id);
-            // Keep the override while queued turns remain so review/reused-thread routing
-            // survives restart-preserve and same-runtime dequeue paths.
-            if !finish.has_pending {
-                shared_owned.dispatch_role_overrides.remove(&channel_id);
-            }
-            finish.has_pending
         };
         let mut preserve_inflight_for_cleanup_retry = false;
 

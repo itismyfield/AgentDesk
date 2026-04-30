@@ -582,16 +582,23 @@ pub(super) struct TmuxWatcherHandle {
     /// `try_start_turn` calls on brand-new turns.
     ///
     /// Protocol:
-    ///   * Bridge: `store(true, Ordering::Release)` at the watcher-unpause
-    ///     site (`turn_bridge/mod.rs` `TmuxReady` branch). The store
-    ///     happens BEFORE `paused.store(false, ...)` so a fast watcher
-    ///     cannot reach its terminal swap before we publish — Codex P1
-    ///     pointed out that storing later (at the delegation decision in
-    ///     `let has_queued_turns = ...`) is racy. If the bridge later
-    ///     decides NOT to delegate (cancelled / prompt_too_long /
-    ///     transport_error / recovery_retry), it revokes the debt with
-    ///     `store(false, Release)` before calling `mailbox_finish_turn`
-    ///     itself.
+    ///   * Bridge unpause: `store(true, Ordering::Release)` at the
+    ///     watcher-unpause site (`turn_bridge/mod.rs` `TmuxReady` branch).
+    ///     The store happens BEFORE `paused.store(false, ...)` so a fast
+    ///     watcher cannot reach its terminal swap before we publish —
+    ///     Codex P1 pointed out that storing later (at the delegation
+    ///     decision in `let has_queued_turns = ...`) is racy.
+    ///   * Bridge non-delegation: when the bridge ends up handling the
+    ///     turn itself (cancelled / prompt_too_long / transport_error /
+    ///     recovery_retry, or watcher relay falls through), it must take
+    ///     the debt back atomically. It uses
+    ///     `compare_exchange(true, false, AcqRel, Acquire)`:
+    ///       * `Ok` → bridge revoked unconsumed debt, runs its own
+    ///         `mailbox_finish_turn`.
+    ///       * `Err(false)` → watcher already swapped and finalized; the
+    ///         bridge MUST skip its own `mailbox_finish_turn` to avoid
+    ///         clearing a turn it no longer owns (Codex P2 from review
+    ///         iter 2).
     ///   * Watcher: `swap(false, Ordering::AcqRel)` in its turn-end
     ///     branch. AcqRel guarantees:
     ///       1. Acquire — every prior bridge write is observed before we

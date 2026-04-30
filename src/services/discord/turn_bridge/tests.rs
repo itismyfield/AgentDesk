@@ -2733,37 +2733,59 @@ async fn reproduction_issue_1452_second_turn_starts_after_handoff() {
     );
 }
 
-/// 4b. `bridge_non_delegation_revokes_finalize_owed_debt` — Codex P1.
+/// 4b. `bridge_non_delegation_compare_exchange_distinguishes_outcomes`
+/// — Codex P2 (review iter 2).
 ///
 /// Because we publish `mailbox_finalize_owed = true` early at the
 /// watcher-unpause site, any non-delegation termination of the bridge
 /// (cancelled / prompt_too_long / transport_error / recovery_retry, or a
-/// watcher that never ended up owning the relay) MUST revoke the debt
-/// before the bridge calls `mailbox_finish_turn` itself. Otherwise a future
-/// watcher swap would observe stale `true` and clear the next turn's
-/// freshly registered cancel_token.
+/// watcher that never ended up owning the relay) creates two race
+/// outcomes the bridge MUST distinguish atomically:
+///
+///   (a) watcher has NOT yet consumed → bridge revokes (`true → false`)
+///       and runs its own `mailbox_finish_turn`.
+///   (b) watcher ALREADY consumed and called `mailbox_finish_turn` →
+///       bridge MUST SKIP its own finalization to avoid clearing a turn
+///       it no longer owns / activating the next queued turn before its
+///       own cleanup is complete.
+///
+/// The bridge implements this with
+/// `compare_exchange(true, false, AcqRel, Acquire)`. This test pins both
+/// arms.
 #[test]
-fn bridge_non_delegation_revokes_finalize_owed_debt() {
+fn bridge_non_delegation_compare_exchange_distinguishes_outcomes() {
     use std::sync::atomic::AtomicBool;
+
+    // Outcome (a): watcher has NOT consumed yet.
     let owed = Arc::new(AtomicBool::new(false));
-
-    // Watcher-unpause publishes the debt (matches the production store at
-    // `turn_bridge/mod.rs` `TmuxReady` branch).
-    owed.store(true, Ordering::Release);
-    assert!(owed.load(Ordering::Acquire));
-
-    // Bridge later decides NOT to delegate (e.g., transport_error). It
-    // revokes the debt before running its own `mailbox_finish_turn`.
-    owed.store(false, Ordering::Release);
-
-    // A future watcher turn-end swap must report no debt, so it does not
-    // call `mailbox_finish_turn` for the wrong turn.
-    let consumed = owed.swap(false, Ordering::AcqRel);
+    owed.store(true, Ordering::Release); // watcher-unpause publishes debt
+    let revoked = owed.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire);
     assert!(
-        !consumed,
-        "non-delegation path must revoke finalize_owed so the watcher does not finalize \
-         the wrong turn's cancel_token"
+        revoked.is_ok(),
+        "bridge must successfully revoke unconsumed debt"
     );
+    assert!(
+        !owed.load(Ordering::Acquire),
+        "after Ok revoke, future swaps must observe no debt for next turn"
+    );
+
+    // Outcome (b): watcher beat the bridge.
+    let owed = Arc::new(AtomicBool::new(false));
+    owed.store(true, Ordering::Release); // watcher-unpause publishes debt
+    let consumed = owed.swap(false, Ordering::AcqRel); // watcher consumes first
+    assert!(consumed);
+    let revoked = owed.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire);
+    assert!(
+        revoked.is_err(),
+        "bridge compare_exchange must report watcher already consumed"
+    );
+    assert_eq!(
+        revoked.unwrap_err(),
+        false,
+        "Err arm must surface the actual current value (false) for branching"
+    );
+    // The bridge sees Err and SKIPS its own `mailbox_finish_turn` (the
+    // watcher already cleared the channel mailbox).
 }
 
 /// 5. Regression: the existing `finish_mailbox_on_completion = true`
