@@ -381,6 +381,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     }
 
     let pg_pool = shared.pg_pool.as_ref();
+    clear_stale_session_dispatch_links(pg_pool).await;
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
     // not a wall-clock offset that could mis-classify old pending dispatches.
@@ -532,6 +533,104 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
         orphans.len()
     );
+}
+
+async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
+    let Some(pool) = pg_pool else {
+        return;
+    };
+
+    match sqlx::query(
+        "UPDATE sessions s
+            SET status = CASE
+                    WHEN s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                    ELSE s.status
+                END,
+                active_dispatch_id = NULL,
+                session_info = 'Cleared stale terminal dispatch link',
+                last_heartbeat = NOW()
+           FROM task_dispatches d
+          WHERE s.active_dispatch_id = d.id
+            AND d.status IN ('completed', 'failed', 'cancelled')
+      RETURNING s.session_key, d.id AS dispatch_id, d.status AS dispatch_status",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            if !rows.is_empty() {
+                let sample = rows
+                    .iter()
+                    .take(5)
+                    .filter_map(|row| {
+                        let session_key = row.try_get::<String, _>("session_key").ok()?;
+                        let dispatch_id = row.try_get::<String, _>("dispatch_id").ok()?;
+                        let dispatch_status = row.try_get::<String, _>("dispatch_status").ok()?;
+                        Some(format!("{session_key}:{dispatch_id}:{dispatch_status}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::warn!(
+                    cleared = rows.len(),
+                    sample = %sample,
+                    "cleared stale terminal active_dispatch_id links during startup recovery"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to clear stale terminal active_dispatch_id links during startup recovery"
+            );
+        }
+    }
+
+    match sqlx::query(
+        "WITH stale AS (
+             SELECT s.session_key
+               FROM sessions s
+              WHERE s.active_dispatch_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_dispatches d WHERE d.id = s.active_dispatch_id
+                )
+         )
+         UPDATE sessions s
+            SET status = CASE
+                    WHEN s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                    ELSE s.status
+                END,
+                active_dispatch_id = NULL,
+                session_info = 'Cleared missing dispatch link',
+                last_heartbeat = NOW()
+           FROM stale
+          WHERE s.session_key = stale.session_key
+      RETURNING s.session_key",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            if !rows.is_empty() {
+                let sample = rows
+                    .iter()
+                    .take(5)
+                    .filter_map(|row| row.try_get::<String, _>("session_key").ok())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::warn!(
+                    cleared = rows.len(),
+                    sample = %sample,
+                    "cleared missing active_dispatch_id links during startup recovery"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to clear missing active_dispatch_id links during startup recovery"
+            );
+        }
+    }
 }
 
 pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
