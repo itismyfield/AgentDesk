@@ -432,6 +432,32 @@ pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &s
 pub(crate) fn clear_inflight_state_for_channel(provider: &ProviderKind, channel_id: u64) {
     inflight::clear_inflight_state(provider, channel_id);
 }
+
+pub(crate) fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
+    let now_unix_secs = chrono::Local::now().timestamp();
+    [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::Gemini,
+        ProviderKind::OpenCode,
+        ProviderKind::Qwen,
+    ]
+    .iter()
+    .flat_map(load_inflight_states)
+    .any(|state| {
+        if state.rebind_origin || state.channel_id != channel_id {
+            return false;
+        }
+        if inflight::inflight_state_is_stale(
+            &state,
+            now_unix_secs,
+            inflight::INFLIGHT_STALENESS_THRESHOLD_SECS,
+        ) {
+            return false;
+        }
+        true
+    })
+}
 /// Check if a deferred restart has been requested and no active or finalizing turns remain
 /// **across all providers**.
 ///
