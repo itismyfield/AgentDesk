@@ -3662,12 +3662,12 @@ fn card_lifecycle_ops_body() -> Value {
                     {
                         "scenario": "Card stuck in review/dilemma_pending, want to restart",
                         "single_call": "POST /api/kanban-cards/{id}/redispatch",
-                        "notes": "Cancels the live dispatch and creates a brand-new dispatch_id. Inspect new_dispatch_id and cancelled_dispatch_id in the response. Do NOT follow with /transition or /auto-queue/generate."
+                        "notes": "Cancels the live dispatch and creates a brand-new dispatch_id. Inspect new_dispatch_id, cancelled_dispatch_id, and next_action in the response. Do NOT follow with /transition or /auto-queue/generate."
                     },
                     {
                         "scenario": "Card done, want to retry the same failed step",
                         "single_call": "POST /api/kanban-cards/{id}/retry",
-                        "notes": "Re-executes the same failed step with the same intent (optional assignee swap via assignee_agent_id). Inspect new_dispatch_id and next_action. Do NOT follow with /transition or /auto-queue/generate."
+                        "notes": "Re-executes the same failed step with the same intent (optional assignee swap via assignee_agent_id). Inspect new_dispatch_id, cancelled_dispatch_id, and next_action. Do NOT follow with /transition or /auto-queue/generate."
                     },
                     {
                         "scenario": "Force card to a specific status",
@@ -3731,11 +3731,11 @@ fn card_lifecycle_ops_body() -> Value {
                 ],
                 "why_it_broke": "Each of /redispatch, /transition status:ready, and /auto-queue/generate is single-call complete. Chaining them produced three dispatches for one card and the runtime started executing all three, causing the duplicate-dispatch outage on 2026-04-30.",
                 "how_it_is_prevented_now": [
-                    "#1442 added new_dispatch_id, cancelled_dispatch_id(s), and next_action_hint to /redispatch, /retry, and /transition responses. next_action_hint is 'none_required' on the success path — if a caller sees that and still chains another mutation, it is a caller bug, not a missing signal.",
+                    "#1442 added new_dispatch_id and cancelled_dispatch_id(s) to /redispatch, /retry, and /transition responses, plus a per-endpoint follow-up signal: /redispatch and /retry return `next_action` (a fixed marker such as 'none_required' or 'assign_agent_then_call_redispatch'); /transition returns `next_action_hint` (a free-form sentence naming the exact follow-up). On the success path both are 'none_required' / point at no further action — if a caller sees that and still chains another mutation, it is a caller bug, not a missing signal.",
                     "#1444 added a 409 Conflict guard on /transition status:ready when an active dispatch exists. Callers must explicitly opt in via force=true (or legacy cancel_dispatches=true) to override.",
-                    "#1444 also made /auto-queue/generate and /dispatch-next surface structured skips (skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter) instead of silently dropping the entry, so even a misuse is observable from the response."
+                    "#1444 also made /auto-queue/generate surface structured skips (skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter) instead of silently dropping the entry, so even a misuse is observable from the response. Note: /dispatch-next does NOT return these arrays — it only reports `dispatched`, `count`, `active_groups`, and `pending_groups`."
                 ],
-                "right_pattern": "Pick ONE row from Section 1 and call it ONCE. Inspect new_dispatch_id, cancelled_dispatch_id(s), next_action_hint, and skipped_due_to_*. Do NOT call a second mutation unless next_action_hint says so."
+                "right_pattern": "Pick ONE row from Section 1 and call it ONCE. Inspect new_dispatch_id, cancelled_dispatch_id(s), next_action / next_action_hint, and (for /generate) skipped_due_to_*. Do NOT call a second mutation unless next_action / next_action_hint says so."
             },
             "4_new_response_fields": {
                 "heading": "Section 4: New Response Fields (from #1442 / #1444)",
@@ -3756,23 +3756,28 @@ fn card_lifecycle_ops_body() -> Value {
                         "notes": "Array of dispatch IDs cancelled by the cleanup pass; pairs with cancelled_dispatches count."
                     },
                     {
+                        "field": "next_action",
+                        "source": "/redispatch, /retry",
+                        "notes": "Concrete next-action string returned by the per-card endpoints. 'none_required' on the success path; otherwise a fixed marker such as 'assign_agent_then_call_retry', 'assign_agent_then_call_redispatch', or 'duplicate_active_dispatch_detected_inspect_card'. If it says 'none_required', do NOT chain another mutation."
+                    },
+                    {
                         "field": "next_action_hint",
-                        "source": "/transition, /redispatch, /retry",
-                        "notes": "Concrete next action string. 'none_required' on the success path; otherwise names the exact endpoint to call. If it says 'none_required', do NOT chain another mutation."
+                        "source": "/transition (force-transition path; also returned in the 409 body)",
+                        "notes": "Free-form sentence naming the exact follow-up — for example 'call /api/auto-queue/generate to dispatch newly-ready card', or guidance on the 409 override. Distinct from /redispatch and /retry's `next_action` field."
                     },
                     {
                         "field": "skipped_due_to_active_dispatch",
-                        "source": "/auto-queue/generate",
+                        "source": "/auto-queue/generate (NOT /dispatch-next)",
                         "notes": "Array of {issue_number, existing_dispatch_id} entries that were silently skipped because the card already had a live dispatch."
                     },
                     {
                         "field": "skipped_due_to_dependency",
-                        "source": "/auto-queue/generate",
+                        "source": "/auto-queue/generate (NOT /dispatch-next)",
                         "notes": "Array of {issue_number, unresolved_deps[]} entries skipped because dependency cards were not yet done."
                     },
                     {
                         "field": "skipped_due_to_filter",
-                        "source": "/auto-queue/generate",
+                        "source": "/auto-queue/generate (NOT /dispatch-next)",
                         "notes": "Array of entries skipped by repo/agent_id filters."
                     },
                     {
