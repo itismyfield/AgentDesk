@@ -906,6 +906,35 @@ pub async fn transition_status_with_opts_pg(
     .map(|(result, _)| result)
 }
 
+/// #1444: run the same `ForceTransitionRevertCleanup` cleanup that
+/// `transition_status_with_opts_and_allowed_cleanup_pg_only` would have
+/// applied, but without going through the FSM. The route handler uses this
+/// when the FSM short-circuits with `NoOp` (e.g. `force=true` ready→ready
+/// recovery) so the cleanup still runs and the documented force-recovery
+/// path actually clears `latest_dispatch_id`, skipped queue entries, and
+/// session bindings instead of leaving them stale.
+pub async fn force_transition_revert_cleanup_pg_only(
+    pg_pool: &sqlx::PgPool,
+    card_id: &str,
+    new_status: &str,
+) -> Result<PgTransitionCleanupCounts> {
+    let mut tx = pg_pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin force-transition revert cleanup tx: {error}"))?;
+    let counts = execute_allowed_cleanup_on_pg_tx(
+        &mut tx,
+        card_id,
+        new_status,
+        AllowedOnConnMutation::ForceTransitionRevertCleanup,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit force-transition revert cleanup tx: {error}"))?;
+    Ok(counts)
+}
+
 pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,

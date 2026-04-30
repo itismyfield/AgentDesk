@@ -4035,8 +4035,15 @@ pub async fn force_transition(
         return response;
     }
 
-    let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
+    // #1444 codex iter-2 P2: `force=true` is documented as opting into the
+    // "cancel + transition" recovery, so it must drive the cleanup decision
+    // alongside the legacy `cancel_dispatches` flag. Otherwise a caller
+    // sending `{"status":"ready","force":true,"cancel_dispatches":false}`
+    // would bypass the 409 guard but skip the cleanup, leaving the active
+    // dispatch in place — the exact regression the guard exists to prevent.
     let force_intent_present = force_transition_force_intent_present(&body);
+    let cleanup_opt_in = force_intent_present || body.cancel_dispatches.unwrap_or(true);
+    let needs_cleanup = force_transition_needs_cleanup(&body.status, Some(cleanup_opt_in));
     let target_status = body.status;
     let mut cleanup_counts = (0, 0);
     let pool = match state.pg_pool_ref() {
@@ -4107,8 +4114,10 @@ pub async fn force_transition(
                 .await
                 {
                     Ok(effective) => {
-                        effective.is_terminal(&target_status)
-                            && body.cancel_dispatches.unwrap_or(true)
+                        // #1444 codex iter-2 P2: same `force || cancel_dispatches`
+                        // unification as the ready/backlog cleanup decision so
+                        // `force=true` drives terminal cleanup too.
+                        effective.is_terminal(&target_status) && cleanup_opt_in
                     }
                     Err(error) => {
                         return (
@@ -4177,41 +4186,46 @@ pub async fn force_transition(
 
     match transition_result {
         Ok(result) => {
-            let (mut cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
+            let (mut cancelled_dispatches, mut skipped_auto_queue_entries) = cleanup_counts;
             crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
 
-            // #1444 codex iter-1 P2: when target_status equals current status
-            // (transition is a NoOp at the FSM level) AND the caller forced the
-            // call to clear an active dispatch, the cleanup helpers never ran
-            // because the FSM short-circuited. Explicitly cancel the
-            // pre-existing active dispatches here so the documented
-            // `force=true` recovery path is actually effective on
-            // ready→ready (or any same-state) retries.
+            // #1444 codex iter-2 P1: when target_status equals current status
+            // (transition is a NoOp at the FSM level) AND the caller forced
+            // the call to clear an active dispatch, the cleanup helpers
+            // never ran because the FSM short-circuited. Run the SAME
+            // `ForceTransitionRevertCleanup` cleanup the normal ready
+            // transition path applies — cancel dispatches AND skip live
+            // auto-queue entries AND clear `latest_dispatch_id`/review
+            // fields on the card AND clear stale session bindings — so
+            // the documented force-recovery actually leaves the card in a
+            // clean state. (Iter-1 used the generic per-dispatch cancel
+            // which RESET queue entries to pending, leaving them eligible
+            // for redispatch and the dispatch pointer stale on the card.)
             if !result.changed
                 && force_intent_present
                 && target_status == "ready"
                 && !pre_active_dispatch_ids.is_empty()
             {
-                let reason = format!("force-transition to {target_status}");
-                for dispatch_id in &pre_active_dispatch_ids {
-                    match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-                        pool,
-                        dispatch_id,
-                        Some(&reason),
-                    )
-                    .await
-                    {
-                        Ok(changed) => cancelled_dispatches += changed,
-                        Err(error) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({
-                                    "error": format!(
-                                        "force-transition no-op cleanup failed for dispatch {dispatch_id}: {error}"
-                                    ),
-                                })),
-                            );
-                        }
+                match crate::kanban::force_transition_revert_cleanup_pg_only(
+                    pool,
+                    &id,
+                    &target_status,
+                )
+                .await
+                {
+                    Ok(noop_counts) => {
+                        cancelled_dispatches += noop_counts.cancelled_dispatches;
+                        skipped_auto_queue_entries += noop_counts.skipped_auto_queue_entries;
+                    }
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": format!(
+                                    "force-transition no-op cleanup failed for card {id}: {error}"
+                                ),
+                            })),
+                        );
                     }
                 }
             }
