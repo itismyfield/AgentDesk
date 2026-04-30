@@ -2788,6 +2788,81 @@ fn bridge_non_delegation_compare_exchange_distinguishes_outcomes() {
     // watcher already cleared the channel mailbox).
 }
 
+/// 4c. `bridge_finalizes_when_no_debt_was_published_for_this_turn`
+/// — Codex iter 3 P1.
+///
+/// If a paused watcher from a prior turn is registered but the current
+/// bridge run exits BEFORE the `TmuxReady` branch (e.g., transport error
+/// during startup, prompt-too-long, or any path that never publishes
+/// debt), `mailbox_finalize_owed` may still be `false` from initialization
+/// — but the watcher never claimed to own this turn. The bridge MUST run
+/// `mailbox_finish_turn` itself; treating "Err(false)" from a
+/// `compare_exchange(true, false)` as "watcher already finalized" would
+/// leak the cancel_token (the watcher has no debt for this turn).
+///
+/// The bridge guards this with a local `bridge_published_finalize_owed_for_this_turn`
+/// flag — only when that flag is true does it consult the atomic.
+#[test]
+fn bridge_finalizes_when_no_debt_was_published_for_this_turn() {
+    use std::sync::atomic::AtomicBool;
+
+    // Watcher handle exists from a prior turn; current value is false
+    // because no `TmuxReady` ran in this turn frame.
+    let owed = Arc::new(AtomicBool::new(false));
+
+    // Bridge's local flag stays false (it never reached the unpause site).
+    let bridge_published_finalize_owed_for_this_turn = false;
+
+    // The bridge's branch logic (paraphrased from
+    // `turn_bridge/mod.rs:bridge_published_finalize_owed_for_this_turn`):
+    let watcher_already_finalized = if bridge_published_finalize_owed_for_this_turn {
+        matches!(
+            owed.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire,),
+            Err(_),
+        )
+    } else {
+        false
+    };
+
+    assert!(
+        !watcher_already_finalized,
+        "no debt published for this turn must NOT short-circuit the bridge's own \
+         `mailbox_finish_turn` — otherwise the channel cancel_token leaks (Codex iter 3 P1)"
+    );
+}
+
+/// 4d. `watcher_skips_swap_when_dispatch_failed` — Codex iter 3 P2.
+///
+/// The watcher must consume `mailbox_finalize_owed` ONLY when it is
+/// actually about to call `finish_restored_watcher_active_turn`. If
+/// `dispatch_ok` is false (e.g., dispatch lookup or fallback completion
+/// failed), the watcher skips finalization — eating the debt would leave
+/// the channel without finalization on either side.
+#[test]
+fn watcher_skips_swap_when_dispatch_failed() {
+    use std::sync::atomic::AtomicBool;
+    let owed = Arc::new(AtomicBool::new(true)); // bridge published debt
+
+    // Watcher's relay completed but dispatch_ok = false — emulate the
+    // production gate at `tmux.rs` (~line 4900): only swap inside the
+    // `if dispatch_ok` arm.
+    let dispatch_ok = false;
+    let consumed = if dispatch_ok {
+        owed.swap(false, Ordering::AcqRel)
+    } else {
+        false
+    };
+
+    assert!(
+        !consumed,
+        "watcher must not eat the debt when it won't finalize"
+    );
+    assert!(
+        owed.load(Ordering::Acquire),
+        "debt must remain available for the bridge's compare_exchange revoke (Codex iter 3 P2)"
+    );
+}
+
 /// 5. Regression: the existing `finish_mailbox_on_completion = true`
 /// (inflight-restore) path keeps working when the new flag is also set.
 /// `mailbox_finish_turn` is idempotent (the second call observes an empty

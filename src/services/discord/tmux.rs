@@ -4887,30 +4887,44 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 drop(data);
             }
             turn_result_relayed = true;
-            // #1452: pull the bridge→watcher handoff debt exactly once per
-            // turn. `swap` (AcqRel) ensures:
+            // #1452 (Codex iter 3 P2): only consume the handoff debt when
+            // we are actually going to finalize. If `dispatch_ok` is false
+            // (e.g., dispatch type lookup or fallback completion failed)
+            // we'd skip `finish_restored_watcher_active_turn` anyway —
+            // swapping early would leave the debt cleared with no
+            // finalization, and a bridge racing this path would then see
+            // `false` and skip its own finish too, leaving the channel
+            // mailbox active forever.
+            //
+            // Swap inside the `if dispatch_ok` arm so:
             //   * Acquire — observes the bridge's prior `Release` store of
             //     `true` (and any inflight writes that preceded it) before
             //     we decide to call `mailbox_finish_turn`.
             //   * Release — publishes our reset back to `false`, so a
             //     watcher that survives into the next turn (e.g., paused
-            //     between dispatches) will see `false` on its next swap and
-            //     will not accidentally clear that turn's freshly registered
-            //     cancel_token.
-            let delegated_finalize_owed =
-                mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
-            if dispatch_ok {
+            //     between dispatches) will see `false` on its next swap
+            //     and will not accidentally clear that turn's freshly
+            //     registered cancel_token.
+            //
+            // When `dispatch_ok = false` we deliberately leave the debt in
+            // place; the bridge's later `compare_exchange(true, false, ...)`
+            // will revoke it and run `mailbox_finish_turn` on its side.
+            let delegated_finalize_owed = if dispatch_ok {
+                let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
                 super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
                 finish_restored_watcher_active_turn(
                     &shared,
                     &provider_kind,
                     channel_id,
                     finish_mailbox_on_completion,
-                    delegated_finalize_owed,
+                    owed,
                     "restored watcher completed with queued backlog",
                 )
                 .await;
-            }
+                owed
+            } else {
+                false
+            };
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
             let watcher_handled_mailbox_finish =

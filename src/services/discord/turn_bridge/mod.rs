@@ -997,6 +997,16 @@ pub(super) fn spawn_turn_bridge(
         let mut watcher_owns_assistant_relay = bridge.inflight_state.watcher_owns_live_relay;
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
             && live_watcher_registered_for_relay(shared_owned.as_ref(), channel_id);
+        // #1452 (Codex iter 3 P1): track whether THIS turn published a
+        // mailbox-finalization debt onto the watcher handle. Without this
+        // flag, the bridge's non-delegation `compare_exchange(true, false, ...)`
+        // cannot tell apart "watcher consumed our debt" (skip finalize) from
+        // "we never set debt at all" (must finalize). The flag flips to
+        // true at the watcher-unpause site below; the non-delegation
+        // finalization branch consults it to decide whether the
+        // compare_exchange Err arm means "watcher beat us" or "no debt at
+        // all".
+        let mut bridge_published_finalize_owed_for_this_turn = false;
         // #1255 live-turn long-running tool placeholder card.
         //
         // `last_assistant_text_line` captures the last non-empty single-line
@@ -2000,7 +2010,20 @@ pub(super) fn spawn_turn_bridge(
                                     watcher
                                         .mailbox_finalize_owed
                                         .store(true, Ordering::Release);
-                                    watcher.paused.store(false, Ordering::Relaxed);
+                                    bridge_published_finalize_owed_for_this_turn = true;
+                                    // #1452 (Codex iter 3 P1): unpause must
+                                    // use Release ordering so a watcher
+                                    // observing `paused = false` is
+                                    // guaranteed to also observe the
+                                    // `mailbox_finalize_owed = true` store
+                                    // above. With Relaxed ordering on a
+                                    // weakly-ordered platform the two
+                                    // stores can be reordered, letting the
+                                    // watcher unpause, race to its terminal
+                                    // swap, observe `false`, and skip
+                                    // `mailbox_finish_turn` — recreating
+                                    // the leak this change is meant to fix.
+                                    watcher.paused.store(false, Ordering::Release);
                                 }
                             }
                             state_dirty = true;
@@ -2479,40 +2502,45 @@ pub(super) fn spawn_turn_bridge(
             );
             false
         } else {
-            // #1452 (Codex P2): non-delegation path. The watcher-unpause site
+            // #1452 non-delegation path. The watcher-unpause site
             // optimistically publishes `mailbox_finalize_owed = true`, but
             // we are now finalizing on the bridge side instead (cancelled /
             // prompt_too_long / transport_error / recovery_retry, or the
-            // watcher never ended up owning relay). Two race outcomes are
-            // possible:
+            // watcher never ended up owning relay).
             //
-            //   (a) the watcher's terminal swap has NOT yet observed the
-            //       debt → we must revoke it (`true → false`) so a future
-            //       swap does not mistakenly clear the next turn's
-            //       cancel_token.
-            //   (b) the watcher's terminal swap ALREADY consumed the debt
-            //       and called `mailbox_finish_turn` itself → we must NOT
-            //       call `mailbox_finish_turn` again on this turn (it
-            //       would clear a turn we no longer own and could even
-            //       activate the next queued turn before our cleanup is
-            //       complete — Codex P2 from review iter 2).
+            // Codex iter 3 P1: we must distinguish three outcomes:
+            //   (a) THIS turn published the debt AND watcher has NOT yet
+            //       consumed it → revoke (`true → false`) and run our own
+            //       `mailbox_finish_turn`. Without revoke a future swap
+            //       would mistakenly clear the next turn's cancel_token.
+            //   (b) THIS turn published the debt AND watcher ALREADY
+            //       consumed it (called `mailbox_finish_turn` itself) →
+            //       SKIP our own finalization to avoid clearing a turn we
+            //       no longer own (Codex P2 review iter 2).
+            //   (c) THIS turn never published the debt at all (no
+            //       `TmuxReady` reached, or watcher missing) → the
+            //       handle's value is just whatever the previous turn
+            //       left there. We MUST run our own `mailbox_finish_turn`
+            //       — treating this as outcome (b) would leak the
+            //       cancel_token (Codex iter 3 P1).
             //
-            // `compare_exchange(true, false, AcqRel, Acquire)` distinguishes
-            // the two atomically: `Ok` means we revoked unconsumed debt;
-            // `Err(false)` means the watcher beat us to it. (`Err(true)` is
-            // impossible because the slot is binary.)
-            let watcher_already_finalized = if let Some(watcher) =
-                shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+            // `bridge_published_finalize_owed_for_this_turn` distinguishes
+            // (a)/(b) from (c). `compare_exchange(true, false, AcqRel,
+            // Acquire)` then distinguishes (a) from (b): Ok = revoked
+            // unconsumed debt (a); Err = watcher beat us (b).
+            let watcher_already_finalized = if bridge_published_finalize_owed_for_this_turn
+                && let Some(watcher) =
+                    shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
-                match watcher.mailbox_finalize_owed.compare_exchange(
-                    true,
-                    false,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                ) {
-                    Ok(_) => false,
-                    Err(_) => true,
-                }
+                matches!(
+                    watcher.mailbox_finalize_owed.compare_exchange(
+                        true,
+                        false,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    ),
+                    Err(_)
+                )
             } else {
                 false
             };

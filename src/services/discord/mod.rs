@@ -589,9 +589,13 @@ pub(super) struct TmuxWatcherHandle {
     ///     Codex P1 pointed out that storing later (at the delegation
     ///     decision in `let has_queued_turns = ...`) is racy.
     ///   * Bridge non-delegation: when the bridge ends up handling the
-    ///     turn itself (cancelled / prompt_too_long / transport_error /
-    ///     recovery_retry, or watcher relay falls through), it must take
-    ///     the debt back atomically. It uses
+    ///     turn itself, it must take the debt back atomically. It tracks
+    ///     a local `bridge_published_finalize_owed_for_this_turn` flag so
+    ///     it can tell apart "we published debt for this turn" from
+    ///     "we never published" — without this distinction, a paused
+    ///     watcher carried over from a prior turn would leave the
+    ///     handle's value unrelated to the current turn (Codex iter 3 P1).
+    ///     If the flag is set, the bridge runs
     ///     `compare_exchange(true, false, AcqRel, Acquire)`:
     ///       * `Ok` → bridge revoked unconsumed debt, runs its own
     ///         `mailbox_finish_turn`.
@@ -599,6 +603,8 @@ pub(super) struct TmuxWatcherHandle {
     ///         bridge MUST skip its own `mailbox_finish_turn` to avoid
     ///         clearing a turn it no longer owns (Codex P2 from review
     ///         iter 2).
+    ///     If the flag is NOT set (no `TmuxReady` reached, or watcher
+    ///     missing), the bridge always runs `mailbox_finish_turn`.
     ///   * Watcher: `swap(false, Ordering::AcqRel)` in its turn-end
     ///     branch. AcqRel guarantees:
     ///       1. Acquire — every prior bridge write is observed before we
