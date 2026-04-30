@@ -23,7 +23,7 @@ This will:
 Windows and Linux run natively today, but they use the manual/runtime-first path instead of the macOS `curl | bash` bootstrap.
 
 1. Download the matching release artifact (`agentdesk-linux-<arch>.tar.gz` or `agentdesk-windows-<arch>.zip`) or build from source with `cargo build --release`.
-2. Run `agentdesk --init` (`agentdesk.exe --init` on Windows) to create the runtime under `~/.adk/release` or `%USERPROFILE%\.adk\release`.
+2. Run `agentdesk init` (`agentdesk.exe init` on Windows) to create the runtime under `~/.adk/release` or `%USERPROFILE%\.adk\release`.
 3. Start `agentdesk dcserver` directly, or register the generated service path with `systemd --user` on Linux or `nssm` / `sc.exe` on Windows.
 4. Verify the host runtime with `agentdesk doctor`. Mutating repairs require explicit flags such as `agentdesk doctor --fix --allow-restart` or `agentdesk doctor --fix --repair-sqlite-cache`.
 
@@ -40,7 +40,7 @@ cargo build --release
 ./scripts/verify-dashboard.sh
 
 # Initialize
-./target/release/agentdesk --init
+./target/release/agentdesk init
 ```
 
 #### Shared rustc Cache with `sccache`
@@ -112,15 +112,15 @@ If your skills live outside the default roots, pass one or more `--skills-root <
 After installation, the web dashboard opens automatically at `http://127.0.0.1:8791`. The onboarding wizard walks you through:
 
 ### Step 1: Discord Bot Setup
-Create Discord bots in the [Discord Developer Portal](https://discord.com/developers/applications). You need at minimum:
+Create Discord bots in the [Discord Developer Portal](https://discord.com/developers/applications). AgentDesk uses three distinct bot identities — each with its own Discord application and token:
 
-| Bot | Role | Required Permissions |
-|-----|------|---------------------|
-| **Command Bot** | Runs AI agent sessions (Claude or Codex) | Send Messages, Read Message History, Manage Messages |
-| **Communication Bot** | Agent-to-agent messaging + channel management | Administrator (simplest) or Manage Channels + Manage Roles |
-| **Notification Bot** *(optional)* | System alerts (agents don't respond to this bot) | Send Messages |
+| Bot key | Role | Required Permissions |
+|---------|------|---------------------|
+| **`announce`** | Authoritative trigger source: posts dispatch envelopes (`DISPATCH:<uuid>`), PM/escalation cards, and agent-to-agent routing via `/api/discord/send`. Other agent bots treat its messages as turn triggers. | Administrator (simplest) or Send Messages + Manage Messages + Manage Channels + Manage Roles |
+| **`notify`** | Informational notifications only — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`), system alerts. Its user id is intentionally NOT in `allowed_bot_ids`, so its messages do not trigger agent turns (#1448 follow-up). | Send Messages, Read Message History |
+| **Per-provider** (`claude`, `codex`, …) | User-facing bots humans @-mention in agent channels. When a user posts in a channel mapped to one of these bots, AgentDesk runs a turn for that provider. Add one bot per provider you plan to use. | Send Messages, Read Message History, Manage Messages |
 
-**Important:** On the Bot tab, enable the **MESSAGE CONTENT** Privileged Gateway Intent. Without this, bots cannot read message content and will not function properly.
+**Important:** On the Bot tab for every application, enable the **MESSAGE CONTENT** Privileged Gateway Intent. Without this, bots cannot read message content and will not function properly.
 
 After entering and validating each bot token, the wizard generates OAuth2 invite links with the correct permissions pre-configured — just click to invite each bot to your Discord server.
 
@@ -128,15 +128,15 @@ After entering and validating each bot token, the wizard generates OAuth2 invite
 The wizard checks whether Claude Code or Codex CLI is installed and authenticated on your machine. If not, it provides installation and login instructions. Provider setup is **not required** to complete onboarding — you can configure it later.
 
 ### Step 3: Agent Selection
-Choose from three built-in templates or create custom agents:
+Choose from three built-in role presets or compose a custom team:
 
-| Template | Agents | Use Case |
-|----------|--------|----------|
-| **Household** | Scheduler, Household, Cooking, Health, Shopping | Home automation and family management |
-| **Startup** | PM, Developer, Designer, QA, Marketing | Small team software development |
-| **Office** | Schedule Manager, Email, Document Writer, Researcher, Data Analyst | Business process automation |
+| Preset | Agents | Use Case |
+|--------|--------|----------|
+| **Delivery Squad** | PM, Designer, Developer, QA | Role-based execution team focused on shipping |
+| **Operations Cell** | Ops Lead, Scheduler, Support, Records | Stabilizing recurring workflows and incident triage |
+| **Insight Desk** | Researcher, Analyst, Strategist, Writer | Research, analysis, and shareable writeups |
 
-Custom agents can be added with a name and description. The "AI Generate" button creates a system prompt using your configured provider CLI.
+Presets ship with Korean-first prompts; English copy is shown side-by-side in the wizard. Custom agents can be added with a name, description, and system prompt — the "AI Generate" button drafts the prompt using your configured provider CLI.
 
 ### Step 4: Channel Setup
 Map each agent to a Discord channel. The wizard recommends channel names based on agent IDs (e.g., `scheduler-cc` for a Claude-powered scheduler). You can select existing channels or enter new names.
@@ -168,14 +168,17 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 
 | Policy | Purpose |
 |--------|---------|
+| `00-escalation.js` | Manual-intervention routing, PM cooldown management, escalation flush loop |
+| `00-pr-tracking.js` | Card→PR linkage cache and PR sync helpers |
 | `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates, worktree auto-merge |
-| `review-automation.js` | Counter-model review dispatch, verdict processing, PR tracking |
+| `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
-| `timeouts.js` | Stale card detection, deadlock detection/recovery, idle session cleanup |
+| `phase_gate.js` | Phase gate verification before opening the next batch |
+| `ci-recovery.js` | CI failure detection, auto-rerun, and recovery card creation |
+| `timeouts.js` (+ `timeouts/` modules) | Stale card detection, deadlock recovery, idle session kill, branch guard, dispatch maintenance |
 | `triage-rules.js` | GitHub issue auto-classification and agent assignment |
 | `pipeline.js` | Multi-stage workflow progression |
 | `merge-automation.js` | PR auto-merge, worktree cleanup after merge |
-| `deploy-pipeline.js` | E2E test dispatch and deploy stage advancement |
 
 Repository policy files under `policies/` are canonical for shipped behavior. Release copies under `~/.adk/release/policies/` are deployment replicas, and operator-local policy directories are extensions selected by `policies.dir`. For the complete policy/config source map, see [`docs/source-of-truth.md`](docs/source-of-truth.md).
 
@@ -197,6 +200,8 @@ Where to add tests:
 - `policies/__tests__/kanban-rules.test.js`
 - `policies/__tests__/auto-queue.test.js`
 - `policies/__tests__/review-automation.test.js`
+- `policies/__tests__/phase_gate.test.js`
+- `policies/__tests__/timeouts.test.js`
 - Shared helpers live in `policies/__tests__/support/harness.js`
 
 Test-writing rules:
@@ -216,13 +221,11 @@ Policies hook into a 3-tier periodic tick system running on a dedicated OS threa
 | `onTick` | 5m (legacy) | Backward compatibility for older policies |
 
 ### Multi-Bot Architecture
-Each bot has a distinct role to prevent message conflicts:
+Each bot identity has a distinct role so message intent stays unambiguous:
 
-- **Command bots** trigger AI sessions when they receive messages
-- **Communication bot** handles agent-to-agent messaging and channel management
-- **Notification bot** sends alerts without triggering agent responses
-
-Dual-provider mode lets you run both Claude and Codex simultaneously, each through its own command bot.
+- **`announce`** is the authoritative trigger source. It posts dispatch envelopes (`── implementation dispatch ──\nDISPATCH:<uuid>…`), PM/escalation cards, and agent-to-agent messages routed through `/api/discord/send`. Other agent bots accept its messages as turn triggers when its user id is listed under `auth.allowed_bot_ids`.
+- **`notify`** delivers informational notifications — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`) and system alerts. Its user id is intentionally omitted from `allowed_bot_ids`, so its posts never trigger an agent turn (the routing change landed in #1448 follow-up; the message router still suppresses pre-deploy `announce`-authored issue cards via `is_legacy_announce_issue_card` until the catch-up window expires on 2026-06-01).
+- **Per-provider bots** (`claude`, `codex`, optionally `gemini` / `opencode` / `qwen`) are the user-facing identities humans @-mention in agent channels. A user message in a channel mapped to one of these bots starts a turn for that provider. Each agent can be wired to multiple provider bots — see `agents[].channels` in `agentdesk.yaml` — letting Claude and Codex (or any combination) work side-by-side on the same agent role.
 
 ### Web Dashboard
 A React-based dashboard served from the same binary:
@@ -239,10 +242,12 @@ A React-based dashboard served from the same binary:
 Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
 
 ### Turn Orchestration
-Agent turn lifecycle is managed by a dedicated orchestration layer (extracted from the Discord adapter):
+Agent turn lifecycle is managed by a dedicated orchestration layer (`src/services/turn_orchestrator.rs`, extracted from the Discord adapter):
 - **Heartbeat monitoring** — Tracks agent session liveness
 - **Completion guard** — Validates dispatch results before card transitions
-- **Deadlock detection** — Identifies stuck sessions and auto-recovers with configurable thresholds
+- **Deadlock detection** — Identifies stuck sessions and auto-recovers with configurable thresholds; the stall watchdog and THREAD-GUARD stale-check landed in #1446
+- **Watcher lifecycle** — Tmux watcher shutdown rules live in `src/services/discord/watchers/lifecycle.rs`, split out of `tmux.rs` in #1435
+- **Reaction cleanup** — Mixed ⏳/❌ dispatch reactions are normalized by the cleanup pass added in #1445
 - **Inflight tracking** — Per-provider inflight files for concurrent session management
 
 ## Configuration
@@ -259,37 +264,75 @@ server:
 
 discord:
   bots:
-    command:
-      token: "your-command-bot-token"
-    announce:
+    announce:                       # Authoritative trigger bot — DISPATCH cards, PM cards, /api/discord/send
       token: "your-announce-bot-token"
-    notify:
+      description: Announce
+      agent: announce
+    notify:                         # Informational bot — issue/completion cards (#1448 follow-up)
       token: "your-notify-bot-token"
-    codex:
+      description: Notify
+      agent: notify
+    claude:                         # Per-provider user-facing bot for Claude Code
+      token: "your-claude-bot-token"
+      description: Claude
+      provider: claude
+      auth:
+        allowed_bot_ids: [<announce-user-id>]   # accept turns triggered by announce-bot
+        allow_all_users: true
+    codex:                          # Per-provider user-facing bot for Codex
       token: "your-codex-bot-token"
+      description: Codex
       provider: codex
+      auth:
+        allowed_bot_ids: [<announce-user-id>]
+        allow_all_users: true
   guild_id: "your-guild-id"
+  owner_id: 123456789012345678
+  dm_default_agent: family-counsel  # optional: route DMs without a binding to this agent
+
+# Optional top-level MCP server registry (used by Memento and other MCP-aware agents)
+mcp_servers:
+  memento:
+    url: http://127.0.0.1:57332/mcp
+    auth:
+      type: bearer
+      token_env_var: MEMENTO_ACCESS_KEY
+
+shared_prompt: ~/.adk/release/config/agents/_shared.prompt.md
 
 agents:
   - id: my-agent
     name: My Agent
-    provider: claude          # or codex
+    provider: claude                # default provider for this agent
     channels:
-      claude:
+      claude:                       # bind one channel per provider you want to use
         id: "channel-id"
-        name: agent-cc
+        name: my-agent-cc
         workspace: ~/.adk/release/workspaces/my-project
+        prompt_file: ~/.adk/release/config/agents/my-agent.prompt.md
       codex:
         id: "channel-id"
-        name: agent-cdx
+        name: my-agent-cdx
+        workspace: ~/.adk/release/workspaces/my-project
+    department: engineering
+    avatar_emoji: "🔧"
 
 github:
   repos:
     - "owner/repo-name"
   sync_interval_minutes: 10
 
+# PostgreSQL is the live datastore (SQLite is legacy / test-only since the #868 / #1239 cutover).
+database:
+  enabled: true
+  host: 127.0.0.1
+  port: 5432
+  dbname: agentdesk
+  user: agentdesk
+
+# Optional file/MCP memory configuration. Omit the section entirely to use defaults.
 memory:
-  backend: auto
+  backend: auto                     # auto | file | memento
   file:
     sak_path: "memories/shared-agent-knowledge/shared_knowledge.md"
     sam_path: "memories/shared-agent-memory"
@@ -303,10 +346,15 @@ policies:
   dir: "./policies"
   hot_reload: true
 
+# Live-tunable kanban runtime knobs. Most timeout values live under `runtime:` (see
+# `RuntimeSettingsConfig`) and can be hot-edited from the dashboard runtime panel.
 kanban:
-  timeout_requested_minutes: 45
-  timeout_in_progress_minutes: 100
-  max_review_rounds: 3
+  manager_channel_id: "channel-id"  # optional: PM/manager Discord channel
+  pm_decision_gate_enabled: true
+
+review:
+  enabled: true
+  max_rounds: 3
 ```
 
 For canonical edit paths across runtime config, prompts, policies, memory, `CLAUDE.md`, and MCP mirrors, see [`docs/source-of-truth.md`](docs/source-of-truth.md). Legacy config snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archival only and belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`; use `scripts/archive-config-backups.sh` instead of leaving them beside canonical files.
@@ -329,10 +377,16 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 |----------|---------|
 | `AGENTDESK_ROOT_DIR` | Override runtime directory (default: `~/.adk/release`) |
 | `AGENTDESK_CONFIG` | Override config file path |
+| `AGENTDESK_REPO_DIR` | Override resolved AgentDesk repo path used by `git`/`gh` exec helpers |
 | `AGENTDESK_SERVER_PORT` | Override HTTP server port (default: 8791) |
+| `AGENTDESK_API_URL` | Override base URL the CLI client uses to reach the local API |
+| `AGENTDESK_TOKEN` | Auth token forwarded by CLI subcommands when no `--key` is given |
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
-| `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout (default: 3600) |
+| `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
+| `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT` | Cap on how many times a single turn watchdog deadline can be extended |
+| `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS` | Cap on cumulative turn-watchdog extension seconds |
+| `AGENTDESK_GH_PATH` / `AGENTDESK_CODEX_PATH` / `AGENTDESK_GEMINI_PATH` | Override resolved provider/CLI binary paths |
 | `RUST_LOG` | Standard tracing filter (default: `agentdesk=info`) |
 
 ## Customization
@@ -382,10 +436,17 @@ agentdesk.registerPolicy(myPolicy);
 
 ### Bridge API (available in policy JS)
 
+The QuickJS engine installs the `agentdesk.*` global with ~21 namespaces (sources in `src/engine/ops/`). The most commonly used surface:
+
 ```javascript
-// Database
+// Database (Postgres-backed; use ? placeholders, sqlx rebinds them)
 agentdesk.db.query("SELECT * FROM agents WHERE id = ?", ["my-agent"])
 agentdesk.db.execute("UPDATE kv_meta SET value = ? WHERE key = ?", ["true", "my_flag"])
+
+// Key-value store (TTL-aware; replaces direct kv_meta writes for ephemeral state)
+agentdesk.kv.set("pr:42", JSON.stringify(meta), 3600)   // ttlSeconds optional
+agentdesk.kv.get("pr:42")                                // null if missing or expired
+agentdesk.kv.delete("pr:42")
 
 // Cards (typed queries with filters)
 agentdesk.cards.list({ status: "ready", unassigned: true })
@@ -395,33 +456,47 @@ agentdesk.cards.setPriority(cardId, "high")
 
 // Kanban state transitions (fires hooks automatically)
 agentdesk.kanban.setStatus(cardId, "in_progress")
-agentdesk.kanban.setStatus(cardId, "done", true)  // force
+agentdesk.kanban.setStatus(cardId, "done", true)        // force
 agentdesk.kanban.getCard(cardId)
 agentdesk.kanban.reopen(cardId, "ready")
+agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now" })
 
 // Review state
 agentdesk.reviewState.sync(cardId, "idle")
-agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now" })
+agentdesk.reviewAutomation.requestReview(cardId, { reviewer: "codex" })
 
 // Dispatch
 agentdesk.dispatch.create(cardId, agentId, "implementation", "Task title")
+agentdesk.dispatch.markFailed(dispatchId, "Stale dispatch auto-failed after 24h")
 
 // Pipeline
 agentdesk.pipeline.resolveForCard(cardId)
+agentdesk.pipeline.getConfig()
 agentdesk.pipeline.kickoffState(config)
+agentdesk.pipeline.nextGatedTarget(currentStatus, config)
 agentdesk.pipeline.isTerminal(status, config)
 agentdesk.pipeline.terminalState(config)
+
+// Auto-queue + phase gate
+agentdesk.autoQueue.dispatchNext({ runId: "run-123" })
+agentdesk.queue.list({ runId: "run-123" })
 
 // Agents
 agentdesk.agents.get(agentId)
 
-// Configuration
+// Configuration (live runtime keys + yaml-backed config)
 agentdesk.config.get("review_max_rounds")
 
-// Messaging
+// Messaging — third arg picks the bot:
+//   "announce" → trigger-bearing card (DISPATCH, PM, escalation routing)
+//   "notify"   → informational only (does NOT trigger an agent turn, post-#1448)
 agentdesk.message.queue("channel:123456", "Hello", "announce", "system")
+agentdesk.message.queue("channel:123456", "📋 새 이슈 #42", "notify", "issue-sync")
 
-// External commands (gh, git, tmux only)
+// HTTP — loopback only, used to call the local AgentDesk API from policy JS
+agentdesk.http.post("http://127.0.0.1:8791/api/force-kill", { session_key, retry: false })
+
+// External commands (allow-list: gh, git, tmux, etc.)
 agentdesk.exec("gh", ["issue", "close", "42", "--repo", "owner/repo"])
 agentdesk.exec("git", ["-C", repoDir, "log", "--oneline", "-5"])
 
@@ -432,6 +507,16 @@ agentdesk.session.kill(sessionKey)
 // Inflight turn tracking
 agentdesk.inflight.list()
 agentdesk.inflight.remove(provider, channelId)
+
+// Quality / friction reporting
+agentdesk.quality.emit({ kind: "api_friction", note: "duplicate dispatch on retry" })
+
+// Runtime helpers and CI recovery primitives
+agentdesk.runtime.now()
+agentdesk.ciRecovery.classify(failure)
+
+// DM reply hooks (used by escalation/triage flows)
+agentdesk.dmReply.recordPending({ user_id, dispatch_id, payload })
 
 // Logging
 agentdesk.log.info("message")
@@ -455,40 +540,43 @@ Each agent maps to a Discord channel where it receives and responds to tasks.
 agentdesk dcserver                               # Start Discord control plane
 agentdesk init                                   # Interactive setup wizard
 agentdesk reconfigure                            # Re-run setup (preserves data)
-agentdesk restart-dcserver                        # Graceful restart with crash context
+agentdesk restart-dcserver                       # Graceful restart with crash context
 agentdesk doctor [--json] [--profile quick|deep|security]
 agentdesk doctor --fix --allow-restart           # Explicit service restart repair
 agentdesk doctor --fix --repair-sqlite-cache     # Explicit legacy SQLite cache repair
+agentdesk emit-launchd-plist --flavor release|dev [--output <PATH>]
 
 # Discord messaging
 agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
 agentdesk discord-sendmessage --channel <ID> --message <TEXT>
 agentdesk discord-senddm --user <ID> --message <TEXT>
-agentdesk send --target channel:<ID> --content <TEXT>
-agentdesk discord read <CHANNEL_ID> [--limit <N>]
+agentdesk send --target channel:<ID> --content <TEXT> [--bot announce|notify|<provider>]
+agentdesk discord read <CHANNEL_ID> [--limit <N>] [--before <ID>] [--after <ID>]
+agentdesk monitoring start --channel <ID> --key <KEY> --description <TEXT>
+agentdesk monitoring stop --channel <ID> --key <KEY>
 
 # Review / docs / sessions
 agentdesk review-verdict --dispatch <ID> --verdict pass|improve|rework|reject|approved
-agentdesk review-decision --card <CARD_ID> --decision approve|rework|escalate
-agentdesk docs [CATEGORY]
-agentdesk force-kill --session-key <KEY>
+agentdesk review-decision --card <CARD_ID> --decision approve|rework|escalate|accept|dispute|dismiss|requeue|resume
+agentdesk docs [CATEGORY] [--flat]
+agentdesk force-kill --session-key <KEY> [--retry]
 
 # Kanban / dispatch / auto-queue
-agentdesk cards                                  # List kanban cards
-agentdesk card create --from-issue <NUMBER> [--status ready] [--agent <ID>]
-agentdesk card status <CARD_ID|ISSUE_NUMBER>
-agentdesk dispatch <ISSUE_GROUPS...>             # Dispatch issue groups
+agentdesk cards [--status <STATUS>]              # List kanban cards
+agentdesk card create --from-issue <NUMBER> [--status ready] [--agent <ID>] [--repo <OWNER/REPO>]
+agentdesk card status <CARD_ID|ISSUE_NUMBER> [--repo <OWNER/REPO>]
+agentdesk dispatch <ISSUE_GROUPS...> [--agent <ID>] [--concurrent <N>] [--no-activate]
 agentdesk dispatch list
 agentdesk dispatch retry <CARD_ID>
 agentdesk dispatch redispatch <CARD_ID>
-agentdesk resume                                 # Resume stuck cards
-agentdesk advance                                # Promote card to review
-agentdesk queue                                  # Auto-queue status
-agentdesk auto-queue activate [--run <ID>] [--agent <ID>]
-agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>]
-agentdesk auto-queue config --max-concurrent <N> [--run <ID>]
+agentdesk resume <CARD_ID> [--force] [--reason <TEXT>]
+agentdesk advance <ISSUE_NUMBER>                 # Promote card to review
+agentdesk queue                                  # Auto-queue status with thread links
+agentdesk auto-queue activate [--run <ID>] [--agent <ID>] [--repo <OWNER/REPO>] [--active-only]
+agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>] [--thread-group <N>] [--agent <ID>]
+agentdesk auto-queue config --max-concurrent <N> [--run <ID>] [--repo <OWNER/REPO>] [--agent <ID>]
 
-# Git / runtime
+# Git / runtime / migrations
 agentdesk github-sync [--repo <OWNER/REPO>]
 agentdesk cherry-merge <BRANCH> [--close-issue]
 agentdesk status                                 # Runtime health summary
@@ -496,13 +584,20 @@ agentdesk config get                             # Read runtime config
 agentdesk config set '<JSON>'                    # Set runtime config
 agentdesk config audit [--dry-run]               # Reconcile yaml/DB drift
 agentdesk agents                                 # List agents
-agentdesk terminations                           # Session termination events
+agentdesk diag <AGENT_ID|CHANNEL_ID> [--json]    # Turn/session diagnostics
+agentdesk terminations [--card-id <ID>] [--dispatch-id <ID>] [--session <KEY>] [--limit <N>]
 agentdesk api GET /api/health                    # Public safe health summary
 agentdesk api GET /api/health/detail             # Authenticated/local detailed health
+agentdesk deploy                                 # Build workspace + promote to release
+agentdesk migrate openclaw <ARGS>                # Import OpenClaw durable state
+agentdesk migrate postgres-cutover <ARGS>        # SQLite→Postgres cutover + verification
+agentdesk provider-cli <SUBCOMMAND>              # Provider CLI safe-migration ops (status/plan/upgrade/canary/promote/rollback/cleanup/run/resume/smoke)
 
-# Process wrappers (internal)
+# Process wrappers (internal — invoked by tmux session lifecycle)
 agentdesk tmux-wrapper                           # Claude session wrapper
 agentdesk codex-tmux-wrapper                     # Codex session wrapper
+agentdesk qwen-tmux-wrapper                      # Qwen session wrapper
+agentdesk reset-tmux                             # Kill AgentDesk-* tmux sessions and clean temp files
 ```
 
 ## API Overview
@@ -512,7 +607,7 @@ AgentDesk exposes 150+ REST API endpoints. Key groups:
 | Group | Endpoints | Description |
 |-------|-----------|-------------|
 | `/api/agents` | CRUD + signal, skills, timeline | Agent management |
-| `/api/kanban-cards` | CRUD + assign, retry, redispatch, bulk actions | Work item management |
+| `/api/kanban-cards` | CRUD + assign, `/transition`, `/retry`, `/redispatch`, `/rereview`, `/reopen`, batch actions | Work item management. `/transition`, `/retry`, `/redispatch`, and `/auto-queue/generate` are **single-call complete** — do not chain them; inspect `new_dispatch_id` / `next_action` in the response (#1442). `/transition` requires `force=true` when an active dispatch exists (#1444). |
 | `/api/dispatches` | CRUD + cancel | Task assignment tracking |
 | `/api/auto-queue` | Generate, activate, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |
@@ -522,11 +617,11 @@ AgentDesk exposes 150+ REST API endpoints. Key groups:
 | `/api/pipeline` | Stages, config, graphs, card history | Pipeline configuration |
 | `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
 | `/api/github` | Repo sync, dashboard views, issue actions | GitHub integration |
-| `/api/discord` | Channel messages, bindings, DM reply hooks | Discord access layer |
+| `/api/discord` | `/send`, `/send-to-agent`, `/send-dm`, channel messages, bindings, DM reply hooks. `/api/send`, `/api/send_to_agent`, and `/api/senddm` remain as deprecated aliases. | Discord access layer |
 | `/api/health` | Public safe health summary | Service status |
 | `/api/health/detail` | Authenticated/local detailed diagnostics | Provider/runtime diagnostics |
 | `/api/onboarding` | Status, validate, complete | Setup wizard backend |
-| `/api/docs` | Endpoint discovery + category drill-down | Self-documenting API |
+| `/api/docs` | Endpoint discovery + category drill-down + decision-tree guides such as `/api/docs/card-lifecycle-ops` (#1443) | Self-documenting API |
 
 Full API documentation is available at `/api/docs` when the server is running, with category-based grouping and parameter details.
 
@@ -548,7 +643,7 @@ Full API documentation is available at `/api/docs` when the server is running, w
 │       │              │             │             │       │
 │  ┌────┴─────┐  ┌─────┴────┐  ┌────┴─────┐  ┌───┴────┐  │
 │  │ Dispatch │  │  Policy   │  │ Database │  │   WS   │  │
-│  │ Service  │  │  Engine   │  │ (SQLite) │  │Broadcast│  │
+│  │ Service  │  │  Engine   │  │(Postgres)│  │Broadcast│  │
 │  │ +outbox  │  │(QuickJS)  │  │          │  │        │  │
 │  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
 │                     │                                    │
@@ -565,9 +660,9 @@ Full API documentation is available at `/api/docs` when the server is running, w
 ```
 
 ### Design Principles
-1. **Single Binary** — One Rust binary, no external runtime dependencies
-2. **Single Process** — No inter-process communication, minimal failure points
-3. **Single Database** — SQLite for all state (agents, cards, dispatches, sessions)
+1. **Single Binary** — One Rust binary; PostgreSQL is the only required external runtime dependency
+2. **Single Process** — No inter-process communication for the control plane, minimal failure points
+3. **Single Database** — PostgreSQL holds all live state (agents, cards, dispatches, sessions, kv_meta). The legacy SQLite path is gated behind a `legacy-sqlite-tests` cargo feature and only used by tests after the #868 / #1239 cutover
 4. **Hot-Reloadable Policies** — Business logic in JS, editable without rebuild
 5. **Self-Contained** — No Node.js, Python, or other runtimes needed at deploy time
 6. **Pipeline-Driven** — State machines defined in YAML, not hardcoded in Rust or JS
@@ -578,7 +673,7 @@ Full API documentation is available at `/api/docs` when the server is running, w
 - **Local execution** — Agents run on the same machine as AgentDesk. Distributed agent execution is not supported.
 - **Discord-dependent** — Agent communication requires Discord. There is no built-in alternative messaging backend.
 - **tmux optional** — Agent sessions use tmux by default, but a backend process mode is available that does not require tmux. That fallback keeps heartbeats, not tmux-style watcher reattachment after restart.
-- **Single SQLite database** — Not designed for multi-instance or clustered deployment.
+- **Single PostgreSQL instance** — Not yet designed for multi-instance or clustered deployment. Multinode coordination work is being scoped under issues #875–#884.
 - **Provider CLI required** — AI providers (Claude Code, Codex) must be installed and authenticated on the host machine for agents to function.
 - **GitHub integration via CLI** — GitHub features require the `gh` CLI tool to be installed and authenticated.
 
@@ -595,14 +690,16 @@ AgentDesk/
 │   ├── db/                     # SQLite schema, migrations, typed queries
 │   ├── dispatch/               # Dispatch creation, outbox, delivery
 │   ├── engine/                 # QuickJS policy engine + bridge ops
-│   │   └── ops/                # 15 bridge namespaces (cards, kanban, dispatch, ...)
+│   │   └── ops/                # ~21 bridge namespaces (cards, kanban, dispatch, kv, http, runtime, quality, ...)
 │   ├── github/                 # Issue sync, auto-triage, DoD mirroring
 │   ├── server/                 # Axum HTTP server + WebSocket
 │   │   └── routes/             # 150+ API route handlers
 │   └── services/               # Provider integrations + platform abstractions
 │       ├── discord/            # Serenity/Poise gateway, router, recovery
+│       │   └── watchers/lifecycle.rs   # Tmux watcher lifecycle (extracted from tmux.rs in #1435)
 │       ├── dispatches.rs       # Dispatch service layer
 │       ├── turn_orchestrator.rs # Turn lifecycle management
+│       ├── issue_announcements.rs # Notify-bot routing for issue cards (#1448 follow-up)
 │       ├── retrospectives.rs   # Terminal card retrospectives
 │       └── api_friction.rs     # API friction reporting
 ├── policies/                   # JavaScript policy files (repo canonical; release mirror hot-reload)
