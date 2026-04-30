@@ -366,16 +366,25 @@ wait_for_http_service_health() {
 health_turn_snapshot() {
   local port="$1"
   local health_json
-  # NOTE: do NOT pass `-f`. Once restart_pending is armed the runtime serves
-  # /api/health as HTTP 503 (build_health_snapshot returns `unhealthy`), but
-  # the body still carries valid global_active / global_finalizing counts —
-  # which is exactly what wait_for_live_turns_to_drain_or_fail needs to read
-  # while the gate is open. Dropping `-f` lets the drain-wait keep observing
-  # turn counts after the gate is armed (#1447 review iteration 3 P1).
-  health_json=$(curl -s --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || return 1
+  # Use /api/health/detail (auth-aware via _curl_health_auth_args) so that
+  # global_active / global_finalizing are present even when restart_pending
+  # is armed — public_health_json strips the counters from the redacted
+  # /api/health body (#1447 review iteration 4 P2). We also drop `-f` so the
+  # 503 body served while restart_pending is armed remains observable.
+  health_json=$(curl -s --max-time 3 -H "$(_health_origin_header)" \
+    "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
   [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
+    # Require global_active and global_finalizing to be PRESENT (not just
+    # non-zero). If the body is missing them — for instance because we hit
+    # the auth shim or a redacted endpoint — fail closed instead of letting
+    # AGENTDESK_SKIP_TURN_DRAIN=0 callers incorrectly conclude "no turns".
+    if ! printf '%s\n' "$health_json" | jq -e '
+      (has("global_active")) and (has("global_finalizing"))
+    ' >/dev/null 2>&1; then
+      return 1
+    fi
     printf '%s\n' "$health_json" | jq -r '
       [
         (.global_active // 0),
@@ -386,6 +395,14 @@ health_turn_snapshot() {
     return
   fi
 
+  # jq-less fallback: require the field markers to be present in the body,
+  # otherwise return 1 so callers do not silently default to "0 active".
+  if ! printf '%s' "$health_json" | grep -q '"global_active":[0-9]'; then
+    return 1
+  fi
+  if ! printf '%s' "$health_json" | grep -q '"global_finalizing":[0-9]'; then
+    return 1
+  fi
   local active finalizing queue_depth
   active=$(printf '%s' "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
   finalizing=$(printf '%s' "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
@@ -425,6 +442,15 @@ clear_restart_drain_mode() {
   rm -f "$runtime_root/restart_pending"
 }
 
+_health_origin_header() {
+  # auth_middleware (src/server/routes/auth.rs) treats requests with a
+  # same-origin Origin header as authenticated even when server.auth_token
+  # is configured. The restart skill runs on the same host as dcserver so
+  # this is always true; otherwise the helper would be locked out of
+  # /api/health/detail on auth-enabled deployments (#1447 review iter 4 P2).
+  printf 'Origin: http://%s' "${ADK_DEFAULT_LOOPBACK}"
+}
+
 _restart_pending_acknowledged() {
   local port="$1"
   local detail_json
@@ -433,7 +459,8 @@ _restart_pending_acknowledged() {
   # `unhealthy` for restart-pending — see src/services/discord/health.rs), and
   # `-f` would drop the body and report failure exactly when we need to read
   # the body to confirm the gate is armed (#1447 review P1, iteration 2).
-  detail_json=$(curl -s --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
+  detail_json=$(curl -s --max-time 3 -H "$(_health_origin_header)" \
+    "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
   [ -n "$detail_json" ] || return 1
 
   # restart_pending is per-provider. Require EVERY provider that exposes
@@ -515,7 +542,13 @@ request_restart_drain_mode_or_fail() {
 
   job_state=$(_launchd_job_state "$label")
   if [ "$job_state" = "not running" ]; then
-    echo "▸ [gate] ${scope} launchd job is not running; restart drain marker staged for next boot"
+    # #1447 review iter 4 P2: leaving the marker on disk causes the next
+    # cold boot to enter drain mode, observe zero turns, delete the marker,
+    # and call exit(0) — flapping under KeepAlive. The service is not
+    # running, so there is nothing to drain; clear the marker and report
+    # success.
+    rm -f "$marker" 2>/dev/null || true
+    echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
   fi
   # Late-arriving consumption: marker may have been consumed between the

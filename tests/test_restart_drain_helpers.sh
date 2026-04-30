@@ -234,6 +234,79 @@ wait "$BG_PID" 2>/dev/null || true
 unset -f _launchd_job_state
 assert_eq "drain helper returns 0 when marker is consumed mid-wait" "0" "$rc"
 
+echo "== Test 5c: health_turn_snapshot fails closed when counters absent =="
+# Regression for #1447 review iteration 4 P2: previously a redacted body
+# (no global_active / global_finalizing) silently defaulted to "0 active",
+# which let strict-drain callers (AGENTDESK_SKIP_TURN_DRAIN=0) bypass the
+# wait. Now health_turn_snapshot must return non-zero so the caller fails
+# closed and refuses to restart.
+mkdir -p "$TMP_FIXTURE_DIR/bin_redacted"
+cat >"$TMP_FIXTURE_DIR/bin_redacted/curl" <<'EOF'
+#!/usr/bin/env bash
+# Mimic the public_health_json shape: status/version present, no counters.
+printf '%s' '{"status":"unhealthy","version":"x","db":true,"dashboard":false}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_redacted/curl"
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_redacted:$PATH" health_turn_snapshot 0 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "snapshot returns 1 when global_active is absent" "1" "$rc"
+
+echo "== Test 5d: snapshot returns counters when present (auth-aware) =="
+mkdir -p "$TMP_FIXTURE_DIR/bin_full"
+cat >"$TMP_FIXTURE_DIR/bin_full/curl" <<'EOF'
+#!/usr/bin/env bash
+# Verify the Origin header the helper sends — auth_middleware accepts
+# same-origin requests on auth-enabled deployments. Fail if missing.
+saw_origin=0
+for arg in "$@"; do
+  case "$arg" in
+    Origin:*) saw_origin=1 ;;
+  esac
+done
+if [ "$saw_origin" != "1" ]; then
+  echo "MISSING_ORIGIN_HEADER" >&2
+  exit 33
+fi
+printf '%s' '{"global_active":2,"global_finalizing":1,"queue_depth":3}'
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_full/curl"
+set +e
+out=$(PATH="$TMP_FIXTURE_DIR/bin_full:$PATH" health_turn_snapshot 0 2>/dev/null)
+rc=$?
+set -e
+assert_eq "snapshot returns 0 with counters present + Origin sent" "0" "$rc"
+assert_eq "snapshot prints 'active finalizing queue_depth'" "2 1 3" "$out"
+
+echo "== Test 5e: request helper clears marker if launchd job is stopped =="
+# Regression for #1447 review iteration 4 P2: previously the not-running
+# branch returned success but left restart_pending on disk, causing the
+# next cold boot to drain-and-self-exit (KeepAlive flap).
+TMP_RUNTIME2=$(mktemp -d)
+trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2"' EXIT
+mkdir -p "$TMP_FIXTURE_DIR/bin_unreach"
+cat >"$TMP_FIXTURE_DIR/bin_unreach/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_unreach/curl"
+_launchd_job_state() { echo "not running"; }
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_unreach:$PATH" \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=2 \
+  request_restart_drain_mode_or_fail "test" "stopped.label" 0 "$TMP_RUNTIME2" "smoke-test" \
+  >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "request returns 0 when job not running" "0" "$rc"
+if [ ! -e "$TMP_RUNTIME2/restart_pending" ]; then
+  pass "marker removed when job is not running (no flap on next boot)"
+else
+  fail "marker removed when job is not running (no flap on next boot)"
+fi
+
 echo "== Test 6: clear_restart_drain_mode removes marker file =="
 touch "$TMPDIR_TEST/restart_pending"
 # shellcheck source=/dev/null
