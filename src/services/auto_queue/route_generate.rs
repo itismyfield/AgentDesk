@@ -136,12 +136,16 @@ pub async fn generate(
     // `/auto-queue/generate` would silently create another. The filtered
     // cards get reported under `skipped_due_to_active_dispatch` so callers
     // see WHY their issue didn't make it into the run.
+    //
+    // Codex iter-1 P2: fail closed on lookup errors. If the active-dispatch
+    // probe returns a SQL error, we cannot prove the card is safe to enqueue
+    // — return 500 so the caller does not silently get a duplicate dispatch.
     let mut active_dispatch_skips: Vec<serde_json::Value> = Vec::new();
     {
         let mut retained = Vec::with_capacity(cards.len());
         for card in cards.into_iter() {
             match active_dispatch_id_for_card_pg(pool, &card.card_id).await {
-                Some(existing_dispatch_id) => {
+                Ok(Some(existing_dispatch_id)) => {
                     if let Some(issue_number) = card.github_issue_number {
                         active_dispatch_skips.push(json!({
                             "issue_number": issue_number,
@@ -160,7 +164,18 @@ pub async fn generate(
                         existing_dispatch_id
                     );
                 }
-                None => retained.push(card),
+                Ok(None) => retained.push(card),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": format!(
+                                "active-dispatch lookup failed for card {}: {error}",
+                                card.card_id
+                            ),
+                        })),
+                    );
+                }
             }
         }
         cards = retained;
@@ -636,10 +651,14 @@ pub(crate) async fn collect_generate_skip_breakdown(
 /// has a pending/dispatched dispatch on `task_dispatches`, otherwise None.
 /// Used by `/api/auto-queue/generate` to silently skip cards that would
 /// otherwise queue up a duplicate dispatch on top of an in-flight one.
+///
+/// Returns a `Result` so callers can fail closed on lookup errors (codex
+/// iter-1 P2): swallowing a SQL failure here would let a card with a live
+/// dispatch slip into a generated run and reintroduce the #1442 incident.
 pub(crate) async fn active_dispatch_id_for_card_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
-) -> Option<String> {
+) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
         "SELECT id
          FROM task_dispatches
@@ -651,6 +670,4 @@ pub(crate) async fn active_dispatch_id_for_card_pg(
     .bind(card_id)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
 }

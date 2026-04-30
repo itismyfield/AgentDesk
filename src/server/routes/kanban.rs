@@ -4177,8 +4177,44 @@ pub async fn force_transition(
 
     match transition_result {
         Ok(result) => {
-            let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
+            let (mut cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
             crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+
+            // #1444 codex iter-1 P2: when target_status equals current status
+            // (transition is a NoOp at the FSM level) AND the caller forced the
+            // call to clear an active dispatch, the cleanup helpers never ran
+            // because the FSM short-circuited. Explicitly cancel the
+            // pre-existing active dispatches here so the documented
+            // `force=true` recovery path is actually effective on
+            // ready→ready (or any same-state) retries.
+            if !result.changed
+                && force_intent_present
+                && target_status == "ready"
+                && !pre_active_dispatch_ids.is_empty()
+            {
+                let reason = format!("force-transition to {target_status}");
+                for dispatch_id in &pre_active_dispatch_ids {
+                    match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                        pool,
+                        dispatch_id,
+                        Some(&reason),
+                    )
+                    .await
+                    {
+                        Ok(changed) => cancelled_dispatches += changed,
+                        Err(error) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({
+                                    "error": format!(
+                                        "force-transition no-op cleanup failed for dispatch {dispatch_id}: {error}"
+                                    ),
+                                })),
+                            );
+                        }
+                    }
+                }
+            }
 
             // Reconcile the pre-transition active dispatch snapshot against
             // current state to surface concrete cancelled IDs (#1442).
