@@ -212,40 +212,44 @@ pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
 
 /// Announce-bot variant of `should_process_allowed_bot_turn_text`.
 ///
-/// Real announce-bot dispatch messages are wrapped in a divider header
-/// (`── implementation dispatch ──\nDISPATCH:<uuid>...`), so the
-/// `starts_with("DISPATCH:")` check used for generic allowed bots fails.
-/// At the same time, informational announcements like `📋 새 이슈 #N` and
-/// `✅ 종료됨` must NOT trigger an agent turn (#1448).
+/// Historically the announce-bot branch in `is_allowed_turn_sender` returned
+/// `true` unconditionally so that every announce-bot message — agent-to-agent
+/// `/api/send` routing, dispatch wrappers, escalation headers — woke the
+/// target agent. That blanket pass also let the issue-announcement cards
+/// emitted by `services::issue_announcements::{render_active_card,
+/// render_completed_card}` trigger spurious turns whenever a new issue was
+/// filed or closed (#1448).
 ///
-/// This helper accepts the message when:
-///   1. The monitor auto-turn origin marker is present (forced turn from
-///      AgentDesk's own monitor flow), or
-///   2. Any line in the sanitized body, after `trim_start`, begins with
-///      `DISPATCH:` — matching the same line-level predicate used by
-///      `adk_session::parse_dispatch_id`. The line scan (rather than a
-///      naked `contains`) prevents false positives such as an issue
-///      announcement whose title literally contains the substring
-///      `DISPATCH:` (e.g. `Fix DISPATCH: parsing`), or
-///   3. The body opens with one of the announce-bot's actionable
-///      escalation headers (`⚠️ [에스컬레이션]`, `⚠️ [PM 결정 요청]`).
-///      These are emitted by the escalation route and must wake the
-///      target agent / PM agent even though they carry no `DISPATCH:`
-///      token.
+/// The fix is intentionally a narrow block-list rather than a broad
+/// allow-list: we only suppress the two informational announcement
+/// templates and keep the prior allow-everything behavior for every other
+/// announce-bot payload (PM escalations, user escalations, generic routing,
+/// dispatch wrappers, etc.). Both templates use a fixed, distinctive
+/// leading marker — `📋 **새 이슈 #` for active cards and `✅ **#` for
+/// completion cards — so the block check is unambiguous and cannot be
+/// confused with an issue title that merely contains those substrings
+/// further down the message.
 pub(super) fn should_process_announce_bot_turn_text(text: &str) -> bool {
     let (sanitized, has_monitor_origin) = strip_monitor_auto_turn_origin(text);
     if has_monitor_origin {
         return true;
     }
-    let body = sanitized.as_ref();
-    if body
-        .lines()
-        .any(|line| line.trim_start().starts_with("DISPATCH:"))
-    {
-        return true;
-    }
-    let head = body.trim_start();
-    head.starts_with("⚠️ [에스컬레이션]") || head.starts_with("⚠️ [PM 결정 요청]")
+    !is_issue_announcement_card(sanitized.as_ref())
+}
+
+/// Returns true when `text` matches one of the issue-announcement card
+/// templates emitted by `services::issue_announcements`. The templates
+/// always begin at the very start of the message with a distinctive
+/// leading marker, so we anchor the match at `trim_start()` to avoid
+/// false positives from titles that contain the same substring further
+/// down the body.
+fn is_issue_announcement_card(text: &str) -> bool {
+    let head = text.trim_start();
+    // `render_active_card` →
+    //   "📋 **새 이슈 #{issue_number}** — {title}\n> ..."
+    // `render_completed_card` →
+    //   "✅ **#{issue_number} 완료** — {title}\n> ..."
+    head.starts_with("📋 **새 이슈 #") || head.starts_with("✅ **#")
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
@@ -3792,10 +3796,10 @@ mod tests {
             false,
             agent_msg
         ));
-        // #1448: announce-bot informational text (no `DISPATCH:` token) must
-        // no longer trigger an agent turn. The `agent_msg` payload is plain
-        // chatter, so this should now return false instead of true.
-        assert!(!is_allowed_turn_sender(
+        // Announce-bot still allows arbitrary text by design (it backs
+        // generic agent-to-agent routing via /api/send), so plain chatter
+        // from the announce bot keeps its prior behavior.
+        assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
             announce_bot_id,
             456,
@@ -3806,13 +3810,14 @@ mod tests {
 
     #[test]
     fn announce_bot_issue_announcement_does_not_trigger_turn() {
-        // #1448 regression: announce-bot's "📋 새 이슈 #N — ..." informational
-        // card must NOT start an agent turn. Previously the announce-bot
-        // branch returned `true` unconditionally, causing every issue
-        // announcement to dispatch a spurious turn.
+        // #1448 regression: announce-bot's "📋 **새 이슈 #N** — ..."
+        // card (rendered by issue_announcements::render_active_card) must
+        // NOT start an agent turn. Previously the announce-bot branch
+        // returned `true` unconditionally, causing every issue announcement
+        // to dispatch a spurious turn.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
-        let announcement = "📋 새 이슈 #1448 — [ANNOUNCE-TURN-LEAK] issue announcement 메시지가 agent turn을 잘못 trigger";
+        let announcement = "📋 **새 이슈 #1448** — [ANNOUNCE-TURN-LEAK] issue announcement 메시지가 agent turn을 잘못 trigger\n> 상태: 🟡 open\n> 담당: agent:project-agentdesk\n> 발행: <t:1700000000:R>";
 
         assert!(!should_process_announce_bot_turn_text(announcement));
         assert!(!is_allowed_turn_sender(
@@ -3826,11 +3831,13 @@ mod tests {
 
     #[test]
     fn announce_bot_issue_completion_does_not_trigger_turn() {
-        // #1448 regression: announce-bot's "✅ 종료됨 ..." card must not
-        // trigger a turn either. Same root cause as the announcement case.
+        // #1448 regression: announce-bot's "✅ **#N 완료** — ..." card
+        // (rendered by issue_announcements::render_completed_card) must
+        // not trigger a turn either. Same root cause as the announcement
+        // case.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
-        let completion = "✅ 종료됨 #1442 — [SOME-FIX] 작업 완료";
+        let completion = "✅ **#1442 완료** — [SOME-FIX] 작업 완료\n> 머지: PR #1500\n> 소요: 2h 15m\n> 발행: <t:1700000000:R>";
 
         assert!(!should_process_announce_bot_turn_text(completion));
         assert!(!is_allowed_turn_sender(
@@ -3846,9 +3853,9 @@ mod tests {
     fn announce_bot_real_dispatch_still_triggers_turn() {
         // #1448 regression: real announce-bot dispatch payloads are wrapped
         // in a divider header so `DISPATCH:` appears mid-body rather than as
-        // a prefix. They must still trigger a turn — the gating helper uses
-        // `contains("DISPATCH:")` (after stripping the monitor auto-turn
-        // origin marker) precisely to keep this path intact.
+        // a prefix. They must still trigger a turn — they don't match the
+        // suppressed issue-announcement templates so the helper falls
+        // through to the default-allow path.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
         let dispatch =
@@ -3868,8 +3875,8 @@ mod tests {
     fn allowed_bot_dispatch_prefix_unaffected_by_announce_helper() {
         // Regression guard: the generic allowed-bot path keeps its strict
         // `starts_with("DISPATCH:")` check, while announce-bot uses the
-        // looser `contains("DISPATCH:")`. Both must pass for their
-        // respective bot types when given the appropriate payload.
+        // narrower issue-announcement block-list. Each path must keep
+        // accepting its respective dispatch payload.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
         let prefix_dispatch = "DISPATCH: abc123\n작업 시작";
@@ -3885,7 +3892,8 @@ mod tests {
             true,
             prefix_dispatch,
         ));
-        // Announce-bot accepts both wrapped and prefix forms.
+        // Announce-bot accepts both wrapped and prefix forms because
+        // neither matches an issue-announcement template.
         assert!(should_process_announce_bot_turn_text(wrapped_dispatch));
         assert!(should_process_announce_bot_turn_text(prefix_dispatch));
         assert!(is_allowed_turn_sender(
@@ -3898,34 +3906,12 @@ mod tests {
     }
 
     #[test]
-    fn announce_bot_title_containing_dispatch_substring_does_not_trigger_turn() {
-        // #1448 P2 regression guard: an issue title that literally contains
-        // the substring `DISPATCH:` (for example `Fix DISPATCH: parsing`)
-        // must not be mistaken for a real dispatch payload. The gate uses a
-        // line-level `trim_start().starts_with("DISPATCH:")` predicate
-        // (matching `adk_session::parse_dispatch_id`), so a title appearing
-        // mid-line after `📋 **새 이슈 #N** —` is correctly rejected.
-        let allowed_bot_ids: Vec<u64> = vec![123];
-        let announce_bot_id = Some(456u64);
-        let announcement = "📋 **새 이슈 #1500** — Fix DISPATCH: parsing\n> 상태: 🟡 open";
-
-        assert!(!should_process_announce_bot_turn_text(announcement));
-        assert!(!is_allowed_turn_sender(
-            &allowed_bot_ids,
-            announce_bot_id,
-            456,
-            true,
-            announcement,
-        ));
-    }
-
-    #[test]
     fn announce_bot_pm_decision_request_still_triggers_turn() {
-        // #1448 P1 regression guard: `deliver_pm_fallback` posts an
-        // `⚠️ [PM 결정 요청] card_id: ...` message via the announce bot
-        // when the user thread escalation can't be delivered. The PM
-        // agent reacts to this message, so the gate must let it through
-        // even though it carries no `DISPATCH:` token.
+        // #1448 regression guard (Codex iter1 P1): `deliver_pm_fallback`
+        // posts an `⚠️ [PM 결정 요청] card_id: ...` message via the
+        // announce bot when the user thread escalation can't be delivered.
+        // The PM agent reacts to this message, so the gate must keep
+        // letting it through.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
         let pm_message =
@@ -3943,10 +3929,11 @@ mod tests {
 
     #[test]
     fn announce_bot_user_escalation_still_triggers_turn() {
-        // #1448 P1 regression guard: `build_user_message` posts an
-        // `⚠️ [에스컬레이션] ...` message via the announce bot when an
-        // escalation thread is created for the owning user. The owner
-        // agent reacts to this message, so the gate must let it through.
+        // #1448 regression guard (Codex iter1 P1): `build_user_message`
+        // posts an `⚠️ [에스컬레이션] ...` message via the announce bot
+        // when an escalation thread is created for the owning user. The
+        // owner agent reacts to this message, so the gate must keep
+        // letting it through.
         let allowed_bot_ids: Vec<u64> = vec![123];
         let announce_bot_id = Some(456u64);
         let escalation =
@@ -3959,6 +3946,71 @@ mod tests {
             456,
             true,
             escalation,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_generic_routing_payload_still_triggers_turn() {
+        // #1448 regression guard (Codex iter2 P1): /api/send /
+        // handle_send_to_agent posts arbitrary task text via the announce
+        // bot for agent-to-agent routing ("agents respond" mode). The
+        // payload carries no DISPATCH token and no escalation header, so
+        // the block-list strategy is the only thing keeping this flow
+        // intact.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let routed = "@AgentB please review the latest cards and confirm priorities by EOD.";
+
+        assert!(should_process_announce_bot_turn_text(routed));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            routed,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_announcement_template_with_dispatch_substring_in_title_does_not_trigger() {
+        // #1448 P2 regression guard (Codex iter1): an issue announcement
+        // whose title literally contains the substring `DISPATCH:` (for
+        // example `Fix DISPATCH: parsing`) must still be suppressed. The
+        // block-list anchors on the rendered prefix `📋 **새 이슈 #` and
+        // ignores the rest of the body, so the title text never bypasses
+        // the gate.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let announcement = "📋 **새 이슈 #1500** — Fix DISPATCH: parsing\n> 상태: 🟡 open";
+
+        assert!(!should_process_announce_bot_turn_text(announcement));
+        assert!(!is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            announcement,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_message_mentioning_announcement_substring_still_triggers() {
+        // The block-list anchors at trim_start, so a message that merely
+        // *mentions* the suppressed prefix mid-body (for example a routed
+        // recap that quotes the announcement format inside a code fence)
+        // is not falsely suppressed.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let routed =
+            "Recap: earlier today we saw `📋 **새 이슈 #1500**` land — please rerun verification.";
+
+        assert!(should_process_announce_bot_turn_text(routed));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            routed,
         ));
     }
 
