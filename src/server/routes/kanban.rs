@@ -4149,9 +4149,15 @@ pub async fn force_transition(
                 _ => None,
             };
 
+            // Only suggest /auto-queue/generate when the target state is
+            // actually enqueueable by that endpoint (codex P2). The default
+            // pipeline only dispatches `ready` / `requested` cards via
+            // generate; suggesting it for an `in_progress` target sends the
+            // caller down a dead-end (the card has no path to a dispatch via
+            // generate from `in_progress`).
             let next_action_hint = if created_dispatch_id.is_some() {
                 "none_required".to_string()
-            } else if matches!(result.to.as_str(), "ready" | "requested" | "in_progress") {
+            } else if matches!(result.to.as_str(), "ready" | "requested") {
                 // Caller may want to dispatch the now-ready card via the
                 // queue. The transition itself is complete; this hint surfaces
                 // the natural follow-up so callers do not silently chain
