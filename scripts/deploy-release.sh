@@ -308,8 +308,8 @@ SOURCE_BINARY="${AGENTDESK_DEPLOY_BINARY:-$REPO/target/release/agentdesk}"
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     echo "▸ Building release binary..."
     (cd "$REPO" && cargo build --release --bin agentdesk)
-    # The freshness gate below is mtime-based. A successful current-HEAD cargo
-    # build can still reuse an existing artifact, so align the mtime after build.
+    # Cargo tracks embedded migration inputs via build.rs. After a successful
+    # current-HEAD build, align the mtime so the freshness gate records it.
     [ -e "$SOURCE_BINARY" ] && touch "$SOURCE_BINARY"
 fi
 
