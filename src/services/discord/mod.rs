@@ -26,6 +26,7 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
 mod queued_placeholders_store;
+mod relay_health;
 pub(crate) mod response_sanitizer;
 // #1074: landing zone for the future recovery-engine module split
 // (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
