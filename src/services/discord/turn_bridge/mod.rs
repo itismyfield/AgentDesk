@@ -213,6 +213,38 @@ fn task_notification_closes_background_child(kind: TaskNotificationKind, status:
     )
 }
 
+async fn ensure_active_placeholder_card<G: TurnGateway + ?Sized>(
+    shared: &SharedData,
+    gateway: &G,
+    key: super::placeholder_controller::PlaceholderKey,
+    input: super::placeholder_controller::PlaceholderActiveInput,
+) -> super::placeholder_controller::PlaceholderControllerOutcome {
+    if shared.placeholder_live_events_enabled
+        && let Some(block) = shared.placeholder_live_events.render_block(key.channel_id)
+    {
+        return shared
+            .placeholder_controller
+            .ensure_active_with_live_events(gateway, key, input, block)
+            .await;
+    }
+    shared
+        .placeholder_controller
+        .ensure_active(gateway, key, input)
+        .await
+}
+
+fn record_placeholder_live_event(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    event: Option<super::placeholder_live_events::RecentPlaceholderEvent>,
+) {
+    if shared.placeholder_live_events_enabled
+        && let Some(event) = event
+    {
+        shared.placeholder_live_events.push_event(channel_id, event);
+    }
+}
+
 fn thinking_status_line() -> String {
     "💭 Thinking...".to_string()
 }
@@ -1154,6 +1186,9 @@ pub(super) fn spawn_turn_bridge(
             bool, // ack_consumed
         )> = None;
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
+        if shared_owned.placeholder_live_events_enabled {
+            shared_owned.placeholder_live_events.clear_channel(channel_id);
+        }
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
@@ -1448,6 +1483,13 @@ pub(super) fn spawn_turn_bridge(
                                 truncate_str(&summary, 120).to_string()
                             };
                             let display = format!("⚙ {}: {}", name, display_summary);
+                            record_placeholder_live_event(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                super::placeholder_live_events::RecentPlaceholderEvent::tool_use(
+                                    &name, &input,
+                                ),
+                            );
                             // #1113 implicit-terminate: a new ToolUse arriving
                             // before the prior ToolResult means the previous
                             // tool is orphaned (parser miss, parallel-tool
@@ -1548,14 +1590,13 @@ pub(super) fn spawn_turn_bridge(
                                             )
                                             .await,
                                         };
-                                    let outcome = shared_owned
-                                        .placeholder_controller
-                                        .ensure_active(
-                                            gateway.as_ref(),
-                                            key.clone(),
-                                            input_payload.clone(),
-                                        )
-                                        .await;
+                                    let outcome = ensure_active_placeholder_card(
+                                        shared_owned.as_ref(),
+                                        gateway.as_ref(),
+                                        key.clone(),
+                                        input_payload.clone(),
+                                    )
+                                    .await;
                                     // codex round-2 P2: only commit the active
                                     // pointer when the controller actually
                                     // committed (or coalesced an existing
@@ -1633,6 +1674,15 @@ pub(super) fn spawn_turn_bridge(
                                 is_error,
                                 &content,
                             );
+                            if is_error {
+                                record_placeholder_live_event(
+                                    shared_owned.as_ref(),
+                                    channel_id,
+                                    super::placeholder_live_events::RecentPlaceholderEvent::tool_error(
+                                        &content,
+                                    ),
+                                );
+                            }
                             // #1255: a long-running tool's ToolResult means the
                             // background card can transition to its terminal
                             // state.  We still keep the placeholder around for
@@ -1759,6 +1809,15 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.task_notification_kind =
                                 merge_task_notification_kind(inflight_state.task_notification_kind, kind);
                             state_dirty = true;
+                            record_placeholder_live_event(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                super::placeholder_live_events::RecentPlaceholderEvent::task_notification(
+                                    kind.as_str(),
+                                    &status,
+                                    &summary,
+                                ),
+                            );
                             if task_notification_closes_background_child(kind, &status) {
                                 let close_status = if matches!(
                                     status.trim().to_ascii_lowercase().as_str(),
@@ -2258,14 +2317,13 @@ pub(super) fn spawn_turn_bridge(
                                         channel_id,
                                         message_id: current_msg_id,
                                     };
-                                    let outcome = shared_owned
-                                        .placeholder_controller
-                                        .ensure_active(
-                                            gateway.as_ref(),
-                                            new_key.clone(),
-                                            snapshot.clone(),
-                                        )
-                                        .await;
+                                    let outcome = ensure_active_placeholder_card(
+                                        shared_owned.as_ref(),
+                                        gateway.as_ref(),
+                                        new_key.clone(),
+                                        snapshot.clone(),
+                                    )
+                                    .await;
                                     use super::placeholder_controller::PlaceholderControllerOutcome::*;
                                     if matches!(outcome, Edited | Coalesced) {
                                         long_running_placeholder_active = Some((
@@ -2341,6 +2399,28 @@ pub(super) fn spawn_turn_bridge(
                     inflight_state.current_msg_len = last_edit_text.len();
                     inflight_state.response_sent_offset = response_sent_offset;
                     inflight_state.full_response = full_response.clone();
+                    state_dirty = true;
+                }
+            }
+
+            if shared_owned.placeholder_live_events_enabled
+                && !watcher_owns_assistant_relay
+                && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
+                && let Some(block) = shared_owned.placeholder_live_events.render_block(channel_id)
+            {
+                let outcome = shared_owned
+                    .placeholder_controller
+                    .ensure_active_with_live_events(
+                        gateway.as_ref(),
+                        key.clone(),
+                        input.clone(),
+                        block,
+                    )
+                    .await;
+                if matches!(
+                    outcome,
+                    super::placeholder_controller::PlaceholderControllerOutcome::Edited
+                ) {
                     state_dirty = true;
                 }
             }
@@ -2942,10 +3022,13 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await,
             };
-            let controller_outcome = shared_owned
-                .placeholder_controller
-                .ensure_active(gateway.as_ref(), key.clone(), controller_input)
-                .await;
+            let controller_outcome = ensure_active_placeholder_card(
+                shared_owned.as_ref(),
+                gateway.as_ref(),
+                key.clone(),
+                controller_input,
+            )
+            .await;
             // Fall back to a direct edit only when the controller refused or
             // failed — `Edited`/`Coalesced` already cover the happy path.
             let handoff_edit: Result<(), String> = match controller_outcome {

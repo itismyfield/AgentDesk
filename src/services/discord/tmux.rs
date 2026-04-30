@@ -29,6 +29,7 @@ use super::placeholder_cleanup::{
     PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
     classify_delete_error,
 };
+use super::placeholder_live_events::{RecentPlaceholderEvent, events_from_json};
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
     resolve_role_binding, validate_bot_channel_routing_with_provider_channel,
@@ -2971,6 +2972,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             &mut full_response,
             &mut tool_state,
         );
+        flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
         let mut is_auth_error = initial_outcome.is_auth_error;
@@ -3105,6 +3107,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             &mut full_response,
                             &mut tool_state,
                         );
+                        flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
                         found_result = found_result || outcome.found_result;
                         is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
                         is_auth_error = is_auth_error || outcome.is_auth_error;
@@ -5430,6 +5433,8 @@ pub(super) struct WatcherToolState {
     pub has_post_tool_text: bool,
     /// Structured transcript events collected during watcher replay
     pub transcript_events: Vec<SessionTranscriptEvent>,
+    /// Recent user-visible tool/system events for Active placeholder cards.
+    placeholder_events: Vec<RecentPlaceholderEvent>,
 }
 
 impl WatcherToolState {
@@ -5441,7 +5446,16 @@ impl WatcherToolState {
             any_tool_used: false,
             has_post_tool_text: false,
             transcript_events: Vec::new(),
+            placeholder_events: Vec::new(),
         }
+    }
+
+    fn record_placeholder_events_from_json(&mut self, value: &serde_json::Value) {
+        self.placeholder_events.extend(events_from_json(value));
+    }
+
+    fn take_placeholder_events(&mut self) -> Vec<RecentPlaceholderEvent> {
+        std::mem::take(&mut self.placeholder_events)
     }
 
     fn set_current_tool_line(&mut self, next_tool_line: Option<String>) {
@@ -5471,6 +5485,17 @@ impl WatcherToolState {
     }
 }
 
+fn flush_placeholder_live_events(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    tool_state: &mut WatcherToolState,
+) {
+    let events = tool_state.take_placeholder_events();
+    if shared.placeholder_live_events_enabled && !events.is_empty() {
+        shared.placeholder_live_events.push_many(channel_id, events);
+    }
+}
+
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
@@ -5492,6 +5517,7 @@ pub(super) fn process_watcher_lines(
         // Parse the JSON line
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
             observe_stream_context(&val, state);
+            tool_state.record_placeholder_events_from_json(&val);
             let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "assistant" => {

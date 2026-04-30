@@ -1,7 +1,8 @@
 use poise::serenity_prelude as serenity;
+use regex::Regex;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
 use crate::utils::format::tail_with_ellipsis_bytes;
@@ -12,6 +13,23 @@ const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
 const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
 const THINKING_STATUS_MAX_BYTES: usize = 600;
 const TOOL_STATUS_MAX_BYTES: usize = 300;
+
+pub(super) fn redact_sensitive_for_placeholder(input: &str) -> String {
+    static OPENAI_KEY_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}").expect("valid key regex"));
+    static BEARER_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\bBearer\s+\S+").expect("valid bearer token regex"));
+    static ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(password|token|api[_-]?key)=\S+")
+            .expect("valid secret assignment regex")
+    });
+
+    let redacted = OPENAI_KEY_RE.replace_all(input, "***");
+    let redacted = BEARER_RE.replace_all(&redacted, "Bearer ***");
+    ASSIGNMENT_RE
+        .replace_all(&redacted, "${1}=***")
+        .into_owned()
+}
 
 /// Inline footer appended to a summary when a long message is delivered as a
 /// `.txt` attachment via `/api/send`.
@@ -2911,6 +2929,32 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
     request_line: Option<&str>,
     progress_line: Option<&str>,
 ) -> String {
+    build_monitor_handoff_placeholder_with_live_events(
+        status,
+        reason,
+        started_at_unix,
+        tool_summary,
+        command_summary,
+        reason_detail,
+        context_line,
+        request_line,
+        progress_line,
+        None,
+    )
+}
+
+pub(super) fn build_monitor_handoff_placeholder_with_live_events(
+    status: MonitorHandoffStatus<'_>,
+    reason: MonitorHandoffReason,
+    started_at_unix: i64,
+    tool_summary: Option<&str>,
+    command_summary: Option<&str>,
+    reason_detail: Option<&str>,
+    context_line: Option<&str>,
+    request_line: Option<&str>,
+    progress_line: Option<&str>,
+    live_events_block: Option<&str>,
+) -> String {
     let header = monitor_handoff_header(status, reason);
     let footer = monitor_handoff_footer(status, reason);
 
@@ -3015,6 +3059,14 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
     }
     lines.push(format!("> **시작**: <t:{started_at_unix}:R>"));
     lines.push(footer.to_string());
+    if matches!(status, MonitorHandoffStatus::Active)
+        && let Some(block) = live_events_block.and_then(|raw| {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+    {
+        lines.push(block.to_string());
+    }
 
     lines.join("\n")
 }

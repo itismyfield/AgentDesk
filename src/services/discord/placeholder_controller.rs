@@ -21,12 +21,14 @@
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::services::provider::ProviderKind;
 
 use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder_with_context,
+    build_monitor_handoff_placeholder_with_live_events,
 };
 use super::gateway::TurnGateway;
 
@@ -71,6 +73,8 @@ struct PlaceholderEntry {
     /// Snapshot of the last `Active` input. Terminal transitions reuse the
     /// snapshot to render the consistent header/footer pair.
     active_snapshot: Option<PlaceholderActiveInput>,
+    last_live_events_block: Option<String>,
+    last_live_events_edit_at: Option<Instant>,
 }
 
 impl Default for PlaceholderEntry {
@@ -79,6 +83,8 @@ impl Default for PlaceholderEntry {
             state: PlaceholderLifecycle::NotCreated,
             last_rendered: None,
             active_snapshot: None,
+            last_live_events_block: None,
+            last_live_events_edit_at: None,
         }
     }
 }
@@ -89,6 +95,7 @@ impl Default for PlaceholderEntry {
 /// background-tool activity; eviction prefers terminal entries over Active
 /// ones so we never drop a live card mid-flight.
 const PLACEHOLDER_ENTRIES_MAX: usize = 4096;
+const PLACEHOLDER_LIVE_EVENTS_MIN_EDIT_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
@@ -160,6 +167,27 @@ impl PlaceholderController {
         key: PlaceholderKey,
         input: PlaceholderActiveInput,
     ) -> PlaceholderControllerOutcome {
+        self.ensure_active_inner(gateway, key, input, None).await
+    }
+
+    pub(super) async fn ensure_active_with_live_events<G: TurnGateway + ?Sized>(
+        &self,
+        gateway: &G,
+        key: PlaceholderKey,
+        input: PlaceholderActiveInput,
+        live_events_block: String,
+    ) -> PlaceholderControllerOutcome {
+        self.ensure_active_inner(gateway, key, input, Some(live_events_block))
+            .await
+    }
+
+    async fn ensure_active_inner<G: TurnGateway + ?Sized>(
+        &self,
+        gateway: &G,
+        key: PlaceholderKey,
+        input: PlaceholderActiveInput,
+        live_events_block: Option<String>,
+    ) -> PlaceholderControllerOutcome {
         let entry = self.entry(&key);
         let mut guarded = entry.lock().await;
 
@@ -175,7 +203,7 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Rejected;
         }
 
-        let rendered = build_monitor_handoff_placeholder_with_context(
+        let rendered = build_monitor_handoff_placeholder_with_live_events(
             MonitorHandoffStatus::Active,
             input.reason,
             input.started_at_unix,
@@ -185,6 +213,7 @@ impl PlaceholderController {
             input.context_line.as_deref(),
             input.request_line.as_deref(),
             input.progress_line.as_deref(),
+            live_events_block.as_deref(),
         );
 
         // Coalesce identical re-renders into a single PATCH.  Tool-stream
@@ -198,6 +227,16 @@ impl PlaceholderController {
             return PlaceholderControllerOutcome::Coalesced;
         }
 
+        if let Some(block) = live_events_block.as_deref()
+            && matches!(guarded.state, PlaceholderLifecycle::Active)
+            && guarded.last_live_events_block.as_deref() != Some(block)
+            && guarded
+                .last_live_events_edit_at
+                .is_some_and(|last| last.elapsed() < PLACEHOLDER_LIVE_EVENTS_MIN_EDIT_INTERVAL)
+        {
+            return PlaceholderControllerOutcome::Coalesced;
+        }
+
         let edit_result = gateway
             .edit_message(key.channel_id, key.message_id, &rendered)
             .await;
@@ -207,6 +246,10 @@ impl PlaceholderController {
                 guarded.state = PlaceholderLifecycle::Active;
                 guarded.last_rendered = Some(rendered);
                 guarded.active_snapshot = Some(input);
+                if live_events_block.is_some() {
+                    guarded.last_live_events_edit_at = Some(Instant::now());
+                }
+                guarded.last_live_events_block = live_events_block;
                 PlaceholderControllerOutcome::Edited
             }
             Err(_) => {
@@ -387,6 +430,173 @@ impl PlaceholderController {
     pub(super) fn detach_by_message(&self, channel_id: ChannelId, message_id: MessageId) {
         self.entries
             .retain(|key, _| !(key.channel_id == channel_id && key.message_id == message_id));
+    }
+}
+
+#[cfg(test)]
+mod live_events_tests {
+    use super::*;
+    use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingGateway {
+        edits: AtomicUsize,
+        last_edit: tokio::sync::Mutex<Option<String>>,
+    }
+
+    impl CountingGateway {
+        fn new() -> Self {
+            Self {
+                edits: AtomicUsize::new(0),
+                last_edit: tokio::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl TurnGateway for CountingGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(1)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            let content = content.to_string();
+            Box::pin(async move {
+                self.edits.fetch_add(1, Ordering::SeqCst);
+                *self.last_edit.lock().await = Some(content);
+                Ok(())
+            })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+        > {
+            Box::pin(async {
+                Ok(crate::services::discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+            })
+        }
+
+        fn add_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn remove_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a crate::services::discord::Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Codex)
+        }
+    }
+
+    fn key() -> PlaceholderKey {
+        PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(1),
+            message_id: MessageId::new(2),
+        }
+    }
+
+    fn input() -> PlaceholderActiveInput {
+        PlaceholderActiveInput {
+            reason: MonitorHandoffReason::ExplicitCall,
+            started_at_unix: 1_700_000_000,
+            tool_summary: Some("Monitor".to_string()),
+            command_summary: Some("session=foo".to_string()),
+            reason_detail: None,
+            context_line: None,
+            request_line: None,
+            progress_line: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_active_with_live_events_appends_block_and_throttles_changes() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let outcome = controller
+            .ensure_active_with_live_events(
+                gateway.as_ref(),
+                key(),
+                input(),
+                "```text\n[Bash] echo 1\n```".to_string(),
+            )
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
+        let last = gateway.last_edit.lock().await.clone().unwrap();
+        assert!(last.contains("[Bash] echo 1"));
+
+        let outcome = controller
+            .ensure_active_with_live_events(
+                gateway.as_ref(),
+                key(),
+                input(),
+                "```text\n[Bash] echo 2\n```".to_string(),
+            )
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -581,6 +791,34 @@ mod tests {
             .await;
         let outcome = controller
             .ensure_active(gateway.as_ref(), key(), sample_input())
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
+        assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_active_with_live_events_appends_block_and_throttles_changes() {
+        let gateway = Arc::new(CountingGateway::new());
+        let controller = PlaceholderController::default();
+        let outcome = controller
+            .ensure_active_with_live_events(
+                gateway.as_ref(),
+                key(),
+                sample_input(),
+                "```text\n[Bash] echo 1\n```".to_string(),
+            )
+            .await;
+        assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
+        let last = gateway.last_edit.lock().await.clone().unwrap();
+        assert!(last.contains("[Bash] echo 1"));
+
+        let outcome = controller
+            .ensure_active_with_live_events(
+                gateway.as_ref(),
+                key(),
+                sample_input(),
+                "```text\n[Bash] echo 2\n```".to_string(),
+            )
             .await;
         assert_eq!(outcome, PlaceholderControllerOutcome::Coalesced);
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 1);

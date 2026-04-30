@@ -29,6 +29,8 @@ pub struct Config {
     pub kanban: KanbanConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
     pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "PlaceholderConfig::is_empty")]
+    pub placeholder: PlaceholderConfig,
     #[serde(default, skip_serializing_if = "RuntimeSettingsConfig::is_empty")]
     pub runtime: RuntimeSettingsConfig,
     #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
@@ -678,6 +680,19 @@ impl ReviewConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct PlaceholderConfig {
+    #[serde(default)]
+    pub live_events_enabled: bool,
+}
+
+impl PlaceholderConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.live_events_enabled
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_timeout_min: Option<u64>,
@@ -1221,6 +1236,7 @@ impl Default for Config {
             database: DatabaseConfig::default(),
             kanban: KanbanConfig::default(),
             review: ReviewConfig::default(),
+            placeholder: PlaceholderConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
             automation: AutomationConfig::default(),
             escalation: EscalationConfig::default(),

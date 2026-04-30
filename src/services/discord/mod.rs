@@ -22,6 +22,7 @@ pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
 mod placeholder_controller;
+mod placeholder_live_events;
 mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
@@ -1131,6 +1132,11 @@ pub(super) struct SharedData {
     /// instead of racing.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
+    /// Per-channel recent tool/system events rendered in Active placeholder
+    /// cards when `placeholder.live_events_enabled` is enabled.
+    pub(in crate::services::discord) placeholder_live_events:
+        Arc<placeholder_live_events::PlaceholderLiveEvents>,
+    pub(in crate::services::discord) placeholder_live_events_enabled: bool,
     /// #1332: per-channel mapping from a mailbox-queued user message id to the
     /// Discord placeholder message id displaying the `📬 메시지 대기 중` card.
     /// Populated when `mailbox_try_start_turn` reports the new message lost the
@@ -1881,6 +1887,8 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         tmux_relay_coords: dashmap::DashMap::new(),
         placeholder_cleanup: Arc::new(placeholder_cleanup::PlaceholderCleanupRegistry::default()),
         placeholder_controller: Arc::new(placeholder_controller::PlaceholderController::default()),
+        placeholder_live_events: Arc::new(placeholder_live_events::PlaceholderLiveEvents::default()),
+        placeholder_live_events_enabled: false,
         queued_placeholders: dashmap::DashMap::new(),
         queue_exit_placeholder_clears: dashmap::DashMap::new(),
         queued_placeholders_persist_locks: dashmap::DashMap::new(),
