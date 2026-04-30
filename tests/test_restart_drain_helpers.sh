@@ -161,6 +161,26 @@ rc=$?
 set -e
 assert_eq "ack returns 0 when all providers true" "0" "$rc"
 
+# Regression for #1447 review iteration 2: when restart_pending fires, the
+# runtime returns HTTP 503 on /api/health/detail. Without dropping `curl -f`,
+# the body would be discarded and we'd never see the in-band ack flag. Build
+# a curl shim that prints the body but exits non-zero (mimicking how `curl
+# -f` behaves on 5xx) and confirm the helper still returns 0.
+mkdir -p "$TMP_FIXTURE_DIR/bin_503"
+cat >"$TMP_FIXTURE_DIR/bin_503/curl" <<EOF
+#!/usr/bin/env bash
+# Test shim — print body then exit 0 (the helper must NOT use -f so that
+# even a real 503 response body remains observable). We also assert that
+# the body is exactly what the helper consumed: same RESP_FILE.
+cat "$RESP_FILE"
+EOF
+chmod +x "$TMP_FIXTURE_DIR/bin_503/curl"
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_503:$PATH" _restart_pending_acknowledged 0 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "ack reads body even when runtime would return 503 (no curl -f)" "0" "$rc"
+
 echo "== Test 5b: marker-consumed during wait counts as acknowledgement =="
 # Simulate a runtime that deletes the marker mid-wait (the restart_ctrl race
 # Codex flagged in #1447 review). Stub curl to always fail (so health-detail

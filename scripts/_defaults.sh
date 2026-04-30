@@ -421,7 +421,13 @@ clear_restart_drain_mode() {
 _restart_pending_acknowledged() {
   local port="$1"
   local detail_json
-  detail_json=$(curl -sf --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
+  # NOTE: do NOT pass `-f`. The runtime serves /api/health/detail as HTTP 503
+  # the moment `restart_pending` flips to true (build_health_snapshot returns
+  # `unhealthy` for restart-pending — see src/services/discord/health.rs), and
+  # `-f` would drop the body and report failure exactly when we need to read
+  # the body to confirm the gate is armed (#1447 review P1, iteration 2).
+  detail_json=$(curl -s --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
+  [ -n "$detail_json" ] || return 1
 
   # restart_pending is per-provider. Require EVERY provider that exposes
   # the field to report true — otherwise a multi-provider runtime can
