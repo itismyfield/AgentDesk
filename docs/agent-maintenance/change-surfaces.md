@@ -139,6 +139,10 @@
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
   smaller route-delegation slices.
+  `src/services/auto_queue/activate_command.rs` (1012 lines, post-#1444
+  idempotency-guard expansion) is the canonical activate/dispatch-next
+  command surface; it is intentionally above the giant-file threshold and
+  tracked here. Further growth requires a split issue.
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
