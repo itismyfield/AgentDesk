@@ -3163,6 +3163,14 @@ pub(super) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
+        // #1446 codex review P2 — `snapshot_watcher_state` returns the
+        // first provider that knows the channel. If that's not THIS
+        // provider's pass, defer to the matching provider's watchdog: we
+        // must not destructively clean up a different provider's
+        // inflight/mailbox keyed by the same Discord channel id.
+        if !snapshot.provider.eq_ignore_ascii_case(provider.as_str()) {
+            continue;
+        }
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
@@ -3180,11 +3188,17 @@ pub(super) async fn run_stall_watchdog_pass(
         );
         // Force cleanup mirrors THREAD-GUARD's stale path:
         //   1. clear inflight state file (releases the durable lock)
-        //   2. cancel the mailbox active turn (releases in-memory lock)
+        //   2. **clear** the mailbox (drops cancel token + active turn
+        //      anchor + queued interventions). `cancel_active_turn` alone
+        //      only marks the cancel flag and waits for the live turn task
+        //      to call `finish_turn`; for the dead-dispatch case this
+        //      watchdog targets, no such task exists so we must use
+        //      `mailbox_clear_channel` to synchronously release the
+        //      in-memory lock and stop subsequent THREAD-GUARD queueing.
         //   3. drop any parent → thread mapping that points at this channel
         //      (so the parent's THREAD-GUARD stops queueing)
         super::inflight::delete_inflight_state_file(provider, channel_id.get());
-        let _ = mailbox_cancel_active_turn(&shared, channel_id).await;
+        let _ = mailbox_clear_channel(&shared, provider, channel_id).await;
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);

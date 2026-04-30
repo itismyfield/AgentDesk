@@ -30,10 +30,16 @@ const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
 /// stall-watchdog uses `2x` to stay strictly more conservative than any
 /// caller that has already observed the state directly.
 ///
-/// Tuned to stay well above the placeholder sweeper's `STALL_THRESHOLD_SECS`
-/// (60s) and any normal stream cadence so we never false-positive a
-/// healthy long turn.
-pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 60;
+/// `updated_at` is rewritten on every `save_inflight_state` call but is
+/// **not** a true heartbeat — a healthy foreground model/tool call can
+/// legitimately go silent for multiple minutes (long Bash, slow LLM
+/// stream, large Read). We therefore align the THREAD-GUARD trigger with
+/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (300s = 5 min): by then
+/// the placeholder sweeper has *already* replaced the message with its
+/// terminal "abandoned" form, so any further "active turn" claim is
+/// definitively stale. False-positive cleanup of a live turn is much
+/// worse than slightly delayed recovery (issue #1446).
+pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InflightTurnState {

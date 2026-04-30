@@ -183,8 +183,16 @@ pub(super) fn thread_guard_inflight_is_stale(
 ///   2. delete the thread's inflight state file (releases the durable lock
 ///      whose presence convinced `mailbox_has_active_turn` the dispatch is
 ///      still live),
-///   3. cancel the thread's mailbox active turn so any later turn-end hook
-///      does not fire on top of an already-freed dispatch.
+///   3. **clear** the thread's mailbox (cancel token + active turn anchor +
+///      pending interventions). `cancel_active_turn` alone is insufficient
+///      here — for a dead-dispatch case there is no live turn task to
+///      observe the cancel signal and call `finish_turn`, so
+///      `has_active_turn()` would stay `true` forever and the next bot
+///      message would re-enter the THREAD-GUARD's queueing branch.
+///      `mailbox_clear_channel` synchronously drops `active_request_owner`
+///      / `active_user_message_id` and reports `has_active_turn() == false`
+///      immediately on completion (see `ChannelMailboxMsg::Clear` handler
+///      in `turn_orchestrator.rs`).
 ///
 /// We never touch the parent channel's own mailbox — only the thread's.
 /// This preserves the `watcher_owns_live_relay` invariant by leaving
@@ -202,7 +210,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     );
     shared.dispatch_thread_parents.remove(&parent_channel_id);
     super::super::inflight::delete_inflight_state_file(provider, thread_id.get());
-    let _ = mailbox_cancel_active_turn(shared, thread_id).await;
+    let _ = mailbox_clear_channel(shared, provider, thread_id).await;
 }
 
 fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
@@ -908,8 +916,18 @@ pub(in crate::services::discord) async fn handle_event(
             // turn (the thread's cancel_token is keyed by thread_id, leaving
             // the parent channel "unlocked").
             if is_allowed_bot {
-                if let Some(thread_id_ref) = data.shared.dispatch_thread_parents.get(&channel_id) {
-                    let thread_id = *thread_id_ref.value();
+                // #1446 — copy the mapped thread_id and immediately drop the
+                // DashMap ref. `thread_guard_force_clean_stale_thread`
+                // re-acquires the same shard lock to call `.remove()`; if the
+                // ref were still held we would deadlock on the shard's
+                // RwLock. The narrow scope below releases the ref at the `}`.
+                let thread_id_opt = {
+                    data.shared
+                        .dispatch_thread_parents
+                        .get(&channel_id)
+                        .map(|entry| *entry.value())
+                };
+                if let Some(thread_id) = thread_id_opt {
                     // Thread still has an active turn?
                     let thread_active = mailbox_has_active_turn(&data.shared, thread_id).await;
                     if thread_active {
