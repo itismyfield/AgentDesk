@@ -14443,6 +14443,675 @@ async fn auto_queue_generate_response_breaks_down_skipped_active_dispatch_pg_144
     pg_db.drop().await;
 }
 
+// ── #1444 idempotency guards ─────────────────────────────────────────
+//
+// Regression coverage for the "duplicate dispatch" incident pattern:
+// `/redispatch` is single-call complete, but callers used to chain
+// `/transition status:ready` and `/auto-queue/generate` after it, which
+// silently cancelled the just-created dispatch and made a second one. The
+// guards below reject such follow-up calls server-side so caller behaviour
+// can no longer regress past the protections added in #1442.
+
+#[tokio::test]
+async fn transition_to_ready_with_active_dispatch_returns_409_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-tx-1444").await;
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-tx-1444")
+    .bind("Transition guard 1444")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("agent-tx-1444")
+    .bind("test-repo")
+    .bind(1444001_i64)
+    .bind("dispatch-tx-1444-active")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-tx-1444-active")
+    .bind("card-tx-1444")
+    .bind("agent-tx-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] active 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-tx-1444/transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"ready"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "transition to ready with active dispatch must 409: {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["active_dispatch_id"], "dispatch-tx-1444-active",
+        "409 body must echo the blocking dispatch id: {body_text}"
+    );
+    let hint = json["next_action_hint"]
+        .as_str()
+        .expect("next_action_hint must be a string");
+    assert!(
+        hint.contains("force=true"),
+        "next_action_hint must point callers at force=true: {body_text}"
+    );
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("force=true"),
+        "error must mention force=true: {body_text}"
+    );
+
+    // Verify the active dispatch was NOT cancelled by the rejected call.
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-tx-1444-active")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        dispatch_status, "dispatched",
+        "guarded transition must leave the live dispatch untouched"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn transition_to_ready_with_active_dispatch_force_true_proceeds_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-tx-force-1444").await;
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-tx-force-1444")
+    .bind("Force transition 1444")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("agent-tx-force-1444")
+    .bind("test-repo")
+    .bind(1444002_i64)
+    .bind("dispatch-tx-force-1444-active")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-tx-force-1444-active")
+    .bind("card-tx-force-1444")
+    .bind("agent-tx-force-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] force 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-tx-force-1444/transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"ready","force":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "force=true must bypass the #1444 guard and succeed: {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["forced"], true);
+    let cancelled_ids = json["cancelled_dispatch_ids"]
+        .as_array()
+        .expect("cancelled_dispatch_ids must be an array");
+    assert!(
+        cancelled_ids
+            .iter()
+            .any(|id| id.as_str() == Some("dispatch-tx-force-1444-active")),
+        "cancelled_dispatch_ids must include the previously-active dispatch: {body_text}"
+    );
+
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-tx-force-1444-active")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        dispatch_status, "cancelled",
+        "force=true must cancel the previously-active dispatch"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn auto_queue_generate_skips_card_with_active_dispatch_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-aq-skip-1444").await;
+
+    // Card #1: in `ready` (an enqueueable state) BUT carries an active
+    // dispatch — exactly the #1444 race where redispatch already created a
+    // dispatch and a follow-up generate would otherwise queue a duplicate.
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-aq-skip-1444-ready-but-active")
+    .bind("Ready+active 1444")
+    .bind("ready")
+    .bind("medium")
+    .bind("agent-aq-skip-1444")
+    .bind("test-repo")
+    .bind(1444011_i64)
+    .bind("dispatch-aq-skip-1444-active")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-aq-skip-1444-active")
+    .bind("card-aq-skip-1444-ready-but-active")
+    .bind("agent-aq-skip-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] live 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Card #2: clean ready card — should make it into the run.
+    seed_auto_queue_card_pg(
+        &pool,
+        "card-aq-skip-1444-clean",
+        1444012,
+        "ready",
+        "agent-aq-skip-1444",
+    )
+    .await;
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"repo":"test-repo","issue_numbers":[1444011,1444012]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "generate must respond 200: {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let skipped_active = json["skipped_due_to_active_dispatch"]
+        .as_array()
+        .expect("skipped_due_to_active_dispatch must be an array");
+    assert!(
+        skipped_active
+            .iter()
+            .any(|entry| entry["issue_number"] == 1444011
+                && entry["existing_dispatch_id"] == "dispatch-aq-skip-1444-active"),
+        "issue 1444011 must be reported in skipped_due_to_active_dispatch: {body_text}"
+    );
+
+    // The clean card should still make it into the run.
+    let entries = json["entries"]
+        .as_array()
+        .expect("entries must be an array");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry["card_id"].as_str() == Some("card-aq-skip-1444-clean") }),
+        "clean card must still appear in entries: {body_text}"
+    );
+    // The skipped card must NOT be in entries.
+    assert!(
+        entries.iter().all(|entry| {
+            entry["card_id"].as_str() != Some("card-aq-skip-1444-ready-but-active")
+        }),
+        "skipped card must not appear in entries: {body_text}"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// #1444: when /api/auto-queue/dispatch-next encounters an entry whose card
+/// already has an active dispatch, it must reuse the existing dispatch
+/// (no duplicate creation) and emit the DISPATCH-NEXT skip log marker. We
+/// verify the no-duplicate property — the card's latest_dispatch_id must
+/// not change, and dispatch row count for the card stays at 1.
+#[tokio::test]
+async fn dispatch_next_skips_card_with_active_dispatch_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-dn-1444").await;
+
+    // Seed a card already pointing at a live dispatch.
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-dn-1444")
+    .bind("Dispatch-next guard 1444")
+    .bind("ready")
+    .bind("medium")
+    .bind("agent-dn-1444")
+    .bind("test-repo")
+    .bind(1444020_i64)
+    .bind("dispatch-dn-1444-existing")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-dn-1444-existing")
+    .bind("card-dn-1444")
+    .bind("agent-dn-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] existing dn 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Build an active auto_queue run with one pending entry pointing at
+    // this card so dispatch-next has something to iterate over.
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (
+            id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+         ) VALUES (
+            $1, $2, $3, 'active', 1, 1
+         )",
+    )
+    .bind("run-dn-1444")
+    .bind("test-repo")
+    .bind("agent-dn-1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase
+         ) VALUES (
+            $1, $2, $3, $4, 'pending', 0, 0
+         )",
+    )
+    .bind("entry-dn-1444")
+    .bind("run-dn-1444")
+    .bind("card-dn-1444")
+    .bind("agent-dn-1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch-next")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"repo":"test-repo"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert!(
+        status.is_success(),
+        "dispatch-next should respond 2xx even when the entry is skipped: status={status} body={body_text}"
+    );
+
+    // No new dispatch must have been created — count stays at 1.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = $1",
+    )
+    .bind("card-dn-1444")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 1,
+        "dispatch-next must NOT create a duplicate dispatch when the card already has an active one: body={body_text}"
+    );
+    let latest: Option<String> =
+        sqlx::query_scalar("SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1")
+            .bind("card-dn-1444")
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(
+        latest.as_deref(),
+        Some("dispatch-dn-1444-existing"),
+        "card must still point at the original dispatch"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// #1444 incident regression: replay today's bug — call /redispatch (which
+/// is single-call complete and creates one new dispatch), then chain the
+/// redundant /transition status:ready and /auto-queue/generate calls. The
+/// guards must reject the follow-ups so the second dispatch is NEVER
+/// created.
+#[tokio::test]
+async fn idempotency_guards_block_duplicate_dispatch_after_redispatch_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-incident-1444").await;
+
+    // Seed the failed-impl card the way redispatch needs it: in_progress
+    // with a previously-failed dispatch row. /redispatch will cancel that
+    // and create a brand-new dispatch_id.
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-incident-1444")
+    .bind("Incident 1444")
+    .bind("in_progress")
+    .bind("medium")
+    .bind("agent-incident-1444")
+    .bind("test-repo")
+    .bind(1444100_i64)
+    .bind("dispatch-incident-1444-old")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW() - INTERVAL '5 minutes', NOW() - INTERVAL '5 minutes'
+         )",
+    )
+    .bind("dispatch-incident-1444-old")
+    .bind("card-incident-1444")
+    .bind("agent-incident-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] incident-old 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+
+    // Step 1 — /redispatch (the only call that should have happened).
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-incident-1444/redispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"test #1444"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_dispatch_id = json["new_dispatch_id"]
+        .as_str()
+        .expect("redispatch must report a new_dispatch_id")
+        .to_string();
+    assert_ne!(
+        new_dispatch_id, "dispatch-incident-1444-old",
+        "redispatch must mint a fresh dispatch_id"
+    );
+
+    let after_redispatch_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = $1",
+    )
+    .bind("card-incident-1444")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_redispatch_count, 2,
+        "after /redispatch we expect 2 task_dispatches rows: the old (cancelled) and the new"
+    );
+
+    // Step 2 — the wrongly chained /transition status:ready. Must 409.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-incident-1444/transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"ready"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "redundant transition→ready must 409 because the redispatched dispatch is still active"
+    );
+
+    // Step 3 — the wrongly chained /auto-queue/generate. Card must be
+    // reported under skipped_due_to_active_dispatch and NOT enter a run.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"repo":"test-repo","issue_numbers":[1444100]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let skipped_active = json["skipped_due_to_active_dispatch"]
+        .as_array()
+        .expect("skipped_due_to_active_dispatch must be an array");
+    assert!(
+        skipped_active
+            .iter()
+            .any(|entry| entry["issue_number"] == 1444100),
+        "issue 1444100 must be reported as skipped_due_to_active_dispatch: {body_text}"
+    );
+    let entries = json["entries"]
+        .as_array()
+        .map(|e| e.as_slice())
+        .unwrap_or(&[]);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["card_id"].as_str().unwrap_or_default() != "card-incident-1444"),
+        "card-incident-1444 must NOT enter the generated run: {body_text}"
+    );
+
+    // Final invariant: only ONE active (pending|dispatched) dispatch row
+    // exists for the card after redispatch + the rejected follow-ups.
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind("card-incident-1444")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        active_count, 1,
+        "exactly one active dispatch must exist after the rejected follow-ups; the guard prevents a duplicate"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn force_transition_rejects_mismatched_channel_when_pmd_channel_is_configured() {
     let _lock = env_lock();
@@ -15022,7 +15691,9 @@ async fn postgres_force_transition_to_ready_cleans_up_live_state() {
                 .uri("/kanban-cards/card-ft-clean-pg/transition")
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
-                .body(Body::from(r#"{"status":"ready"}"#))
+                // #1444: card has a live dispatch — force=true is now required
+                // for the ready transition to bypass the idempotency guard.
+                .body(Body::from(r#"{"status":"ready","force":true}"#))
                 .unwrap(),
         )
         .await

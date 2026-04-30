@@ -130,6 +130,42 @@ pub async fn generate(
         });
     }
 
+    // #1444 idempotency guard: filter out any candidate card that already has
+    // a pending/dispatched dispatch. This prevents the #1442 incident pattern
+    // where `/redispatch` creates a new dispatch and a follow-up
+    // `/auto-queue/generate` would silently create another. The filtered
+    // cards get reported under `skipped_due_to_active_dispatch` so callers
+    // see WHY their issue didn't make it into the run.
+    let mut active_dispatch_skips: Vec<serde_json::Value> = Vec::new();
+    {
+        let mut retained = Vec::with_capacity(cards.len());
+        for card in cards.into_iter() {
+            match active_dispatch_id_for_card_pg(pool, &card.card_id).await {
+                Some(existing_dispatch_id) => {
+                    if let Some(issue_number) = card.github_issue_number {
+                        active_dispatch_skips.push(json!({
+                            "issue_number": issue_number,
+                            "existing_dispatch_id": existing_dispatch_id,
+                        }));
+                    }
+                    crate::auto_queue_log!(
+                        info,
+                        "generate_skip_active_dispatch_pg_1444",
+                        AutoQueueLogContext::new()
+                            .card(card.card_id.as_str())
+                            .agent(card.agent_id.as_str())
+                            .dispatch(&existing_dispatch_id),
+                        "⏭ GENERATE: card {} already has active dispatch {}, skipping",
+                        card.card_id,
+                        existing_dispatch_id
+                    );
+                }
+                None => retained.push(card),
+            }
+        }
+        cards = retained;
+    }
+
     // #1442: capture skip-reason breakdowns for the requested issue_numbers
     // (or for everything filtered out when no explicit list was given). This
     // lets callers see why a card was excluded without chaining extra calls.
@@ -141,7 +177,7 @@ pub async fn generate(
         .iter()
         .filter_map(|card| card.github_issue_number)
         .collect();
-    let skip_breakdown = collect_generate_skip_breakdown(
+    let mut skip_breakdown = collect_generate_skip_breakdown(
         pool,
         requested_issue_numbers.as_deref(),
         &candidate_issue_numbers,
@@ -149,6 +185,24 @@ pub async fn generate(
         body.agent_id.as_deref(),
     )
     .await;
+    // Merge in the explicit-filter skips from the #1444 guard above. Dedupe
+    // on issue_number so we don't double-report (the breakdown helper only
+    // surfaces issues NOT in the candidate pool — our filtered cards came
+    // from the pool so they wouldn't otherwise appear).
+    {
+        let already: std::collections::HashSet<i64> = skip_breakdown
+            .active_dispatch
+            .iter()
+            .filter_map(|entry| entry.get("issue_number").and_then(|v| v.as_i64()))
+            .collect();
+        for entry in active_dispatch_skips {
+            let issue_number = entry.get("issue_number").and_then(|v| v.as_i64());
+            if issue_number.map(|n| already.contains(&n)).unwrap_or(false) {
+                continue;
+            }
+            skip_breakdown.active_dispatch.push(entry);
+        }
+    }
 
     if cards.is_empty() {
         let mut counts_map = serde_json::Map::new();
@@ -576,4 +630,27 @@ pub(crate) async fn collect_generate_skip_breakdown(
         }
     }
     breakdown
+}
+
+/// #1444 idempotency helper: returns the dispatch_id when the card already
+/// has a pending/dispatched dispatch on `task_dispatches`, otherwise None.
+/// Used by `/api/auto-queue/generate` to silently skip cards that would
+/// otherwise queue up a duplicate dispatch on top of an in-flight one.
+pub(crate) async fn active_dispatch_id_for_card_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }

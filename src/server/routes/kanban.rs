@@ -3535,10 +3535,23 @@ pub async fn batch_transition(
 pub struct ForceTransitionBody {
     pub status: String,
     pub cancel_dispatches: Option<bool>,
+    /// #1444: explicit opt-in to cancel a card's active dispatch when the
+    /// target_status is `ready`. Without `force=true` (and without legacy
+    /// `cancel_dispatches=true`), `/transition` returns 409 Conflict if the
+    /// card already has a pending/dispatched dispatch — preventing the
+    /// duplicate dispatch incident from #1442.
+    pub force: Option<bool>,
 }
 
 fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option<bool>) -> bool {
     matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
+}
+
+/// #1444: returns true if the caller has explicitly opted into cancelling an
+/// existing active dispatch on a `target=ready` transition. Either the new
+/// `force` flag or the legacy `cancel_dispatches=true` field qualifies.
+fn force_transition_force_intent_present(body: &ForceTransitionBody) -> bool {
+    body.force.unwrap_or(false) || body.cancel_dispatches.unwrap_or(false)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -4023,6 +4036,7 @@ pub async fn force_transition(
     }
 
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
+    let force_intent_present = force_transition_force_intent_present(&body);
     let target_status = body.status;
     let mut cleanup_counts = (0, 0);
     let pool = match state.pg_pool_ref() {
@@ -4045,6 +4059,27 @@ pub async fn force_transition(
     let pre_active_dispatch_ids: Vec<String> = active_dispatch_ids_for_card_pg(pool, &id)
         .await
         .unwrap_or_default();
+
+    // #1444 idempotency guard: when the caller asks to transition a card to
+    // `ready` while it already has a pending/dispatched dispatch, refuse with
+    // 409 unless `force=true` (or legacy `cancel_dispatches=true`) is
+    // explicitly set. This stops the #1442 incident pattern where a caller
+    // chains `/redispatch` + `/transition` + `/auto-queue/generate` and
+    // accidentally creates duplicate dispatches.
+    if target_status == "ready" && !force_intent_present && !pre_active_dispatch_ids.is_empty() {
+        let active_id = pre_active_dispatch_ids.first().cloned().unwrap_or_default();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "card has active dispatch {active_id}; pass force=true to cancel and re-transition"
+                ),
+                "active_dispatch_id": active_id,
+                "active_dispatch_ids": pre_active_dispatch_ids,
+                "next_action_hint": "card already has a live dispatch — inspect /api/dispatches/{id}; pass force=true (or legacy cancel_dispatches=true) on /transition to cancel + re-transition",
+            })),
+        );
+    }
     let pre_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
         "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
     )

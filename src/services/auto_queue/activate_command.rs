@@ -540,6 +540,22 @@ pub(crate) async fn activate_with_deps_pg(
                 .as_ref()
                 .expect("active dispatch state requires dispatch id")
                 .clone();
+            // #1444 idempotency log: emit a clearly-tagged DISPATCH-NEXT skip
+            // marker so the operator can correlate "no new dispatch was
+            // created" with the active-dispatch reuse path. We continue to
+            // attach the entry to the existing dispatch (the existing
+            // semantics) rather than truly skip — leaving the entry pending
+            // would cause subsequent dispatch-next calls to retry the same
+            // card forever. The attach is itself idempotent: a card with an
+            // active dispatch never gets a NEW dispatch_id from this path.
+            crate::auto_queue_log!(
+                info,
+                "dispatch_next_skip_active_dispatch_pg_1444",
+                entry_log_ctx.clone().dispatch(&dispatch_id),
+                "⏭ DISPATCH-NEXT: card {} already has active dispatch {}, skipping",
+                card_id,
+                dispatch_id
+            );
             if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
                 pool,
                 &entry_id,
