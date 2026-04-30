@@ -84,6 +84,24 @@ pub(crate) enum Commands {
         #[arg(long)]
         content: String,
     },
+    /// Send a trigger-capable agent handoff through the announce bot
+    SendToAgent {
+        /// Source agent id recorded in the message envelope
+        #[arg(long = "from")]
+        from_agent_id: String,
+        /// Target agent id whose Discord channel binding is used
+        #[arg(long = "to")]
+        to_agent_id: String,
+        /// Message body
+        #[arg(long)]
+        message: String,
+        /// Target channel binding kind
+        #[arg(long = "channel-kind", value_enum, default_value = "cc")]
+        channel_kind: AgentHandoffChannelKindArg,
+        /// Send the body without the automatic handoff prefix
+        #[arg(long = "no-prefix")]
+        no_prefix: bool,
+    },
     /// Submit a review verdict without HTTP server dependency
     ReviewVerdict {
         /// Review dispatch ID
@@ -385,6 +403,12 @@ pub(crate) enum DoctorProfileArg {
     Quick,
     Deep,
     Security,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum AgentHandoffChannelKindArg {
+    Cc,
+    Cdx,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -697,6 +721,74 @@ mod tests {
                 assert_eq!(card_id, "610");
                 assert_eq!(phase, Some(1));
                 assert_eq!(thread_group, Some(2));
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn send_to_agent_parses_defaults() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "send-to-agent",
+            "--from",
+            "project-agentdesk",
+            "--to",
+            "adk-dashboard",
+            "--message",
+            "hello",
+        ])
+        .expect("send-to-agent args should parse");
+
+        match cli.command {
+            Some(Commands::SendToAgent {
+                from_agent_id,
+                to_agent_id,
+                message,
+                channel_kind,
+                no_prefix,
+            }) => {
+                assert_eq!(from_agent_id, "project-agentdesk");
+                assert_eq!(to_agent_id, "adk-dashboard");
+                assert_eq!(message, "hello");
+                assert_eq!(channel_kind, AgentHandoffChannelKindArg::Cc);
+                assert!(!no_prefix);
+            }
+            other => panic!(
+                "unexpected parse result: {:?}",
+                other.map(|_| "other command")
+            ),
+        }
+    }
+
+    #[test]
+    fn send_to_agent_parses_cdx_without_prefix() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "send-to-agent",
+            "--from",
+            "project-agentdesk",
+            "--to",
+            "adk-dashboard",
+            "--message",
+            "hello",
+            "--channel-kind",
+            "cdx",
+            "--no-prefix",
+        ])
+        .expect("send-to-agent args should parse");
+
+        match cli.command {
+            Some(Commands::SendToAgent {
+                channel_kind,
+                no_prefix,
+                ..
+            }) => {
+                assert_eq!(channel_kind, AgentHandoffChannelKindArg::Cdx);
+                assert!(no_prefix);
             }
             other => panic!(
                 "unexpected parse result: {:?}",

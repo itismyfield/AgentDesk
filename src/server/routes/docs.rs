@@ -935,6 +935,37 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Send runtime signal to agent // TODO: example",
         ),
         ep(
+            "POST",
+            "/api/agents/{id}/message",
+            "agents",
+            "Send a trigger-capable agent handoff via the announce bot",
+        )
+        .with_params([
+            ("id", path_param("Target agent id")),
+            ("from_agent_id", body_param("string", true, "Source agent id")),
+            ("message", body_param("string", true, "Message body")),
+            (
+                "channel_kind",
+                body_param("string", false, "Target binding: cc (default) or cdx")
+                    .with_enum(&["cc", "cdx"])
+                    .with_default(json!("cc")),
+            ),
+            (
+                "prefix",
+                body_param("boolean", false, "Add the handoff prefix").with_default(true),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc", "prefix": true}}),
+            json!({"to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "message_id": "1500000000000000002", "bot": "announce", "prefixed": true}),
+        )
+        .with_error_example(
+            422,
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc"}}),
+            json!({"error": "channel_kind unset", "to_agent_id": "adk-dashboard", "channel_kind": "cc", "available_kinds": ["cdx"]}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/message -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"message\":\"hello\",\"channel_kind\":\"cc\",\"prefix\":true}'"),
+        ep(
             "GET",
             "/api/agents/{id}/cron",
             "agents",

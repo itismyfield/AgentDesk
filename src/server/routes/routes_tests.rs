@@ -7653,6 +7653,15 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
     assert_eq!(setup["params"]["dry_run"]["type"], "boolean");
     assert_eq!(setup["params"]["provider"]["enum"][0], "claude");
     assert_eq!(setup["example"]["response"]["dry_run"], true);
+
+    let message = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/agents/{id}/message")
+        .expect("agents message endpoint must be present");
+    assert_eq!(message["params"]["from_agent_id"]["required"], true);
+    assert_eq!(message["params"]["channel_kind"]["default"], "cc");
+    assert_eq!(message["params"]["prefix"]["default"], true);
+    assert_eq!(message["example"]["response"]["bot"], "announce");
 }
 
 #[tokio::test]

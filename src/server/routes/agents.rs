@@ -68,6 +68,16 @@ pub struct StartAgentTurnBody {
     pub channel_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AgentMessageBody {
+    pub from_agent_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub channel_kind: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<bool>,
+}
+
 const TURN_CAPTURE_SCROLLBACK_LINES: i32 = -80;
 const TURN_CAPTURE_TAIL_LINES: usize = 60;
 const TURN_OUTPUT_MAX_CHARS: usize = 4000;
@@ -1876,6 +1886,46 @@ pub async fn agent_signal(
         StatusCode::OK,
         Json(json!({"ok": true, "card_id": card_id, "signal": signal})),
     )
+}
+
+/// POST /api/agents/:id/message
+/// Send a trigger-capable agent-to-agent handoff through the announce bot.
+pub async fn agent_message(
+    State(state): State<super::AppState>,
+    axum::extract::Path(to_agent_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<AgentMessageBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_required_response();
+    };
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Discord not available (standalone mode)"})),
+        );
+    };
+
+    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+        body.channel_kind.as_deref(),
+    ) {
+        Ok(channel_kind) => channel_kind,
+        Err(error) => return (error.status(), Json(error.body())),
+    };
+
+    match crate::services::discord::agent_handoff::send_agent_handoff(
+        registry,
+        pool,
+        &body.from_agent_id,
+        &to_agent_id,
+        &body.message,
+        channel_kind,
+        body.prefix.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response.to_value())),
+        Err(error) => (error.status(), Json(error.body())),
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

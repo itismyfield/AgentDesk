@@ -20,6 +20,9 @@ pub fn print_help() {
     println!("    discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!("    discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
     println!("    discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
+    println!(
+        "    send-to-agent --from <AGENT> --to <AGENT> --message <TEXT> [--channel-kind cc|cdx] [--no-prefix]"
+    );
     println!("    reset-tmux              Kill all AgentDesk-* tmux sessions");
     println!(
         "    ismcptool <TOOL>...     Check if MCP tool(s) are registered in .claude/settings.json (CWD)"

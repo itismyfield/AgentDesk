@@ -34,6 +34,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/agents/{id}/duplicate", post(agents_crud::duplicate_agent))
             .route("/agents/{id}/offices", get(agents::agent_offices))
             .route("/agents/{id}/signal", post(agents::agent_signal))
+            .route("/agents/{id}/message", post(agents::agent_message))
             .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))
             .route("/agents/{id}/skills", get(agents::agent_skills))
             .route(

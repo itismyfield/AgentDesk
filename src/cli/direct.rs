@@ -60,7 +60,9 @@ fn parse_health_status_code(status: &str) -> StatusCode {
         "400 Bad Request" => StatusCode::BAD_REQUEST,
         "403 Forbidden" => StatusCode::FORBIDDEN,
         "404 Not Found" => StatusCode::NOT_FOUND,
+        "422 Unprocessable Entity" => StatusCode::UNPROCESSABLE_ENTITY,
         "500 Internal Server Error" => StatusCode::INTERNAL_SERVER_ERROR,
+        "502 Bad Gateway" => StatusCode::BAD_GATEWAY,
         "503 Service Unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -287,6 +289,37 @@ pub(crate) async fn cmd_send(
             Err(extract_error_message(&value)
                 .unwrap_or_else(|| format!("send failed ({})", status.as_u16())))
         }
+    })
+    .await
+}
+
+pub(crate) async fn cmd_send_to_agent(
+    from_agent_id: &str,
+    to_agent_id: &str,
+    message: &str,
+    channel_kind: crate::services::discord::agent_handoff::AgentHandoffChannelKind,
+    prefix: bool,
+) -> Result<(), String> {
+    run_command(true, false, |state| async move {
+        let registry = state
+            .health_registry
+            .as_ref()
+            .ok_or_else(|| "Discord health registry not available".to_string())?;
+        let pool = state
+            .pg_pool_ref()
+            .ok_or_else(|| "postgres pool unavailable".to_string())?;
+        let response = crate::services::discord::agent_handoff::send_agent_handoff(
+            registry,
+            pool,
+            from_agent_id,
+            to_agent_id,
+            message,
+            channel_kind,
+            prefix,
+        )
+        .await
+        .map_err(|error| error.one_line())?;
+        Ok(response.to_value())
     })
     .await
 }
