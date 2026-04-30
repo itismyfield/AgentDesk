@@ -2972,7 +2972,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
             &mut full_response,
             &mut tool_state,
         );
-        flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
+        let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
         let mut is_auth_error = initial_outcome.is_auth_error;
@@ -3050,6 +3050,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
             let turn_start = tokio::time::Instant::now();
             let turn_timeout = super::turn_watchdog_timeout();
             let mut last_status_update = tokio::time::Instant::now();
+            if live_events_dirty {
+                force_next_watcher_status_update(&mut last_status_update);
+            }
             let mut ready_for_input_tracker =
                 crate::services::provider::ReadyForInputIdleTracker::default();
             let mut last_ready_probe_at: Option<std::time::Instant> = None;
@@ -3107,7 +3110,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             &mut full_response,
                             &mut tool_state,
                         );
-                        flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
+                        if flush_placeholder_live_events(&shared, channel_id, &mut tool_state) {
+                            force_next_watcher_status_update(&mut last_status_update);
+                        }
                         found_result = found_result || outcome.found_result;
                         is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
                         is_auth_error = is_auth_error || outcome.is_auth_error;
@@ -3358,7 +3363,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             break;
                         }
 
-                        let status_block = super::formatting::build_placeholder_status_block(
+                        let status_block = build_watcher_placeholder_status_block(
+                            &shared,
+                            channel_id,
                             indicator,
                             tool_state.prev_tool_status.as_deref(),
                             tool_state.current_tool_line.as_deref(),
@@ -3440,7 +3447,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         }
                     }
 
-                    let status_block = super::formatting::build_placeholder_status_block(
+                    let status_block = build_watcher_placeholder_status_block(
+                        &shared,
+                        channel_id,
                         indicator,
                         tool_state.prev_tool_status.as_deref(),
                         tool_state.current_tool_line.as_deref(),
@@ -5489,11 +5498,40 @@ fn flush_placeholder_live_events(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     tool_state: &mut WatcherToolState,
-) {
+) -> bool {
     let events = tool_state.take_placeholder_events();
     if shared.placeholder_live_events_enabled && !events.is_empty() {
         shared.placeholder_live_events.push_many(channel_id, events);
+        true
+    } else {
+        false
     }
+}
+
+fn force_next_watcher_status_update(last_status_update: &mut tokio::time::Instant) {
+    *last_status_update = tokio::time::Instant::now() - super::status_update_interval();
+}
+
+fn build_watcher_placeholder_status_block(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    indicator: &str,
+    prev_tool_status: Option<&str>,
+    current_tool_line: Option<&str>,
+    full_response: &str,
+) -> String {
+    let status_block = super::formatting::build_placeholder_status_block(
+        indicator,
+        prev_tool_status,
+        current_tool_line,
+        full_response,
+    );
+    if shared.placeholder_live_events_enabled
+        && let Some(block) = shared.placeholder_live_events.render_block(channel_id)
+    {
+        return format!("{status_block}\n{block}");
+    }
+    status_block
 }
 
 /// Process buffered lines for the tmux watcher.

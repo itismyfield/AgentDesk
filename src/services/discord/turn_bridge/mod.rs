@@ -2404,7 +2404,7 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if shared_owned.placeholder_live_events_enabled
-                && !watcher_owns_assistant_relay
+                && watcher_owns_assistant_relay
                 && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
                 && let Some(block) = shared_owned.placeholder_live_events.render_block(channel_id)
             {

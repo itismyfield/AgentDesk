@@ -341,6 +341,10 @@ fn truncate_chars(raw: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::formatting::{
+        MonitorHandoffReason, MonitorHandoffStatus,
+        build_monitor_handoff_placeholder_with_live_events,
+    };
     use super::*;
     use serde_json::json;
 
@@ -383,6 +387,83 @@ mod tests {
         assert!(line.contains("token=***"));
         assert!(!line.contains("abc123"));
         assert!(!line.contains("secret"));
+    }
+
+    #[test]
+    fn redact_sensitive_for_placeholder_masks_required_patterns() {
+        let redacted = redact_sensitive_for_placeholder(
+            "sk-abcdefghijklmnopqrstuvwxyz \
+             Authorization: Bearer live-token \
+             password=hunter2 token=secret api_key=key1 api-key=key2",
+        );
+
+        assert!(redacted.contains("***"));
+        assert!(redacted.contains("Bearer ***"));
+        assert!(redacted.contains("password=***"));
+        assert!(redacted.contains("token=***"));
+        assert!(redacted.contains("api_key=***"));
+        assert!(redacted.contains("api-key=***"));
+        assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+        assert!(!redacted.contains("live-token"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("key1"));
+        assert!(!redacted.contains("key2"));
+    }
+
+    #[test]
+    fn monitor_handoff_live_events_stays_under_description_limit_with_long_command() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(99);
+        let long_command = format!(
+            "printf '{}' && curl -H 'Authorization: Bearer secret-token' https://example.test?api_key=secret",
+            "x".repeat(800)
+        );
+        for idx in 0..20 {
+            events.push_event(
+                channel_id,
+                RecentPlaceholderEvent::tool_use(
+                    "Bash",
+                    &json!({"command": format!("{long_command}-{idx}")}).to_string(),
+                )
+                .unwrap(),
+            );
+        }
+
+        let block = events.render_block(channel_id).unwrap();
+        let live_lines = block
+            .lines()
+            .filter(|line| line.starts_with("[Bash]"))
+            .collect::<Vec<_>>();
+        assert!(!live_lines.is_empty());
+        assert!(
+            live_lines
+                .iter()
+                .all(|line| line.chars().count() <= EVENT_LINE_MAX_CHARS)
+        );
+        assert!(block.contains("..."));
+        assert!(!block.contains("secret-token"));
+        assert!(!block.contains("api_key=secret"));
+
+        let rendered = build_monitor_handoff_placeholder_with_live_events(
+            MonitorHandoffStatus::Active,
+            MonitorHandoffReason::AsyncDispatch,
+            1_700_000_000,
+            Some(&"tool ".repeat(200)),
+            Some(&long_command),
+            Some(&"reason ".repeat(200)),
+            Some(&"context ".repeat(200)),
+            Some(&"request ".repeat(200)),
+            Some(&"progress ".repeat(200)),
+            Some(&block),
+        );
+
+        assert!(
+            rendered.len() <= 4096,
+            "monitor handoff placeholder exceeded embed description limit: {}",
+            rendered.len()
+        );
+        assert!(rendered.contains("```text\n"));
     }
 
     #[test]
