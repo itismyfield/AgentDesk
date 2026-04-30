@@ -92,6 +92,36 @@ fn emit_recovery_quality_event(
     );
 }
 
+fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
+    relay_ok
+}
+
+async fn relay_recovery_terminal_notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> bool {
+    super::formatting::replace_long_message_raw(
+        http,
+        ChannelId::new(state.channel_id),
+        MessageId::new(state.current_msg_id),
+        text,
+        shared,
+    )
+    .await
+    .is_ok()
+}
+
+#[cfg(test)]
+mod recovery_dispatch_gate_tests {
+    #[test]
+    fn recovery_dispatch_advance_requires_successful_relay() {
+        assert!(super::should_advance_recovery_dispatch_after_relay(true));
+        assert!(!super::should_advance_recovery_dispatch_after_relay(false));
+    }
+}
+
 /// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 fn tmux_session_alive_with_retry(name: &str) -> bool {
@@ -1050,15 +1080,25 @@ pub(super) async fn restore_inflight_turns(
                 };
                 let channel_id = ChannelId::new(state.channel_id);
                 let current_msg_id = MessageId::new(state.current_msg_id);
-                let _ = super::formatting::replace_long_message_raw(
+                let relay_ok = super::formatting::replace_long_message_raw(
                     http,
                     channel_id,
                     current_msg_id,
                     &final_text,
                     shared,
                 )
-                .await;
-                // Mark user message as completed: ⏳ → ✅
+                .await
+                .is_ok();
+                if !should_advance_recovery_dispatch_after_relay(relay_ok) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ recovery: Discord relay failed before downtime dispatch completion — preserving inflight for retry"
+                    );
+                    continue;
+                }
+                // Mark user message as completed only after Discord terminal
+                // delivery commits; otherwise the channel shows completion
+                // without the final assistant message.
                 let user_msg_id = MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
@@ -1614,6 +1654,13 @@ pub(super) async fn restore_inflight_turns(
             .await
             .is_ok();
 
+            if !should_advance_recovery_dispatch_after_relay(relay_ok) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: Discord relay failed before dispatch completion — preserving inflight for retry"
+                );
+                continue;
+            }
             super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
 
@@ -1779,7 +1826,7 @@ pub(super) async fn restore_inflight_turns(
                 }
             }
 
-            if dispatch_completed && relay_ok {
+            if dispatch_completed {
                 finish_recovered_turn_mailbox(
                     shared,
                     provider,
@@ -1788,11 +1835,6 @@ pub(super) async fn restore_inflight_turns(
                 )
                 .await;
                 clear_inflight_state(provider, state.channel_id);
-            } else if dispatch_completed && !relay_ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: dispatch completed but Discord relay failed — preserving inflight for retry"
-                );
             }
             continue;
         }
@@ -1841,8 +1883,15 @@ pub(super) async fn restore_inflight_turns(
             .await
             .is_ok();
 
-            // Mark user message as completed: ⏳ → ✅
             let user_msg_id = MessageId::new(state.user_msg_id);
+            if !should_advance_recovery_dispatch_after_relay(relay_ok) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: Discord relay failed before dispatch completion — preserving inflight for retry"
+                );
+                continue;
+            }
+            // Mark user message as completed only after Discord terminal delivery commits.
             super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
             super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
 
@@ -2019,13 +2068,8 @@ pub(super) async fn restore_inflight_turns(
 
             // #225 P1-1: Only clear inflight if both dispatch completed AND relay succeeded.
             // If relay failed, preserve inflight for retry on next startup.
-            if dispatch_completed && relay_ok {
+            if dispatch_completed {
                 clear_inflight_state(provider, state.channel_id);
-            } else if dispatch_completed && !relay_ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ recovery: dispatch completed but Discord relay failed — preserving inflight for retry"
-                );
             }
             continue;
         }
@@ -2049,15 +2093,14 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 super::formatting::format_for_discord_with_provider(&state.full_response, provider)
             };
-            let _ = super::formatting::replace_long_message_raw(
-                http,
-                channel_id,
-                current_msg_id,
-                &final_text,
-                shared,
-            )
-            .await;
-            clear_inflight_state(provider, state.channel_id);
+            if relay_recovery_terminal_notice(http, shared, &state, &final_text).await {
+                clear_inflight_state(provider, state.channel_id);
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: ready-without-output notice failed — preserving inflight for retry"
+                );
+            }
             continue;
         }
 
@@ -2099,14 +2142,7 @@ pub(super) async fn restore_inflight_turns(
                     best_response.len()
                 );
             }
-            let _ = super::formatting::replace_long_message_raw(
-                http,
-                channel_id,
-                current_msg_id,
-                &stale_text,
-                shared,
-            )
-            .await;
+            let relay_ok = relay_recovery_terminal_notice(http, shared, &state, &stale_text).await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
                     None::<&crate::db::Db>,
@@ -2122,7 +2158,14 @@ pub(super) async fn restore_inflight_turns(
                 );
             }
             save_missing_session_handoff(provider, &state, &best_response);
-            clear_inflight_state(provider, state.channel_id);
+            if relay_ok {
+                clear_inflight_state(provider, state.channel_id);
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: missing-tmux notice failed — preserving inflight for retry"
+                );
+            }
             continue;
         }
 
@@ -2132,7 +2175,14 @@ pub(super) async fn restore_inflight_turns(
                 "  [{ts}] ⚠ clearing inflight turn for channel {}: tmux session name missing",
                 state.channel_id
             );
-            clear_inflight_state(provider, state.channel_id);
+            let text = stale_inflight_message("tmux session name missing during recovery");
+            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                clear_inflight_state(provider, state.channel_id);
+            } else {
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: missing-tmux-name notice failed — preserving inflight for retry"
+                );
+            }
             continue;
         };
         let Some(output_path) = output_path else {
@@ -2141,7 +2191,14 @@ pub(super) async fn restore_inflight_turns(
                 "  [{ts}] ⚠ clearing inflight turn for channel {}: output path missing",
                 state.channel_id
             );
-            clear_inflight_state(provider, state.channel_id);
+            let text = stale_inflight_message("output path missing during recovery");
+            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                clear_inflight_state(provider, state.channel_id);
+            } else {
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: missing-output-path notice failed — preserving inflight for retry"
+                );
+            }
             continue;
         };
         let Some(input_fifo_path) = input_fifo_path else {
@@ -2150,7 +2207,14 @@ pub(super) async fn restore_inflight_turns(
                 "  [{ts}] ⚠ clearing inflight turn for channel {}: input fifo path missing",
                 state.channel_id
             );
-            clear_inflight_state(provider, state.channel_id);
+            let text = stale_inflight_message("input fifo path missing during recovery");
+            if relay_recovery_terminal_notice(http, shared, &state, &text).await {
+                clear_inflight_state(provider, state.channel_id);
+            } else {
+                tracing::warn!(
+                    "  [{ts}] ⚠ recovery: missing-input-fifo notice failed — preserving inflight for retry"
+                );
+            }
             continue;
         };
 
@@ -2212,22 +2276,30 @@ pub(super) async fn restore_inflight_turns(
                             state.session_key.as_deref(),
                             "worktree_missing_main_fallback_blocked",
                         );
-                        let _ = super::formatting::replace_long_message_raw(
+                        let relay_ok = super::formatting::replace_long_message_raw(
                             http,
                             channel_id,
                             current_msg_id,
                             &format!("❌ {error}\nmain workspace fallback blocked."),
                             shared,
                         )
-                        .await;
-                        super::turn_bridge::fail_dispatch_with_retry(
-                            shared.api_port,
-                            dispatch_id.as_deref(),
-                            &error,
-                        )
-                        .await;
-                        super::restart_report::clear_restart_report(provider, state.channel_id);
-                        clear_inflight_state(provider, state.channel_id);
+                        .await
+                        .is_ok();
+                        if should_advance_recovery_dispatch_after_relay(relay_ok) {
+                            super::turn_bridge::fail_dispatch_with_retry(
+                                shared.api_port,
+                                dispatch_id.as_deref(),
+                                &error,
+                            )
+                            .await;
+                            super::restart_report::clear_restart_report(provider, state.channel_id);
+                            clear_inflight_state(provider, state.channel_id);
+                        } else {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ recovery: worktree error relay failed before dispatch failure — preserving inflight for retry"
+                            );
+                        }
                         continue;
                     }
                 };
@@ -2402,22 +2474,30 @@ pub(super) async fn restore_inflight_turns(
                     state.session_key.as_deref(),
                     "worktree_missing_main_fallback_blocked",
                 );
-                let _ = super::formatting::replace_long_message_raw(
+                let relay_ok = super::formatting::replace_long_message_raw(
                     http,
                     channel_id,
                     current_msg_id,
                     &format!("❌ {error}\nmain workspace fallback blocked."),
                     shared,
                 )
-                .await;
-                super::turn_bridge::fail_dispatch_with_retry(
-                    shared.api_port,
-                    dispatch_id.as_deref(),
-                    &error,
-                )
-                .await;
-                super::restart_report::clear_restart_report(provider, state.channel_id);
-                clear_inflight_state(provider, state.channel_id);
+                .await
+                .is_ok();
+                if should_advance_recovery_dispatch_after_relay(relay_ok) {
+                    super::turn_bridge::fail_dispatch_with_retry(
+                        shared.api_port,
+                        dispatch_id.as_deref(),
+                        &error,
+                    )
+                    .await;
+                    super::restart_report::clear_restart_report(provider, state.channel_id);
+                    clear_inflight_state(provider, state.channel_id);
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ recovery: worktree error relay failed before dispatch failure — preserving inflight for retry"
+                    );
+                }
                 continue;
             }
         };

@@ -266,14 +266,22 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     let stale_text = super::turn_bridge::stale_inflight_message(best_response);
-    let _ = super::formatting::replace_long_message_raw(
+    let relay_ok = super::formatting::replace_long_message_raw(
         http,
         channel_id,
         serenity::MessageId::new(state.current_msg_id),
         &stale_text,
         shared,
     )
-    .await;
+    .await
+    .is_ok();
+    if !relay_ok {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher death recovery: handoff notice failed before dispatch failure — preserving inflight for retry"
+        );
+        return false;
+    }
 
     clear_restart_handoff_provider_session(channel_id, shared, provider_kind, &state).await;
 

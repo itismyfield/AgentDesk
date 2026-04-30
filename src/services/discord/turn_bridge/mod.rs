@@ -649,6 +649,102 @@ fn active_turn_thread_channel_id(
         .or(inflight_state.thread_id)
 }
 
+fn should_complete_work_dispatch_after_terminal_delivery(
+    completion_candidate: bool,
+    terminal_delivery_committed: bool,
+    preserve_inflight_for_cleanup_retry: bool,
+    resume_failure_detected: bool,
+    recovery_retry: bool,
+    full_response: &str,
+) -> bool {
+    completion_candidate
+        && terminal_delivery_committed
+        && !preserve_inflight_for_cleanup_retry
+        && !resume_failure_detected
+        && !recovery_retry
+        && !full_response.trim().is_empty()
+}
+
+fn should_fail_dispatch_after_terminal_delivery(
+    fail_candidate: bool,
+    terminal_delivery_committed: bool,
+    preserve_inflight_for_cleanup_retry: bool,
+) -> bool {
+    fail_candidate && terminal_delivery_committed && !preserve_inflight_for_cleanup_retry
+}
+
+#[cfg(test)]
+mod terminal_delivery_gate_tests {
+    use super::{
+        should_complete_work_dispatch_after_terminal_delivery,
+        should_fail_dispatch_after_terminal_delivery,
+    };
+
+    #[test]
+    fn work_dispatch_completion_requires_terminal_delivery_commit() {
+        assert!(should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            true,
+            false,
+            false,
+            false,
+            "visible final response",
+        ));
+
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            false,
+            false,
+            false,
+            false,
+            "visible final response",
+        ));
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            true,
+            true,
+            false,
+            false,
+            "visible final response",
+        ));
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            true,
+            false,
+            true,
+            false,
+            "visible final response",
+        ));
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            true,
+            false,
+            false,
+            true,
+            "visible final response",
+        ));
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true, true, false, false, false, "   ",
+        ));
+    }
+
+    #[test]
+    fn transport_error_dispatch_failure_requires_terminal_delivery_commit() {
+        assert!(should_fail_dispatch_after_terminal_delivery(
+            true, true, false,
+        ));
+        assert!(!should_fail_dispatch_after_terminal_delivery(
+            true, false, false,
+        ));
+        assert!(!should_fail_dispatch_after_terminal_delivery(
+            true, true, true,
+        ));
+        assert!(!should_fail_dispatch_after_terminal_delivery(
+            false, true, false,
+        ));
+    }
+}
+
 fn maybe_refresh_active_turn_activity_heartbeat(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -2390,34 +2486,16 @@ pub(super) fn spawn_turn_bridge(
             recovery_retry,
         );
 
-        // Explicitly complete implementation/rework dispatches before sending idle.
-        // These types are NOT auto-completed by the session idle hook — they require
-        // this explicit PATCH call so the pipeline can advance.
-        // When the live tmux watcher owns relay, its terminal-success path completes
-        // the dispatch after it sends the final assistant response.
-        // Skip if: cancelled, prompt too long, or transport error.
-        // transport_error is set by StreamMessage::Error — not substring matching.
-        if !cancelled
+        // Explicitly complete implementation/rework dispatches only after the
+        // terminal Discord delivery commits. Completing here used to let
+        // dispatch followups / auto-queue slot release race ahead of the final
+        // message edit, so an archived/deleted thread could strand the turn
+        // while the queue already advanced.
+        let should_complete_work_dispatch_after_delivery = !cancelled
             && !is_prompt_too_long
             && !transport_error
-            && !bridge_relay_delegated_to_watcher
-        {
-            complete_work_dispatch_on_turn_end(
-                &shared_owned,
-                dispatch_id.as_deref(),
-                adk_cwd.as_deref(),
-                Some(&full_response),
-            )
-            .await;
-        } else if transport_error && !cancelled {
-            // Transport error — fail the dispatch instead of completing
-            fail_dispatch_with_retry(
-                shared_owned.api_port,
-                dispatch_id.as_deref(),
-                &full_response,
-            )
-            .await;
-        }
+            && !bridge_relay_delegated_to_watcher;
+        let should_fail_dispatch_after_delivery = transport_error && !cancelled;
 
         let final_session_status = if cancelled || transport_error {
             IDLE
@@ -2596,6 +2674,7 @@ pub(super) fn spawn_turn_bridge(
             }
         };
         let mut preserve_inflight_for_cleanup_retry = false;
+        let mut terminal_delivery_committed = false;
 
         // Remove ⏳ only if NOT handing off to tmux watcher.
         // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
@@ -3131,13 +3210,17 @@ pub(super) fn spawn_turn_bridge(
             // If response is empty (e.g. auto-retry on stale session), show
             // recovery notice instead of deleting — avoids visual gap.
             if delivery_response.trim().is_empty() {
-                let _ = gateway
+                if gateway
                     .edit_message(
                         channel_id,
                         current_msg_id,
                         "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
                     )
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    terminal_delivery_committed = true;
+                }
             } else {
                 delivery_response = super::formatting::format_for_discord_with_provider(
                     &delivery_response,
@@ -3166,24 +3249,63 @@ pub(super) fn spawn_turn_bridge(
                             tmux_last_offset,
                             inflight_state.tmux_session_name.as_deref(),
                         );
+                        terminal_delivery_committed = true;
                     } else {
                         preserve_inflight_for_cleanup_retry = true;
                     }
-                } else if let Err(error) = enqueue_headless_delivery(
-                    &shared_owned,
-                    channel_id,
-                    adk_session_key.as_deref(),
-                    &delivery_response,
-                )
-                .await
-                {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ headless delivery enqueue failed for channel {}: {}",
+                } else {
+                    match enqueue_headless_delivery(
+                        &shared_owned,
                         channel_id,
-                        error
-                    );
+                        adk_session_key.as_deref(),
+                        &delivery_response,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            terminal_delivery_committed = true;
+                        }
+                        Err(error) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ headless delivery enqueue failed for channel {}: {}",
+                                channel_id,
+                                error
+                            );
+                        }
+                    }
                 }
+            }
+
+            if should_complete_work_dispatch_after_terminal_delivery(
+                should_complete_work_dispatch_after_delivery,
+                terminal_delivery_committed,
+                preserve_inflight_for_cleanup_retry,
+                resume_failure_detected,
+                recovery_retry,
+                &full_response,
+            ) {
+                complete_work_dispatch_on_turn_end(
+                    &shared_owned,
+                    dispatch_id.as_deref(),
+                    adk_cwd.as_deref(),
+                    Some(&full_response),
+                )
+                .await;
+            } else if should_fail_dispatch_after_terminal_delivery(
+                should_fail_dispatch_after_delivery,
+                terminal_delivery_committed,
+                preserve_inflight_for_cleanup_retry,
+            ) {
+                // Transport error — fail the dispatch only after the terminal
+                // error response is deliverable, so auto-queue does not advance
+                // ahead of visible turn completion.
+                fail_dispatch_with_retry(
+                    shared_owned.api_port,
+                    dispatch_id.as_deref(),
+                    &full_response,
+                )
+                .await;
             }
 
             // Signal the watcher that this turn's response was already delivered.
