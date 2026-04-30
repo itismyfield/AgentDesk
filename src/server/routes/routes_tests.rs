@@ -14665,6 +14665,114 @@ async fn transition_to_ready_with_active_dispatch_force_true_proceeds_pg_1444() 
     pg_db.drop().await;
 }
 
+/// #1444 codex iter-1 P2 regression: when a card is already in `ready` and
+/// the caller retries the transition with `force=true` to clean up a still-
+/// active dispatch, the FSM short-circuits with NoOp and the cleanup path
+/// is bypassed. The route handler must explicitly cancel the active
+/// dispatches in that case so the documented force-recovery actually
+/// resolves the duplicate-dispatch incident.
+#[tokio::test]
+async fn transition_to_ready_force_true_cleans_up_active_dispatch_when_already_ready_pg_1444() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pool.clone());
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-tx-noop-1444").await;
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, priority, assigned_agent_id, repo_id,
+            github_issue_number, latest_dispatch_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+         )",
+    )
+    .bind("card-tx-noop-1444")
+    .bind("Ready+active 1444 noop")
+    .bind("ready")
+    .bind("medium")
+    .bind("agent-tx-noop-1444")
+    .bind("test-repo")
+    .bind(1444003_i64)
+    .bind("dispatch-tx-noop-1444-active")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, $4, $5, $6, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-tx-noop-1444-active")
+    .bind("card-tx-noop-1444")
+    .bind("agent-tx-noop-1444")
+    .bind("implementation")
+    .bind("dispatched")
+    .bind("[Impl] noop 1444")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-tx-noop-1444/transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(r#"{"status":"ready","force":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "force ready→ready must succeed: {body_text}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cancelled_ids = json["cancelled_dispatch_ids"]
+        .as_array()
+        .expect("cancelled_dispatch_ids must be an array");
+    assert!(
+        cancelled_ids
+            .iter()
+            .any(|id| id.as_str() == Some("dispatch-tx-noop-1444-active")),
+        "force=true on ready→ready must cancel the active dispatch even though FSM is NoOp: {body_text}"
+    );
+
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-tx-noop-1444-active")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        dispatch_status, "cancelled",
+        "active dispatch must be cancelled by the no-op force path"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test]
 async fn auto_queue_generate_skips_card_with_active_dispatch_pg_1444() {
     crate::pipeline::ensure_loaded();
