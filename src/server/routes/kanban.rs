@@ -992,10 +992,23 @@ pub async fn retry_card(
             &json!({"retry": true, "preserved_dispatch_type": retry_dispatch_type.clone()}),
         ) {
             Ok(dispatch) => {
-                new_dispatch_id = dispatch
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string());
+                // Codex P2: `create_dispatch_pg_only` can return an existing
+                // active dispatch tagged `__reused` instead of inserting a
+                // new row when a duplicate active dispatch already exists.
+                // Surface that explicitly so callers don't believe a fresh
+                // retry dispatch was issued.
+                let reused = dispatch
+                    .get("__reused")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if reused {
+                    next_action = "duplicate_active_dispatch_detected_inspect_card".to_string();
+                } else {
+                    new_dispatch_id = dispatch
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                }
             }
             Err(error) => {
                 return (
@@ -1138,10 +1151,24 @@ pub async fn redispatch_card(
             &json!({"redispatch": true, "preserved_dispatch_type": dispatch_type.clone()}),
         ) {
             Ok(dispatch) => {
-                new_dispatch_id = dispatch
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_string());
+                // Codex P2: `create_dispatch_pg_only` can return an existing
+                // active dispatch tagged `__reused` instead of inserting a
+                // new row when a duplicate active dispatch already exists.
+                // Don't claim that as `new_dispatch_id` — that would falsely
+                // confirm a fresh dispatch was created and mask the
+                // duplicate-state problem the caller is trying to solve.
+                let reused = dispatch
+                    .get("__reused")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if reused {
+                    next_action = "duplicate_active_dispatch_detected_inspect_card".to_string();
+                } else {
+                    new_dispatch_id = dispatch
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string());
+                }
             }
             Err(error) => {
                 return (
@@ -4150,14 +4177,22 @@ pub async fn force_transition(
             };
 
             // Only suggest /auto-queue/generate when the target state is
-            // actually enqueueable by that endpoint (codex P2). The default
-            // pipeline only dispatches `ready` / `requested` cards via
-            // generate; suggesting it for an `in_progress` target sends the
-            // caller down a dead-end (the card has no path to a dispatch via
-            // generate from `in_progress`).
+            // actually enqueueable by that endpoint AND no live dispatch
+            // remains for the card (codex P2). Suggesting generate while a
+            // pending/dispatched dispatch is still in flight queues a card
+            // that's already running — the original #1442 failure mode.
+            // Cleanup only runs for `backlog`/`ready` (or with
+            // cancel_dispatches=true on terminal targets), so callers can
+            // also reach `requested`/`ready` while a live dispatch persists.
+            let post_active_dispatch_count = active_dispatch_ids_for_card_pg(pool, &id)
+                .await
+                .map(|ids| ids.len())
+                .unwrap_or(0);
             let next_action_hint = if created_dispatch_id.is_some() {
                 "none_required".to_string()
-            } else if matches!(result.to.as_str(), "ready" | "requested") {
+            } else if matches!(result.to.as_str(), "ready" | "requested")
+                && post_active_dispatch_count == 0
+            {
                 // Caller may want to dispatch the now-ready card via the
                 // queue. The transition itself is complete; this hint surfaces
                 // the natural follow-up so callers do not silently chain

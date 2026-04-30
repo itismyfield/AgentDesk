@@ -178,7 +178,7 @@
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 939 |  |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 607 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 |  |
-| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4204 | giant-file |
+| `server::routes::kanban` | `src/server/routes/kanban.rs` | 4277 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 2158 | giant-file |
@@ -231,7 +231,7 @@
 | `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 296 |  |
 | `services::auto_queue::route` | `src/services/auto_queue/route.rs` | 97 |  |
 | `services::auto_queue::route_dispatch` | `src/services/auto_queue/route_dispatch.rs` | 276 |  |
-| `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 559 |  |
+| `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 579 |  |
 | `services::auto_queue::route_types` | `src/services/auto_queue/route_types.rs` | 168 |  |
 | `services::auto_queue::runtime` | `src/services/auto_queue/runtime.rs` | 329 |  |
 | `services::auto_queue::slot_routes` | `src/services/auto_queue/slot_routes.rs` | 268 |  |
