@@ -164,14 +164,28 @@ assert_eq "ack returns 0 when all providers true" "0" "$rc"
 # Regression for #1447 review iteration 2: when restart_pending fires, the
 # runtime returns HTTP 503 on /api/health/detail. Without dropping `curl -f`,
 # the body would be discarded and we'd never see the in-band ack flag. Build
-# a curl shim that prints the body but exits non-zero (mimicking how `curl
-# -f` behaves on 5xx) and confirm the helper still returns 0.
+# a curl shim that *models* `-f` behavior — refuses to print the body when
+# called with -f / --fail (returning 22 like curl) but prints the body and
+# exits 0 otherwise. Helper must not pass -f, so this test passes only when
+# the helper accepts the body delivered without -f.
 mkdir -p "$TMP_FIXTURE_DIR/bin_503"
 cat >"$TMP_FIXTURE_DIR/bin_503/curl" <<EOF
 #!/usr/bin/env bash
-# Test shim — print body then exit 0 (the helper must NOT use -f so that
-# even a real 503 response body remains observable). We also assert that
-# the body is exactly what the helper consumed: same RESP_FILE.
+# Test shim — refuse to deliver body if caller passed -f or --fail.
+for arg in "\$@"; do
+  case "\$arg" in
+    -f|--fail|*-*f*)
+      # Match real curl behaviour on 5xx with -f: no body, exit 22.
+      case "\$arg" in
+        -f|--fail) exit 22 ;;
+      esac
+      # Bundled short flags like -sf.
+      if [ "\${arg#-}" != "\$arg" ] && [ "\${arg#--}" = "\$arg" ]; then
+        case "\$arg" in *f*) exit 22 ;; esac
+      fi
+      ;;
+  esac
+done
 cat "$RESP_FILE"
 EOF
 chmod +x "$TMP_FIXTURE_DIR/bin_503/curl"
@@ -180,6 +194,17 @@ PATH="$TMP_FIXTURE_DIR/bin_503:$PATH" _restart_pending_acknowledged 0 >/dev/null
 rc=$?
 set -e
 assert_eq "ack reads body even when runtime would return 503 (no curl -f)" "0" "$rc"
+
+# Sanity: confirm the same shim DOES fail if invoked with -f, so a future
+# regression that re-introduces `curl -sf` would actually be caught.
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_503:$PATH" curl -sf --max-time 1 "http://x" >/dev/null 2>&1
+shim_with_f_rc=$?
+PATH="$TMP_FIXTURE_DIR/bin_503:$PATH" curl -s --max-time 1 "http://x" >/dev/null 2>&1
+shim_without_f_rc=$?
+set -e
+assert_eq "503 shim exits 22 when called with -sf (catches regression)" "22" "$shim_with_f_rc"
+assert_eq "503 shim exits 0 when called without -f" "0" "$shim_without_f_rc"
 
 echo "== Test 5b: marker-consumed during wait counts as acknowledgement =="
 # Simulate a runtime that deletes the marker mid-wait (the restart_ctrl race

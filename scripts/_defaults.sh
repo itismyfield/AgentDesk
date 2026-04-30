@@ -366,7 +366,14 @@ wait_for_http_service_health() {
 health_turn_snapshot() {
   local port="$1"
   local health_json
-  health_json=$(curl -sf --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || return 1
+  # NOTE: do NOT pass `-f`. Once restart_pending is armed the runtime serves
+  # /api/health as HTTP 503 (build_health_snapshot returns `unhealthy`), but
+  # the body still carries valid global_active / global_finalizing counts —
+  # which is exactly what wait_for_live_turns_to_drain_or_fail needs to read
+  # while the gate is open. Dropping `-f` lets the drain-wait keep observing
+  # turn counts after the gate is armed (#1447 review iteration 3 P1).
+  health_json=$(curl -s --max-time 3 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null) || return 1
+  [ -n "$health_json" ] || return 1
 
   if _health_json_has_jq; then
     printf '%s\n' "$health_json" | jq -r '
