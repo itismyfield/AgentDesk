@@ -2451,15 +2451,57 @@ fn persist_watcher_stream_progress(
     let _ = super::inflight::save_inflight_state(&inflight);
 }
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+pub(super) async fn test_finish_restored_watcher_active_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finish_mailbox_on_completion: bool,
+    delegated_finalize_owed: bool,
+    stop_source: &'static str,
+) {
+    finish_restored_watcher_active_turn(
+        shared,
+        provider,
+        channel_id,
+        finish_mailbox_on_completion,
+        delegated_finalize_owed,
+        stop_source,
+    )
+    .await
+}
+
 async fn finish_restored_watcher_active_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     finish_mailbox_on_completion: bool,
+    delegated_finalize_owed: bool,
     stop_source: &'static str,
 ) {
-    if !finish_mailbox_on_completion {
+    // Either flag implies the watcher must clear the channel mailbox now:
+    //   * `finish_mailbox_on_completion` → inflight-restore semantics (a
+    //     restored/recovered watcher inherits its turn from the bridge, so
+    //     it owns the cancel_token when the turn ends). Pre-existing.
+    //   * `delegated_finalize_owed` → bridge handed finalization debt to the
+    //     watcher because it skipped `mailbox_finish_turn` to avoid racing
+    //     the in-flight watcher relay. New for #1452.
+    //
+    // The two flags can coincide (e.g., a recovered watcher whose first
+    // post-recovery turn also went through stream-lost handoff). Calling
+    // `mailbox_finish_turn` once per turn is idempotent for our purposes —
+    // the second call would just observe an empty active slot — but we
+    // gate on the OR to keep the call site to a single place.
+    if !finish_mailbox_on_completion && !delegated_finalize_owed {
         return;
+    }
+
+    if delegated_finalize_owed {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] watcher_finalized_delegated_turn: clearing channel {} mailbox after bridge→watcher handoff (#1452)",
+            channel_id.get()
+        );
     }
 
     let finish = super::mailbox_finish_turn(shared, provider, channel_id).await;
@@ -2505,6 +2547,7 @@ pub(super) async fn tmux_output_watcher(
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+    mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tmux_output_watcher_with_restore(
         channel_id,
@@ -2519,6 +2562,7 @@ pub(super) async fn tmux_output_watcher(
         pause_epoch,
         turn_delivered,
         last_heartbeat_ts_ms,
+        mailbox_finalize_owed,
         None,
     )
     .await;
@@ -2539,6 +2583,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+    mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
     restored_turn: Option<RestoredWatcherTurn>,
 ) {
     use std::io::{Read, Seek, SeekFrom};
@@ -4842,6 +4887,18 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 drop(data);
             }
             turn_result_relayed = true;
+            // #1452: pull the bridge→watcher handoff debt exactly once per
+            // turn. `swap` (AcqRel) ensures:
+            //   * Acquire — observes the bridge's prior `Release` store of
+            //     `true` (and any inflight writes that preceded it) before
+            //     we decide to call `mailbox_finish_turn`.
+            //   * Release — publishes our reset back to `false`, so a
+            //     watcher that survives into the next turn (e.g., paused
+            //     between dispatches) will see `false` on its next swap and
+            //     will not accidentally clear that turn's freshly registered
+            //     cancel_token.
+            let delegated_finalize_owed =
+                mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
             if dispatch_ok {
                 super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
                 finish_restored_watcher_active_turn(
@@ -4849,25 +4906,30 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     &provider_kind,
                     channel_id,
                     finish_mailbox_on_completion,
+                    delegated_finalize_owed,
                     "restored watcher completed with queued backlog",
                 )
                 .await;
             }
             let mailbox = shared.mailbox(channel_id);
             let has_active_turn = mailbox.has_active_turn().await;
-            let should_kickoff_queue =
-                if finish_mailbox_on_completion || monitor_auto_turn_finished || has_active_turn {
-                    false
-                } else {
-                    mailbox
-                        .has_pending_soft_queue(super::queue_persistence_context(
-                            &shared,
-                            &provider_kind,
-                            channel_id,
-                        ))
-                        .await
-                        .has_pending
-                };
+            let watcher_handled_mailbox_finish =
+                finish_mailbox_on_completion || delegated_finalize_owed;
+            let should_kickoff_queue = if watcher_handled_mailbox_finish
+                || monitor_auto_turn_finished
+                || has_active_turn
+            {
+                false
+            } else {
+                mailbox
+                    .has_pending_soft_queue(super::queue_persistence_context(
+                        &shared,
+                        &provider_kind,
+                        channel_id,
+                    ))
+                    .await
+                    .has_pending
+            };
             if dispatch_ok && should_kickoff_queue {
                 super::schedule_deferred_idle_queue_kickoff(
                     shared.clone(),
@@ -5834,6 +5896,7 @@ mod tests {
             last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                 super::super::tmux_watcher_now_ms(),
             )),
+            mailbox_finalize_owed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -7907,6 +7970,7 @@ mod tests {
             &provider,
             channel_id,
             true,
+            false,
             "restored_watcher_finish_does_not_underflow_global_active",
         )
         .await;

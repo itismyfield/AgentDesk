@@ -1874,6 +1874,8 @@ pub(super) fn spawn_turn_bridge(
                                 Arc::new(std::sync::atomic::AtomicI64::new(
                                     super::tmux_watcher_now_ms(),
                                 ));
+                            let mailbox_finalize_owed =
+                                Arc::new(std::sync::atomic::AtomicBool::new(false));
                             let handle = TmuxWatcherHandle {
                                 tmux_session_name: tmux_session_name.clone(),
                                 paused: paused.clone(),
@@ -1882,6 +1884,7 @@ pub(super) fn spawn_turn_bridge(
                                 pause_epoch: pause_epoch.clone(),
                                 turn_delivered: turn_delivered.clone(),
                                 last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
+                                mailbox_finalize_owed: mailbox_finalize_owed.clone(),
                             };
                             #[cfg(unix)]
                             let (watcher_claimed, watcher_claim_replaced_existing) = {
@@ -1940,6 +1943,7 @@ pub(super) fn spawn_turn_bridge(
                                             pause_epoch,
                                             turn_delivered,
                                             last_heartbeat_ts_ms,
+                                            mailbox_finalize_owed,
                                             restored_turn,
                                         ));
                                         watcher_relay_available_for_turn = true;
@@ -2413,6 +2417,43 @@ pub(super) fn spawn_turn_bridge(
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let has_queued_turns = if bridge_relay_delegated_to_watcher {
+            // #1452: hand mailbox finalization debt to the watcher.
+            //
+            // The bridge intentionally skips `mailbox_finish_turn` here to
+            // avoid clearing the channel cancel_token while the live tmux
+            // watcher is still streaming the assistant response (clearing
+            // mid-turn would let a fresh user message race ahead and produce
+            // a duplicate turn). Without this transfer, neither side would
+            // ever clear the token on a brand-new turn whose
+            // `finish_mailbox_on_completion` defaults to false, leaving the
+            // mailbox permanently busy (issue #1452).
+            //
+            // Use Release ordering so any prior writes the watcher might
+            // need to observe (inflight state updates, per-turn flags) are
+            // published before the watcher's Acquire-side swap reads true.
+            let mut handoff_recorded = false;
+            if let Some(watcher) =
+                shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+            {
+                watcher
+                    .mailbox_finalize_owed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                handoff_recorded = true;
+            }
+            record_turn_bridge_invariant(
+                handoff_recorded,
+                &provider,
+                channel_id,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "bridge_handoff_finds_watcher_handle",
+                "src/services/discord/turn_bridge/mod.rs:bridge_relay_delegated_to_watcher",
+                "bridge delegation expected to find a live watcher handle to receive finalization debt",
+                serde_json::json!({
+                    "watcher_owner_channel_id": watcher_owner_channel_id.get(),
+                }),
+            );
             false
         } else {
             let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;

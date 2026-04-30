@@ -1581,6 +1581,7 @@ impl TestHealthHarness {
                 last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                     super::tmux_watcher_now_ms(),
                 )),
+                mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         cancel
@@ -1604,6 +1605,7 @@ impl TestHealthHarness {
                 last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                     super::tmux_watcher_now_ms(),
                 )),
+                mailbox_finalize_owed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         cancel

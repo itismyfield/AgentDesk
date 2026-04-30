@@ -257,6 +257,7 @@ fn test_watcher_handle(tmux_session_name: &str, paused: bool) -> super::super::T
         last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
             super::super::tmux_watcher_now_ms(),
         )),
+        mailbox_finalize_owed: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -2461,6 +2462,328 @@ fn done_noop_when_result_empty() {
     // Synthetic Done with empty result — nothing to replace with
     let res = resolve_done_response("중간 텍스트\n\n", "", true, false);
     assert_eq!(res, None);
+}
+
+// ==========================================================================
+// Issue #1452: bridge→watcher mailbox finalization handoff via
+// `mailbox_finalize_owed` atomic. See `TmuxWatcherHandle::mailbox_finalize_owed`
+// for the protocol comment.
+// ==========================================================================
+
+/// 1. `mailbox_finalize_owed_set_by_bridge_delegation`
+///
+/// Pins the publish/consume contract for the bridge→watcher handoff.
+///
+/// The bridge cannot exercise the full `spawn_turn_bridge` path here because
+/// the in-tree integration harness for `live_tmux_watcher_owner_suppresses_*`
+/// is currently red on `origin/main` (unrelated drift). What we MUST keep
+/// honest is the atomic protocol the registry handle's `mailbox_finalize_owed`
+/// implements:
+///
+///   * Bridge: `mailbox_finalize_owed.store(true, Ordering::Release)`
+///   * Watcher: `mailbox_finalize_owed.swap(false, Ordering::AcqRel)`
+///
+/// The Acquire side observes the bridge's prior writes; the swap-back to
+/// `false` is what protects #1452's secondary risk: a watcher that survives
+/// (paused) into the next turn must NOT clear that future turn's freshly
+/// registered cancel_token. This test pins both halves of that contract.
+#[test]
+fn mailbox_finalize_owed_set_by_bridge_delegation() {
+    use std::sync::atomic::AtomicBool;
+    let owed = Arc::new(AtomicBool::new(false));
+    // Bridge-side: at the delegation decision point, `store(true, Release)`.
+    owed.store(true, Ordering::Release);
+    // Watcher-side: at turn-end, `swap(false, AcqRel)`.
+    let consumed = owed.swap(false, Ordering::AcqRel);
+    assert!(
+        consumed,
+        "watcher swap must observe the bridge's Release store of true"
+    );
+    assert!(
+        !owed.load(Ordering::Acquire),
+        "swap must reset the flag back to false so a paused-survivor watcher \
+         cannot accidentally clear the next turn's cancel_token"
+    );
+    // Re-running the swap (e.g., the watcher loop circles back without a
+    // fresh handoff) must observe `false` and trigger no further finalization.
+    let second_consumed = owed.swap(false, Ordering::AcqRel);
+    assert!(
+        !second_consumed,
+        "swap idempotency: a second consumer must not observe the consumed debt"
+    );
+    // And a handle that the bridge never touched is exactly the
+    // non-delegation case — the watcher's swap must report no debt.
+    let untouched = Arc::new(AtomicBool::new(false));
+    assert!(!untouched.swap(false, Ordering::AcqRel));
+}
+
+/// 2. `watcher_consumes_mailbox_finalize_owed_on_turn_end`
+///
+/// Verifies the watcher-side swap+finalize sequence: a watcher whose handle
+/// has `mailbox_finalize_owed = true` must call `mailbox_finish_turn` and
+/// reset the flag back to `false` so a future-paused-watcher does not clear
+/// a different turn's cancel_token by mistake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_consumes_mailbox_finalize_owed_on_turn_end() {
+    use std::sync::atomic::AtomicBool;
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168201);
+    let cancel_token = Arc::new(CancelToken::new());
+
+    // Seed an active turn on the channel mailbox so we have a token to clear.
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                cancel_token.clone(),
+                UserId::new(7),
+                MessageId::new(1487795113240559811),
+            )
+            .await,
+        "fresh mailbox must accept a first try_start_turn"
+    );
+    assert!(shared.mailbox(channel_id).has_active_turn().await);
+
+    // Simulate the bridge handoff: set the debt, then have the watcher
+    // consume it via swap.
+    let mailbox_finalize_owed = Arc::new(AtomicBool::new(false));
+    mailbox_finalize_owed.store(true, Ordering::Release);
+    let delegated = mailbox_finalize_owed.swap(false, Ordering::AcqRel);
+    assert!(
+        delegated,
+        "watcher swap must observe the bridge's Release store of true"
+    );
+    assert!(
+        !mailbox_finalize_owed.load(Ordering::Acquire),
+        "swap must reset the flag so a paused-survivor watcher cannot clear the next turn's token"
+    );
+
+    // The watcher's helper must now clear the channel mailbox active turn.
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        false, // finish_mailbox_on_completion (the inflight-restore semantics)
+        true,  // delegated_finalize_owed (the new #1452 semantics)
+        "test #1452 watcher consume",
+    )
+    .await;
+
+    assert!(
+        !shared.mailbox(channel_id).has_active_turn().await,
+        "watcher_consumes_mailbox_finalize_owed_on_turn_end must clear the active turn"
+    );
+    assert!(
+        cancel_token.cancelled.load(Ordering::Relaxed),
+        "removed cancel_token must be marked cancelled to drop pending watchdogs"
+    );
+}
+
+/// 3. `bridge_delegated_turn_does_not_leak_cancel_token`
+///
+/// End-to-end at the registry/mailbox level: the bridge plants the debt on
+/// the watcher's handle, the watcher consumes via swap and runs
+/// `finish_restored_watcher_active_turn`, and the channel mailbox ends with
+/// no leftover cancel_token. The full `spawn_turn_bridge` integration is
+/// blocked by unrelated `legacy-sqlite-tests` drift, so we drive the bridge
+/// half by directly storing `true` into the registry handle's atomic — this
+/// is exactly what the bridge does at `turn_bridge/mod.rs:bridge_relay_delegated_to_watcher`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_delegated_turn_does_not_leak_cancel_token() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168202);
+    let channel_name = format!("adk-cdx-t{}", channel_id.get());
+    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let user_msg_id = MessageId::new(1487795113240559912);
+
+    // 1) Active turn registered (bridge would have done this in
+    // `mailbox_try_start_turn` before streaming).
+    let cancel_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(cancel_token.clone(), UserId::new(7), user_msg_id)
+            .await
+    );
+    assert!(shared.mailbox(channel_id).has_active_turn().await);
+
+    // 2) Bridge claims/observes a live watcher handle in the registry.
+    let handle = test_watcher_handle(&tmux_name, false);
+    let mailbox_finalize_owed = handle.mailbox_finalize_owed.clone();
+    assert!(super::super::tmux::try_claim_watcher(
+        &shared.tmux_watchers,
+        channel_id,
+        handle,
+    ));
+
+    // 3) Bridge enters the `bridge_relay_delegated_to_watcher = true` branch
+    // and publishes the debt with `Ordering::Release`. (See
+    // `turn_bridge/mod.rs` near the `if bridge_relay_delegated_to_watcher`
+    // arm of `let has_queued_turns = ...`.)
+    {
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel_id)
+            .expect("bridge must locate the live watcher handle");
+        watcher.mailbox_finalize_owed.store(true, Ordering::Release);
+    }
+
+    // 4) The mailbox active turn is intentionally NOT finalized by the bridge
+    // (would race with the in-flight watcher relay). The debt is now parked
+    // on the watcher's atomic.
+    assert!(
+        shared.mailbox(channel_id).has_active_turn().await,
+        "bridge in delegation mode must not finalize the mailbox"
+    );
+    assert!(
+        mailbox_finalize_owed.load(Ordering::Acquire),
+        "delegation must publish finalize_owed=true on the watcher handle"
+    );
+
+    // 5) Watcher reaches its turn-end branch: `swap(false, AcqRel)` and, if
+    // the swap returned true, calls `finish_restored_watcher_active_turn`.
+    let delegated = mailbox_finalize_owed.swap(false, Ordering::AcqRel);
+    assert!(delegated);
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        false, // finish_mailbox_on_completion (inflight-restore semantics)
+        delegated,
+        "test #1452 bridge_delegated_turn_does_not_leak_cancel_token",
+    )
+    .await;
+
+    // 6) Channel mailbox must be fully cleared and the original cancel_token
+    // must be marked cancelled to drop any lingering watchdog timer.
+    assert!(
+        !shared.mailbox(channel_id).has_active_turn().await,
+        "watcher finalization must release the channel mailbox cancel_token"
+    );
+    assert!(
+        cancel_token.cancelled.load(Ordering::Relaxed),
+        "cleared cancel_token must be marked cancelled (no leak)"
+    );
+
+    shared.tmux_watchers.remove(&channel_id);
+}
+
+/// 4. Reproduction of issue #1452: two consecutive new turns where the first
+/// triggers stream-lost handoff. Before the fix the second `try_start_turn`
+/// would always return false because the cancel_token leaked on turn 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reproduction_issue_1452_second_turn_starts_after_handoff() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168203);
+
+    // ---- Turn #1: bridge delegates to watcher ----
+    let turn1_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                turn1_token.clone(),
+                UserId::new(7),
+                MessageId::new(1487795113240559921),
+            )
+            .await
+    );
+
+    // The bridge would store true into mailbox_finalize_owed at the
+    // delegation point. Reproduce that store directly.
+    let owed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owed.store(true, Ordering::Release);
+
+    // The watcher consumes and finalizes.
+    let delegated = owed.swap(false, Ordering::AcqRel);
+    assert!(delegated);
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        false,
+        delegated,
+        "test #1452 reproduction turn1",
+    )
+    .await;
+
+    // Pre-fix invariant violation: the channel mailbox cancel_token would
+    // still be set here. Post-fix: it must be cleared.
+    assert!(
+        !shared.mailbox(channel_id).has_active_turn().await,
+        "issue #1452: turn 1 finalization must clear the channel mailbox after bridge→watcher handoff"
+    );
+
+    // ---- Turn #2: must be admitted ----
+    let turn2_token = Arc::new(CancelToken::new());
+    let admitted = shared
+        .mailbox(channel_id)
+        .try_start_turn(
+            turn2_token,
+            UserId::new(7),
+            MessageId::new(1487795113240559922),
+        )
+        .await;
+    assert!(
+        admitted,
+        "issue #1452 regression: second new turn must be admitted because turn 1 cleared its cancel_token"
+    );
+}
+
+/// 5. Regression: the existing `finish_mailbox_on_completion = true`
+/// (inflight-restore) path keeps working when the new flag is also set.
+/// `mailbox_finish_turn` is idempotent (the second call observes an empty
+/// active slot), so a single watcher call must clear the channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inflight_restore_and_handoff_finalize_idempotent() {
+    let shared = make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel_id = ChannelId::new(1485506232256168204);
+
+    let cancel_token = Arc::new(CancelToken::new());
+    assert!(
+        shared
+            .mailbox(channel_id)
+            .try_start_turn(
+                cancel_token.clone(),
+                UserId::new(7),
+                MessageId::new(1487795113240559931),
+            )
+            .await
+    );
+
+    // Both flags set simultaneously — the watcher must call finish exactly once
+    // and end with a cleared mailbox.
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        true, // finish_mailbox_on_completion (inflight-restore)
+        true, // delegated_finalize_owed (#1452 handoff)
+        "test #1452 idempotent",
+    )
+    .await;
+
+    assert!(!shared.mailbox(channel_id).has_active_turn().await);
+    assert!(cancel_token.cancelled.load(Ordering::Relaxed));
+
+    // Calling the helper again must be a safe no-op (no panic, mailbox
+    // already empty). We pass only the new flag here to check the
+    // independent gate.
+    super::super::tmux::test_finish_restored_watcher_active_turn(
+        &shared,
+        &provider,
+        channel_id,
+        false,
+        true,
+        "test #1452 idempotent re-call",
+    )
+    .await;
+
+    assert!(!shared.mailbox(channel_id).has_active_turn().await);
 }
 
 // Issue #1255: confirm SharedData wires up the placeholder controller and

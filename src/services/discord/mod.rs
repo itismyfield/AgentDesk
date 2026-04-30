@@ -570,6 +570,27 @@ pub(super) struct TmuxWatcherHandle {
     /// Updated by the watcher task loop. If this stops moving while the registry
     /// still has a slot, the slot is stale and must not suppress a new watcher.
     pub(super) last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// #1452: turn-scoped finalization debt transferred from bridge to watcher.
+    ///
+    /// When the bridge decides to delegate the assistant relay to a live tmux
+    /// watcher (`bridge_relay_delegated_to_watcher = true`) it intentionally
+    /// skips `mailbox_finish_turn` to avoid racing with the still-running
+    /// watcher turn. Without an explicit handoff signal the watcher would also
+    /// skip the finalization (its existing `finish_mailbox_on_completion`
+    /// gate is reserved for inflight-restore semantics), leaving the channel
+    /// mailbox `cancel_token` permanently set and blocking subsequent
+    /// `try_start_turn` calls on brand-new turns.
+    ///
+    /// The bridge stores `true` here under `Ordering::Release` immediately
+    /// before returning so the value publishes alongside any inflight state
+    /// updates that precede it. The watcher consumes the flag with
+    /// `swap(false, Ordering::AcqRel)` in its turn-end branch, guaranteeing:
+    ///   1. Acquire ordering — every prior bridge write is observed before
+    ///      we decide to call `mailbox_finish_turn`.
+    ///   2. Single consumer — a paused watcher that survives into a future
+    ///      turn cannot accidentally clear that turn's freshly registered
+    ///      cancel token because the swap returns `false` for it.
+    pub(super) mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(super) const TMUX_WATCHER_STALE_HEARTBEAT_MS: i64 = 60_000;
@@ -1467,6 +1488,7 @@ pub(crate) mod test_harness_exports {
             last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
                 super::tmux_watcher_now_ms(),
             )),
+            mailbox_finalize_owed: Arc::new(AtomicBool::new(false)),
         };
         let inspector = WatcherHandleInspector {
             cancel,
