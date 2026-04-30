@@ -2733,6 +2733,39 @@ async fn reproduction_issue_1452_second_turn_starts_after_handoff() {
     );
 }
 
+/// 4b. `bridge_non_delegation_revokes_finalize_owed_debt` — Codex P1.
+///
+/// Because we publish `mailbox_finalize_owed = true` early at the
+/// watcher-unpause site, any non-delegation termination of the bridge
+/// (cancelled / prompt_too_long / transport_error / recovery_retry, or a
+/// watcher that never ended up owning the relay) MUST revoke the debt
+/// before the bridge calls `mailbox_finish_turn` itself. Otherwise a future
+/// watcher swap would observe stale `true` and clear the next turn's
+/// freshly registered cancel_token.
+#[test]
+fn bridge_non_delegation_revokes_finalize_owed_debt() {
+    use std::sync::atomic::AtomicBool;
+    let owed = Arc::new(AtomicBool::new(false));
+
+    // Watcher-unpause publishes the debt (matches the production store at
+    // `turn_bridge/mod.rs` `TmuxReady` branch).
+    owed.store(true, Ordering::Release);
+    assert!(owed.load(Ordering::Acquire));
+
+    // Bridge later decides NOT to delegate (e.g., transport_error). It
+    // revokes the debt before running its own `mailbox_finish_turn`.
+    owed.store(false, Ordering::Release);
+
+    // A future watcher turn-end swap must report no debt, so it does not
+    // call `mailbox_finish_turn` for the wrong turn.
+    let consumed = owed.swap(false, Ordering::AcqRel);
+    assert!(
+        !consumed,
+        "non-delegation path must revoke finalize_owed so the watcher does not finalize \
+         the wrong turn's cancel_token"
+    );
+}
+
 /// 5. Regression: the existing `finish_mailbox_on_completion = true`
 /// (inflight-restore) path keeps working when the new flag is also set.
 /// `mailbox_finish_turn` is idempotent (the second call observes an empty

@@ -572,24 +572,34 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
     /// #1452: turn-scoped finalization debt transferred from bridge to watcher.
     ///
-    /// When the bridge decides to delegate the assistant relay to a live tmux
-    /// watcher (`bridge_relay_delegated_to_watcher = true`) it intentionally
-    /// skips `mailbox_finish_turn` to avoid racing with the still-running
-    /// watcher turn. Without an explicit handoff signal the watcher would also
-    /// skip the finalization (its existing `finish_mailbox_on_completion`
-    /// gate is reserved for inflight-restore semantics), leaving the channel
+    /// When the bridge unpauses a live tmux watcher to take over the
+    /// assistant relay it intentionally skips `mailbox_finish_turn` to
+    /// avoid racing with the still-running watcher turn. Without an
+    /// explicit handoff signal the watcher would also skip the
+    /// finalization (its existing `finish_mailbox_on_completion` gate is
+    /// reserved for inflight-restore semantics), leaving the channel
     /// mailbox `cancel_token` permanently set and blocking subsequent
     /// `try_start_turn` calls on brand-new turns.
     ///
-    /// The bridge stores `true` here under `Ordering::Release` immediately
-    /// before returning so the value publishes alongside any inflight state
-    /// updates that precede it. The watcher consumes the flag with
-    /// `swap(false, Ordering::AcqRel)` in its turn-end branch, guaranteeing:
-    ///   1. Acquire ordering — every prior bridge write is observed before
-    ///      we decide to call `mailbox_finish_turn`.
-    ///   2. Single consumer — a paused watcher that survives into a future
-    ///      turn cannot accidentally clear that turn's freshly registered
-    ///      cancel token because the swap returns `false` for it.
+    /// Protocol:
+    ///   * Bridge: `store(true, Ordering::Release)` at the watcher-unpause
+    ///     site (`turn_bridge/mod.rs` `TmuxReady` branch). The store
+    ///     happens BEFORE `paused.store(false, ...)` so a fast watcher
+    ///     cannot reach its terminal swap before we publish — Codex P1
+    ///     pointed out that storing later (at the delegation decision in
+    ///     `let has_queued_turns = ...`) is racy. If the bridge later
+    ///     decides NOT to delegate (cancelled / prompt_too_long /
+    ///     transport_error / recovery_retry), it revokes the debt with
+    ///     `store(false, Release)` before calling `mailbox_finish_turn`
+    ///     itself.
+    ///   * Watcher: `swap(false, Ordering::AcqRel)` in its turn-end
+    ///     branch. AcqRel guarantees:
+    ///       1. Acquire — every prior bridge write is observed before we
+    ///          decide to call `mailbox_finish_turn`.
+    ///       2. Release+single-consumer — a paused-survivor watcher
+    ///          cannot accidentally clear a future turn's freshly
+    ///          registered cancel token because the swap returns `false`
+    ///          for it.
     pub(super) mailbox_finalize_owed: Arc<std::sync::atomic::AtomicBool>,
 }
 

@@ -1976,6 +1976,30 @@ pub(super) fn spawn_turn_bridge(
                                         *guard = Some(last_offset);
                                     }
                                     watcher.turn_delivered.store(false, Ordering::Relaxed);
+                                    // #1452 (Codex P1): publish the mailbox-finalization
+                                    // debt BEFORE unpausing the watcher.
+                                    //
+                                    // The watcher's terminal `swap(false, AcqRel)` runs
+                                    // as soon as it sees a Done event; if we delayed
+                                    // the store until the bridge's later delegation
+                                    // decision (line 2419+), the watcher could swap
+                                    // first, observe `false`, skip `mailbox_finish_turn`,
+                                    // and the bridge's late `store(true)` would leave
+                                    // stale debt that either keeps `cancel_token`
+                                    // permanently set OR is consumed by a future
+                                    // watcher event for the WRONG turn.
+                                    //
+                                    // We treat "watcher is now responsible for relay"
+                                    // as a superset of "bridge will delegate
+                                    // finalization": the store is unconditional here,
+                                    // and the bridge's later non-delegation paths
+                                    // (cancelled/prompt_too_long/transport_error/
+                                    // recovery_retry) revoke the debt with a
+                                    // `store(false, Release)` before running their
+                                    // own `mailbox_finish_turn`.
+                                    watcher
+                                        .mailbox_finalize_owed
+                                        .store(true, Ordering::Release);
                                     watcher.paused.store(false, Ordering::Relaxed);
                                 }
                             }
@@ -2417,29 +2441,28 @@ pub(super) fn spawn_turn_bridge(
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let has_queued_turns = if bridge_relay_delegated_to_watcher {
-            // #1452: hand mailbox finalization debt to the watcher.
+            // #1452 (Codex P1): the actual `mailbox_finalize_owed.store(true,
+            // Release)` happens EARLIER, at the watcher-unpause site in the
+            // `TmuxReady` branch (~line 1980). Doing it there guarantees we
+            // win any race with a fast watcher whose terminal `swap(false,
+            // AcqRel)` could otherwise execute before this late delegation
+            // decision and leave stale debt that would clear the next turn's
+            // cancel_token.
             //
-            // The bridge intentionally skips `mailbox_finish_turn` here to
-            // avoid clearing the channel cancel_token while the live tmux
-            // watcher is still streaming the assistant response (clearing
-            // mid-turn would let a fresh user message race ahead and produce
-            // a duplicate turn). Without this transfer, neither side would
-            // ever clear the token on a brand-new turn whose
-            // `finish_mailbox_on_completion` defaults to false, leaving the
-            // mailbox permanently busy (issue #1452).
-            //
-            // Use Release ordering so any prior writes the watcher might
-            // need to observe (inflight state updates, per-turn flags) are
-            // published before the watcher's Acquire-side swap reads true.
-            let mut handoff_recorded = false;
-            if let Some(watcher) =
-                shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-            {
-                watcher
-                    .mailbox_finalize_owed
-                    .store(true, std::sync::atomic::Ordering::Release);
-                handoff_recorded = true;
-            }
+            // Here we only verify the invariant: a live watcher handle still
+            // exists and its `mailbox_finalize_owed` is true. If either
+            // condition fails, the watcher will not finalize and the channel
+            // mailbox would leak its cancel_token; we surface the violation
+            // via `record_turn_bridge_invariant`.
+            let handoff_recorded = shared_owned
+                .tmux_watchers
+                .get(&watcher_owner_channel_id)
+                .map(|watcher| {
+                    watcher
+                        .mailbox_finalize_owed
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+                .unwrap_or(false);
             record_turn_bridge_invariant(
                 handoff_recorded,
                 &provider,
@@ -2449,13 +2472,33 @@ pub(super) fn spawn_turn_bridge(
                 Some(turn_id.as_str()),
                 "bridge_handoff_finds_watcher_handle",
                 "src/services/discord/turn_bridge/mod.rs:bridge_relay_delegated_to_watcher",
-                "bridge delegation expected to find a live watcher handle to receive finalization debt",
+                "bridge delegation expected to find a live watcher handle holding finalization debt",
                 serde_json::json!({
                     "watcher_owner_channel_id": watcher_owner_channel_id.get(),
                 }),
             );
             false
         } else {
+            // #1452 (Codex P1): non-delegation path. The watcher-unpause site
+            // unconditionally publishes `mailbox_finalize_owed = true` so we
+            // win any race with a fast watcher. If we're now finalizing on
+            // the bridge side instead (e.g. cancelled / prompt_too_long /
+            // transport_error / recovery_retry, or because the watcher never
+            // ended up owning relay), revoke that debt BEFORE we call
+            // `mailbox_finish_turn` — otherwise the watcher's later swap
+            // would observe `true` and call `mailbox_finish_turn` a second
+            // time on the next turn's freshly registered cancel_token.
+            //
+            // We always revoke regardless of whether the debt was set: the
+            // store is cheap and a conditional load would race with a
+            // concurrent watcher writer.
+            if let Some(watcher) =
+                shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+            {
+                watcher
+                    .mailbox_finalize_owed
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
             let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
             record_turn_bridge_invariant(
                 finish.removed_token.is_some(),
