@@ -1131,15 +1131,10 @@ Any other message is sent to {p}.
                         cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                     match stop_lookup {
                         TextStopLookup::Stop(token) => {
-                            super::super::turn_bridge::cancel_active_token(
-                                &token,
-                                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                                "!cc stop",
-                            );
-                            // #1117 see !stop branch above for rationale.
-                            super::super::turn_bridge::interrupt_provider_cli_turn(
+                            super::super::turn_bridge::stop_active_turn(
                                 &data.provider,
                                 &token,
+                                super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                                 "!cc stop",
                             )
                             .await;

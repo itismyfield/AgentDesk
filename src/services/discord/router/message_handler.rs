@@ -5303,17 +5303,19 @@ Any other message is sent to {p}.
                     }
                     "stop" => {
                         // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
-                        // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                        // → stop_active_turn → token.cancelled triggers turn_bridge loop exit
                         // → mailbox_finish_turn canonical cleanup
                         let stop_lookup =
                             cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                         match stop_lookup {
                             TextStopLookup::Stop(token) => {
-                                super::super::turn_bridge::cancel_active_token(
+                                super::super::turn_bridge::stop_active_turn(
+                                    &data.provider,
                                     &token,
                                     super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                                     "!cc stop",
-                                );
+                                )
+                                .await;
                                 super::super::commands::notify_turn_stop(
                                     &ctx.http,
                                     &data.shared,

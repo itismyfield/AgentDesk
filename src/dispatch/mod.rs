@@ -158,6 +158,18 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
         dispatch_status.as_deref(),
         Some("cancelled") | Some("failed")
     ) {
+        conn.execute(
+            "UPDATE sessions
+             SET status = CASE
+                     WHEN status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                     ELSE status
+                 END,
+                 active_dispatch_id = NULL,
+                 session_info = ?1
+             WHERE active_dispatch_id = ?2",
+            sqlite_test::params!["Dispatch cancelled", dispatch_id],
+        )?;
+
         // #815: user / external explicit stops must move the entry to a
         // non-dispatchable terminal status so the next auto-queue tick does
         // not immediately re-dispatch the same entry. System cancels (retry
@@ -296,6 +308,23 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
     if changed == 0 {
         return Ok(0);
     }
+
+    sqlx::query(
+        "UPDATE sessions
+         SET status = CASE
+                 WHEN status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                 ELSE status
+             END,
+             active_dispatch_id = NULL,
+             session_info = $1,
+             last_heartbeat = NOW()
+         WHERE active_dispatch_id = $2",
+    )
+    .bind("Dispatch cancelled")
+    .bind(dispatch_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("clear postgres session dispatch link {dispatch_id}: {error}"))?;
 
     let _ = sqlx::query(
         "INSERT INTO dispatch_events (
@@ -1353,6 +1382,12 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, session_info, created_at) \
+             VALUES ('session-aq', 'agent-1', 'claude', 'turn_active', 'dispatch-aq', 'live dispatch', datetime('now'))",
+            [],
+        )
+        .unwrap();
 
         let cancelled =
             cancel_dispatch_and_reset_auto_queue_on_conn(&conn, "dispatch-aq", Some("test"))
@@ -1377,6 +1412,20 @@ mod tests {
             .unwrap();
         assert_eq!(entry_status, "pending");
         assert!(entry_dispatch_id.is_none());
+        let (session_status, active_dispatch_id, session_info): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, session_info FROM sessions WHERE session_key = 'session-aq'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_status, "idle");
+        assert!(active_dispatch_id.is_none());
+        assert_eq!(session_info.as_deref(), Some("Dispatch cancelled"));
         assert_eq!(
             load_dispatch_events(&conn, "dispatch-aq"),
             vec![(

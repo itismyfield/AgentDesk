@@ -3,7 +3,6 @@ use serenity::CreateMessage;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::router::{TurnKind, handle_text_message};
-use super::super::turn_bridge::cancel_active_token;
 use super::super::{
     Context, Error, auto_restore_session, check_auth, mailbox_cancel_active_turn,
     mailbox_has_active_turn,
@@ -172,17 +171,10 @@ pub(in crate::services::discord) async fn cmd_cc(
                         return Ok(());
                     }
                     ctx.say("Stopping...").await?;
-                    cancel_active_token(
-                        &token,
-                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                        "/cc stop",
-                    );
-                    // #1117 see text_commands.rs (!stop) for rationale. Safe
-                    // to await here — `ctx.say("Stopping...")` already
-                    // satisfied the slash interaction deadline above.
-                    super::super::turn_bridge::interrupt_provider_cli_turn(
+                    super::super::turn_bridge::stop_active_turn(
                         &ctx.data().provider,
                         &token,
+                        super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "/cc stop",
                     )
                     .await;
