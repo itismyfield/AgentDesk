@@ -204,12 +204,34 @@ pub async fn generate(
     // on issue_number so we don't double-report (the breakdown helper only
     // surfaces issues NOT in the candidate pool — our filtered cards came
     // from the pool so they wouldn't otherwise appear).
+    //
+    // Codex iter-3 P3: also strip any matching entries from `filter` so the
+    // response can't contradict itself by reporting the same issue under
+    // both `skipped_due_to_active_dispatch` AND `skipped_due_to_filter`.
+    // This happens when `kanban_cards.latest_dispatch_id` is stale or null
+    // even though `task_dispatches` still has a live row — the breakdown
+    // helper looks up the dispatch via the (stale) pointer and falls back
+    // to a "wrong status" filter reason, while the new card-id-based probe
+    // correctly identifies the live dispatch.
     {
         let already: std::collections::HashSet<i64> = skip_breakdown
             .active_dispatch
             .iter()
             .filter_map(|entry| entry.get("issue_number").and_then(|v| v.as_i64()))
             .collect();
+        let active_skip_numbers: std::collections::HashSet<i64> = active_dispatch_skips
+            .iter()
+            .filter_map(|entry| entry.get("issue_number").and_then(|v| v.as_i64()))
+            .collect();
+        if !active_skip_numbers.is_empty() {
+            skip_breakdown.filter.retain(|entry| {
+                entry
+                    .get("issue_number")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| !active_skip_numbers.contains(&n))
+                    .unwrap_or(true)
+            });
+        }
         for entry in active_dispatch_skips {
             let issue_number = entry.get("issue_number").and_then(|v| v.as_i64());
             if issue_number.map(|n| already.contains(&n)).unwrap_or(false) {
