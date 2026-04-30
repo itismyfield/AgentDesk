@@ -318,6 +318,7 @@ src/
 │   │   ├── session_runtime.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
+│   │   ├── stall_recovery.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_lifecycle.rs
