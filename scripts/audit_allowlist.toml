@@ -21,7 +21,10 @@ route_srp_violations = [
 
 # Direct Discord sends: current baseline captured for #1436 outbound v3
 # extraction. Entries are path:line so new callsites in the same file still
-# fail the hard gate.
+# fail the hard gate. Line numbers for tmux.rs / turn_bridge / mod.rs /
+# health.rs were refreshed in #1440 after the #1435 tmux watcher-lifecycle
+# extraction shifted callsites (no logical regressions; the same callsites
+# moved with the surrounding functions).
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs:60",
   "src/services/discord/commands/skill.rs:286",
@@ -36,36 +39,36 @@ direct_discord_sends = [
   "src/services/discord/gateway.rs:186",
   "src/services/discord/gateway.rs:210",
   "src/services/discord/gateway.rs:237",
-  "src/services/discord/health.rs:2312",
-  "src/services/discord/health.rs:2358",
+  "src/services/discord/health.rs:2318",
+  "src/services/discord/health.rs:2364",
   "src/services/discord/meeting_orchestrator.rs:654",
   "src/services/discord/meeting_orchestrator.rs:678",
-  "src/services/discord/mod.rs:2031",
+  "src/services/discord/mod.rs:2069",
   "src/services/discord/monitoring_status.rs:50",
   "src/services/discord/monitoring_status.rs:74",
   "src/services/discord/placeholder_controller.rs:202",
   "src/services/discord/placeholder_controller.rs:270",
   "src/services/discord/placeholder_controller.rs:348",
   "src/services/discord/router/intake_gate.rs:258",
-  "src/services/discord/tmux.rs:1255",
-  "src/services/discord/tmux.rs:4851",
-  "src/services/discord/tmux.rs:4861",
-  "src/services/discord/tmux.rs:4892",
-  "src/services/discord/tmux.rs:4933",
-  "src/services/discord/tmux.rs:4987",
-  "src/services/discord/tmux.rs:5070",
-  "src/services/discord/tmux.rs:5148",
-  "src/services/discord/tmux.rs:5268",
-  "src/services/discord/tmux.rs:5542",
-  "src/services/discord/turn_bridge/mod.rs:1073",
-  "src/services/discord/turn_bridge/mod.rs:1456",
-  "src/services/discord/turn_bridge/mod.rs:2009",
-  "src/services/discord/turn_bridge/mod.rs:2012",
-  "src/services/discord/turn_bridge/mod.rs:2094",
-  "src/services/discord/turn_bridge/mod.rs:2133",
-  "src/services/discord/turn_bridge/mod.rs:2455",
-  "src/services/discord/turn_bridge/mod.rs:2673",
-  "src/services/discord/turn_bridge/mod.rs:2954",
+  "src/services/discord/tmux.rs:1273",
+  "src/services/discord/tmux.rs:3380",
+  "src/services/discord/tmux.rs:3390",
+  "src/services/discord/tmux.rs:3421",
+  "src/services/discord/tmux.rs:3462",
+  "src/services/discord/tmux.rs:3516",
+  "src/services/discord/tmux.rs:3599",
+  "src/services/discord/tmux.rs:3677",
+  "src/services/discord/tmux.rs:3797",
+  "src/services/discord/tmux.rs:4071",
+  "src/services/discord/turn_bridge/mod.rs:1098",
+  "src/services/discord/turn_bridge/mod.rs:1481",
+  "src/services/discord/turn_bridge/mod.rs:2042",
+  "src/services/discord/turn_bridge/mod.rs:2045",
+  "src/services/discord/turn_bridge/mod.rs:2127",
+  "src/services/discord/turn_bridge/mod.rs:2166",
+  "src/services/discord/turn_bridge/mod.rs:2491",
+  "src/services/discord/turn_bridge/mod.rs:2709",
+  "src/services/discord/turn_bridge/mod.rs:2990",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
@@ -80,11 +83,11 @@ limit_clamp_duplication = [
 git_subprocess_callsites = [
 ]
 
-# Legacy SQLite references: cli/migrate and compat are exempt by path rule
-# already. Current baseline is tracked by #1440.
+# Legacy SQLite references: cli/migrate, compat, and db/legacy_sqlite are
+# exempt by path rule already. Baseline cleared in #1440 — keep this list
+# empty; new violations should be removed from production sources rather
+# than allowlisted.
 legacy_sqlite_refs = [
-  "src/config.rs:1069",
-  "src/integration_tests/tests/high_risk_recovery.rs:609",
 ]
 
 # Source-of-truth alias writes: runtime_layout is already exempt.

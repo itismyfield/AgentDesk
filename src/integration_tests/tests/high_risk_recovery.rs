@@ -601,12 +601,12 @@ mod failure_recovery {
 
     // TODO(#850 follow-up): rewrite as PG fixture test.
     // After #850 the OnReviewEnter hook's `agentdesk.dispatch.create` call
-    // requires a PG pool (rusqlite dispatch creation path deleted). This
-    // test uses only the rusqlite `test_db()` fixture so the hook returns
-    // `postgres pool required`. Rewriting requires bringing up a PG pool
-    // inside the integration test harness — out of scope for #850.
+    // requires a PG pool (legacy SQLite dispatch creation path deleted).
+    // This test uses only the legacy SQLite `test_db()` fixture so the hook
+    // returns `postgres pool required`. Rewriting requires bringing up a PG
+    // pool inside the integration test harness — out of scope for #850.
     #[tokio::test]
-    #[ignore = "rusqlite dispatch path deleted in #850; needs PG fixture rewrite"]
+    #[ignore = "legacy dispatch path deleted in #850; needs PG fixture rewrite"]
     async fn scenario_251_boot_reconcile_refires_missing_review_dispatch() {
         let (_repo, _repo_guard) = setup_test_repo();
         let db = test_db();

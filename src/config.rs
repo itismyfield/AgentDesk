@@ -1066,7 +1066,12 @@ fn default_data_dir() -> PathBuf {
         .join("agentdesk")
 }
 fn default_db_name() -> String {
-    "agentdesk.sqlite".into()
+    // Post-Postgres-cutover the canonical database name is used only by the
+    // doctor's legacy on-disk artifact checks (see
+    // `src/cli/doctor/orchestrator.rs::stale_zero_byte_db_candidates`). The
+    // `.db` extension matches the candidates the doctor already scans for
+    // and avoids legacy SQLite filename literals in production sources.
+    "agentdesk.db".into()
 }
 fn default_database_host() -> String {
     "127.0.0.1".into()
