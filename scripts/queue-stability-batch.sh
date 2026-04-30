@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Auto-queue batch runner — variable phases with optional deploy gates.
+# Auto-queue batch runner - variable phases with optional deploy gates.
 # Usage: edit PHASES array below, then run manually or via launchd.
-# Idempotent — skips if active run exists.
+# Idempotent - skips if active/pending/paused run exists.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 
 REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
 API="http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}"
-DB="$HOME/.adk/release/data/agentdesk.sqlite"
+REPO="${AQ_REPO:-itismyfield/AgentDesk}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
-# ── Configuration ──────────────────────────────────────────
+# -- Configuration ----------------------------------------------------------
 # Each PHASES entry: "issue1 issue2 ..."
 # Phase index = array position (0-based)
 PHASES=(
@@ -25,22 +26,106 @@ PHASES=(
 )
 
 AGENT_ID="project-agentdesk"
-RATIONALE="Batch auto-queue run"
 
-# ── Pre-checks ─────────────────────────────────────────────
-if ! curl -sf "$API/api/health" >/dev/null 2>&1; then
-    log "✗ Release server not healthy — aborting"
+api_get() {
+    curl -sf "$API$1"
+}
+
+api_post_json() {
+    local path="$1"
+    local body="$2"
+    curl -sf "$API$path" -X POST -H "Content-Type: application/json" -d "$body"
+}
+
+api_patch_json() {
+    local path="$1"
+    local body="$2"
+    curl -sf "$API$path" -X PATCH -H "Content-Type: application/json" -d "$body"
+}
+
+card_for_issue() {
+    local issue="$1"
+    api_get "/api/kanban-cards" \
+        | jq -c --argjson issue "$issue" \
+            'first(.cards[]? | select((.github_issue_number // empty | tonumber) == $issue)) // empty'
+}
+
+sync_repo_cards() {
+    local owner="${REPO%%/*}"
+    local repo="${REPO#*/}"
+    api_post_json "/api/github/repos/$owner/$repo/sync" '{}' >/dev/null || true
+}
+
+ensure_card_ready_and_assigned() {
+    local issue="$1"
+    local card status card_id assigned
+
+    card=$(card_for_issue "$issue" || true)
+    if [ -z "$card" ]; then
+        log "> #$issue: card not found - syncing"
+        sync_repo_cards
+        sleep 2
+        card=$(card_for_issue "$issue" || true)
+    fi
+    if [ -z "$card" ]; then
+        log "x #$issue: card not found after sync"
+        exit 1
+    fi
+
+    card_id=$(printf '%s' "$card" | jq -r '.id')
+    status=$(printf '%s' "$card" | jq -r '.status // ""')
+    assigned=$(printf '%s' "$card" | jq -r '.assigned_agent_id // ""')
+
+    if [ "$status" = "done" ]; then
+        log "> #$issue: already done - will be skipped by preflight"
+        return
+    fi
+
+    if [ "$status" = "backlog" ]; then
+        api_patch_json "/api/kanban-cards/$card_id" '{"status":"ready"}' >/dev/null
+        log "> #$issue: backlog -> ready"
+    fi
+
+    if [ -z "$assigned" ]; then
+        api_patch_json "/api/kanban-cards/$card_id" \
+            "$(jq -n --arg agent "$AGENT_ID" '{assignee_agent_id:$agent}')" >/dev/null
+        log "> #$issue: assigned to $AGENT_ID"
+    fi
+}
+
+build_entries_json() {
+    local lines=()
+    local idx issue
+
+    for idx in "${!PHASES[@]}"; do
+        for issue in ${PHASES[$idx]}; do
+            lines+=("$issue:$idx")
+        done
+    done
+
+    printf '%s\n' "${lines[@]}" \
+        | jq -R -s '
+            split("\n")[:-1]
+            | map(select(length > 0) | split(":") | {
+                issue_number: (.[0] | tonumber),
+                batch_phase: (.[1] | tonumber)
+            })'
+}
+
+# -- Pre-checks -------------------------------------------------------------
+if ! api_get "/api/health" >/dev/null 2>&1; then
+    log "x Release server not healthy - aborting"
     exit 1
 fi
 
-ACTIVE_RUN=$(/usr/bin/sqlite3 -readonly "$DB" \
-    "SELECT id FROM auto_queue_runs WHERE status IN ('active','pending','paused') LIMIT 1;" 2>/dev/null || true)
+ACTIVE_RUN=$(api_get "/api/auto-queue/history?limit=20" \
+    | jq -r 'first(.runs[]? | select(.status == "active" or .status == "pending" or .status == "paused") | "\(.id) \(.status)") // ""')
 if [ -n "$ACTIVE_RUN" ]; then
-    log "▸ Active run exists ($ACTIVE_RUN) — skipping"
+    log "> Active run exists ($ACTIVE_RUN) - skipping"
     exit 0
 fi
 
-# ── Build issue list ───────────────────────────────────────
+# -- Build issue list -------------------------------------------------------
 ALL_ISSUES=()
 for phase_issues in "${PHASES[@]}"; do
     for iss in $phase_issues; do
@@ -49,111 +134,59 @@ for phase_issues in "${PHASES[@]}"; do
 done
 
 if [ ${#ALL_ISSUES[@]} -eq 0 ]; then
-    log "✗ No issues configured — edit PHASES array"
+    log "x No issues configured - edit PHASES array"
     exit 1
 fi
 
-# ── Ensure cards are ready ─────────────────────────────────
+# -- Ensure cards are ready -------------------------------------------------
 for issue in "${ALL_ISSUES[@]}"; do
-    STATUS=$(/usr/bin/sqlite3 -readonly "$DB" \
-        "SELECT status FROM kanban_cards WHERE github_issue_number = $issue;" 2>/dev/null || true)
-    if [ -z "$STATUS" ]; then
-        log "▸ #$issue: card not found — syncing"
-        curl -sf "$API/api/github/repos/itismyfield/AgentDesk/sync" -X POST >/dev/null 2>&1 || true
-        sleep 2
-        STATUS=$(/usr/bin/sqlite3 -readonly "$DB" \
-            "SELECT status FROM kanban_cards WHERE github_issue_number = $issue;" 2>/dev/null || true)
-    fi
-    if [ "$STATUS" = "done" ]; then
-        log "▸ #$issue: already done — will be skipped by preflight"
-        continue
-    fi
-    if [ "$STATUS" = "backlog" ]; then
-        CARD_ID=$(/usr/bin/sqlite3 -readonly "$DB" \
-            "SELECT id FROM kanban_cards WHERE github_issue_number = $issue;")
-        curl -sf "$API/api/kanban-cards/$CARD_ID" -X PATCH \
-            -H "Content-Type: application/json" -d '{"status":"ready"}' >/dev/null 2>&1 || true
-        log "▸ #$issue: backlog → ready"
-    fi
-    /usr/bin/sqlite3 "$DB" \
-        "UPDATE kanban_cards SET assigned_agent_id = '$AGENT_ID' WHERE github_issue_number = $issue AND (assigned_agent_id IS NULL OR assigned_agent_id = '');" 2>/dev/null || true
+    ensure_card_ready_and_assigned "$issue"
 done
 
-# ── Generate run ───────────────────────────────────────────
-ISSUE_JSON=$(printf '%s\n' "${ALL_ISSUES[@]}" | jq -s '.')
-GENERATE_RESULT=$(curl -sf "$API/api/auto-queue/generate" -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"issue_numbers\": $ISSUE_JSON}" 2>/dev/null)
+# -- Generate run with phase metadata --------------------------------------
+ENTRIES_JSON=$(build_entries_json)
+GENERATE_BODY=$(jq -n \
+    --arg repo "$REPO" \
+    --argjson entries "$ENTRIES_JSON" \
+    '{repo:$repo, entries:$entries}')
 
-RUN_ID=$(echo "$GENERATE_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('run',{}).get('id',''))" 2>/dev/null || true)
+GENERATE_RESULT=$(api_post_json "/api/auto-queue/generate" "$GENERATE_BODY")
+RUN_ID=$(printf '%s' "$GENERATE_RESULT" | jq -r '.run.id // ""')
 if [ -z "$RUN_ID" ]; then
-    log "✗ Generate failed"
+    log "x Generate failed"
+    printf '%s\n' "$GENERATE_RESULT" | jq -c '{message, skipped_due_to_active_dispatch, skipped_due_to_dependency, skipped_due_to_filter}' 2>/dev/null || true
     exit 1
 fi
-log "▸ Generated run: $RUN_ID"
+log "> Generated run: $RUN_ID"
 
-# ── Set phases ─────────────────────────────────────────────
-set_phase() {
-    local phase=$1; shift
-    for issue in "$@"; do
-        /usr/bin/sqlite3 "$DB" "
-            UPDATE auto_queue_entries SET batch_phase = $phase
-            WHERE run_id = '$RUN_ID'
-            AND kanban_card_id = (SELECT id FROM kanban_cards WHERE github_issue_number = $issue);
-        " 2>/dev/null || true
-    done
-}
+GENERATED_COUNT=$(printf '%s' "$GENERATE_RESULT" | jq -r '.entries | length')
+if [ "$GENERATED_COUNT" -lt "${#ALL_ISSUES[@]}" ]; then
+    log "> Generated $GENERATED_COUNT/${#ALL_ISSUES[@]} entries; skipped issues:"
+    printf '%s\n' "$GENERATE_RESULT" \
+        | jq -r '
+            [
+              (.skipped_due_to_active_dispatch[]? | "active_dispatch #" + (.issue_number|tostring)),
+              (.skipped_due_to_dependency[]? | "dependency #" + (.issue_number|tostring) + " " + ((.unresolved_deps // [])|join(","))),
+              (.skipped_due_to_filter[]? | "filter #" + (.issue_number|tostring) + " " + (.reason // ""))
+            ] | .[]' \
+        || true
+fi
 
-for idx in "${!PHASES[@]}"; do
-    issues_str="${PHASES[$idx]}"
-    if [ -n "$issues_str" ]; then
-        # shellcheck disable=SC2086
-        set_phase "$idx" $issues_str
-    fi
-done
+# -- Activate ---------------------------------------------------------------
+ACTIVATE_BODY=$(jq -n --arg run_id "$RUN_ID" '{run_id:$run_id}')
+ACTIVATE_RESULT=$(api_post_json "/api/auto-queue/dispatch-next" "$ACTIVATE_BODY")
+DISPATCHED=$(printf '%s' "$ACTIVATE_RESULT" | jq -r '.dispatched | length')
+log "OK Activated run $RUN_ID - $DISPATCHED dispatched"
 
-# ── Add missing entries ────────────────────────────────────
-for idx in "${!PHASES[@]}"; do
-    for issue in ${PHASES[$idx]}; do
-        EXISTS=$(/usr/bin/sqlite3 -readonly "$DB" "
-            SELECT COUNT(*) FROM auto_queue_entries e
-            JOIN kanban_cards k ON k.id = e.kanban_card_id
-            WHERE e.run_id = '$RUN_ID' AND k.github_issue_number = $issue;
-        " 2>/dev/null || echo "0")
-        if [ "$EXISTS" = "0" ]; then
-            CARD_ID=$(/usr/bin/sqlite3 -readonly "$DB" \
-                "SELECT id FROM kanban_cards WHERE github_issue_number = $issue;" 2>/dev/null || true)
-            if [ -n "$CARD_ID" ]; then
-                /usr/bin/sqlite3 "$DB" "
-                    INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, status, batch_phase)
-                    VALUES (lower(hex(randomblob(16))), '$RUN_ID', '$CARD_ID', '$AGENT_ID', 0, 'pending', $idx);
-                " 2>/dev/null || true
-                log "▸ #$issue: added missing entry (phase $idx)"
-            fi
-        fi
-    done
-done
-
-# ── Submit order + activate ────────────────────────────────
-/usr/bin/sqlite3 "$DB" "UPDATE auto_queue_runs SET status = 'pending' WHERE id = '$RUN_ID';"
-
-ORDER_JSON=$(printf '%s\n' "${ALL_ISSUES[@]}" | jq -s '.')
-curl -sf "$API/api/auto-queue/runs/$RUN_ID/order" -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"order\": $ORDER_JSON, \"rationale\": \"$RATIONALE\"}" >/dev/null 2>&1
-
-ACTIVATE_RESULT=$(curl -sf "$API/api/auto-queue/dispatch-next" -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"run_id\": \"$RUN_ID\"}" 2>/dev/null)
-
-DISPATCHED=$(echo "$ACTIVATE_RESULT" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('dispatched',[])))" 2>/dev/null || echo "?")
-log "✓ Activated run $RUN_ID — $DISPATCHED dispatched"
-
-# ── Verify ─────────────────────────────────────────────────
-/usr/bin/sqlite3 -readonly "$DB" "
-    SELECT k.github_issue_number, e.batch_phase, e.status
-    FROM auto_queue_entries e
-    JOIN kanban_cards k ON k.id = e.kanban_card_id
-    WHERE e.run_id = '$RUN_ID'
-    ORDER BY e.batch_phase, k.github_issue_number;
-"
+# -- Verify -----------------------------------------------------------------
+api_get "/api/auto-queue/status" \
+    | jq -r --arg run "$RUN_ID" '
+        if .run.id != $run then
+          "warning: latest status is for run " + (.run.id // "none") + ", expected " + $run
+        else
+          (.entries
+            | sort_by(.batch_phase, .github_issue_number)
+            | .[]
+            | [(.github_issue_number|tostring), (.batch_phase|tostring), .status]
+            | @tsv)
+        end'

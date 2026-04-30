@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SRC_ROOT = REPO_ROOT / "src"
+SCRIPTS_ROOT = REPO_ROOT / "scripts"
 
 TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 
@@ -43,6 +44,14 @@ def production_rust_files() -> list[Path]:
     if not SRC_ROOT.is_dir():
         return []
     return sorted(p for p in SRC_ROOT.rglob("*.rs") if p.is_file() and not is_test_rs(p))
+
+
+def operational_shell_scripts() -> list[Path]:
+    """Shell scripts under ``scripts/`` that may be run against live runtime data."""
+
+    if not SCRIPTS_ROOT.is_dir():
+        return []
+    return sorted(p for p in SCRIPTS_ROOT.glob("*.sh") if p.is_file())
 
 
 def all_rust_files() -> list[Path]:
