@@ -463,7 +463,10 @@ agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now
 
 // Review state
 agentdesk.reviewState.sync(cardId, "idle")
-agentdesk.reviewAutomation.requestReview(cardId, { reviewer: "codex" })
+// Create-PR lifecycle helpers (#743 redesign)
+agentdesk.reviewAutomation.handoffCreatePr(cardId, { /* dispatch payload */ })
+agentdesk.reviewAutomation.recordPrCreateFailure(cardId, "gh exit 128", stampGen)
+agentdesk.reviewAutomation.reseedPrTracking(cardId)
 
 // Dispatch
 agentdesk.dispatch.create(cardId, agentId, "implementation", "Task title")
@@ -478,8 +481,13 @@ agentdesk.pipeline.isTerminal(status, config)
 agentdesk.pipeline.terminalState(config)
 
 // Auto-queue + phase gate
-agentdesk.autoQueue.dispatchNext({ runId: "run-123" })
-agentdesk.queue.list({ runId: "run-123" })
+agentdesk.autoQueue.activate("run-123")                   // or activate({ run_id, repo, agent_id, ... })
+agentdesk.autoQueue.updateEntryStatus(entryId, "active", "policy")
+agentdesk.autoQueue.pauseRun(runId, "manual-hold")
+agentdesk.autoQueue.resumeRun(runId, "policy-resume")
+agentdesk.autoQueue.completeRun(runId, "policy", { reason: "all entries done" })
+agentdesk.autoQueue.savePhaseGateState(runId, phase, state)
+agentdesk.queue.status()                                  // run/slot snapshot used by dashboards
 
 // Agents
 agentdesk.agents.get(agentId)
@@ -509,14 +517,27 @@ agentdesk.inflight.list()
 agentdesk.inflight.remove(provider, channelId)
 
 // Quality / friction reporting
-agentdesk.quality.emit({ kind: "api_friction", note: "duplicate dispatch on retry" })
+agentdesk.quality.emit({
+  event_type: "api_friction",
+  card_id: cardId,
+  payload: { note: "duplicate dispatch on retry" }
+})
 
-// Runtime helpers and CI recovery primitives
-agentdesk.runtime.now()
-agentdesk.ciRecovery.classify(failure)
+// Runtime helpers (signals, retrospectives, inventory refresh)
+agentdesk.runtime.emitSignal("escalation_routed", { card_id })
+agentdesk.runtime.recordCardRetrospective(cardId, "done")
+agentdesk.runtime.refreshInventoryDocs(worktreePath)
+
+// CI recovery primitives
+agentdesk.ciRecovery.setBlockedReason(cardId, "ci_failure:lint")
+agentdesk.ciRecovery.getCardStatus(cardId)
+agentdesk.ciRecovery.getReworkCardInfo(cardId)
+agentdesk.ciRecovery.listWaitingForCi()
 
 // DM reply hooks (used by escalation/triage flows)
-agentdesk.dmReply.recordPending({ user_id, dispatch_id, payload })
+agentdesk.dmReply.register(sourceAgent, userId, context, ttlSeconds)
+agentdesk.dmReply.pending(userId)
+agentdesk.dmReply.consume(userId)
 
 // Logging
 agentdesk.log.info("message")
@@ -590,7 +611,8 @@ agentdesk api GET /api/health                    # Public safe health summary
 agentdesk api GET /api/health/detail             # Authenticated/local detailed health
 agentdesk deploy                                 # Build workspace + promote to release
 agentdesk migrate openclaw <ARGS>                # Import OpenClaw durable state
-agentdesk migrate postgres-cutover <ARGS>        # SQLite→Postgres cutover + verification
+# `migrate postgres-cutover` is retired (production cutover landed 2026-04-19); the
+# subcommand is parsed but returns an error so help/scripts don't break. Do not run it.
 agentdesk provider-cli <SUBCOMMAND>              # Provider CLI safe-migration ops (status/plan/upgrade/canary/promote/rollback/cleanup/run/resume/smoke)
 
 # Process wrappers (internal — invoked by tmux session lifecycle)
@@ -607,7 +629,7 @@ AgentDesk exposes 150+ REST API endpoints. Key groups:
 | Group | Endpoints | Description |
 |-------|-----------|-------------|
 | `/api/agents` | CRUD + signal, skills, timeline | Agent management |
-| `/api/kanban-cards` | CRUD + assign, `/transition`, `/retry`, `/redispatch`, `/rereview`, `/reopen`, batch actions | Work item management. `/transition`, `/retry`, `/redispatch`, and `/auto-queue/generate` are **single-call complete** — do not chain them; inspect `new_dispatch_id` / `next_action` in the response (#1442). `/transition` requires `force=true` when an active dispatch exists (#1444). |
+| `/api/kanban-cards` | CRUD + assign, `/transition`, `/retry`, `/redispatch`, `/rereview`, `/reopen`, batch actions | Work item management. `/transition`, `/retry`, `/redispatch`, and `/auto-queue/generate` are **single-call complete** — do not chain them (#1442). Response fields differ per endpoint: `/retry` and `/redispatch` return `new_dispatch_id` + `next_action`; `/transition` returns `cancelled_dispatch_ids`, `created_dispatch_id`, and `next_action_hint` (and requires `force=true` when an active dispatch exists, #1444); `/auto-queue/generate` returns `run`, `entries`, and the `skipped_due_to_active_dispatch` / `skipped_due_to_dependency` / `skipped_due_to_filter` arrays. |
 | `/api/dispatches` | CRUD + cancel | Task assignment tracking |
 | `/api/auto-queue` | Generate, activate, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |
