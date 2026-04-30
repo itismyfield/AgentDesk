@@ -14274,12 +14274,16 @@ async fn transition_response_includes_cancelled_ids_and_next_action_hint_pg_1442
         None,
         pool.clone(),
     );
+    // #1442 (codex P2): send x-channel-id so this test isn't 401-flaked when
+    // it runs in parallel with the `kanban_manager_channel_id` PMD-channel
+    // tests that mutate the global AGENTDESK_CONFIG.
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/kanban-cards/card-transition-1442/transition")
                 .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(r#"{"status":"ready","cancel_dispatches":true}"#))
                 .unwrap(),
         )
