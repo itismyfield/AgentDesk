@@ -380,7 +380,7 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | `AGENTDESK_REPO_DIR` | Override resolved AgentDesk repo path used by `git`/`gh` exec helpers |
 | `AGENTDESK_SERVER_PORT` | Override HTTP server port (default: 8791) |
 | `AGENTDESK_API_URL` | Override base URL the CLI client uses to reach the local API |
-| `AGENTDESK_TOKEN` | Auth token forwarded by CLI subcommands when no `--key` is given |
+| `AGENTDESK_TOKEN` | Optional fallback Discord bot token for `dcserver` startup, and a `--key` fallback for `discord-send*` commands. **Not** used for `/api/*` auth — that comes from `server.auth_token` in `agentdesk.yaml` |
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
 | `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
@@ -502,7 +502,10 @@ agentdesk.message.queue("channel:123456", "Hello", "announce", "system")
 agentdesk.message.queue("channel:123456", "📋 새 이슈 #42", "notify", "issue-sync")
 
 // HTTP — loopback only, used to call the local AgentDesk API from policy JS
-agentdesk.http.post("http://127.0.0.1:8791/api/force-kill", { session_key, retry: false })
+agentdesk.http.post(
+  "http://127.0.0.1:8791/api/sessions/" + sessionKey + "/force-kill",
+  { retry: false, reason: "idle 30분 초과 — 자동 정리" }
+)
 
 // External commands (allow-list: gh, git, tmux, etc.)
 agentdesk.exec("gh", ["issue", "close", "42", "--repo", "owner/repo"])
