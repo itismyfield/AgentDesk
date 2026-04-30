@@ -163,6 +163,13 @@ fn parse_dispatch_message_target(dispatch_context: Option<&str>) -> Option<Dispa
     })
 }
 
+/// #1445 candidate command-bot identities whose `⏳` may linger on a
+/// failed/cancelled dispatch when the live command-bot cleanup path was
+/// bypassed (queue/API cancel, orphan recovery). Each token's `/@me` DELETE
+/// is 404-tolerant so calling for both providers when only one was active is
+/// harmless.
+const COMMAND_BOT_PENDING_OWNERS: &[&str] = &["claude", "codex"];
+
 async fn update_dispatch_reaction_presence(
     client: &reqwest::Client,
     token: &str,
@@ -240,11 +247,32 @@ async fn apply_dispatch_status_reaction_state(
         }
         DispatchStatusReactionState::Failed => {
             // Clean announce-bot's own ⏳/✅ (404-tolerant) then add ❌.
+            // #1445: also DELETE the command-bot's `⏳` via each provider's
+            // `/@me` token — repair paths that bypass the live command-bot
+            // cleanup (queue/API cancel, orphan recovery) leave the pending
+            // marker in place, so without this users see ⏳ + ❌ together
+            // and can't tell whether the dispatch is in-progress or failed.
+            // 404 on the provider tokens is expected (only one provider
+            // owned the ⏳) and is treated as success.
             // Command bot's ✅ added on response delivery (turn_bridge:1537)
             // is a separate @user reaction and will still render alongside
             // ❌ — inevitable cross-bot collision on failed turns that
             // returned text. ❌ remains the authoritative failure signal.
             update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
+            for owner in COMMAND_BOT_PENDING_OWNERS {
+                let Some(owner_token) = crate::credential::read_bot_token(owner) else {
+                    continue;
+                };
+                update_dispatch_reaction_presence(
+                    client,
+                    &owner_token,
+                    base_url,
+                    target,
+                    '⏳',
+                    false,
+                )
+                .await?;
+            }
             update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
             update_dispatch_reaction_presence(client, token, base_url, target, '❌', true).await
         }
@@ -3244,6 +3272,16 @@ mod tests {
         .unwrap();
     }
 
+    fn write_command_bot_token(root: &std::path::Path, name: &str, value: &str) {
+        let credential_dir = crate::runtime_layout::credential_dir(root);
+        std::fs::create_dir_all(&credential_dir).unwrap();
+        std::fs::write(
+            crate::runtime_layout::credential_token_path(root, name),
+            format!("{value}\n"),
+        )
+        .unwrap();
+    }
+
     struct TestPostgresDb {
         admin_url: String,
         database_name: String,
@@ -4817,6 +4855,69 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    /// #1445: simulates the canonical bug — command-bot has added `⏳` at
+    /// turn start, then a repair path (queue/API cancel) drives the dispatch
+    /// to `failed` and announce-bot runs `apply_dispatch_status_reaction_state`.
+    /// Before the fix the announce-bot's `/@me` DELETE skipped command-bot's
+    /// `⏳`, leaving the message rendered as `⏳ + ❌` (in-progress vs failed
+    /// ambiguity). The fix issues a 404-tolerant `/@me` DELETE on each
+    /// provider's command-bot token so whichever provider owns `⏳` cleans up.
+    #[tokio::test]
+    async fn apply_dispatch_status_reaction_state_failed_clears_command_bot_pending() {
+        let _env_lock = env_lock();
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let _api_base = EnvVarGuard::set("AGENTDESK_DISCORD_API_BASE_URL", &base_url);
+        let temp = tempfile::tempdir().unwrap();
+        write_announce_token(temp.path());
+        write_command_bot_token(temp.path(), "claude", "claude-token");
+        write_command_bot_token(temp.path(), "codex", "codex-token");
+        let _root = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let target = DispatchMessageTarget {
+            channel_id: "123".to_string(),
+            message_id: "message-123".to_string(),
+        };
+        let token = crate::credential::read_bot_token("announce").unwrap();
+        apply_dispatch_status_reaction_state(
+            shared_discord_http_client(),
+            &token,
+            &base_url,
+            &target,
+            DispatchStatusReactionState::Failed,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        let reaction_calls: Vec<String> = state
+            .calls
+            .iter()
+            .filter(|call| call.contains("/channels/123/messages/message-123/reactions/"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            reaction_calls,
+            vec![
+                // announce-bot drops its own stale ⏳ (404-tolerant).
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                // #1445: each provider command-bot also drops its own ⏳
+                // (the 404 case for whichever bot didn't own it is fine).
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%8F%B3/@me",
+                "DELETE /channels/123/messages/message-123/reactions/%E2%9C%85/@me",
+                "PUT /channels/123/messages/message-123/reactions/%E2%9D%8C/@me",
+            ],
+            "#1445: failed dispatch must DELETE command-bot ⏳ via each provider token before announce-bot adds ❌ — final reaction state is ❌ only, never ⏳ + ❌"
+        );
+        assert!(
+            !reaction_calls
+                .iter()
+                .any(|call| call.starts_with("PUT") && call.contains("%E2%8F%B3")),
+            "#1445: must never re-add ⏳ on the failure path"
+        );
     }
 
     fn insert_review_followup_fixture(db: &crate::db::Db) {
