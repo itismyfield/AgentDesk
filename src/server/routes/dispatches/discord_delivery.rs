@@ -163,12 +163,35 @@ fn parse_dispatch_message_target(dispatch_context: Option<&str>) -> Option<Dispa
     })
 }
 
-/// #1445 candidate command-bot identities whose `⏳` may linger on a
-/// failed/cancelled dispatch when the live command-bot cleanup path was
-/// bypassed (queue/API cancel, orphan recovery). Each token's `/@me` DELETE
-/// is 404-tolerant so calling for both providers when only one was active is
-/// harmless.
-const COMMAND_BOT_PENDING_OWNERS: &[&str] = &["claude", "codex"];
+/// #1445 fallback command-bot credential names checked when the loaded
+/// `discord.bots.*` config doesn't surface any provider-bound bots (e.g.
+/// pre-onboarding bootstraps). Tokens are only consumed when a credential
+/// file actually exists on disk.
+const COMMAND_BOT_PENDING_FALLBACK_NAMES: &[&str] = &["claude", "codex", "command", "command_2"];
+
+/// #1445: enumerate tokens of currently-launchable command bots — i.e.
+/// bots whose `discord.bots.<name>.provider` is set (these are the bots
+/// that add the `⏳` pending marker at turn start). `load_discord_bot_launch_configs`
+/// already filters by agent-channel mapping and deduplicates by token, so
+/// each returned entry represents a distinct command-bot identity. We
+/// supplement with on-disk credential files for the canonical fallback
+/// names so the cleanup still works when the YAML omits inline tokens.
+fn collect_command_bot_pending_tokens() -> Vec<String> {
+    let mut tokens: Vec<String> =
+        crate::services::discord::settings::load_discord_bot_launch_configs()
+            .into_iter()
+            .map(|launch| launch.token)
+            .collect();
+    for name in COMMAND_BOT_PENDING_FALLBACK_NAMES {
+        let Some(token) = crate::credential::read_bot_token(name) else {
+            continue;
+        };
+        if !tokens.iter().any(|existing| existing == &token) {
+            tokens.push(token);
+        }
+    }
+    tokens
+}
 
 async fn update_dispatch_reaction_presence(
     client: &reqwest::Client,
@@ -247,23 +270,25 @@ async fn apply_dispatch_status_reaction_state(
         }
         DispatchStatusReactionState::Failed => {
             // Clean announce-bot's own ⏳/✅ (404-tolerant) then add ❌.
-            // #1445: also DELETE the command-bot's `⏳` via each provider's
-            // `/@me` token — repair paths that bypass the live command-bot
-            // cleanup (queue/API cancel, orphan recovery) leave the pending
-            // marker in place, so without this users see ⏳ + ❌ together
-            // and can't tell whether the dispatch is in-progress or failed.
-            // 404 on the provider tokens is expected (only one provider
-            // owned the ⏳) and is treated as success.
+            // #1445: also DELETE the command-bot's `⏳` via each launchable
+            // command-bot token — repair paths that bypass the live
+            // command-bot cleanup (queue/API cancel, orphan recovery) leave
+            // the pending marker in place, so without this users see
+            // ⏳ + ❌ together and can't tell whether the dispatch is
+            // in-progress or failed. The cross-bot cleanup is best-effort:
+            // a 401/403 from a stale or revoked token must not block the
+            // authoritative ❌ PUT, so failures are logged and swallowed.
             // Command bot's ✅ added on response delivery (turn_bridge:1537)
             // is a separate @user reaction and will still render alongside
             // ❌ — inevitable cross-bot collision on failed turns that
             // returned text. ❌ remains the authoritative failure signal.
             update_dispatch_reaction_presence(client, token, base_url, target, '⏳', false).await?;
-            for owner in COMMAND_BOT_PENDING_OWNERS {
-                let Some(owner_token) = crate::credential::read_bot_token(owner) else {
+            for owner_token in collect_command_bot_pending_tokens() {
+                if owner_token == token {
+                    // Already cleaned via the announce-bot @me DELETE above.
                     continue;
-                };
-                update_dispatch_reaction_presence(
+                }
+                if let Err(error) = update_dispatch_reaction_presence(
                     client,
                     &owner_token,
                     base_url,
@@ -271,7 +296,14 @@ async fn apply_dispatch_status_reaction_state(
                     '⏳',
                     false,
                 )
-                .await?;
+                .await
+                {
+                    tracing::debug!(
+                        message_id = %target.message_id,
+                        %error,
+                        "[dispatch] #1445 best-effort command-bot ⏳ cleanup skipped (treating as harmless)"
+                    );
+                }
             }
             update_dispatch_reaction_presence(client, token, base_url, target, '✅', false).await?;
             update_dispatch_reaction_presence(client, token, base_url, target, '❌', true).await
