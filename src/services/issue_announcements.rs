@@ -202,59 +202,79 @@ pub async fn complete_issue_announcement_pg(
 
 /// Edits an existing issue-announcement message, falling back to the
 /// legacy `announce` token when the message was authored by announce-bot
-/// before the #1448 follow-up moved announcements to `notify`. Discord
-/// rejects cross-bot edits with a 50005 error string ("Cannot edit a
-/// message authored by another user"), so we detect that signature and
-/// retry with the announce token. Once existing announce-authored rows
-/// have all closed, the fallback can be removed (sunset target
-/// 2026-06-01, same as the legacy turn-sender block in `mod.rs`).
+/// before the #1448 follow-up moved announcements to `notify`.
+///
+/// Fallback triggers (the announce-only deployment shape is the legacy
+/// reality we have to support during the cutover window):
+/// - `notify` token is not configured (deployment hasn't seeded notify yet)
+/// - `notify` PATCH returns Discord 50005 (cross-bot edit on a message
+///   authored by announce-bot)
+/// - `notify` PATCH returns 50001 / 403 / "missing access" (notify bot
+///   doesn't yet have access to the legacy announcement channel)
+///
+/// Once all legacy announce-authored rows have closed and notify-bot has
+/// permissions on every announcement channel, both this fallback and the
+/// matching `is_legacy_announce_issue_card` gate in `mod.rs` can be
+/// removed (sunset target 2026-06-01).
 async fn edit_announcement_with_legacy_fallback(
     channel_id: &str,
     message_id: &str,
     content: &str,
     log_key: &str,
 ) -> Result<String, String> {
-    let notify_token = crate::credential::read_bot_token("notify")
-        .ok_or_else(|| "no notify bot token configured".to_string())?;
-    match send_issue_announcement_message(
-        &notify_token,
+    let notify_token = crate::credential::read_bot_token("notify");
+    if let Some(token) = notify_token.as_deref() {
+        match send_issue_announcement_message(
+            token,
+            channel_id,
+            Some(message_id),
+            content,
+            log_key,
+            "completed",
+        )
+        .await
+        {
+            Ok(id) => return Ok(id),
+            Err(error) if should_try_legacy_announce_fallback(&error) => {
+                tracing::info!(
+                    target: "issue_announcements",
+                    "{log_key}: notify edit failed with `{error}`, retrying with announce token"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let Some(announce_token) = crate::credential::read_bot_token("announce") else {
+        return Err(if notify_token.is_some() {
+            "notify edit failed and no announce bot token configured for legacy fallback"
+                .to_string()
+        } else {
+            "no notify or announce bot token configured".to_string()
+        });
+    };
+    send_issue_announcement_message(
+        &announce_token,
         channel_id,
         Some(message_id),
         content,
         log_key,
-        "completed",
+        "completed-legacy-fallback",
     )
     .await
-    {
-        Ok(id) => Ok(id),
-        Err(error) if is_cross_bot_edit_error(&error) => {
-            let Some(announce_token) = crate::credential::read_bot_token("announce") else {
-                return Err(format!(
-                    "{error} (and no announce bot token configured for legacy fallback)"
-                ));
-            };
-            send_issue_announcement_message(
-                &announce_token,
-                channel_id,
-                Some(message_id),
-                content,
-                log_key,
-                "completed-legacy-fallback",
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    }
 }
 
-fn is_cross_bot_edit_error(error: &str) -> bool {
-    // Discord error code 50005 = "Cannot edit a message authored by
-    // another user". Match on the numeric code or the canonical phrase
-    // so both `reqwest`/serenity wrappers surface as legacy fallbacks.
+/// Decides whether a notify-side PATCH failure should trigger the
+/// announce-token fallback. Cross-bot (50005) and missing-access (50001 /
+/// 403) errors all indicate the message was originally authored by
+/// announce-bot or that notify-bot has no permission on the legacy
+/// channel — both correctable by retrying with announce.
+fn should_try_legacy_announce_fallback(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
     error.contains("50005")
-        || error
-            .to_ascii_lowercase()
-            .contains("cannot edit a message authored by another user")
+        || error.contains("50001")
+        || lowered.contains("cannot edit a message authored by another user")
+        || lowered.contains("missing access")
+        || lowered.contains("403 forbidden")
 }
 
 async fn resolve_announcement_channel_pg(

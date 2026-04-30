@@ -317,6 +317,7 @@ fn response_portion_after_offset(full_response: &str, response_sent_offset: usiz
 fn should_delegate_bridge_relay_to_watcher(
     watcher_owns_assistant_relay: bool,
     watcher_relay_available_for_turn: bool,
+    bridge_response_pending: bool,
     cancelled: bool,
     is_prompt_too_long: bool,
     transport_error: bool,
@@ -324,6 +325,7 @@ fn should_delegate_bridge_relay_to_watcher(
 ) -> bool {
     watcher_owns_assistant_relay
         && watcher_relay_available_for_turn
+        && !bridge_response_pending
         && !cancelled
         && !is_prompt_too_long
         && !transport_error
@@ -2328,6 +2330,9 @@ pub(super) fn spawn_turn_bridge(
         let bridge_relay_delegated_to_watcher = should_delegate_bridge_relay_to_watcher(
             watcher_owns_assistant_relay,
             watcher_relay_available_for_turn,
+            !response_portion_after_offset(&full_response, response_sent_offset)
+                .trim()
+                .is_empty(),
             cancelled,
             is_prompt_too_long,
             transport_error,

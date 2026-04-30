@@ -2377,10 +2377,17 @@ fn work_outcome_parser_rejects_non_explicit_noop_mentions() {
 #[test]
 fn bridge_relay_delegation_requires_fresh_watcher_task() {
     assert!(!should_delegate_bridge_relay_to_watcher(
-        true, false, false, false, false, false
+        true, false, false, false, false, false, false
     ));
     assert!(should_delegate_bridge_relay_to_watcher(
-        true, true, false, false, false, false
+        true, true, false, false, false, false, false
+    ));
+}
+
+#[test]
+fn bridge_relay_delegation_stays_disabled_when_bridge_has_pending_response() {
+    assert!(!should_delegate_bridge_relay_to_watcher(
+        true, true, true, false, false, false, false
     ));
 }
 
@@ -2395,6 +2402,7 @@ fn bridge_relay_delegation_stays_disabled_for_terminal_error_paths() {
         assert!(!should_delegate_bridge_relay_to_watcher(
             true,
             true,
+            false,
             cancelled,
             prompt_too_long,
             transport_error,
