@@ -346,6 +346,15 @@ fn write_announce_token(runtime_root: &std::path::Path) {
         "announce-token\n",
     )
     .unwrap();
+    // #1448 follow-up: issue announcements moved to notify-bot. Tests
+    // that exercise the announcement creation path must also seed the
+    // notify token, or `create_issue_announcement_pg` short-circuits
+    // with `no notify bot token configured`.
+    fs::write(
+        crate::runtime_layout::credential_token_path(runtime_root, "notify"),
+        "notify-token\n",
+    )
+    .unwrap();
 }
 
 #[derive(Default)]
