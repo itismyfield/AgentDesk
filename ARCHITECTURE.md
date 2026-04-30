@@ -278,7 +278,8 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   └── tmux_runtime.rs
 │   │   ├── watchers/
-│   │   │   └── lifecycle.rs
+│   │   │   ├── lifecycle.rs
+│   │   │   └── lifecycle_decision.rs
 │   │   ├── adk_session.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── discord_io.rs
@@ -308,6 +309,7 @@ src/
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── relay_health.rs
+│   │   ├── relay_recovery.rs
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_ctrl.rs
 │   │   ├── restart_mode.rs
