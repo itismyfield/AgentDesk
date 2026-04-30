@@ -482,7 +482,7 @@ mod tests {
     fn build_stalled_placeholder_uses_stable_badge() {
         let state = make_state(1234, 5678);
         let text = build_stalled_placeholder(&state);
-        assert!(text.starts_with("🔄 **백그라운드 처리 중**"));
+        assert!(text.starts_with("🔄 **응답 처리 중**"));
         assert!(text.contains("⚠ stalled — no stream progress"));
         assert!(!text.contains("90s"));
     }
@@ -519,7 +519,7 @@ mod tests {
     fn build_abandoned_placeholder_uses_aborted_status() {
         let state = make_state(1234, 5678);
         let text = build_abandoned_placeholder(&state);
-        assert!(text.starts_with("⚠ **백그라운드 중단** (모니터 연결 끊김)"));
+        assert!(text.starts_with("⚠ **응답 중단**"));
     }
 
     #[test]

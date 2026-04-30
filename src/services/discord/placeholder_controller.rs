@@ -1,7 +1,7 @@
 //! Placeholder lifecycle controller (#1255).
 //!
 //! Centralises the live-turn placeholder card lifecycle so every entry point
-//! that wants to drive the `🔄 백그라운드 처리 중` -> terminal transition flow
+//! that wants to drive the live placeholder -> terminal transition flow
 //! goes through the same FSM and the same edit-coalescer.
 //!
 //! Lifecycle FSM:
@@ -759,7 +759,7 @@ mod tests {
 
     // #1332: Queued → Active transition emits a PATCH and keeps the same
     // Discord message id so the user sees `📬 메시지 대기 중` morph into
-    // `🔄 백그라운드 처리 중` on dispatch.
+    // `🔄 응답 처리 중` on dispatch.
     #[tokio::test]
     async fn ensure_queued_then_active_transitions_in_place() {
         let gateway = Arc::new(CountingGateway::new());
@@ -775,7 +775,7 @@ mod tests {
             progress_line: None,
         };
         let outcome = controller
-            .ensure_queued(gateway.as_ref(), key(), queued_input)
+            .ensure_queued(gateway.as_ref(), key(), queued_input.clone())
             .await;
         assert_eq!(outcome, PlaceholderControllerOutcome::Edited);
         assert_eq!(
@@ -787,7 +787,7 @@ mod tests {
         assert!(queued_render.contains("앞선 턴 진행 중"));
 
         let active_outcome = controller
-            .ensure_active(gateway.as_ref(), key(), sample_input())
+            .ensure_active(gateway.as_ref(), key(), queued_input)
             .await;
         assert_eq!(active_outcome, PlaceholderControllerOutcome::Edited);
         assert_eq!(
@@ -795,7 +795,7 @@ mod tests {
             PlaceholderLifecycle::Active
         );
         let active_render = gateway.last_edit.lock().await.clone().unwrap();
-        assert!(active_render.contains("🔄 **백그라운드 처리 중**"));
+        assert!(active_render.contains("🔄 **응답 처리 중**"));
         assert_eq!(gateway.edits.load(Ordering::SeqCst), 2);
     }
 

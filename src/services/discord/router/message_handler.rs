@@ -3203,7 +3203,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
         // Drive the controller from Queued → Active so the user sees the
-        // existing `📬 메시지 대기 중` card morph into `🔄 백그라운드 처리 중`
+        // existing `📬 메시지 대기 중` card morph into `🔄 응답 처리 중`
         // at the exact moment the queued turn starts. The streaming path will
         // overwrite this Active card with response text shortly after; the
         // brief Active beat is the visible "we picked your queued message up"

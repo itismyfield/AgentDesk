@@ -1255,10 +1255,10 @@ mod tests {
             None,
         );
         let expected = concat!(
-            "🔄 **백그라운드 처리 중**\n",
-            "> **도구**: ⚙ Bash: cargo build · **사유**: 직결 스트림 끊김 — watcher 이어받음\n",
+            "🔄 **응답 처리 중**\n",
+            "> **도구**: ⚙ Bash: cargo build · **사유**: 응답 스트림 전환 — watcher 이어받음\n",
             "> **시작**: <t:1700000000:R>\n",
-            "완료 시 이 채널로 결과 이어서 보냅니다.",
+            "완료 시 이 채널로 결과를 이어서 표시합니다.",
         );
         assert_eq!(text, expected);
     }
@@ -1287,7 +1287,7 @@ mod tests {
             None,
             None,
         );
-        assert!(completed.starts_with("✅ **백그라운드 완료**\n"));
+        assert!(completed.starts_with("✅ **응답 완료**\n"));
         assert!(completed.contains("**도구**: —"));
         assert!(completed.contains("결과가 위에 도착했습니다."));
 
@@ -1300,7 +1300,7 @@ mod tests {
             None,
             None,
         );
-        assert!(failed.starts_with("❌ **백그라운드 실패**: exit code 137\n"));
+        assert!(failed.starts_with("❌ **응답 실패**: exit code 137\n"));
         assert!(failed.contains("**사유**: 응답 지연 — watcher 이어받음"));
 
         let timed_out = build_monitor_handoff_placeholder(
@@ -1310,7 +1310,7 @@ mod tests {
             None,
             None,
         );
-        assert!(timed_out.starts_with("⏱ **백그라운드 타임아웃**\n"));
+        assert!(timed_out.starts_with("⏱ **응답 타임아웃**\n"));
 
         let aborted = build_monitor_handoff_placeholder(
             MonitorHandoffStatus::Aborted,
@@ -1319,7 +1319,7 @@ mod tests {
             None,
             None,
         );
-        assert!(aborted.starts_with("⚠ **백그라운드 중단** (모니터 연결 끊김)\n"));
+        assert!(aborted.starts_with("⚠ **응답 중단**\n"));
     }
 
     // #1332: Queued status renders the dedicated `📬 메시지 대기 중` card
@@ -2775,7 +2775,7 @@ pub(super) enum MonitorHandoffReason {
 impl MonitorHandoffReason {
     fn label(self) -> &'static str {
         match self {
-            Self::AsyncDispatch => "직결 스트림 끊김 — watcher 이어받음",
+            Self::AsyncDispatch => "응답 스트림 전환 — watcher 이어받음",
             Self::InlineTimeout => "응답 지연 — watcher 이어받음",
             Self::ExplicitCall => "백그라운드 도구 실행 중",
             Self::Queued => "앞선 턴 진행 중",
@@ -2804,30 +2804,57 @@ const MONITOR_HANDOFF_TOOL_MAX_BYTES: usize = 80;
 const MONITOR_HANDOFF_COMMAND_MAX_BYTES: usize = 80;
 const MONITOR_HANDOFF_REASON_DETAIL_MAX_BYTES: usize = 80;
 
-fn monitor_handoff_header(status: MonitorHandoffStatus<'_>) -> String {
+fn monitor_handoff_uses_background_label(reason: MonitorHandoffReason) -> bool {
+    matches!(reason, MonitorHandoffReason::ExplicitCall)
+}
+
+fn monitor_handoff_header(
+    status: MonitorHandoffStatus<'_>,
+    reason: MonitorHandoffReason,
+) -> String {
+    let background_label = monitor_handoff_uses_background_label(reason);
     match status {
         MonitorHandoffStatus::Queued => "📬 **메시지 대기 중**".to_string(),
-        MonitorHandoffStatus::Active => "🔄 **백그라운드 처리 중**".to_string(),
-        MonitorHandoffStatus::Completed => "✅ **백그라운드 완료**".to_string(),
+        MonitorHandoffStatus::Active if background_label => "🔄 **백그라운드 처리 중**".to_string(),
+        MonitorHandoffStatus::Active => "🔄 **응답 처리 중**".to_string(),
+        MonitorHandoffStatus::Completed if background_label => "✅ **백그라운드 완료**".to_string(),
+        MonitorHandoffStatus::Completed => "✅ **응답 완료**".to_string(),
         MonitorHandoffStatus::Failed { reason } => {
             let trimmed = reason.trim();
+            let label = if background_label {
+                "백그라운드 실패"
+            } else {
+                "응답 실패"
+            };
             if trimmed.is_empty() {
-                "❌ **백그라운드 실패**".to_string()
+                format!("❌ **{label}**")
             } else {
                 let truncated =
                     truncate_for_status_bytes(trimmed, MONITOR_HANDOFF_COMMAND_MAX_BYTES);
-                format!("❌ **백그라운드 실패**: {truncated}")
+                format!("❌ **{label}**: {truncated}")
             }
         }
-        MonitorHandoffStatus::TimedOut => "⏱ **백그라운드 타임아웃**".to_string(),
-        MonitorHandoffStatus::Aborted => "⚠ **백그라운드 중단** (모니터 연결 끊김)".to_string(),
+        MonitorHandoffStatus::TimedOut if background_label => {
+            "⏱ **백그라운드 타임아웃**".to_string()
+        }
+        MonitorHandoffStatus::TimedOut => "⏱ **응답 타임아웃**".to_string(),
+        MonitorHandoffStatus::Aborted if background_label => {
+            "⚠ **백그라운드 중단** (모니터 연결 끊김)".to_string()
+        }
+        MonitorHandoffStatus::Aborted => "⚠ **응답 중단**".to_string(),
     }
 }
 
-fn monitor_handoff_footer(status: MonitorHandoffStatus<'_>) -> &'static str {
+fn monitor_handoff_footer(
+    status: MonitorHandoffStatus<'_>,
+    reason: MonitorHandoffReason,
+) -> &'static str {
     match status {
         MonitorHandoffStatus::Queued => "현재 진행 중인 턴 완료 후 처리 시작합니다.",
-        MonitorHandoffStatus::Active => "완료 시 이 채널로 결과 이어서 보냅니다.",
+        MonitorHandoffStatus::Active if monitor_handoff_uses_background_label(reason) => {
+            "완료 시 이 채널로 결과 이어서 보냅니다."
+        }
+        MonitorHandoffStatus::Active => "완료 시 이 채널로 결과를 이어서 표시합니다.",
         MonitorHandoffStatus::Completed => "결과가 위에 도착했습니다.",
         MonitorHandoffStatus::Failed { .. } => "자세한 사유는 다음 응답을 확인해 주세요.",
         MonitorHandoffStatus::TimedOut => "타임아웃 임계를 넘어 종료되었습니다.",
@@ -2884,8 +2911,8 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
     request_line: Option<&str>,
     progress_line: Option<&str>,
 ) -> String {
-    let header = monitor_handoff_header(status);
-    let footer = monitor_handoff_footer(status);
+    let header = monitor_handoff_header(status, reason);
+    let footer = monitor_handoff_footer(status, reason);
 
     let tool_field = tool_summary
         .map(|raw| {
