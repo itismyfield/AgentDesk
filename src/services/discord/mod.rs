@@ -218,13 +218,34 @@ pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
 /// At the same time, informational announcements like `📋 새 이슈 #N` and
 /// `✅ 종료됨` must NOT trigger an agent turn (#1448).
 ///
-/// This helper accepts the message only when a `DISPATCH:` token appears
-/// anywhere in the sanitized body (after stripping the monitor auto-turn
-/// origin marker), gating announce-bot turn triggers on the dispatch
-/// signal itself.
+/// This helper accepts the message when:
+///   1. The monitor auto-turn origin marker is present (forced turn from
+///      AgentDesk's own monitor flow), or
+///   2. Any line in the sanitized body, after `trim_start`, begins with
+///      `DISPATCH:` — matching the same line-level predicate used by
+///      `adk_session::parse_dispatch_id`. The line scan (rather than a
+///      naked `contains`) prevents false positives such as an issue
+///      announcement whose title literally contains the substring
+///      `DISPATCH:` (e.g. `Fix DISPATCH: parsing`), or
+///   3. The body opens with one of the announce-bot's actionable
+///      escalation headers (`⚠️ [에스컬레이션]`, `⚠️ [PM 결정 요청]`).
+///      These are emitted by the escalation route and must wake the
+///      target agent / PM agent even though they carry no `DISPATCH:`
+///      token.
 pub(super) fn should_process_announce_bot_turn_text(text: &str) -> bool {
     let (sanitized, has_monitor_origin) = strip_monitor_auto_turn_origin(text);
-    has_monitor_origin || sanitized.contains("DISPATCH:")
+    if has_monitor_origin {
+        return true;
+    }
+    let body = sanitized.as_ref();
+    if body
+        .lines()
+        .any(|line| line.trim_start().starts_with("DISPATCH:"))
+    {
+        return true;
+    }
+    let head = body.trim_start();
+    head.starts_with("⚠️ [에스컬레이션]") || head.starts_with("⚠️ [PM 결정 요청]")
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
@@ -3873,6 +3894,71 @@ mod tests {
             456,
             true,
             wrapped_dispatch,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_title_containing_dispatch_substring_does_not_trigger_turn() {
+        // #1448 P2 regression guard: an issue title that literally contains
+        // the substring `DISPATCH:` (for example `Fix DISPATCH: parsing`)
+        // must not be mistaken for a real dispatch payload. The gate uses a
+        // line-level `trim_start().starts_with("DISPATCH:")` predicate
+        // (matching `adk_session::parse_dispatch_id`), so a title appearing
+        // mid-line after `📋 **새 이슈 #N** —` is correctly rejected.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let announcement = "📋 **새 이슈 #1500** — Fix DISPATCH: parsing\n> 상태: 🟡 open";
+
+        assert!(!should_process_announce_bot_turn_text(announcement));
+        assert!(!is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            announcement,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_pm_decision_request_still_triggers_turn() {
+        // #1448 P1 regression guard: `deliver_pm_fallback` posts an
+        // `⚠️ [PM 결정 요청] card_id: ...` message via the announce bot
+        // when the user thread escalation can't be delivered. The PM
+        // agent reacts to this message, so the gate must let it through
+        // even though it carries no `DISPATCH:` token.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let pm_message =
+            "⚠️ [PM 결정 요청] card_id: card-2\nissue: #1442\n카드에 수동 판단이 필요합니다.";
+
+        assert!(should_process_announce_bot_turn_text(pm_message));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            pm_message,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_user_escalation_still_triggers_turn() {
+        // #1448 P1 regression guard: `build_user_message` posts an
+        // `⚠️ [에스컬레이션] ...` message via the announce bot when an
+        // escalation thread is created for the owning user. The owner
+        // agent reacts to this message, so the gate must let it through.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let escalation =
+            "⚠️ [에스컬레이션] card_id: card-3 / #1444\n<@111> 수동 판단이 필요합니다.";
+
+        assert!(should_process_announce_bot_turn_text(escalation));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            escalation,
         ));
     }
 
