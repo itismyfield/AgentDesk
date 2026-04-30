@@ -27593,6 +27593,90 @@ async fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries_pg() {
 }
 
 #[tokio::test]
+async fn orphan_recovery_rollback_terminalizes_auto_queue_entry_pg() {
+    crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+
+    seed_repo_pg(&pool, "test-repo").await;
+    seed_agent_pg(&pool, "agent-orphan-aq").await;
+    seed_auto_queue_card_pg(
+        &pool,
+        "card-orphan-aq",
+        9101,
+        "in_progress",
+        "agent-orphan-aq",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+        ) VALUES (
+            'dispatch-orphan-aq', 'card-orphan-aq', 'agent-orphan-aq',
+            'implementation', 'pending', 'orphan aq',
+            NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE kanban_cards
+         SET latest_dispatch_id = 'dispatch-orphan-aq'
+         WHERE id = 'card-orphan-aq'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-orphan-aq', 'test-repo', 'agent-orphan-aq', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, dispatched_at
+        ) VALUES (
+            'entry-orphan-aq', 'run-orphan-aq', 'card-orphan-aq', 'agent-orphan-aq',
+            'dispatched', 'dispatch-orphan-aq', 0, NOW() - INTERVAL '10 minutes'
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let supervisor = crate::supervisor::RuntimeSupervisor::new(Some(pool.clone()), engine);
+    assert_eq!(
+        supervisor
+            .mark_dispatch_failed_for_test("dispatch-orphan-aq")
+            .unwrap(),
+        1
+    );
+    let (dispatch_status, entry_status, entry_dispatch_id): (String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT td.status, aq.status, aq.dispatch_id
+         FROM task_dispatches td
+         JOIN auto_queue_entries aq ON aq.dispatch_id = td.id
+         WHERE td.id = 'dispatch-orphan-aq'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dispatch_status, "failed");
+    assert_eq!(
+        entry_status, "failed",
+        "orphan rollback must not leave the auto-queue entry dispatched"
+    );
+    assert_eq!(entry_dispatch_id.as_deref(), Some("dispatch-orphan-aq"));
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn auto_queue_recovery_honors_stale_dispatch_runtime_config_pg() {
     crate::pipeline::ensure_loaded();
     let pg_db = TestPostgresDb::create().await;
