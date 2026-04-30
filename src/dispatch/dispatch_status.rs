@@ -637,6 +637,37 @@ async fn set_dispatch_status_on_pg_with_sync(
                 )
             })?;
         }
+
+        if matches!(to_status, "completed" | "failed" | "cancelled") {
+            let session_info = format!("Dispatch {to_status}");
+            let cleared = sqlx::query(
+                "UPDATE sessions
+                 SET status = CASE
+                         WHEN status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                         ELSE status
+                     END,
+                     active_dispatch_id = NULL,
+                     session_info = $1,
+                     last_heartbeat = NOW()
+                 WHERE active_dispatch_id = $2",
+            )
+            .bind(&session_info)
+            .bind(dispatch_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("clear postgres session dispatch link {dispatch_id}: {error}")
+            })?
+            .rows_affected();
+            if cleared > 0 {
+                tracing::info!(
+                    "[dispatch] cleared {} stale session link(s) for terminal dispatch {} ({})",
+                    cleared,
+                    dispatch_id,
+                    to_status
+                );
+            }
+        }
     }
 
     tx.commit()
@@ -1101,6 +1132,22 @@ fn set_dispatch_status_on_conn_with_sync(
                     sqlite_test::params![entry_status, dispatch_id],
                 )?;
                 let _ = transition_source;
+            }
+
+            if matches!(to_status, "completed" | "failed" | "cancelled") {
+                let session_info = format!("Dispatch {to_status}");
+                conn.execute(
+                    "UPDATE sessions
+                     SET status = CASE
+                             WHEN status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                             ELSE status
+                         END,
+                         active_dispatch_id = NULL,
+                         session_info = ?1,
+                         last_heartbeat = datetime('now')
+                     WHERE active_dispatch_id = ?2",
+                    sqlite_test::params![session_info, dispatch_id],
+                )?;
             }
         }
         Ok(changed)

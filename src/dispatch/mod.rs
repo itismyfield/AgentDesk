@@ -1437,6 +1437,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_dispatch_status_clears_linked_session_active_dispatch() {
+        let db = test_db();
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ('card-terminal-session', 'Terminal Session Card', 'in_progress', 'agent-1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-terminal-session', 'card-terminal-session', 'agent-1', 'implementation', 'dispatched', 'Terminal Session', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, session_info, created_at) \
+             VALUES ('session-terminal-session', 'agent-1', 'codex', 'turn_active', 'dispatch-terminal-session', 'live dispatch', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let changed = set_dispatch_status_on_conn(
+            &conn,
+            "dispatch-terminal-session",
+            "completed",
+            Some(&serde_json::json!({"completed_commit": "abc123"})),
+            "api",
+            Some(&["dispatched"]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(changed, 1);
+
+        let (session_status, active_dispatch_id, session_info): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id, session_info FROM sessions WHERE session_key = 'session-terminal-session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(session_status, "idle");
+        assert!(active_dispatch_id.is_none());
+        assert_eq!(session_info.as_deref(), Some("Dispatch completed"));
+    }
+
     // ── #815 regression: user reaction-stop must not re-dispatch ──────
     //
     // Exercises the full user-cancel flow against the canonical sqlite
