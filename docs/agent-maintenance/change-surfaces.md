@@ -234,8 +234,10 @@
 The remaining giant-file modules under `src/services/` not covered above:
 
 - `src/services/api_friction.rs` (1808).
-- `src/services/auto_queue.rs` (1047); auto-queue route behavior is split
-  across `src/services/auto_queue/*` slices, each currently below 1000 lines.
+- `src/services/auto_queue.rs` (1047) and
+  `src/services/auto_queue/activate_command.rs` (1012); auto-queue route
+  behavior is split across `src/services/auto_queue/*` slices, with
+  `activate_command.rs` now giant-file territory.
 - `src/services/claude.rs` (2477), `src/services/gemini.rs` (2565),
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —
