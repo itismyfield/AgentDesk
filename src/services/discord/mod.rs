@@ -243,13 +243,32 @@ pub(super) fn should_process_announce_bot_turn_text(text: &str) -> bool {
 /// leading marker, so we anchor the match at `trim_start()` to avoid
 /// false positives from titles that contain the same substring further
 /// down the body.
+///
+/// The completion check matches the full template signature
+/// (`✅ **#<digits> 완료** —`) instead of the bare `✅ **#` prefix so
+/// that a routed handoff like `✅ **#1500** verified; please review`,
+/// which legitimately wakes the target agent over `/api/send`, is not
+/// misclassified as a completion card.
 fn is_issue_announcement_card(text: &str) -> bool {
     let head = text.trim_start();
     // `render_active_card` →
     //   "📋 **새 이슈 #{issue_number}** — {title}\n> ..."
+    if head.starts_with("📋 **새 이슈 #") {
+        return true;
+    }
     // `render_completed_card` →
     //   "✅ **#{issue_number} 완료** — {title}\n> ..."
-    head.starts_with("📋 **새 이슈 #") || head.starts_with("✅ **#")
+    if let Some(rest) = head.strip_prefix("✅ **#") {
+        let digits_end = rest
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_digit())
+            .map(|(idx, _)| idx)
+            .unwrap_or(rest.len());
+        if digits_end > 0 && rest[digits_end..].starts_with(" 완료** —") {
+            return true;
+        }
+    }
+    false
 }
 
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
@@ -3990,6 +4009,28 @@ mod tests {
             456,
             true,
             announcement,
+        ));
+    }
+
+    #[test]
+    fn announce_bot_routed_handoff_with_completion_emoji_still_triggers() {
+        // #1448 regression guard (Codex iter3 P2): a routed message that
+        // happens to start with `✅ **#<digits>**` — for example the
+        // status handoff `✅ **#1500** verified; please review` — must
+        // still wake the target agent. The completion-card block-list
+        // requires the full ` 완료** —` suffix, so it does not falsely
+        // suppress this generic acknowledgement.
+        let allowed_bot_ids: Vec<u64> = vec![123];
+        let announce_bot_id = Some(456u64);
+        let routed = "✅ **#1500** verified; please review the latest patch.";
+
+        assert!(should_process_announce_bot_turn_text(routed));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            announce_bot_id,
+            456,
+            true,
+            routed,
         ));
     }
 
