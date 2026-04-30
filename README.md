@@ -118,7 +118,7 @@ Create Discord bots in the [Discord Developer Portal](https://discord.com/develo
 |---------|------|---------------------|
 | **`announce`** | Authoritative trigger source: posts dispatch envelopes (`DISPATCH:<uuid>`), PM/escalation cards, and agent-to-agent routing via `/api/discord/send`. Other agent bots treat its messages as turn triggers. | Administrator (simplest) or Send Messages + Manage Messages + Manage Channels + Manage Roles |
 | **`notify`** | Informational notifications only — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`), system alerts. Its user id is intentionally NOT in `allowed_bot_ids`, so its messages do not trigger agent turns (#1448 follow-up). | Send Messages, Read Message History |
-| **Per-provider** (`claude`, `codex`, …) | User-facing bots humans @-mention in agent channels. When a user posts in a channel mapped to one of these bots, AgentDesk runs a turn for that provider. Add one bot per provider you plan to use. | Send Messages, Read Message History, Manage Messages |
+| **Per-provider** (`claude`, `codex`, …) | User-facing bots humans @-mention in agent channels. When a user posts in a channel mapped to one of these bots, AgentDesk runs a turn for that provider. Add one bot per provider you plan to use. | Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads (the wizard's generated invite includes all of these — required for dispatch threads) |
 
 **Important:** On the Bot tab for every application, enable the **MESSAGE CONTENT** Privileged Gateway Intent. Without this, bots cannot read message content and will not function properly.
 
@@ -380,7 +380,7 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | `AGENTDESK_REPO_DIR` | Override resolved AgentDesk repo path used by `git`/`gh` exec helpers |
 | `AGENTDESK_SERVER_PORT` | Override HTTP server port (default: 8791) |
 | `AGENTDESK_API_URL` | Override base URL the CLI client uses to reach the local API |
-| `AGENTDESK_TOKEN` | Optional fallback Discord bot token for `dcserver` startup, and a `--key` fallback for `discord-send*` commands. **Not** used for `/api/*` auth — that comes from `server.auth_token` in `agentdesk.yaml` |
+| `AGENTDESK_TOKEN` | Optional Discord bot token forwarded to `dcserver` at startup. **Not** used by `discord-send*` CLI commands (those load configured bot tokens via the wizard, or require `--key`) and **not** used for `/api/*` auth — that comes from `server.auth_token` in `agentdesk.yaml` |
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
 | `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
