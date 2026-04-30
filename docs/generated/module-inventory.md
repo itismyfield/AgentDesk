@@ -159,7 +159,7 @@
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 436 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5535 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 2908 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3018 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1243 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 4005 | giant-file |
@@ -240,7 +240,7 @@
 | `services::claude` | `src/services/claude.rs` | 2477 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1665 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 667 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5717 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5743 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 723 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1166 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 97 |  |
