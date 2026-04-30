@@ -591,6 +591,46 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST http://localhost:8787/api/doctor/stale-mailbox/repair -H 'Content-Type: application/json' -d '{\"channel_id\":1486017489027469493}'"),
         ep(
             "POST",
+            "/api/channels/{id}/relay-recovery",
+            "health",
+            "Local/protected relay recovery dry-run endpoint with bounded apply for safe local auto-heal actions.",
+        )
+        .with_params([
+            ("id", path_param("Discord channel snowflake")),
+            (
+                "provider",
+                body_param("string", false, "Optional provider filter such as codex"),
+            ),
+            (
+                "apply",
+                body_param("boolean", false, "Default false. When true, only eligible bounded local cleanup may run"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"provider": "codex", "apply": false}}),
+            json!({
+                "ok": true,
+                "mode": "dry_run",
+                "applied": false,
+                "skipped": false,
+                "decision": {
+                    "relay_stall_state": "orphan_pending_token",
+                    "action": "clear_orphan_pending_token",
+                    "reason": "mailbox holds a cancel token without bridge, watcher, or live tmux evidence",
+                    "evidence": {"mailbox_has_cancel_token": true, "bridge_inflight_present": false, "watcher_attached": false},
+                    "affected": {"channel_id": "1486017489027469493", "provider": "codex"},
+                    "auto_heal": {"eligible": true, "bounded": true, "max_attempts_per_window": 1, "window_secs": 600}
+                }
+            }),
+        )
+        .with_error_example(
+            403,
+            json!({"body": {"provider": "codex"}}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/channels/1486017489027469493/relay-recovery -H 'Content-Type: application/json' -d '{\"provider\":\"codex\",\"apply\":false}'"),
+        ep(
+            "POST",
             "/api/discord/send",
             "discord",
             "Send a Discord channel message",

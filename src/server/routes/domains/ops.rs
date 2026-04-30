@@ -214,6 +214,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(queue_api::get_watcher_state),
             )
             .route(
+                "/channels/{id}/relay-recovery",
+                post(health_api::relay_recovery_handler),
+            )
+            .route(
                 "/dispatches/pending",
                 get(queue_api::list_pending_dispatches),
             )

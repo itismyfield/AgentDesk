@@ -9162,6 +9162,7 @@ async fn health_docs_list_doctor_discovery_endpoints() {
         ("GET", "/api/health/detail"),
         ("GET", "/api/doctor/startup/latest"),
         ("POST", "/api/doctor/stale-mailbox/repair"),
+        ("POST", "/api/channels/{id}/relay-recovery"),
     ] {
         assert!(
             endpoints
@@ -9210,6 +9211,7 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
         "/api/health/detail",
         "/api/doctor/startup/latest",
         "/api/doctor/stale-mailbox/repair",
+        "/api/channels/{id}/relay-recovery",
         "/api/github/issues/create",
         "/api/sessions/{id}/tmux-output",
         "/api/stats/memento",

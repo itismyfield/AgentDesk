@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -39,6 +39,13 @@ struct ChannelSessionState {
 struct StaleMailboxRepairRequest {
     channel_id: u64,
     expected_has_cancel_token: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RelayRecoveryRequest {
+    provider: Option<String>,
+    #[serde(default)]
+    apply: bool,
 }
 
 fn discord_control_endpoints_allowed(
@@ -642,6 +649,71 @@ pub async fn stale_mailbox_repair_handler(
         })),
     )
         .into_response()
+}
+
+/// POST /api/channels/{id}/relay-recovery — protected/local relay recovery dry-run.
+pub async fn relay_recovery_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Path(channel_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
+    let channel_id = match channel_id.parse::<u64>() {
+        Ok(channel_id) if channel_id > 0 => channel_id,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "channel_id must be a numeric Discord channel ID"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(ref registry) = state.health_registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "Discord not available (standalone mode)"})),
+        )
+            .into_response();
+    };
+
+    let request = if body.is_empty() {
+        RelayRecoveryRequest::default()
+    } else {
+        let body_str = String::from_utf8_lossy(&body);
+        match serde_json::from_str::<RelayRecoveryRequest>(&body_str) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("invalid request: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let provider = request.provider.as_deref();
+    let (status_str, response_body) =
+        health::handle_relay_recovery(registry, provider, channel_id, request.apply).await;
+    let status = parse_status_code(status_str);
+    let json: serde_json::Value =
+        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
+    (status, Json(json)).into_response()
 }
 
 /// POST /api/send — agent-to-agent native routing.

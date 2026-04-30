@@ -87,3 +87,33 @@ pub(super) fn finalize_orphaned_clear(
         counter_decremented
     );
 }
+
+/// Finalize an orphaned mailbox clear without terminating any tmux session.
+///
+/// Relay recovery uses this for bounded auto-heal paths where the safe action
+/// is to release local mailbox/global-active bookkeeping only. This preserves
+/// the explicit invariant that recovery auto-heal never kills `AgentDesk-*`
+/// tmux sessions.
+pub(super) fn finalize_orphaned_clear_preserve_session(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    removed_token: Option<Arc<CancelToken>>,
+    reason: &'static str,
+) {
+    let Some(token) = removed_token else {
+        return;
+    };
+    super::turn_bridge::cancel_active_token(
+        &token,
+        super::TmuxCleanupPolicy::PreserveSession,
+        reason,
+    );
+    let counter_decremented = saturating_decrement_global_active(shared);
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🔄 stall-recovery: finalized orphaned clear preserving tmux for channel {} (reason={}, global_active_decremented={})",
+        channel_id,
+        reason,
+        counter_decremented
+    );
+}

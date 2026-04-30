@@ -403,6 +403,18 @@ impl HealthRegistry {
         self.providers.lock().await.len()
     }
 
+    pub(in crate::services::discord) async fn shared_for_provider(
+        &self,
+        provider: &ProviderKind,
+    ) -> Option<Arc<SharedData>> {
+        self.providers
+            .lock()
+            .await
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
+            .map(|entry| entry.shared.clone())
+    }
+
     pub(super) async fn register_http(&self, provider: String, http: Arc<serenity::Http>) {
         self.discord_http.lock().await.push((provider, http));
     }
@@ -773,11 +785,7 @@ async fn shared_for_provider(
     registry: &HealthRegistry,
     provider: &ProviderKind,
 ) -> Option<Arc<SharedData>> {
-    let providers = registry.providers.lock().await;
-    providers
-        .iter()
-        .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
-        .map(|entry| entry.shared.clone())
+    registry.shared_for_provider(provider).await
 }
 
 async fn wait_for_turn_end(
@@ -3097,6 +3105,32 @@ pub async fn handle_rebind_inflight<'a>(
                 serde_json::json!({ "ok": false, "error": message }).to_string(),
             )
         }
+    }
+}
+
+/// #1462: Handle relay recovery dry-run / bounded auto-heal for one channel.
+///
+/// `apply=false` is the default and only returns the proposed action with
+/// evidence. `apply=true` is intentionally conservative: only local,
+/// idempotent cleanup paths marked eligible by the recovery planner can run.
+pub async fn handle_relay_recovery<'a>(
+    registry: &HealthRegistry,
+    provider: Option<&str>,
+    channel_id: u64,
+    apply: bool,
+) -> (&'a str, String) {
+    match super::relay_recovery::run_relay_recovery(registry, provider, channel_id, apply).await {
+        Ok(response) => (
+            "200 OK",
+            serde_json::to_string(&response).unwrap_or_else(|error| {
+                serde_json::json!({
+                    "ok": false,
+                    "error": format!("failed to serialize relay recovery response: {error}")
+                })
+                .to_string()
+            }),
+        ),
+        Err(error) => (error.status_str(), error.body().to_string()),
     }
 }
 
