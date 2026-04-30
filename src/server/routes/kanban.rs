@@ -901,16 +901,32 @@ pub async fn retry_card(
     .ok()
     .flatten()
     .flatten();
-    let cancelled_dispatch_id: Option<String> = existing_dispatch_id.clone();
-    if let Some(dispatch_id) = existing_dispatch_id.as_deref()
-        && let Err(error) =
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch_id, None)
-                .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+    // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
+    // call actually transitioned a `pending`/`dispatched` row to `cancelled`.
+    // The cancel helper returns `Ok(0)` for stale/already-terminal rows
+    // (e.g. failed/completed); the typical retry case must not falsely
+    // claim a cancellation that did not happen.
+    let mut cancelled_dispatch_id: Option<String> = None;
+    if let Some(prev_dispatch_id) = existing_dispatch_id.as_deref() {
+        match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            pool,
+            prev_dispatch_id,
+            None,
+        )
+        .await
+        {
+            Ok(changed) => {
+                if changed > 0 {
+                    cancelled_dispatch_id = Some(prev_dispatch_id.to_string());
+                }
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
     }
 
     use crate::engine::transition::TransitionIntent as TI2;
@@ -1058,16 +1074,32 @@ pub async fn redispatch_card(
     .ok()
     .flatten()
     .flatten();
-    let cancelled_dispatch_id: Option<String> = dispatch_id.clone();
-    if let Some(dispatch_id) = dispatch_id.as_deref()
-        && let Err(error) =
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch_id, None)
-                .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+    // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
+    // call actually transitioned a `pending`/`dispatched` row to `cancelled`.
+    // The cancel helper returns `Ok(0)` for stale/already-terminal rows, and
+    // claiming a cancellation that did not happen would defeat the
+    // single-call confirmation contract.
+    let mut cancelled_dispatch_id: Option<String> = None;
+    if let Some(prev_dispatch_id) = dispatch_id.as_deref() {
+        match crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            pool,
+            prev_dispatch_id,
+            None,
+        )
+        .await
+        {
+            Ok(changed) => {
+                if changed > 0 {
+                    cancelled_dispatch_id = Some(prev_dispatch_id.to_string());
+                }
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
     }
 
     use crate::engine::transition::TransitionIntent;

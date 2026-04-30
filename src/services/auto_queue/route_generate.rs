@@ -133,6 +133,10 @@ pub async fn generate(
     // #1442: capture skip-reason breakdowns for the requested issue_numbers
     // (or for everything filtered out when no explicit list was given). This
     // lets callers see why a card was excluded without chaining extra calls.
+    // Codex P2: scope the lookup to the same repo/agent filters
+    // `prepare_generate_cards_with_pg` applied so that an unrelated card on
+    // another repo or assigned to another agent isn't surfaced as the skip
+    // reason for the requested issue.
     let candidate_issue_numbers: std::collections::HashSet<i64> = cards
         .iter()
         .filter_map(|card| card.github_issue_number)
@@ -141,6 +145,8 @@ pub async fn generate(
         pool,
         requested_issue_numbers.as_deref(),
         &candidate_issue_numbers,
+        body.repo.as_deref(),
+        body.agent_id.as_deref(),
     )
     .await;
 
@@ -481,10 +487,17 @@ pub(crate) struct GenerateSkipBreakdown {
 /// pool. When `requested_issue_numbers` is None we skip this work — the
 /// breakdown is most useful when callers explicitly asked for specific
 /// issues and need to know why something was dropped.
+///
+/// `repo_filter` and `agent_filter` mirror the filters that
+/// `prepare_generate_cards_with_pg` applied so we don't surface an unrelated
+/// card on another repo / assigned to another agent as the skip reason for
+/// the requested issue (codex P2 follow-up to #1442).
 pub(crate) async fn collect_generate_skip_breakdown(
     pool: &sqlx::PgPool,
     requested_issue_numbers: Option<&[i64]>,
     candidate_issue_numbers: &std::collections::HashSet<i64>,
+    repo_filter: Option<&str>,
+    agent_filter: Option<&str>,
 ) -> GenerateSkipBreakdown {
     let mut breakdown = GenerateSkipBreakdown::default();
     let Some(requested) = requested_issue_numbers else {
@@ -493,20 +506,27 @@ pub(crate) async fn collect_generate_skip_breakdown(
     if requested.is_empty() {
         return breakdown;
     }
+    let repo = repo_filter.filter(|value| !value.is_empty());
+    let agent = agent_filter.filter(|value| !value.is_empty());
     for issue_number in requested {
         if candidate_issue_numbers.contains(issue_number) {
             continue;
         }
-        // Look up the most recent matching card to determine the actual
-        // skip reason (active dispatch, wrong status, missing card).
+        // Look up the most recent matching card (within the same repo /
+        // agent filter scope) to determine the actual skip reason
+        // (active dispatch, wrong status, missing card).
         match sqlx::query_as::<_, (String, String, Option<String>)>(
             "SELECT id, status, latest_dispatch_id
              FROM kanban_cards
              WHERE github_issue_number::BIGINT = $1
+               AND ($2::TEXT IS NULL OR repo_id = $2)
+               AND ($3::TEXT IS NULL OR assigned_agent_id = $3)
              ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
              LIMIT 1",
         )
         .bind(*issue_number)
+        .bind(repo)
+        .bind(agent)
         .fetch_optional(pool)
         .await
         {
