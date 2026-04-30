@@ -2746,9 +2746,19 @@ pub(super) fn spawn_turn_bridge(
                 let _ = save_inflight_state(&inflight_state);
             }
 
-            if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
-                crate::services::process::kill_pid_tree(pid);
-            }
+            let cleanup_policy = match cancel_token.restart_mode() {
+                Some(restart_mode) => TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    restart_mode,
+                },
+                None => TmuxCleanupPolicy::PreserveSession,
+            };
+            stop_active_turn(
+                &provider,
+                &cancel_token,
+                cleanup_policy,
+                "turn_bridge_cancelled",
+            )
+            .await;
 
             if let Some(dispatch_id) = dispatch_id.as_deref() {
                 if let Some(pg_pool) = shared_owned.pg_pool.as_ref() {

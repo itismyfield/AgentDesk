@@ -1,6 +1,5 @@
 use crate::services::provider::ProviderKind;
 
-use super::super::turn_bridge::cancel_active_token;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_has_active_turn,
 };
@@ -196,11 +195,13 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
 
         let cancel = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
         if let Some(token) = cancel.token {
-            cancel_active_token(
+            super::super::turn_bridge::stop_active_turn(
+                &ctx.data().provider,
                 &token,
                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                 command_name,
-            );
+            )
+            .await;
         }
     }
 

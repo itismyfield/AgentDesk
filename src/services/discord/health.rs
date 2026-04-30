@@ -834,7 +834,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
 
     if let Some(token) = result.token.as_ref() {
         let termination_recorded = if !result.already_stopping || cleanup_requested {
-            super::turn_bridge::cancel_active_token(token, cleanup_policy, reason)
+            super::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason).await
         } else {
             false
         };
@@ -859,7 +859,7 @@ pub(crate) async fn stop_provider_channel_runtime_with_policy(
     let mut termination_recorded = false;
     if let Some(token) = finish.removed_token.as_ref() {
         termination_recorded =
-            super::turn_bridge::cancel_active_token(token, cleanup_policy, reason);
+            super::turn_bridge::stop_active_turn(&provider, token, cleanup_policy, reason).await;
     }
     apply_runtime_hard_stop_cleanup(
         &shared,
@@ -1240,11 +1240,13 @@ pub async fn clear_provider_channel_runtime(
 
     let cleared = mailbox_clear_channel(&shared, &provider, channel_id).await;
     if let Some(token) = cleared.removed_token {
-        super::turn_bridge::cancel_active_token(
+        super::turn_bridge::stop_active_turn(
+            &provider,
             &token,
             super::TmuxCleanupPolicy::PreserveSession,
             "auto-queue slot clear",
-        );
+        )
+        .await;
         decrement_counter(shared.global_active.as_ref());
     }
 
