@@ -1994,6 +1994,9 @@ agents:
             assert!(rendered.contains("ch-td"));
             assert!(!rendered.contains("ch-pd (PD"));
             assert!(rendered.contains("Name 1-2 peer agents"));
+            assert!(rendered.contains("agentdesk send-to-agent"));
+            let removed_skill = ["send", "agent", "message"].join("-");
+            assert!(!rendered.contains(&removed_skill));
         });
     }
 

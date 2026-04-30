@@ -336,7 +336,7 @@ pub(in crate::services::discord) fn render_peer_agent_guidance(
         "Other specialist agents share this workspace. For requests mostly outside your scope:".to_string(),
         "1. Name 1-2 peer agents that fit better and why.".to_string(),
         "2. Ask \"해당 에이전트에게 전달할까요?\" and wait for approval.".to_string(),
-        "3. On approval, call the `send-agent-message` skill to forward context.".to_string(),
+        "3. On approval, call `agentdesk send-to-agent --from <self> --to <peer> --message \"...\" [--channel-kind cc|cdx]` to forward context via the announce bot so the peer intake_gate can trigger.".to_string(),
         "If the user wants your perspective anyway, answer within your scope and note the handoff option.".to_string(),
         String::new(),
         "Available peer agents:".to_string(),
