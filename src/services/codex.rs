@@ -1363,8 +1363,8 @@ mod tests {
 
         assert!(prompt.contains("[Authoritative Instructions]"));
         assert!(prompt.contains("role: PMD"));
-        assert!(prompt.contains("[Tool Policy]"));
-        assert!(prompt.contains("Bash, Read"));
+        assert!(!prompt.contains("[Tool Policy]"));
+        assert!(!prompt.contains("Bash, Read"));
         assert!(prompt.contains("[User Request]\nrole과 mission만 답해줘."));
     }
 

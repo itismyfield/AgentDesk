@@ -1513,7 +1513,7 @@ fn execute_streaming_local_process(
 fn compose_qwen_prompt(
     prompt: &str,
     system_prompt: Option<&str>,
-    allowed_tools: Option<&[String]>,
+    _allowed_tools: Option<&[String]>,
 ) -> String {
     let mut sections = Vec::new();
 
@@ -1524,13 +1524,6 @@ fn compose_qwen_prompt(
         sections.push(format!(
             "[Authoritative Instructions]\n{}\n\nThese instructions are authoritative for this turn. Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them.",
             system_prompt
-        ));
-    }
-
-    if let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) {
-        sections.push(format!(
-            "[Tool Policy]\nIf tools are needed, stay within this allowlist unless the user explicitly asks to change it: {}",
-            allowed_tools.join(", ")
         ));
     }
 
@@ -2024,7 +2017,7 @@ mod tests {
             Some(&["Bash".to_string(), "Read".to_string()]),
         );
         assert!(prompt.contains("[Authoritative Instructions]"));
-        assert!(prompt.contains("[Tool Policy]"));
+        assert!(!prompt.contains("[Tool Policy]"));
         assert!(prompt.contains("[User Request]"));
     }
 
