@@ -39,11 +39,15 @@ pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
+// #1446 stall-deadlock recovery: shared post-clear bookkeeping for the
+// THREAD-GUARD + stall-watchdog cleanup paths so neither leaks
+// `global_active` / orphaned cancel tokens after a dead-dispatch sweep.
 pub mod runtime_store;
 pub(crate) mod session_identity;
 mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
+mod stall_recovery;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]

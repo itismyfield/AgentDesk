@@ -316,9 +316,39 @@ impl HealthRegistry {
     /// call is wrapped in `spawn_blocking` so it never stalls the axum
     /// runtime even if tmux is wedged.
     pub async fn snapshot_watcher_state(&self, channel_id: u64) -> Option<WatcherStateSnapshot> {
+        self.snapshot_watcher_state_filtered(channel_id, None).await
+    }
+
+    /// #1446 — provider-scoped variant of `snapshot_watcher_state`. Used by
+    /// the stall watchdog so a multi-provider deployment that shares a
+    /// single Discord channel never has provider B's pass skip cleanup
+    /// because provider A happened to be the first registered entry that
+    /// "knew" the channel.
+    ///
+    /// `provider_filter == None` preserves the legacy behaviour
+    /// (first-match across all providers).
+    pub(crate) async fn snapshot_watcher_state_for_provider(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+    ) -> Option<WatcherStateSnapshot> {
+        self.snapshot_watcher_state_filtered(channel_id, Some(provider))
+            .await
+    }
+
+    async fn snapshot_watcher_state_filtered(
+        &self,
+        channel_id: u64,
+        provider_filter: Option<&ProviderKind>,
+    ) -> Option<WatcherStateSnapshot> {
         let channel = ChannelId::new(channel_id);
         let providers = self.providers.lock().await;
         for entry in providers.iter() {
+            if let Some(filter) = provider_filter
+                && !entry.name.eq_ignore_ascii_case(filter.as_str())
+            {
+                continue;
+            }
             let shared = entry.shared.clone();
             let watcher_binding = shared.tmux_watchers.channel_binding(&channel);
             let inflight = ProviderKind::from_str(&entry.name)
@@ -3159,18 +3189,18 @@ pub(super) async fn run_stall_watchdog_pass(
     let now_unix_secs = chrono::Utc::now().timestamp();
     let mut cleaned = 0usize;
     for channel_id in candidate_channels {
-        let snapshot = match registry.snapshot_watcher_state(channel_id.get()).await {
+        // #1446 codex review iter-2 P2 — use the provider-scoped snapshot
+        // helper. The unscoped variant returns the FIRST registered
+        // provider that knows the channel, so in a multi-provider
+        // deployment that shares a Discord channel the later provider's
+        // watchdog pass would never see its own state.
+        let snapshot = match registry
+            .snapshot_watcher_state_for_provider(provider, channel_id.get())
+            .await
+        {
             Some(snapshot) => snapshot,
             None => continue,
         };
-        // #1446 codex review P2 — `snapshot_watcher_state` returns the
-        // first provider that knows the channel. If that's not THIS
-        // provider's pass, defer to the matching provider's watchdog: we
-        // must not destructively clean up a different provider's
-        // inflight/mailbox keyed by the same Discord channel id.
-        if !snapshot.provider.eq_ignore_ascii_case(provider.as_str()) {
-            continue;
-        }
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
@@ -3195,10 +3225,18 @@ pub(super) async fn run_stall_watchdog_pass(
         //      watchdog targets, no such task exists so we must use
         //      `mailbox_clear_channel` to synchronously release the
         //      in-memory lock and stop subsequent THREAD-GUARD queueing.
-        //   3. drop any parent → thread mapping that points at this channel
+        //   3. finalize the orphaned clear via `stall_recovery` so
+        //      `global_active` and any leftover child/tmux are released.
+        //   4. drop any parent → thread mapping that points at this channel
         //      (so the parent's THREAD-GUARD stops queueing)
         super::inflight::delete_inflight_state_file(provider, channel_id.get());
-        let _ = mailbox_clear_channel(&shared, provider, channel_id).await;
+        let cleared = mailbox_clear_channel(&shared, provider, channel_id).await;
+        super::stall_recovery::finalize_orphaned_clear(
+            &shared,
+            channel_id,
+            cleared.removed_token,
+            "1446_stall_watchdog",
+        );
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);

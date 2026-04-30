@@ -161,6 +161,13 @@ pub(super) fn queue_pending_reaction_for(outcome: super::super::MailboxEnqueueOu
 /// whether its `updated_at` is older than `INFLIGHT_STALENESS_THRESHOLD_SECS`.
 /// Returns `false` when no state file exists (nothing to clean) or when
 /// `updated_at` cannot be parsed (never infer staleness from missing data).
+///
+/// **Pure-classification helper only.** A stale `updated_at` is necessary
+/// but not sufficient to force-clean a live thread — `updated_at` only
+/// advances when `save_inflight_state` runs, so a healthy long Bash /
+/// large Read / slow LLM stream can legitimately go silent for minutes.
+/// `thread_guard_should_force_clean_stale_thread` adds the required
+/// secondary signal (watcher snapshot's `desynced == true`).
 pub(super) fn thread_guard_inflight_is_stale(
     provider: &ProviderKind,
     thread_id: serenity::ChannelId,
@@ -175,6 +182,44 @@ pub(super) fn thread_guard_inflight_is_stale(
             )
         })
         .unwrap_or(false)
+}
+
+/// #1446 Layer 2 — full force-clean predicate. Requires BOTH:
+///   1. `thread_guard_inflight_is_stale` (persisted `updated_at` is older
+///      than `INFLIGHT_STALENESS_THRESHOLD_SECS`), AND
+///   2. the watcher-state snapshot for the thread reports
+///      `desynced == true` (capture-lag, cross-owner mismatch, or live-
+///      tmux orphan with no relay heartbeat — the same conjunction the
+///      stall-watchdog uses).
+///
+/// Without the snapshot's desync corroboration we would force-clean a
+/// healthy long-running turn whose `updated_at` simply has not advanced
+/// because no chunk hit the bridge in the last 5 minutes. Returning
+/// `false` when the registry is unreachable is the conservative default —
+/// a missing registry happens during startup before the stall-watchdog
+/// would also be running, so deferring cleanup costs nothing.
+pub(super) async fn thread_guard_should_force_clean_stale_thread(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    thread_id: serenity::ChannelId,
+    now_unix_secs: i64,
+) -> bool {
+    if !thread_guard_inflight_is_stale(provider, thread_id, now_unix_secs) {
+        return false;
+    }
+    let Some(registry) = shared.health_registry.upgrade() else {
+        return false;
+    };
+    // Provider-scoped snapshot — multi-provider deployments may share a
+    // Discord channel, so the unscoped variant could return a different
+    // provider's state and we'd misread `desynced`.
+    let Some(snapshot) = registry
+        .snapshot_watcher_state_for_provider(provider, thread_id.get())
+        .await
+    else {
+        return false;
+    };
+    snapshot.desynced
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
@@ -193,6 +238,11 @@ pub(super) fn thread_guard_inflight_is_stale(
 ///      / `active_user_message_id` and reports `has_active_turn() == false`
 ///      immediately on completion (see `ChannelMailboxMsg::Clear` handler
 ///      in `turn_orchestrator.rs`).
+///   4. complete the bookkeeping that the missing `finish_turn` would
+///      otherwise have done: cancel the orphaned token (kill any leftover
+///      child / tmux session) and decrement `global_active`. Mirrors the
+///      `placeholder_sweeper::finalize_abandoned_mailbox` cleanup
+///      pattern so health and deferred-restart counters do not leak.
 ///
 /// We never touch the parent channel's own mailbox — only the thread's.
 /// This preserves the `watcher_owns_live_relay` invariant by leaving
@@ -210,7 +260,13 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     );
     shared.dispatch_thread_parents.remove(&parent_channel_id);
     super::super::inflight::delete_inflight_state_file(provider, thread_id.get());
-    let _ = mailbox_clear_channel(shared, provider, thread_id).await;
+    let cleared = mailbox_clear_channel(shared, provider, thread_id).await;
+    super::super::stall_recovery::finalize_orphaned_clear(
+        shared,
+        thread_id,
+        cleared.removed_token,
+        "1446_thread_guard_stale_inflight",
+    );
 }
 
 fn should_merge_consecutive_messages(text: &str, is_allowed_bot: bool) -> bool {
@@ -937,13 +993,18 @@ pub(in crate::services::discord) async fn handle_event(
                         // pinned. The THREAD-GUARD then queues every parent-
                         // channel bot message forever because
                         // `mailbox_has_active_turn(thread)` keeps returning
-                        // true. Detect that case via the inflight staleness
-                        // helper and force-clean before deciding to queue.
-                        let stale_inflight = thread_guard_inflight_is_stale(
+                        // true. We require BOTH a stale `updated_at` AND a
+                        // watcher-state desync signal before force-cleaning,
+                        // mirroring the stall-watchdog's conjunction so a
+                        // quiet-but-live long turn (e.g. mid-Bash) is never
+                        // mistaken for a dead dispatch.
+                        let stale_inflight = thread_guard_should_force_clean_stale_thread(
+                            &data.shared,
                             &data.provider,
                             thread_id,
                             chrono::Utc::now().timestamp(),
-                        );
+                        )
+                        .await;
                         if stale_inflight {
                             thread_guard_force_clean_stale_thread(
                                 &data.shared,
