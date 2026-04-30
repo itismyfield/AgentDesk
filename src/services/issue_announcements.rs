@@ -69,8 +69,8 @@ pub async fn create_issue_announcement_pg(
         return Ok(None);
     };
 
-    let token = crate::credential::read_bot_token("announce")
-        .ok_or_else(|| "no announce bot token configured".to_string())?;
+    let token = crate::credential::read_bot_token("notify")
+        .ok_or_else(|| "no notify bot token configured".to_string())?;
     let created_at = Utc::now();
     let content = render_active_card(
         input.issue_number,
@@ -135,8 +135,8 @@ pub async fn complete_issue_announcement_pg(
         return Ok(false);
     };
 
-    let token = crate::credential::read_bot_token("announce")
-        .ok_or_else(|| "no announce bot token configured".to_string())?;
+    let token = crate::credential::read_bot_token("notify")
+        .ok_or_else(|| "no notify bot token configured".to_string())?;
     let title = event.title.as_deref().unwrap_or(&row.title);
     let content = render_completed_card(title, &row, &event);
     let edit_result = send_issue_announcement_message(
