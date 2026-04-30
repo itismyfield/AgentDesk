@@ -1,7 +1,15 @@
 use super::*;
 
 /// POST /api/auto-queue/generate
+///
 /// Creates a queue run from ready cards, ordered by priority.
+///
+/// This endpoint is single-call complete. Do NOT chain /redispatch, /retry,
+/// or /transition after it for the same card — that creates duplicate
+/// dispatches (see #1442 incident). The response surfaces structured skip
+/// breakdowns (`skipped_due_to_active_dispatch`, `skipped_due_to_dependency`,
+/// `skipped_due_to_filter`) so callers can make follow-up decisions without
+/// guessing.
 pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
@@ -122,6 +130,20 @@ pub async fn generate(
         });
     }
 
+    // #1442: capture skip-reason breakdowns for the requested issue_numbers
+    // (or for everything filtered out when no explicit list was given). This
+    // lets callers see why a card was excluded without chaining extra calls.
+    let candidate_issue_numbers: std::collections::HashSet<i64> = cards
+        .iter()
+        .filter_map(|card| card.github_issue_number)
+        .collect();
+    let skip_breakdown = collect_generate_skip_breakdown(
+        pool,
+        requested_issue_numbers.as_deref(),
+        &candidate_issue_numbers,
+    )
+    .await;
+
     if cards.is_empty() {
         let mut counts_map = serde_json::Map::new();
         if let Some(pipeline) = crate::pipeline::try_get() {
@@ -149,6 +171,9 @@ pub async fn generate(
                 "message": "No dispatchable cards found",
                 "hint": "Move cards to a dispatchable state before generating a queue.",
                 "counts": counts_map,
+                "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
+                "skipped_due_to_dependency": Vec::<serde_json::Value>::new(),
+                "skipped_due_to_filter": skip_breakdown.filter,
             })),
         );
     }
@@ -163,6 +188,7 @@ pub async fn generate(
         .collect();
     let mut filtered_cards = Vec::with_capacity(cards.len());
     let mut excluded_count = 0usize;
+    let mut skipped_due_to_dependency: Vec<serde_json::Value> = Vec::new();
     let mut dependency_status_cache: HashMap<i64, Option<String>> = HashMap::new();
     for card in &cards {
         let dep_parse = extract_dependency_parse_result(card);
@@ -229,6 +255,12 @@ pub async fn generate(
                 unresolved_external_dependencies
             );
             excluded_count += 1;
+            if let Some(issue_number) = card.github_issue_number {
+                skipped_due_to_dependency.push(json!({
+                    "issue_number": issue_number,
+                    "unresolved_deps": unresolved_external_dependencies,
+                }));
+            }
         }
     }
 
@@ -238,7 +270,10 @@ pub async fn generate(
             Json(json!({
                 "run": null,
                 "entries": [],
-                "message": format!("No cards available ({}개 외부 의존성 미충족으로 제외)", excluded_count)
+                "message": format!("No cards available ({}개 외부 의존성 미충족으로 제외)", excluded_count),
+                "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
+                "skipped_due_to_dependency": skipped_due_to_dependency,
+                "skipped_due_to_filter": skip_breakdown.filter,
             })),
         );
     }
@@ -425,6 +460,100 @@ pub async fn generate(
 
     (
         StatusCode::OK,
-        Json(json!({ "run": run, "entries": entries })),
+        Json(json!({
+            "run": run,
+            "entries": entries,
+            "skipped_due_to_active_dispatch": skip_breakdown.active_dispatch,
+            "skipped_due_to_dependency": skipped_due_to_dependency,
+            "skipped_due_to_filter": skip_breakdown.filter,
+        })),
     )
+}
+
+/// Structured skip-reason breakdown for `/api/auto-queue/generate` (#1442).
+#[derive(Debug, Default)]
+pub(crate) struct GenerateSkipBreakdown {
+    pub active_dispatch: Vec<serde_json::Value>,
+    pub filter: Vec<serde_json::Value>,
+}
+
+/// Classify why each requested issue_number didn't make it into the candidate
+/// pool. When `requested_issue_numbers` is None we skip this work — the
+/// breakdown is most useful when callers explicitly asked for specific
+/// issues and need to know why something was dropped.
+pub(crate) async fn collect_generate_skip_breakdown(
+    pool: &sqlx::PgPool,
+    requested_issue_numbers: Option<&[i64]>,
+    candidate_issue_numbers: &std::collections::HashSet<i64>,
+) -> GenerateSkipBreakdown {
+    let mut breakdown = GenerateSkipBreakdown::default();
+    let Some(requested) = requested_issue_numbers else {
+        return breakdown;
+    };
+    if requested.is_empty() {
+        return breakdown;
+    }
+    for issue_number in requested {
+        if candidate_issue_numbers.contains(issue_number) {
+            continue;
+        }
+        // Look up the most recent matching card to determine the actual
+        // skip reason (active dispatch, wrong status, missing card).
+        match sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT id, status, latest_dispatch_id
+             FROM kanban_cards
+             WHERE github_issue_number::BIGINT = $1
+             ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(*issue_number)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((_card_id, status, latest_dispatch_id))) => {
+                // Check if the card has an active dispatch (status pending or
+                // dispatched). This is the #1442 case — caller might assume
+                // generate skipped silently and re-call /redispatch.
+                let has_active_dispatch = match latest_dispatch_id.as_deref() {
+                    Some(dispatch_id) => sqlx::query_scalar::<_, Option<String>>(
+                        "SELECT status
+                         FROM task_dispatches
+                         WHERE id = $1 AND status IN ('pending', 'dispatched')",
+                    )
+                    .bind(dispatch_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten()
+                    .map(|_| dispatch_id.to_string()),
+                    None => None,
+                };
+                if let Some(existing_dispatch_id) = has_active_dispatch {
+                    breakdown.active_dispatch.push(json!({
+                        "issue_number": issue_number,
+                        "existing_dispatch_id": existing_dispatch_id,
+                    }));
+                } else {
+                    breakdown.filter.push(json!({
+                        "issue_number": issue_number,
+                        "reason": format!("card status '{status}' is not enqueueable"),
+                    }));
+                }
+            }
+            Ok(None) => {
+                breakdown.filter.push(json!({
+                    "issue_number": issue_number,
+                    "reason": "no kanban card found for this issue number",
+                }));
+            }
+            Err(error) => {
+                breakdown.filter.push(json!({
+                    "issue_number": issue_number,
+                    "reason": format!("lookup failed: {error}"),
+                }));
+            }
+        }
+    }
+    breakdown
 }

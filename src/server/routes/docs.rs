@@ -1404,7 +1404,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/transition",
             "kanban",
-            "Transition a single card with administrative force-transition semantics. Canonical runtime path is /transition; the old /force-transition path is removed. Requires explicit Bearer auth.",
+            "Transition a single card with administrative force-transition semantics. Canonical runtime path is /transition; the old /force-transition path is removed. Requires explicit Bearer auth. Single-call complete: do NOT chain /redispatch, /retry, or /auto-queue/generate after it (#1442). Inspect cancelled_dispatch_ids, created_dispatch_id, and next_action_hint in the response.",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -1428,7 +1428,17 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"status": "ready", "cancel_dispatches": true}}),
-            json!({"card": {"id": "card-1", "status": "ready"}, "forced": true, "from": "in_progress", "to": "ready", "cancelled_dispatches": 1, "skipped_auto_queue_entries": 1}),
+            json!({
+                "card": {"id": "card-1", "status": "ready"},
+                "forced": true,
+                "from": "in_progress",
+                "to": "ready",
+                "cancelled_dispatches": 1,
+                "cancelled_dispatch_ids": ["dispatch-abc"],
+                "created_dispatch_id": null,
+                "next_action_hint": "call /api/auto-queue/generate to dispatch newly-ready card",
+                "skipped_auto_queue_entries": 1
+            }),
         )
         .with_error_example(
             400,
@@ -1436,7 +1446,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "status is required"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/kanban-cards/card-1/transition -H 'Content-Type: application/json' -d '{\"status\":\"ready\",\"cancel_dispatches\":true}'"),
-        ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card: re-execute the same failed step with the same intent and context (optionally swapping assignee). Distinct from /redispatch (creates a NEW dispatch id), /resume (continues a checkpointed turn), and /reopen (re-admits a closed card).")
+        ep("POST", "/api/kanban-cards/{id}/retry", "kanban", "Retry card: re-execute the same failed step with the same intent and context (optionally swapping assignee). Distinct from /redispatch (creates a NEW dispatch id), /resume (continues a checkpointed turn), and /reopen (re-admits a closed card). Single-call complete: do NOT chain /transition or /auto-queue/generate after it (#1442).")
             .with_params([
                 ("id", path_param("Kanban card ID")),
                 (
@@ -1450,7 +1460,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ])
             .with_example(
                 json!({"path": {"id": "card-1"}, "body": {"assignee_agent_id": "agent-review"}}),
-                json!({"card": {"id": "card-1", "assigned_agent_id": "agent-review", "latest_dispatch_id": "dispatch-retry-1"}}),
+                json!({
+                    "card": {"id": "card-1", "assigned_agent_id": "agent-review", "latest_dispatch_id": "dispatch-retry-1"},
+                    "new_dispatch_id": "dispatch-retry-1",
+                    "cancelled_dispatch_id": "dispatch-old-1",
+                    "next_action": "none_required"
+                }),
             )
             .with_error_example(
                 409,
@@ -1462,7 +1477,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/kanban-cards/{id}/redispatch",
             "kanban",
-            "Redispatch: cancel the current live dispatch and create a brand-new dispatch entry with a new dispatch_id for the same card intent. Distinct from /retry (re-executes the SAME step with the same params), /resume (continues a checkpoint), and /reopen (re-admits a closed card).",
+            "Redispatch: cancel the current live dispatch and create a brand-new dispatch entry with a new dispatch_id for the same card intent. Distinct from /retry (re-executes the SAME step with the same params), /resume (continues a checkpoint), and /reopen (re-admits a closed card). Single-call complete: do NOT chain /transition or /auto-queue/generate after it (#1442).",
         )
         .with_params([
             ("id", path_param("Kanban card ID")),
@@ -1473,7 +1488,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"reason": "stale thread"}}),
-            json!({"card": {"id": "card-1", "latest_dispatch_id": "dispatch-redispatch-1", "status": "requested"}}),
+            json!({
+                "card": {"id": "card-1", "latest_dispatch_id": "dispatch-redispatch-1", "status": "requested"},
+                "new_dispatch_id": "dispatch-redispatch-1",
+                "cancelled_dispatch_id": "dispatch-old-1",
+                "next_action": "none_required"
+            }),
         )
         .with_error_example(
             404,
@@ -2490,7 +2510,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/auto-queue/generate",
             "auto-queue",
-            "Generate auto-queue entries",
+            "Generate auto-queue entries. Single-call complete: do NOT chain /redispatch, /retry, or /transition for the same card after it (#1442). Inspect skipped_due_to_active_dispatch / skipped_due_to_dependency / skipped_due_to_filter in the response to see structured skip reasons.",
         )
         .with_params([
             (
@@ -2551,7 +2571,13 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "review_mode": "disabled", "unified_thread": true, "max_concurrent_threads": 2}}),
-            json!({"run": {"id": "run-1", "status": "generated", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}]}),
+            json!({
+                "run": {"id": "run-1", "status": "generated", "review_mode": "disabled", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false},
+                "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}],
+                "skipped_due_to_active_dispatch": [{"issue_number": 405, "existing_dispatch_id": "dispatch-already-running"}],
+                "skipped_due_to_dependency": [{"issue_number": 407, "unresolved_deps": ["#410:in_progress"]}],
+                "skipped_due_to_filter": []
+            }),
         )
         .with_error_example(
             400,

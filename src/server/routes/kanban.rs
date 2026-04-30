@@ -862,6 +862,11 @@ pub async fn delete_card(
 }
 
 /// POST /api/kanban-cards/:id/retry
+///
+/// This endpoint is single-call complete. Do NOT chain /transition or
+/// /auto-queue/generate after it — that creates duplicate dispatches
+/// (see #1442 incident). Inspect `new_dispatch_id` and `next_action` in
+/// the response to confirm the new dispatch was created.
 pub async fn retry_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -896,6 +901,7 @@ pub async fn retry_card(
     .ok()
     .flatten()
     .flatten();
+    let cancelled_dispatch_id: Option<String> = existing_dispatch_id.clone();
     if let Some(dispatch_id) = existing_dispatch_id.as_deref()
         && let Err(error) =
             crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch_id, None)
@@ -957,8 +963,10 @@ pub async fn retry_card(
     } else {
         agent_id_for_dispatch
     };
-    if !dispatch_agent_id.is_empty()
-        && let Err(error) = crate::dispatch::create_dispatch_pg_only(
+    let mut new_dispatch_id: Option<String> = None;
+    let mut next_action = "none_required".to_string();
+    if !dispatch_agent_id.is_empty() {
+        match crate::dispatch::create_dispatch_pg_only(
             pool,
             &state.engine,
             &id,
@@ -966,18 +974,37 @@ pub async fn retry_card(
             &retry_dispatch_type,
             &retry_title,
             &json!({"retry": true, "preserved_dispatch_type": retry_dispatch_type.clone()}),
-        )
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+        ) {
+            Ok(dispatch) => {
+                new_dispatch_id = dispatch
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+    } else {
+        // No agent assigned — caller must assign an agent before a dispatch can be created.
+        next_action = "assign_agent_then_call_retry".to_string();
     }
 
     match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => {
             crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-            (StatusCode::OK, Json(json!({"card": card})))
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "card": card,
+                    "new_dispatch_id": new_dispatch_id,
+                    "cancelled_dispatch_id": cancelled_dispatch_id,
+                    "next_action": next_action,
+                })),
+            )
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -991,6 +1018,11 @@ pub async fn retry_card(
 }
 
 /// POST /api/kanban-cards/:id/redispatch
+///
+/// This endpoint is single-call complete. Do NOT chain /transition or
+/// /auto-queue/generate after it — that creates duplicate dispatches
+/// (see #1442 incident). Inspect `new_dispatch_id` and `next_action` in
+/// the response to confirm the new dispatch was created.
 pub async fn redispatch_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1026,6 +1058,7 @@ pub async fn redispatch_card(
     .ok()
     .flatten()
     .flatten();
+    let cancelled_dispatch_id: Option<String> = dispatch_id.clone();
     if let Some(dispatch_id) = dispatch_id.as_deref()
         && let Err(error) =
             crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch_id, None)
@@ -1060,8 +1093,10 @@ pub async fn redispatch_card(
         }
     }
 
-    if !agent_id.is_empty()
-        && let Err(error) = crate::dispatch::create_dispatch_pg_only(
+    let mut new_dispatch_id: Option<String> = None;
+    let mut next_action = "none_required".to_string();
+    if !agent_id.is_empty() {
+        match crate::dispatch::create_dispatch_pg_only(
             pool,
             &state.engine,
             &id,
@@ -1069,18 +1104,37 @@ pub async fn redispatch_card(
             &dispatch_type,
             &dispatch_title,
             &json!({"redispatch": true, "preserved_dispatch_type": dispatch_type.clone()}),
-        )
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+        ) {
+            Ok(dispatch) => {
+                new_dispatch_id = dispatch
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{error}")})),
+                );
+            }
+        }
+    } else {
+        // No agent assigned — caller must assign an agent before a dispatch can be created.
+        next_action = "assign_agent_then_call_redispatch".to_string();
     }
 
     match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => {
             crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-            (StatusCode::OK, Json(json!({"card": card})))
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "card": card,
+                    "new_dispatch_id": new_dispatch_id,
+                    "cancelled_dispatch_id": cancelled_dispatch_id,
+                    "next_action": next_action,
+                })),
+            )
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -3830,6 +3884,50 @@ async fn clear_reopen_preflight_cache_on_pg(
     save_card_metadata_map_pg(pool, card_id, &metadata).await
 }
 
+/// Snapshot active dispatches (status IN ('pending','dispatched')) for a card.
+///
+/// Used by /transition (#1442) to report which dispatch IDs were cancelled by
+/// the cleanup paths in the response payload.
+async fn active_dispatch_ids_for_card_pg(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(card_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("load active dispatches for {card_id}: {error}"))?;
+    Ok(rows)
+}
+
+/// Filter the input dispatch IDs down to the ones currently in `cancelled`
+/// status. Used after a /transition cleanup to confirm which previously-active
+/// dispatches were actually terminated by the cleanup path (#1442).
+async fn cancelled_dispatch_ids_among_pg(
+    pool: &sqlx::PgPool,
+    dispatch_ids: &[String],
+) -> anyhow::Result<Vec<String>> {
+    if dispatch_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE id = ANY($1)
+           AND status = 'cancelled'",
+    )
+    .bind(dispatch_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow::anyhow!("filter cancelled dispatches: {error}"))?;
+    Ok(rows)
+}
+
 async fn clear_all_threads_pg(pool: &sqlx::PgPool, card_id: &str) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE kanban_cards
@@ -3849,6 +3947,12 @@ async fn clear_all_threads_pg(pool: &sqlx::PgPool, card_id: &str) -> anyhow::Res
 ///
 /// Administrative endpoint. Bypasses dispatch validation.
 /// Requires an explicit Bearer token (no same-origin bypass).
+///
+/// This endpoint is single-call complete. Do NOT chain /redispatch,
+/// /retry, or /auto-queue/generate after it — that creates duplicate
+/// dispatches (see #1442 incident). Inspect `cancelled_dispatch_ids`,
+/// `created_dispatch_id`, and `next_action_hint` in the response to
+/// determine whether any follow-up is genuinely required.
 pub async fn force_transition(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -3874,6 +3978,23 @@ pub async fn force_transition(
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
         .unwrap_or_else(|| "api".to_string());
+    // Snapshot active dispatch IDs before transition so we can report which
+    // were cancelled by the cleanup paths (#1442). The cleanup helpers report
+    // counts but not IDs; we reconcile by querying the post-transition status
+    // of each pre-existing active dispatch and surfacing the ones now in
+    // `cancelled` state.
+    let pre_active_dispatch_ids: Vec<String> = active_dispatch_ids_for_card_pg(pool, &id)
+        .await
+        .unwrap_or_default();
+    let pre_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
     let terminal_cleanup =
         match sqlx::query("SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1")
             .bind(&id)
@@ -3965,6 +4086,49 @@ pub async fn force_transition(
             let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
             crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
 
+            // Reconcile the pre-transition active dispatch snapshot against
+            // current state to surface concrete cancelled IDs (#1442).
+            let cancelled_dispatch_ids =
+                if cancelled_dispatches > 0 && !pre_active_dispatch_ids.is_empty() {
+                    cancelled_dispatch_ids_among_pg(pool, &pre_active_dispatch_ids)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+            // Detect a brand-new dispatch that may have been kicked off by
+            // hooks fired during the transition (e.g. on_enter).
+            let post_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+            let created_dispatch_id = match (
+                pre_latest_dispatch_id.as_deref(),
+                post_latest_dispatch_id.as_deref(),
+            ) {
+                (Some(prev), Some(curr)) if prev != curr => Some(curr.to_string()),
+                (None, Some(curr)) => Some(curr.to_string()),
+                _ => None,
+            };
+
+            let next_action_hint = if created_dispatch_id.is_some() {
+                "none_required".to_string()
+            } else if matches!(result.to.as_str(), "ready" | "requested" | "in_progress") {
+                // Caller may want to dispatch the now-ready card via the
+                // queue. The transition itself is complete; this hint surfaces
+                // the natural follow-up so callers do not silently chain
+                // /redispatch (which would create duplicates — #1442).
+                "call /api/auto-queue/generate to dispatch newly-ready card".to_string()
+            } else {
+                "none_required".to_string()
+            };
+
             let card = load_card_json_pg(pool, &id)
                 .await
                 .map_err(|error| format!("{error}"))
@@ -3986,6 +4150,9 @@ pub async fn force_transition(
                             "from": result.from,
                             "to": result.to,
                             "cancelled_dispatches": cancelled_dispatches,
+                            "cancelled_dispatch_ids": cancelled_dispatch_ids,
+                            "created_dispatch_id": created_dispatch_id,
+                            "next_action_hint": next_action_hint,
                             "skipped_auto_queue_entries": skipped_auto_queue_entries
                         })),
                     )
