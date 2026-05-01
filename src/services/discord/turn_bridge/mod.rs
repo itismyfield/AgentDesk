@@ -20,7 +20,7 @@ use crate::db::session_observability::{
 };
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::{PersistTurnOwned, TurnTokenUsage};
-use crate::services::agent_protocol::TaskNotificationKind;
+use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::memory::{
     CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -238,10 +238,25 @@ fn record_placeholder_live_event(
     channel_id: ChannelId,
     event: Option<super::placeholder_live_events::RecentPlaceholderEvent>,
 ) {
-    if shared.placeholder_live_events_enabled
+    if (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
         && let Some(event) = event
     {
         shared.placeholder_live_events.push_event(channel_id, event);
+    }
+}
+
+fn record_status_panel_events(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    events: Vec<StatusEvent>,
+) -> bool {
+    if shared.status_panel_v2_enabled && !events.is_empty() {
+        shared
+            .placeholder_live_events
+            .push_status_events(channel_id, events);
+        true
+    } else {
+        false
     }
 }
 
@@ -1186,7 +1201,7 @@ pub(super) fn spawn_turn_bridge(
             bool, // ack_consumed
         )> = None;
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
-        if shared_owned.placeholder_live_events_enabled {
+        if shared_owned.placeholder_live_events_enabled || shared_owned.status_panel_v2_enabled {
             shared_owned.placeholder_live_events.clear_channel(channel_id);
         }
         let mut transport_error = false;
@@ -1246,7 +1261,36 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
+        let mut status_panel_msg_id = inflight_state.status_message_id.map(MessageId::new);
+        let mut last_status_panel_text = String::new();
+        let mut status_panel_dirty = shared_owned.status_panel_v2_enabled;
+        let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
+        let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
+
+        if shared_owned.status_panel_v2_enabled && status_panel_msg_id.is_none() {
+            let response_placeholder = "⏳ 응답 준비 중...";
+            match gateway.send_message(channel_id, response_placeholder).await {
+                Ok(response_msg_id) => {
+                    status_panel_msg_id = Some(current_msg_id);
+                    inflight_state.status_message_id = Some(current_msg_id.get());
+                    current_msg_id = response_msg_id;
+                    last_edit_text = response_placeholder.to_string();
+                    inflight_state.current_msg_id = current_msg_id.get();
+                    inflight_state.current_msg_len = last_edit_text.len();
+                    inflight_state.response_sent_offset = response_sent_offset;
+                    inflight_state.full_response = full_response.clone();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[turn_bridge] failed to create status-panel-v2 response message in channel {}: {}",
+                        channel_id,
+                        error
+                    );
+                    status_panel_dirty = false;
+                }
+            }
+        }
 
         // codex round-5 P2 on PR #1308: a dcserver restart resumed an inflight
         // turn whose persisted state still flags `long_running_placeholder_active`.
@@ -1409,6 +1453,11 @@ pub(super) fn spawn_turn_bridge(
                         }
                         StreamMessage::Thinking { summary } => {
                             let display = thinking_status_line();
+                            status_panel_dirty |= record_status_panel_events(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                vec![StatusEvent::Heartbeat],
+                            );
                             // #1113 implicit-terminate: a Thinking event after an
                             // unfinished ToolUse means the agent moved on without
                             // emitting a ToolResult. Promote the orphaned tool to
@@ -1487,6 +1536,13 @@ pub(super) fn spawn_turn_bridge(
                                 shared_owned.as_ref(),
                                 channel_id,
                                 super::placeholder_live_events::RecentPlaceholderEvent::tool_use(
+                                    &name, &input,
+                                ),
+                            );
+                            status_panel_dirty |= record_status_panel_events(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                super::placeholder_live_events::status_events_from_tool_use(
                                     &name, &input,
                                 ),
                             );
@@ -1683,6 +1739,13 @@ pub(super) fn spawn_turn_bridge(
                                     ),
                                 );
                             }
+                            status_panel_dirty |= record_status_panel_events(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                super::placeholder_live_events::status_events_from_tool_result(
+                                    is_error,
+                                ),
+                            );
                             // #1255: a long-running tool's ToolResult means the
                             // background card can transition to its terminal
                             // state.  We still keep the placeholder around for
@@ -1813,6 +1876,15 @@ pub(super) fn spawn_turn_bridge(
                                 shared_owned.as_ref(),
                                 channel_id,
                                 super::placeholder_live_events::RecentPlaceholderEvent::task_notification(
+                                    kind.as_str(),
+                                    &status,
+                                    &summary,
+                                ),
+                            );
+                            status_panel_dirty |= record_status_panel_events(
+                                shared_owned.as_ref(),
+                                channel_id,
+                                super::placeholder_live_events::status_events_from_task_notification(
                                     kind.as_str(),
                                     &status,
                                     &summary,
@@ -2246,6 +2318,40 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
+            if shared_owned.status_panel_v2_enabled
+                && status_panel_dirty
+                && last_status_panel_edit.elapsed() >= status_interval
+                && let Some(status_msg_id) = status_panel_msg_id
+            {
+                let panel_text = shared_owned.placeholder_live_events.render_status_panel(
+                    channel_id,
+                    &provider,
+                    status_panel_started_at,
+                );
+                if panel_text != last_status_panel_text {
+                    match gateway
+                        .edit_message(channel_id, status_msg_id, &panel_text)
+                        .await
+                    {
+                        Ok(()) => {
+                            last_status_panel_text = panel_text;
+                            last_status_panel_edit = tokio::time::Instant::now();
+                            inflight_state.status_message_id = Some(status_msg_id.get());
+                            state_dirty = true;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[turn_bridge] failed to edit status-panel-v2 message {} in channel {}: {}",
+                                status_msg_id,
+                                channel_id,
+                                error
+                            );
+                        }
+                    }
+                }
+                status_panel_dirty = false;
+            }
+
             if !watcher_owns_assistant_relay {
                 loop {
                     let current_portion =
@@ -2255,12 +2361,16 @@ pub(super) fn spawn_turn_bridge(
                     }
 
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
-                    let status_block = super::formatting::build_placeholder_status_block(
-                        indicator,
-                        prev_tool_status.as_deref(),
-                        current_tool_line.as_deref(),
-                        &full_response,
-                    );
+                    let status_block = if shared_owned.status_panel_v2_enabled {
+                        "⏳ 응답 준비 중...".to_string()
+                    } else {
+                        super::formatting::build_placeholder_status_block(
+                            indicator,
+                            prev_tool_status.as_deref(),
+                            current_tool_line.as_deref(),
+                            &full_response,
+                        )
+                    };
                     let Some(plan) =
                         super::formatting::plan_streaming_rollover(current_portion, &status_block)
                     else {
@@ -2372,12 +2482,16 @@ pub(super) fn spawn_turn_bridge(
 
                 let current_portion =
                     response_portion_after_offset(&full_response, response_sent_offset);
-                let status_block = super::formatting::build_placeholder_status_block(
-                    indicator,
-                    prev_tool_status.as_deref(),
-                    current_tool_line.as_deref(),
-                    &full_response,
-                );
+                let status_block = if shared_owned.status_panel_v2_enabled {
+                    "⏳ 응답 준비 중...".to_string()
+                } else {
+                    super::formatting::build_placeholder_status_block(
+                        indicator,
+                        prev_tool_status.as_deref(),
+                        current_tool_line.as_deref(),
+                        &full_response,
+                    )
+                };
                 let stable_display_text =
                     super::formatting::build_streaming_placeholder_text(current_portion, &status_block);
 
@@ -2911,10 +3025,17 @@ pub(super) fn spawn_turn_bridge(
             } else if remaining_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
-                let formatted = super::formatting::format_for_discord_with_provider(
-                    remaining_response,
-                    &provider,
-                );
+                let formatted = if shared_owned.status_panel_v2_enabled {
+                    super::formatting::format_for_discord_with_status_panel(
+                        remaining_response,
+                        &provider,
+                    )
+                } else {
+                    super::formatting::format_for_discord_with_provider(
+                        remaining_response,
+                        &provider,
+                    )
+                };
                 format!("{}\n\n[Stopped]", formatted)
             };
 
@@ -3336,10 +3457,17 @@ pub(super) fn spawn_turn_bridge(
                     terminal_delivery_committed = true;
                 }
             } else {
-                delivery_response = super::formatting::format_for_discord_with_provider(
-                    &delivery_response,
-                    &provider,
-                );
+                delivery_response = if shared_owned.status_panel_v2_enabled {
+                    super::formatting::format_for_discord_with_status_panel(
+                        &delivery_response,
+                        &provider,
+                    )
+                } else {
+                    super::formatting::format_for_discord_with_provider(
+                        &delivery_response,
+                        &provider,
+                    )
+                };
                 if can_chain_locally {
                     let replace_committed = turn_bridge_replace_outcome_committed(
                         shared_owned.as_ref(),

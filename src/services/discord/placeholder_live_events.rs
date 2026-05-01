@@ -293,9 +293,16 @@ fn render_status_panel(
     provider: &ProviderKind,
     started_at_unix: i64,
 ) -> String {
+    let header_status = if matches!(provider, ProviderKind::Codex)
+        && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
+    {
+        DerivedStatus::Running
+    } else {
+        snapshot.status.clone()
+    };
     let mut sections = vec![format!(
         "{} — {} (<t:{started_at_unix}:R>)",
-        render_derived_status(&snapshot.status),
+        render_derived_status(&header_status),
         provider.as_str()
     )];
 
@@ -1063,6 +1070,118 @@ mod tests {
                 prefix: "[background]".to_string(),
                 summary: "completed: CI green".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn status_panel_renders_derived_tool_state_under_limit() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(77);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
+        );
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(rendered.contains("도구 실행 중"));
+        assert!(rendered.contains("[Bash]"));
+        assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+    }
+
+    #[test]
+    fn status_panel_tracks_todowrite_plan() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(78);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "TodoWrite",
+                &json!({
+                    "todos": [
+                        {"content": "Read issue", "status": "completed"},
+                        {"content": "Implement panel", "status": "in_progress"}
+                    ]
+                })
+                .to_string(),
+            ),
+        );
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(rendered.contains("Plan"));
+        assert!(rendered.contains("- [x] Read issue"));
+        assert!(rendered.contains("- [ ] Implement panel"));
+    }
+
+    #[test]
+    fn status_panel_tracks_one_level_subagents() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(79);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "Task",
+                &json!({"subagent_type": "explorer", "description": "Inspect bridge"}).to_string(),
+            ),
+        );
+        events.push_status_events(
+            channel_id,
+            status_events_from_task_notification("subagent", "running", "found turn bridge"),
+        );
+        events.push_status_events(channel_id, status_events_from_tool_result(false));
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(rendered.contains("Subagents"));
+        assert!(rendered.contains("explorer Inspect bridge"));
+        assert!(rendered.contains("found turn bridge"));
+        assert!(rendered.contains("✓"));
+    }
+
+    #[test]
+    fn status_panel_hides_plan_and_subagents_for_codex() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(80);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "TodoWrite",
+                &json!({"todos": [{"content": "Hidden for Codex", "status": "pending"}]})
+                    .to_string(),
+            ),
+        );
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(
+                "Task",
+                &json!({"description": "Hidden subagent"}).to_string(),
+            ),
+        );
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+        assert!(!rendered.contains("Plan"));
+        assert!(!rendered.contains("Subagents"));
+        assert!(!rendered.contains("Hidden for Codex"));
+        assert!(!rendered.contains("Hidden subagent"));
+    }
+
+    #[test]
+    fn status_events_from_json_keeps_tool_result_visibility() {
+        let events = status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "is_error": true,
+                    "content": "failed"
+                }]
+            }
+        }));
+
+        assert_eq!(
+            events,
+            vec![
+                StatusEvent::ToolEnd { success: false },
+                StatusEvent::SubagentEnd { success: false }
+            ]
         );
     }
 }

@@ -7,7 +7,7 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
-use crate::services::agent_protocol::TaskNotificationKind;
+use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::message_outbox::{
     OutboxMessage, enqueue_lifecycle_notification_best_effort, enqueue_outbox_best_effort,
 };
@@ -29,7 +29,9 @@ use super::placeholder_cleanup::{
     PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
     classify_delete_error,
 };
-use super::placeholder_live_events::{RecentPlaceholderEvent, events_from_json};
+use super::placeholder_live_events::{
+    RecentPlaceholderEvent, events_from_json, status_events_from_json,
+};
 use super::settings::{
     channel_supports_provider, load_last_remote_profile, load_last_session_path,
     resolve_role_binding, validate_bot_channel_routing_with_provider_channel,
@@ -572,6 +574,7 @@ pub(super) struct WatcherLineOutcome {
 #[derive(Debug, Clone)]
 pub(super) struct RestoredWatcherTurn {
     current_msg_id: MessageId,
+    status_message_id: Option<MessageId>,
     response_sent_offset: usize,
     full_response: String,
     last_edit_text: String,
@@ -582,6 +585,7 @@ pub(super) struct RestoredWatcherTurn {
 #[derive(Debug)]
 struct WatcherStreamSeed {
     placeholder_msg_id: Option<MessageId>,
+    status_panel_msg_id: Option<MessageId>,
     response_sent_offset: usize,
     full_response: String,
     last_edit_text: String,
@@ -641,6 +645,7 @@ pub(super) fn restored_watcher_turn_from_inflight(
         normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
     Some(RestoredWatcherTurn {
         current_msg_id: MessageId::new(state.current_msg_id),
+        status_message_id: state.status_message_id.map(MessageId::new),
         response_sent_offset,
         full_response: state.full_response.clone(),
         last_edit_text: reconstructed_inflight_placeholder_body(state),
@@ -653,6 +658,7 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
     match restored_turn {
         Some(restored) => WatcherStreamSeed {
             placeholder_msg_id: Some(restored.current_msg_id),
+            status_panel_msg_id: restored.status_message_id,
             response_sent_offset: restored.response_sent_offset,
             full_response: restored.full_response,
             last_edit_text: restored.last_edit_text,
@@ -661,6 +667,7 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
         },
         None => WatcherStreamSeed {
             placeholder_msg_id: None,
+            status_panel_msg_id: None,
             response_sent_offset: 0,
             full_response: String::new(),
             last_edit_text: String::new(),
@@ -2955,6 +2962,9 @@ pub(super) async fn tmux_output_watcher_with_restore(
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut spin_idx: usize = 0;
         let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
+        let status_panel_msg_id: Option<serenity::MessageId> = stream_seed.status_panel_msg_id;
+        let mut last_status_panel_text = String::new();
+        let status_panel_started_at = chrono::Utc::now().timestamp();
         let mut last_edit_text = stream_seed.last_edit_text;
         let mut response_sent_offset = stream_seed.response_sent_offset;
         let finish_mailbox_on_completion = stream_seed.finish_mailbox_on_completion;
@@ -3304,6 +3314,40 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     last_status_update = tokio::time::Instant::now();
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
+
+                    if shared.status_panel_v2_enabled
+                        && let Some(status_msg_id) = status_panel_msg_id
+                    {
+                        let panel_text = shared.placeholder_live_events.render_status_panel(
+                            channel_id,
+                            &watcher_provider,
+                            status_panel_started_at,
+                        );
+                        if panel_text != last_status_panel_text {
+                            rate_limit_wait(&shared, channel_id).await;
+                            match channel_id
+                                .edit_message(
+                                    &http,
+                                    status_msg_id,
+                                    serenity::EditMessage::new().content(&panel_text),
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    last_status_panel_text = panel_text;
+                                }
+                                Err(error) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    tracing::warn!(
+                                        "  [{ts}] ⚠ tmux status-panel-v2 edit failed for msg {} in channel {}: {}",
+                                        status_msg_id.get(),
+                                        channel_id.get(),
+                                        error
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     let has_assistant_response_for_streaming = !full_response.trim().is_empty();
                     let recent_stop_for_streaming = if has_assistant_response_for_streaming {
@@ -4385,10 +4429,17 @@ pub(super) async fn tmux_output_watcher_with_restore(
             "monitor/task-notification watcher relays must not use notify-bot outbox"
         );
         let relay_ok = if relay_decision.should_direct_send {
-            let formatted = super::formatting::format_for_discord_with_provider(
-                current_response,
-                &watcher_provider,
-            );
+            let formatted = if shared.status_panel_v2_enabled {
+                super::formatting::format_for_discord_with_status_panel(
+                    current_response,
+                    &watcher_provider,
+                )
+            } else {
+                super::formatting::format_for_discord_with_provider(
+                    current_response,
+                    &watcher_provider,
+                )
+            };
             let relay_text = if relay_decision.should_tag_monitor_origin {
                 super::prepend_monitor_auto_turn_origin(&formatted)
             } else {
@@ -5444,6 +5495,8 @@ pub(super) struct WatcherToolState {
     pub transcript_events: Vec<SessionTranscriptEvent>,
     /// Recent user-visible tool/system events for Active placeholder cards.
     placeholder_events: Vec<RecentPlaceholderEvent>,
+    /// Provider-normalized status events for the status-panel-v2 message.
+    status_events: Vec<StatusEvent>,
 }
 
 impl WatcherToolState {
@@ -5456,15 +5509,21 @@ impl WatcherToolState {
             has_post_tool_text: false,
             transcript_events: Vec::new(),
             placeholder_events: Vec::new(),
+            status_events: Vec::new(),
         }
     }
 
     fn record_placeholder_events_from_json(&mut self, value: &serde_json::Value) {
         self.placeholder_events.extend(events_from_json(value));
+        self.status_events.extend(status_events_from_json(value));
     }
 
     fn take_placeholder_events(&mut self) -> Vec<RecentPlaceholderEvent> {
         std::mem::take(&mut self.placeholder_events)
+    }
+
+    fn take_status_events(&mut self) -> Vec<StatusEvent> {
+        std::mem::take(&mut self.status_events)
     }
 
     fn set_current_tool_line(&mut self, next_tool_line: Option<String>) {
@@ -5500,12 +5559,21 @@ fn flush_placeholder_live_events(
     tool_state: &mut WatcherToolState,
 ) -> bool {
     let events = tool_state.take_placeholder_events();
-    if shared.placeholder_live_events_enabled && !events.is_empty() {
+    let status_events = tool_state.take_status_events();
+    let mut dirty = false;
+    if (shared.placeholder_live_events_enabled || shared.status_panel_v2_enabled)
+        && !events.is_empty()
+    {
         shared.placeholder_live_events.push_many(channel_id, events);
-        true
-    } else {
-        false
+        dirty = true;
     }
+    if shared.status_panel_v2_enabled && !status_events.is_empty() {
+        shared
+            .placeholder_live_events
+            .push_status_events(channel_id, status_events);
+        dirty = true;
+    }
+    dirty
 }
 
 fn force_next_watcher_status_update(last_status_update: &mut tokio::time::Instant) {
@@ -5520,6 +5588,9 @@ fn build_watcher_placeholder_status_block(
     current_tool_line: Option<&str>,
     full_response: &str,
 ) -> String {
+    if shared.status_panel_v2_enabled {
+        return "⏳ 응답 준비 중...".to_string();
+    }
     let status_block = super::formatting::build_placeholder_status_block(
         indicator,
         prev_tool_status,
