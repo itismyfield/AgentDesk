@@ -198,6 +198,15 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
     upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
     crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
     crate::server::routes::escalation::seed_escalation_defaults_pg(pool, config).await?;
+    let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
+    crate::db::table_metadata::sync_pipeline_stages_from_yaml_pg(pool, &pipeline_path)
+        .await
+        .map_err(|error| {
+            format!(
+                "sync pipeline_stages from {}: {error}",
+                pipeline_path.display()
+            )
+        })?;
 
     for repo_id in normalized_repo_ids(&config.github.repos) {
         register_repo(pool, &repo_id).await?;
@@ -1035,6 +1044,48 @@ mod tests {
             .await
             .expect("count github_repos");
         assert_eq!(repo_count, 1);
+
+        let pipeline_stage_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = '__default__'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count default pipeline_stages");
+        assert!(
+            pipeline_stage_count >= 1,
+            "startup reseed must materialize default pipeline_stages from YAML"
+        );
+
+        let (first_stage, first_stage_order): (String, i64) = sqlx::query_as(
+            "SELECT stage_name, stage_order
+             FROM pipeline_stages
+             WHERE repo_id = '__default__'
+             ORDER BY stage_order
+             LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load first default pipeline stage");
+        assert_eq!(first_stage, "backlog");
+        assert_eq!(first_stage_order, 1);
+
+        let (source_of_truth, file_path, last_synced): (String, Option<String>, bool) =
+            sqlx::query_as(
+                "SELECT source_of_truth, file_path, last_synced_at IS NOT NULL AS last_synced
+                 FROM db_table_metadata
+                 WHERE table_name = 'pipeline_stages'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("load pipeline_stages source metadata");
+        assert_eq!(source_of_truth, "file-canonical");
+        assert!(
+            file_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("default-pipeline.yaml")),
+            "pipeline_stages metadata should record the source YAML path"
+        );
+        assert!(last_synced, "startup reseed must stamp last_synced_at");
 
         let agent_row = sqlx::query(
             "SELECT id, provider, discord_channel_cdx
