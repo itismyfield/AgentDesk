@@ -12,15 +12,6 @@ import {
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 export default function AgentFormModal({
   isKo,
   locale,
@@ -46,12 +37,7 @@ export default function AgentFormModal({
 }) {
   const { t } = useI18n();
   const overlayRef = useRef<HTMLDivElement>(null);
-  const [spriteFile, setSpriteFile] = useState<File | null>(null);
-  const [processing, setProcessing] = useState(false);
-  const [previews, setPreviews] = useState<Record<string, string> | null>(null);
   const [spriteNum, setSpriteNum] = useState(form.sprite_number ?? 0);
-  const [registering, setRegistering] = useState(false);
-  const [registered, setRegistered] = useState(false);
 
   // ESC 키로 닫기
   useEffect(() => {
@@ -318,154 +304,7 @@ export default function AgentFormModal({
           </SurfaceSubsection>
         </div>
 
-        {/* ── Sprite Upload ── */}
-        <div className="mt-5">
-          <SurfaceSubsection
-            title={tr("캐릭터 스프라이트", "Character Sprite")}
-            description={tr("스프라이트 시트를 업로드하고 등록 번호를 확정합니다.", "Upload the sprite sheet and register the final sprite number.")}
-          >
 
-          {!previews && !processing && (
-            <label
-              className="flex flex-col items-center justify-center gap-2 py-6 rounded-xl border-2 border-dashed cursor-pointer transition-colors hover:border-blue-500/50"
-              style={{ borderColor: "var(--th-input-border)", color: "var(--th-text-muted)" }}
-            >
-              <span className="text-2xl">🖼️</span>
-              <span className="text-xs">
-                {tr("4방향 스프라이트 시트 업로드 (2x2 그리드)", "Upload 4-direction sprite sheet (2x2 grid)")}
-              </span>
-              <span className="text-xs">{tr("앞 / 왼 / 뒤 / 오른 순서", "Front / Left / Back / Right order")}</span>
-              <span className="text-xs">
-                {t({
-                  ko: "(흰색배경)",
-                  en: "(White background)",
-                  ja: "（白背景）",
-                  zh: "（白色背景）",
-                })}
-              </span>
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  setSpriteFile(file);
-                  setProcessing(true);
-                  setPreviews(null);
-                  setRegistered(false);
-                  try {
-                    const base64 = await fileToBase64(file);
-                    const result = await api.processSprite(base64);
-                    setPreviews(result.previews);
-                    setSpriteNum(result.suggestedNumber);
-                  } catch (err) {
-                    console.error("Sprite processing failed:", err);
-                  } finally {
-                    setProcessing(false);
-                  }
-                }}
-              />
-            </label>
-          )}
-
-          {processing && (
-            <SurfaceNotice tone="info" className="justify-center py-8" leading={<span className="animate-spin text-lg">⏳</span>}>
-              <span className="text-sm">
-                {tr("배경 제거 및 분할 처리 중...", "Removing background & splitting...")}
-              </span>
-            </SurfaceNotice>
-          )}
-
-          {previews && !processing && (
-            <div className="space-y-3">
-              {/* Preview grid */}
-              <div className="grid grid-cols-3 gap-3">
-                {(["D", "L", "R"] as const).map((dir) => (
-                  <div key={dir} className="text-center">
-                    <div className="text-xs font-medium mb-1" style={{ color: "var(--th-text-muted)" }}>
-                      {dir === "D" ? tr("정면", "Front") : dir === "L" ? tr("좌측", "Left") : tr("우측", "Right")}
-                    </div>
-                    <div
-                      className="rounded-lg p-2 flex items-center justify-center h-24"
-                      style={{ background: "var(--th-input-bg)", border: "1px solid var(--th-input-border)" }}
-                    >
-                      {previews[dir] ? (
-                        <img
-                          src={previews[dir]}
-                          alt={dir}
-                          className="max-h-20 object-contain"
-                          style={{ imageRendering: "pixelated" }}
-                        />
-                      ) : (
-                        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                          —
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Sprite number + register */}
-              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                    {tr("스프라이트 번호", "Sprite #")}
-                  </label>
-                  <input
-                    type="number"
-                    value={spriteNum}
-                    onChange={(e) => setSpriteNum(Number(e.target.value))}
-                    min={1}
-                    className="w-16 px-2 py-1 border rounded-lg text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500/40"
-                    style={{
-                      background: "var(--th-input-bg)",
-                      borderColor: "var(--th-input-border)",
-                      color: "var(--th-text-primary)",
-                    }}
-                  />
-                </div>
-                <SurfaceActionButton
-                  onClick={async () => {
-                    if (!previews) return;
-                    setRegistering(true);
-                    try {
-                      await api.registerSprite(previews, spriteNum);
-                      setRegistered(true);
-                      setForm({ ...form, sprite_number: spriteNum });
-                    } catch (err) {
-                      console.error("Sprite register failed:", err);
-                    } finally {
-                      setRegistering(false);
-                    }
-                  }}
-                  disabled={registering || registered || !spriteNum}
-                  tone={registered ? "success" : "accent"}
-                >
-                  {registering
-                    ? tr("등록 중...", "Registering...")
-                    : registered
-                      ? tr("등록 완료!", "Registered!")
-                      : tr("스프라이트 등록", "Register Sprite")}
-                </SurfaceActionButton>
-                {previews && (
-                  <SurfaceActionButton
-                    onClick={() => {
-                      setPreviews(null);
-                      setSpriteFile(null);
-                      setRegistered(false);
-                    }}
-                    tone="neutral"
-                  >
-                    {tr("다시 업로드", "Re-upload")}
-                  </SurfaceActionButton>
-                )}
-              </div>
-            </div>
-          )}
-          </SurfaceSubsection>
-        </div>
 
         {/* Actions — full width */}
         <div

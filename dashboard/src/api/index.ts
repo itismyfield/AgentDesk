@@ -176,22 +176,6 @@ export type {
   PhaseGateInfo,
 } from "./client";
 
-// ── Sprite processing (stub for PCD — no backend sprite processor) ──
-
-export async function processSprite(
-  _base64: string,
-): Promise<{ previews: Record<string, string>; suggestedNumber: number }> {
-  console.warn("[ADK] processSprite is not supported in dashboard mode");
-  return { previews: {}, suggestedNumber: 1 };
-}
-
-export async function registerSprite(
-  _previews: Record<string, string>,
-  _spriteNum: number,
-): Promise<void> {
-  console.warn("[ADK] registerSprite is not supported in dashboard mode");
-}
-
 // ── Error type guard ──
 
 interface ApiRequestError {
