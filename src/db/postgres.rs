@@ -790,6 +790,43 @@ pub(crate) async fn connect_test_pool_and_migrate(
 }
 
 #[cfg(test)]
+pub(crate) async fn connect_test_pool_and_migrate_config(
+    config: &Config,
+    label: &str,
+) -> Result<Option<PgPool>, String> {
+    if !database_enabled(config) {
+        return Ok(None);
+    }
+
+    let mut options = PgConnectOptions::new()
+        .host(&config.database.host)
+        .port(config.database.port)
+        .username(&config.database.user)
+        .database(&config.database.dbname);
+    if let Some(password) = config.database.password.as_deref() {
+        options = options.password(password);
+    }
+
+    let pool = run_test_postgres_sqlx_op(
+        &format!("{label} connect postgres"),
+        PgPoolOptions::new()
+            .max_connections(config.database.pool_max.max(1))
+            .acquire_timeout(TEST_POSTGRES_OP_TIMEOUT)
+            .connect_with(options),
+    )
+    .await?;
+    tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, migrate(&pool))
+        .await
+        .map_err(|_| {
+            format!(
+                "{label} migrate postgres timed out after {}s",
+                TEST_POSTGRES_OP_TIMEOUT.as_secs()
+            )
+        })??;
+    Ok(Some(pool))
+}
+
+#[cfg(test)]
 pub(crate) async fn drop_test_database(
     admin_url: &str,
     database_name: &str,
@@ -839,9 +876,9 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 mod tests {
     use super::{
         AdvisoryLockLease, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, close_test_pool,
-        config_database_summary, connect_and_migrate, connect_options, create_test_database,
-        database_enabled, database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
-        startup_pool_settings, startup_reseed,
+        config_database_summary, connect_options, connect_test_pool_and_migrate_config,
+        create_test_database, database_enabled, database_summary, health_check,
+        run_test_postgres_sqlx_op_with_timeout, startup_pool_settings, startup_reseed,
     };
     use sqlx::Row;
     use std::time::Duration;
@@ -1002,10 +1039,11 @@ mod tests {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);
 
-        let pool = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres migration test pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
         startup_reseed(&pool, &config)
             .await
             .expect("startup reseed postgres");
@@ -1135,10 +1173,11 @@ mod tests {
             avatar_emoji: Some("🛠️".to_string()),
         }];
 
-        let pool = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool =
+            connect_test_pool_and_migrate_config(&config, "db::postgres legacy reseed test pool")
+                .await
+                .expect("connect and migrate postgres")
+                .expect("postgres pool");
 
         sqlx::query(
             "INSERT INTO agents (
@@ -1281,10 +1320,13 @@ mod tests {
             },
         ];
 
-        let pool = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool = connect_test_pool_and_migrate_config(
+            &config,
+            "db::postgres configured legacy reseed test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
 
         sqlx::query(
             "INSERT INTO agents (id, name, provider, status, xp)
@@ -1347,10 +1389,13 @@ mod tests {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);
 
-        let pool = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool = connect_test_pool_and_migrate_config(
+            &config,
+            "db::postgres advisory singleton test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
 
         let mut first = AdvisoryLockLease::try_acquire(&pool, 91_001, "test advisory lock")
             .await
@@ -1386,10 +1431,13 @@ mod tests {
         let mut config = postgres_test_config(&test_db);
         config.database.pool_max = 1;
 
-        let pool = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool = connect_test_pool_and_migrate_config(
+            &config,
+            "db::postgres advisory pool exhaustion test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
 
         let lease = AdvisoryLockLease::try_acquire(&pool, 91_003, "test advisory lock")
             .await
@@ -1412,14 +1460,16 @@ mod tests {
         let test_db = TestDatabase::create().await;
         let config = postgres_test_config(&test_db);
 
-        let pool_a = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres pool A")
-            .expect("postgres pool A");
-        let pool_b = connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres pool B")
-            .expect("postgres pool B");
+        let pool_a =
+            connect_test_pool_and_migrate_config(&config, "db::postgres advisory drop test pool A")
+                .await
+                .expect("connect and migrate postgres pool A")
+                .expect("postgres pool A");
+        let pool_b =
+            connect_test_pool_and_migrate_config(&config, "db::postgres advisory drop test pool B")
+                .await
+                .expect("connect and migrate postgres pool B")
+                .expect("postgres pool B");
 
         let holder_a = AdvisoryLockLease::try_acquire(&pool_a, 91_002, "test advisory lock")
             .await

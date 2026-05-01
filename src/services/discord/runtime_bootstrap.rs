@@ -2644,10 +2644,13 @@ mod tests {
     async fn postgres_discord_gateway_lease_allows_only_one_live_runtime_per_token_hash() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
-        let pool = crate::db::postgres::connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool = crate::db::postgres::connect_test_pool_and_migrate_config(
+            &config,
+            "discord runtime bootstrap gateway singleton test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
 
         let token_hash = "0123456789abcdef0123456789abcdef";
         let mut first = try_acquire_discord_gateway_lease(&pool, token_hash, &ProviderKind::Codex)
@@ -2683,10 +2686,13 @@ mod tests {
     async fn postgres_discord_gateway_lease_allows_parallel_runtimes_for_different_token_hashes() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
-        let pool = crate::db::postgres::connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres")
-            .expect("postgres pool");
+        let pool = crate::db::postgres::connect_test_pool_and_migrate_config(
+            &config,
+            "discord runtime bootstrap gateway parallel test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
 
         let first = try_acquire_discord_gateway_lease(
             &pool,
@@ -2722,14 +2728,20 @@ mod tests {
     async fn postgres_discord_gateway_lease_fails_over_across_separate_runtime_pools() {
         let test_db = PgTestDatabase::create().await;
         let config = pg_runtime_test_config(&test_db);
-        let pool_a = crate::db::postgres::connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres runtime pool A")
-            .expect("postgres runtime pool A");
-        let pool_b = crate::db::postgres::connect_and_migrate(&config)
-            .await
-            .expect("connect and migrate postgres runtime pool B")
-            .expect("postgres runtime pool B");
+        let pool_a = crate::db::postgres::connect_test_pool_and_migrate_config(
+            &config,
+            "discord runtime bootstrap gateway failover test pool A",
+        )
+        .await
+        .expect("connect and migrate postgres runtime pool A")
+        .expect("postgres runtime pool A");
+        let pool_b = crate::db::postgres::connect_test_pool_and_migrate_config(
+            &config,
+            "discord runtime bootstrap gateway failover test pool B",
+        )
+        .await
+        .expect("connect and migrate postgres runtime pool B")
+        .expect("postgres runtime pool B");
 
         let token_hash = "feedfacefeedfacefeedfacefeedface";
         let holder_a = try_acquire_discord_gateway_lease(&pool_a, token_hash, &ProviderKind::Codex)

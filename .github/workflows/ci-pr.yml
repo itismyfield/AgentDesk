@@ -80,8 +80,12 @@ jobs:
         run: ./scripts/verify-dashboard.sh
 
   check_fast:
-    name: Fast check (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Fast check + non-PG tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -105,18 +109,30 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Setup Node.js
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Policy JS unit tests
+        if: matrix.os == 'ubuntu-latest'
         run: npm run test:policies
 
       - name: cargo check
         run: cargo check --all-targets
 
+      - name: cargo test (non-PG, targeted subset)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
   test_fast:
-    name: Fast targeted tests (ubuntu-latest)
+    name: PostgreSQL tests (ubuntu-postgres)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -163,15 +179,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-fast-tests-
 
-      - name: Targeted fast test subset
+      - name: cargo test (PG targeted subset)
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --all-targets transition -- --test-threads=1
-          cargo test --all-targets auto_queue
-          cargo test --all-targets cancel
-          cargo test --all-targets review_decision
-          cargo test invariant --all-targets -- --skip _pg_ --skip postgres_
+          cargo test _pg -- --nocapture --test-threads=1
+          cargo test pg_ -- --nocapture --test-threads=1
+          cargo test postgres -- --nocapture --test-threads=1
 
   high-risk-recovery:
     name: High-risk recovery
