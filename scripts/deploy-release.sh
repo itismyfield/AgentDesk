@@ -24,6 +24,9 @@ DEPLOY_TEST_MODE="${AGENTDESK_DEPLOY_TEST_MODE:-0}"
 DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DELAY_SECS:-2}"
 DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-60}"
 DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
+DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$ADK_REL/runtime/deploy-release.lock}"
+DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
+DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
@@ -37,7 +40,9 @@ for arg in "$@"; do
     esac
 done
 
-echo "═══ ADK Deploy → Release ═══"
+if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
+    echo "═══ ADK Deploy → Release ═══"
+fi
 
 sign_binary_with_fallback() {
     local target="$1"
@@ -194,6 +199,9 @@ _cleanup_on_exit() {
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
     fi
+    if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
+        rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
+    fi
     _finalize_detached_helper "$status"
 }
 
@@ -205,6 +213,43 @@ _self_hosted_release_session() {
     [ -n "$REPORT_CHANNEL_ID" ] || return 1
     [ -n "$REPORT_PROVIDER" ] || return 1
     return 0
+}
+
+_acquire_release_deploy_lock() {
+    if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" = "1" ]; then
+        echo "▸ [gate] Release deploy lock acquired"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$DEPLOY_LOCK_FILE")"
+    echo "▸ [gate] Waiting for release deploy lock: $DEPLOY_LOCK_FILE"
+
+    if command -v lockf >/dev/null 2>&1; then
+        exec env AGENTDESK_DEPLOY_LOCK_HELD=1 \
+            lockf -k -t "$DEPLOY_LOCK_TIMEOUT_SECS" "$DEPLOY_LOCK_FILE" "$0" "$@"
+    fi
+
+    if command -v flock >/dev/null 2>&1; then
+        exec env AGENTDESK_DEPLOY_LOCK_HELD=1 \
+            flock -w "$DEPLOY_LOCK_TIMEOUT_SECS" "$DEPLOY_LOCK_FILE" "$0" "$@"
+    fi
+
+    local lock_dir="${DEPLOY_LOCK_FILE}.d"
+    local waited=0
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+        if [ "$waited" -ge "$DEPLOY_LOCK_TIMEOUT_SECS" ]; then
+            echo "✗ [gate] Timed out waiting for release deploy lock after ${DEPLOY_LOCK_TIMEOUT_SECS}s"
+            if [ -f "$lock_dir/pid" ]; then
+                echo "  holder pid: $(cat "$lock_dir/pid" 2>/dev/null || echo "?")"
+            fi
+            exit 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    DEPLOY_MKDIR_LOCK_DIR="$lock_dir"
+    printf '%s\n' "$$" > "$lock_dir/pid" 2>/dev/null || true
+    echo "▸ [gate] Release deploy lock acquired"
 }
 
 _spawn_detached_helper() {
@@ -237,6 +282,9 @@ export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
+export AGENTDESK_DEPLOY_LOCK_FILE=$(printf '%q' "$DEPLOY_LOCK_FILE")
+export AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=$(printf '%q' "$DEPLOY_LOCK_TIMEOUT_SECS")
+unset AGENTDESK_DEPLOY_LOCK_HELD
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
 EOF
@@ -248,6 +296,13 @@ EOF
     echo "  helper log: $log_path"
     echo "  current turn will finish before dcserver restart; final result will be reported automatically"
 }
+
+if _self_hosted_release_session; then
+    _spawn_detached_helper "$@"
+    exit 0
+fi
+
+_acquire_release_deploy_lock "$@"
 
 # #743: Zero-inflight gate for create-pr dispatches on the release runtime.
 # A restart during an in-flight create-pr dispatch leaves its completion
@@ -284,11 +339,6 @@ if [ ! -d "$REPO/policies" ]; then
     echo "✗ Policies not found in workspace — aborting deploy"
     echo "  expected: $REPO/policies"
     exit 1
-fi
-
-if _self_hosted_release_session; then
-    _spawn_detached_helper "$@"
-    exit 0
 fi
 
 if [ "$DEPLOY_TEST_MODE" = "1" ]; then

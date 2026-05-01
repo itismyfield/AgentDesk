@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::services::provider::parse_provider_and_channel_from_tmux_name;
+use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::tmux_common::current_tmux_owner_marker;
 use crate::services::tmux_diagnostics::{record_tmux_exit_reason, tmux_session_has_live_pane};
 
@@ -303,6 +303,151 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     // When a unified-thread run completes, the JS policy writes a kv_meta flag
     // for us to pick up and kill the shared tmux session.
     process_unified_thread_kill_signals(shared).await;
+
+    if matches!(provider, ProviderKind::Codex) {
+        reap_orphan_codex_wrapper_processes().await;
+    }
+}
+
+#[cfg(unix)]
+async fn reap_orphan_codex_wrapper_processes() {
+    let wrappers = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(list_orphan_codex_wrapper_processes),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+
+    if wrappers.is_empty() {
+        return;
+    }
+
+    let count = wrappers.len();
+    let killed = tokio::task::spawn_blocking(move || {
+        let mut killed = 0u32;
+        for wrapper in wrappers {
+            if wrapper.pid <= 0 || wrapper.pid as u32 == std::process::id() {
+                continue;
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 🧹 killing orphan codex wrapper pid={} session={}",
+                wrapper.pid,
+                wrapper.tmux_session_name.as_deref().unwrap_or("unknown")
+            );
+            crate::services::process::kill_pid_tree(wrapper.pid as u32);
+            killed += 1;
+        }
+        killed
+    })
+    .await
+    .unwrap_or(0);
+
+    if killed > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!("  [{ts}] 🧹 Reaped {killed}/{count} orphan codex wrapper process(es)");
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanCodexWrapperProcess {
+    pid: i32,
+    tmux_session_name: Option<String>,
+}
+
+#[cfg(unix)]
+fn list_orphan_codex_wrapper_processes() -> Vec<OrphanCodexWrapperProcess> {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_orphan_codex_wrapper_process_line)
+        .collect()
+}
+
+#[cfg(unix)]
+fn parse_orphan_codex_wrapper_process_line(line: &str) -> Option<OrphanCodexWrapperProcess> {
+    let trimmed = line.trim_start();
+    let first_end = trimmed.find(char::is_whitespace)?;
+    let pid = trimmed[..first_end].parse::<i32>().ok()?;
+    let rest = trimmed[first_end..].trim_start();
+    let second_end = rest.find(char::is_whitespace)?;
+    let ppid = rest[..second_end].parse::<i32>().ok()?;
+    let command = rest[second_end..].trim_start();
+
+    if ppid != 1 || !command.contains(" codex-tmux-wrapper ") {
+        return None;
+    }
+
+    // Restrict this reaper to legacy/orphaned wrappers. Current managed tmux
+    // wrappers are owned by the tmux server and use persistent runtime paths.
+    if !command.contains("--input-mode pipe")
+        && !command.contains(".unused-fifo")
+        && !command.contains("/var/folders/")
+        && !command.contains("/tmp/")
+    {
+        return None;
+    }
+
+    Some(OrphanCodexWrapperProcess {
+        pid,
+        tmux_session_name: extract_tmux_session_name_from_wrapper_command(command),
+    })
+}
+
+#[cfg(unix)]
+fn extract_tmux_session_name_from_wrapper_command(command: &str) -> Option<String> {
+    let output_path = command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|window| (window[0] == "--output-file").then_some(window[1]))?;
+    let basename = std::path::Path::new(output_path).file_name()?.to_str()?;
+    let stem = basename.strip_suffix(".jsonl").unwrap_or(basename);
+    let pos = stem.find("AgentDesk-")?;
+    Some(stem[pos..].to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{
+        extract_tmux_session_name_from_wrapper_command, parse_orphan_codex_wrapper_process_line,
+    };
+
+    #[test]
+    fn extracts_tmux_session_name_from_legacy_output_path() {
+        let command = "/Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper \
+            --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl \
+            --input-fifo /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.unused-fifo";
+
+        assert_eq!(
+            extract_tmux_session_name_from_wrapper_command(command).as_deref(),
+            Some("AgentDesk-codex-adk-cdx")
+        );
+    }
+
+    #[test]
+    fn parses_only_ppid_one_legacy_codex_wrappers() {
+        let line = " 6260     1 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /var/folders/x/agentdesk-AgentDesk-codex-adk-cdx.jsonl --input-mode pipe";
+        let parsed = parse_orphan_codex_wrapper_process_line(line).unwrap();
+        assert_eq!(parsed.pid, 6260);
+        assert_eq!(
+            parsed.tmux_session_name.as_deref(),
+            Some("AgentDesk-codex-adk-cdx")
+        );
+
+        let live_line = " 6261  6988 /Users/me/.adk/release/bin/agentdesk codex-tmux-wrapper --output-file /Users/me/.adk/release/runtime/sessions/host-AgentDesk-codex-adk-cdx.jsonl";
+        assert!(parse_orphan_codex_wrapper_process_line(live_line).is_none());
+    }
 }
 
 /// Kill tmux sessions flagged for cleanup by auto-queue.js after unified run completion.
