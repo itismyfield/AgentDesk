@@ -122,6 +122,14 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             .as_array()
             .cloned()
             .unwrap_or_default();
+        let cluster_standby_without_gateway =
+            cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
+        if cluster_standby_without_gateway {
+            status = health::HealthStatus::Healthy;
+            degraded_reasons.retain(|reason| reason.as_str() != Some("no_providers_registered"));
+            json["fully_recovered"] = serde_json::json!(true);
+            json["cluster_standby"] = serde_json::json!(true);
+        }
 
         if !server_up {
             status = status.worsen(health::HealthStatus::Unhealthy);
@@ -263,6 +271,10 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         .get("fully_recovered")
         .cloned()
         .unwrap_or_else(|| server_up.clone());
+    let cluster_standby = json
+        .get("cluster_standby")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(false));
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
     serde_json::json!({
         "ok": !degraded,
@@ -272,8 +284,55 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "dashboard": dashboard,
         "server_up": server_up,
         "fully_recovered": fully_recovered,
+        "cluster_standby": cluster_standby,
         "degraded": degraded,
     })
+}
+
+async fn cluster_standby_without_gateway(
+    state: &AppState,
+    server_up: bool,
+    degraded_reasons: &[serde_json::Value],
+) -> bool {
+    if !server_up || !state.config.cluster.enabled {
+        return false;
+    }
+    if !degraded_reasons
+        .iter()
+        .any(|reason| reason.as_str() == Some("no_providers_registered"))
+    {
+        return false;
+    }
+    let instance_id = state
+        .config
+        .cluster
+        .instance_id
+        .as_deref()
+        .unwrap_or("")
+        .trim();
+    if instance_id.is_empty() {
+        return false;
+    }
+    let Some(pool) = state.pg_pool_ref() else {
+        return false;
+    };
+    let ttl_secs = state.config.cluster.lease_ttl_secs.max(1) as f64;
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT effective_role
+          FROM worker_nodes
+         WHERE instance_id = $1
+           AND last_heartbeat_at >= NOW() - ($2::double precision * INTERVAL '1 second')
+        "#,
+    )
+    .bind(instance_id)
+    .bind(ttl_secs)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .as_deref()
+        == Some("worker")
 }
 
 fn stale_mailbox_repair_applied(
