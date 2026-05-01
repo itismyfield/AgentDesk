@@ -1,6 +1,7 @@
 pub(crate) mod cluster;
 pub(crate) mod cron_catalog;
 pub(crate) mod maintenance;
+pub(crate) mod resource_locks;
 pub mod routes;
 mod worker_registry;
 pub mod ws;

@@ -28,6 +28,23 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/cluster/routing-diagnostics",
                 get(cluster::routing_diagnostics),
             )
+            .route("/cluster/resource-locks", get(cluster::list_resource_locks))
+            .route(
+                "/cluster/resource-locks/acquire",
+                post(cluster::acquire_resource_lock),
+            )
+            .route(
+                "/cluster/resource-locks/heartbeat",
+                post(cluster::heartbeat_resource_lock),
+            )
+            .route(
+                "/cluster/resource-locks/release",
+                post(cluster::release_resource_lock),
+            )
+            .route(
+                "/cluster/resource-locks/reclaim-expired",
+                post(cluster::reclaim_expired_resource_locks),
+            )
             .route(
                 "/doctor/stale-mailbox/repair",
                 post(health_api::stale_mailbox_repair_handler),

@@ -608,6 +608,112 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl --get http://localhost:8787/api/cluster/routing-diagnostics --data-urlencode 'required={\"labels\":[\"mac-book\"],\"providers\":[\"codex\"]}'"),
         ep(
             "GET",
+            "/api/cluster/resource-locks",
+            "cluster",
+            "List active multinode resource locks used to serialize exclusive worker resources such as Unreal editor/test execution.",
+        )
+        .with_example(
+            json!({"include_expired": false}),
+            json!({
+                "default_ttl_secs": 900,
+                "locks": [{
+                    "lock_key": "unreal:project:CookingHeart",
+                    "holder_instance_id": "mac-book-release",
+                    "holder_job_id": "phase-compile",
+                    "metadata": {"phase": "compile"},
+                    "expires_at": "2026-05-01T06:25:00Z",
+                    "heartbeat_at": "2026-05-01T06:10:00Z",
+                    "created_at": "2026-05-01T06:10:00Z",
+                    "updated_at": "2026-05-01T06:10:00Z"
+                }]
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres unavailable"}),
+        )
+        .with_curl("curl http://localhost:8787/api/cluster/resource-locks"),
+        ep(
+            "POST",
+            "/api/cluster/resource-locks/acquire",
+            "cluster",
+            "Acquire or renew a PG-backed exclusive resource lock. Conflicting active holders return 409 with the current holder.",
+        )
+        .with_example(
+            json!({
+                "lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-book-release",
+                "holder_job_id": "phase-compile",
+                "ttl_secs": 900,
+                "metadata": {"phase": "compile"}
+            }),
+            json!({
+                "acquired": true,
+                "lock": {
+                    "lock_key": "unreal:project:CookingHeart",
+                    "holder_instance_id": "mac-book-release",
+                    "holder_job_id": "phase-compile"
+                },
+                "current": null
+            }),
+        )
+        .with_error_example(
+            409,
+            json!({
+                "lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-mini-release",
+                "holder_job_id": "phase-compile"
+            }),
+            json!({"acquired": false, "lock": null, "current": {"holder_instance_id": "mac-book-release"}}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/resource-locks/acquire -H 'content-type: application/json' -d '{\"lock_key\":\"unreal:project:CookingHeart\",\"holder_instance_id\":\"mac-book-release\",\"holder_job_id\":\"phase-compile\"}'"),
+        ep(
+            "POST",
+            "/api/cluster/resource-locks/heartbeat",
+            "cluster",
+            "Extend a resource lock only when the same holder still owns the lock.",
+        )
+        .with_example(
+            json!({
+                "lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-book-release",
+                "holder_job_id": "phase-compile",
+                "ttl_secs": 900
+            }),
+            json!({"ok": true, "lock": {"lock_key": "unreal:project:CookingHeart"}}),
+        )
+        .with_error_example(
+            409,
+            json!({}),
+            json!({"ok": false, "error": "lock is not held by requester or has expired"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/resource-locks/heartbeat -H 'content-type: application/json' -d '{\"lock_key\":\"unreal:project:CookingHeart\",\"holder_instance_id\":\"mac-book-release\",\"holder_job_id\":\"phase-compile\"}'"),
+        ep(
+            "POST",
+            "/api/cluster/resource-locks/release",
+            "cluster",
+            "Release a resource lock only when lock key, holder instance, and holder job all match.",
+        )
+        .with_example(
+            json!({
+                "lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-book-release",
+                "holder_job_id": "phase-compile"
+            }),
+            json!({"released": true}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/resource-locks/release -H 'content-type: application/json' -d '{\"lock_key\":\"unreal:project:CookingHeart\",\"holder_instance_id\":\"mac-book-release\",\"holder_job_id\":\"phase-compile\"}'"),
+        ep(
+            "POST",
+            "/api/cluster/resource-locks/reclaim-expired",
+            "cluster",
+            "Delete expired resource locks so crashed workers do not permanently hold exclusive resources.",
+        )
+        .with_example(json!({}), json!({"reclaimed": 1}))
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/resource-locks/reclaim-expired"),
+        ep(
+            "GET",
             "/api/doctor/startup/latest",
             "health",
             "Local/protected latest startup doctor artifact envelope for agent rescue and diagnosis.",
