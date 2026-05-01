@@ -84,12 +84,6 @@ CREATE TABLE IF NOT EXISTS task_dispatches (
     chain_depth        INTEGER DEFAULT 0,
     thread_id          TEXT,
     retry_count        INTEGER DEFAULT 0,
-    required_capabilities JSONB,
-    routing_diagnostics JSONB,
-    claimed_at         TIMESTAMPTZ,
-    claim_owner        TEXT,
-    claim_expires_at   TIMESTAMPTZ,
-    idempotency_key    TEXT,
     created_at         TIMESTAMPTZ DEFAULT NOW(),
     updated_at         TIMESTAMPTZ DEFAULT NOW(),
     completed_at       TIMESTAMPTZ
@@ -325,97 +319,7 @@ CREATE TABLE IF NOT EXISTS dispatch_outbox (
     next_attempt_at TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     processed_at    TIMESTAMPTZ,
-    error           TEXT,
-    claimed_at      TIMESTAMPTZ,
-    claim_owner     TEXT,
-    required_capabilities JSONB,
-    routing_diagnostics JSONB
-);
-
-CREATE TABLE IF NOT EXISTS worker_nodes (
-    instance_id        TEXT PRIMARY KEY,
-    hostname           TEXT,
-    process_id         INTEGER,
-    role               TEXT NOT NULL DEFAULT 'auto',
-    effective_role     TEXT NOT NULL DEFAULT 'worker',
-    status             TEXT NOT NULL DEFAULT 'online',
-    labels             JSONB NOT NULL DEFAULT '[]'::jsonb,
-    capabilities       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    last_heartbeat_at  TIMESTAMPTZ,
-    started_at         TIMESTAMPTZ DEFAULT NOW(),
-    updated_at         TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS worker_mcp_endpoints (
-    instance_id     TEXT NOT NULL,
-    endpoint_name   TEXT NOT NULL,
-    healthy         BOOLEAN,
-    metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
-    last_checked_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (instance_id, endpoint_name),
-    FOREIGN KEY (instance_id) REFERENCES worker_nodes(instance_id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS resource_locks (
-    lock_key TEXT PRIMARY KEY,
-    holder_instance_id TEXT NOT NULL,
-    holder_job_id TEXT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    expires_at TIMESTAMPTZ NOT NULL,
-    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS test_phase_runs (
-    id                    TEXT PRIMARY KEY,
-    idempotency_key       TEXT NOT NULL UNIQUE,
-    phase_key             TEXT NOT NULL,
-    head_sha              TEXT NOT NULL,
-    status                TEXT NOT NULL DEFAULT 'queued'
-        CHECK (status IN ('queued', 'running', 'passed', 'failed', 'canceled')),
-    issue_id              TEXT,
-    card_id               TEXT,
-    repo_id               TEXT,
-    required_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
-    resource_lock_key     TEXT,
-    holder_instance_id    TEXT,
-    holder_job_id         TEXT,
-    evidence              JSONB NOT NULL DEFAULT '{}'::jsonb,
-    error                 TEXT,
-    started_at            TIMESTAMPTZ,
-    completed_at          TIMESTAMPTZ,
-    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS test_results (
-    id           TEXT PRIMARY KEY,
-    phase_run_id TEXT NOT NULL REFERENCES test_phase_runs(id) ON DELETE CASCADE,
-    result_key   TEXT NOT NULL,
-    status       TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'skipped')),
-    summary      TEXT,
-    artifacts    JSONB NOT NULL DEFAULT '{}'::jsonb,
-    metrics      JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (phase_run_id, result_key)
-);
-
-CREATE TABLE IF NOT EXISTS issue_specs (
-    issue_id               TEXT PRIMARY KEY,
-    card_id                TEXT,
-    repo_id                TEXT,
-    issue_number           INTEGER,
-    head_sha               TEXT,
-    acceptance_criteria    JSONB NOT NULL DEFAULT '[]'::jsonb,
-    test_plan              JSONB NOT NULL DEFAULT '[]'::jsonb,
-    definition_of_done     JSONB NOT NULL DEFAULT '[]'::jsonb,
-    required_phases        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    validation_errors      JSONB NOT NULL DEFAULT '[]'::jsonb,
-    source_body_sha        TEXT,
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    error           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS kanban_audit_logs (
@@ -702,41 +606,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_stages_repo_stage
 CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatch_outbox_one_shot_action
     ON dispatch_outbox(dispatch_id, action)
     WHERE action IN ('notify', 'followup');
-
-CREATE INDEX IF NOT EXISTS idx_dispatch_outbox_status_claimed_at
-    ON dispatch_outbox (status, claimed_at, next_attempt_at, id);
-CREATE INDEX IF NOT EXISTS idx_dispatch_outbox_required_capabilities
-    ON dispatch_outbox USING GIN (required_capabilities);
-
-CREATE INDEX IF NOT EXISTS idx_worker_nodes_status_heartbeat
-    ON worker_nodes (status, last_heartbeat_at DESC);
-CREATE INDEX IF NOT EXISTS idx_worker_nodes_effective_role
-    ON worker_nodes (effective_role);
-CREATE INDEX IF NOT EXISTS idx_worker_mcp_endpoints_endpoint_healthy
-    ON worker_mcp_endpoints(endpoint_name, healthy);
-
-CREATE INDEX IF NOT EXISTS idx_resource_locks_holder
-    ON resource_locks(holder_instance_id, holder_job_id);
-CREATE INDEX IF NOT EXISTS idx_resource_locks_expires_at
-    ON resource_locks(expires_at);
-
-CREATE INDEX IF NOT EXISTS idx_task_dispatches_status_claim_expires
-    ON task_dispatches(status, claim_expires_at, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_dispatches_idempotency_key
-    ON task_dispatches(idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_test_phase_runs_phase_head
-    ON test_phase_runs(phase_key, head_sha);
-CREATE INDEX IF NOT EXISTS idx_test_phase_runs_status_updated
-    ON test_phase_runs(status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_test_phase_runs_required_capabilities
-    ON test_phase_runs USING GIN (required_capabilities);
-
-CREATE INDEX IF NOT EXISTS idx_issue_specs_card_id
-    ON issue_specs(card_id);
-CREATE INDEX IF NOT EXISTS idx_issue_specs_required_phases
-    ON issue_specs USING GIN (required_phases);
 
 CREATE INDEX IF NOT EXISTS idx_message_outbox_status_claimed_at
     ON message_outbox(status, claimed_at, id);
