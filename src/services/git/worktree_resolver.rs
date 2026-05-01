@@ -22,6 +22,7 @@ pub struct EnsuredWorktreeInfo {
 pub struct ManagedWorktreeCleanup {
     pub removed: usize,
     pub skipped_dirty: usize,
+    pub skipped_unmerged: usize,
     pub skipped_unmanaged: usize,
     pub failed: usize,
 }
@@ -251,6 +252,24 @@ fn is_managed_worktree_path(repo_dir: &str, worktree_path: &str) -> bool {
     }
 }
 
+fn worktree_head_is_merged_to_mainline(repo_dir: &str, worktree_path: &str) -> Option<bool> {
+    let head = git_command()
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|head| !head.is_empty())?;
+    let base_ref = upstream_base_ref(repo_dir);
+    let status = git_command()
+        .args(["merge-base", "--is-ancestor", &head, &base_ref])
+        .current_dir(repo_dir)
+        .status()
+        .ok()?;
+    Some(status.success())
+}
+
 pub fn cleanup_managed_worktree(repo_dir: &str, worktree_path: &str) -> ManagedWorktreeCleanup {
     let mut cleanup = ManagedWorktreeCleanup::default();
     if !is_managed_worktree_path(repo_dir, worktree_path) {
@@ -271,6 +290,10 @@ pub fn cleanup_managed_worktree(repo_dir: &str, worktree_path: &str) -> ManagedW
         .unwrap_or(true);
     if dirty {
         cleanup.skipped_dirty += 1;
+        return cleanup;
+    }
+    if worktree_head_is_merged_to_mainline(repo_dir, worktree_path) != Some(true) {
+        cleanup.skipped_unmerged += 1;
         return cleanup;
     }
 

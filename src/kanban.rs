@@ -264,6 +264,7 @@ async fn cleanup_terminal_managed_worktrees_pg(
             crate::services::platform::shell::cleanup_managed_worktree(&repo_dir, &worktree_path);
         summary.removed += item.removed;
         summary.skipped_dirty += item.skipped_dirty;
+        summary.skipped_unmerged += item.skipped_unmerged;
         summary.skipped_unmanaged += item.skipped_unmanaged;
         summary.failed += item.failed;
     }
@@ -944,14 +945,16 @@ async fn transition_status_with_opts_pg_inner(
             Ok(summary) => {
                 if summary.removed > 0
                     || summary.skipped_dirty > 0
+                    || summary.skipped_unmerged > 0
                     || summary.skipped_unmanaged > 0
                     || summary.failed > 0
                 {
                     tracing::info!(
-                        "[kanban] terminal managed worktree cleanup for {}: removed={}, dirty={}, unmanaged={}, failed={}",
+                        "[kanban] terminal managed worktree cleanup for {}: removed={}, dirty={}, unmerged={}, unmanaged={}, failed={}",
                         card_id,
                         summary.removed,
                         summary.skipped_dirty,
+                        summary.skipped_unmerged,
                         summary.skipped_unmanaged,
                         summary.failed
                     );
