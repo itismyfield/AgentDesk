@@ -131,6 +131,32 @@ jobs:
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
+  fast_check_required_context:
+    name: Fast check (ubuntu-latest)
+    needs: check_fast
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror fast check result for branch protection
+        run: |
+          if [ "${{ needs.check_fast.result }}" != "success" ]; then
+            echo "check_fast result: ${{ needs.check_fast.result }}"
+            exit 1
+          fi
+
+  fast_targeted_tests_required_context:
+    name: Fast targeted tests (ubuntu-latest)
+    needs: check_fast
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror targeted test result for branch protection
+        run: |
+          if [ "${{ needs.check_fast.result }}" != "success" ]; then
+            echo "check_fast result: ${{ needs.check_fast.result }}"
+            exit 1
+          fi
+
   test_fast:
     name: PostgreSQL tests (ubuntu-postgres)
     runs-on: ubuntu-latest

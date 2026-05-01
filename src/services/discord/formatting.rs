@@ -1,6 +1,6 @@
 use poise::serenity_prelude as serenity;
 use regex::Regex;
-use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId};
+use serenity::{ChannelId, CreateAttachment, MessageId};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 
@@ -2262,10 +2262,7 @@ pub(super) async fn send_long_message_raw(
             "discord send single"
         );
         rate_limit_wait(shared, channel_id).await;
-        match channel_id
-            .send_message(http, CreateMessage::new().content(text))
-            .await
-        {
+        match super::http::send_channel_message(http, channel_id, text).await {
             Ok(_) => {
                 tracing::debug!(
                     target: "discord::chunker",
@@ -2317,9 +2314,7 @@ pub(super) async fn send_long_message_raw(
             "discord send chunk"
         );
         rate_limit_wait(shared, channel_id).await;
-        let send_result = channel_id
-            .send_message(http, CreateMessage::new().content(chunk))
-            .await;
+        let send_result = super::http::send_channel_message(http, channel_id, chunk).await;
         match send_result {
             Ok(_) => {
                 if is_last {
@@ -2422,9 +2417,8 @@ pub(super) async fn replace_long_message_raw_with_outcome(
         "discord edit first chunk"
     );
     rate_limit_wait(shared, channel_id).await;
-    let edit_result = channel_id
-        .edit_message(http, message_id, EditMessage::new().content(first_chunk))
-        .await;
+    let edit_result =
+        super::http::edit_channel_message(http, channel_id, message_id, first_chunk).await;
 
     if let Err(e) = edit_result {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2479,9 +2473,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             "discord send continuation chunk"
         );
         rate_limit_wait(shared, channel_id).await;
-        let send_result = channel_id
-            .send_message(http, CreateMessage::new().content(chunk))
-            .await;
+        let send_result = super::http::send_channel_message(http, channel_id, chunk).await;
         match send_result {
             Ok(_) => {
                 if is_last {

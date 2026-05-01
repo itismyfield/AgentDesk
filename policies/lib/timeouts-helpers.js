@@ -236,7 +236,7 @@ function findRecentInflightForSession(sessionKey, tmuxName) {
   try {
     inflights = agentdesk.inflight.list() || [];
   } catch(e) {
-    return null;
+    throw e;
   }
   var best = null;
   var bestUpdatedAt = 0;
@@ -257,7 +257,12 @@ function findRecentInflightForSession(sessionKey, tmuxName) {
 }
 
 function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnMin) {
-  var inflight = findRecentInflightForSession(sessionKey, tmuxName);
+  var inflight;
+  try {
+    inflight = findRecentInflightForSession(sessionKey, tmuxName);
+  } catch (e) {
+    inflight = null; // revert to null on throw so that the rest of inspectInflightProgress works
+  }
   if (!inflight) {
     return {
       inflight: null,

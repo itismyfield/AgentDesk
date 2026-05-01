@@ -729,3 +729,32 @@ pub fn start_hot_reload(
 
     Ok(watcher)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_policy_version() {
+        let source1 = "console.log('hello');";
+        let source2 = "console.log('world');";
+        let source1_again = "console.log('hello');";
+
+        let hash1 = compute_policy_version(source1);
+        let hash2 = compute_policy_version(source2);
+        let hash1_again = compute_policy_version(source1_again);
+
+        assert_eq!(
+            hash1, hash1_again,
+            "Identical sources should have the same hash"
+        );
+        assert_ne!(
+            hash1, hash2,
+            "Different sources should have different hashes"
+        );
+        assert_eq!(
+            hash1.len(),
+            12,
+            "Hash string should be exactly 12 characters long"
+        );
+    }
+}

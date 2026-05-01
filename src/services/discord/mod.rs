@@ -7,6 +7,7 @@ pub(crate) mod formatting;
 mod gateway;
 mod handoff;
 pub(crate) mod health;
+pub(crate) mod http;
 mod idle_detector;
 mod inflight;
 pub(crate) mod internal_api;
@@ -2321,18 +2322,13 @@ async fn apply_queue_exit_feedback(
     // exit-state notice so the user is not left looking at a `📬` promise
     // for a turn that will never run. Edit-on-failure falls back to delete
     // — either way the stale `📬 메시지 대기 중` text is removed. We use
-    // the bare serenity HTTP edit instead of the placeholder controller
+    // the shared Discord HTTP boundary instead of the placeholder controller
     // because the controller entry was just detached (and the public
     // `transition` API only renders terminal monitor-handoff cards).
     for card in &visible_cards_to_clear {
         let body = queue_exit_card_body(card.kind);
-        let edit_result = channel_id
-            .edit_message(
-                &ctx.http,
-                card.placeholder_msg_id,
-                serenity::EditMessage::new().content(body),
-            )
-            .await;
+        let edit_result =
+            http::edit_channel_message(&ctx.http, channel_id, card.placeholder_msg_id, &body).await;
         if edit_result.is_err() {
             let _ = channel_id
                 .delete_message(&ctx.http, card.placeholder_msg_id)
