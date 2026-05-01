@@ -1379,6 +1379,12 @@ pub fn handle_dcserver(token: Option<String>) {
                     },
                 )
                 .await;
+                if ad_config.cluster.enabled {
+                    eprintln!(
+                        "  ▸ Cluster standby : Discord gateway lease unavailable; keeping HTTP and worker heartbeat online"
+                    );
+                    std::future::pending::<()>().await;
+                }
             }
             None => {
                 let configs = launch_configs;
@@ -1473,6 +1479,12 @@ pub fn handle_dcserver(token: Option<String>) {
                     if let Err(e) = task.await {
                         eprintln!("  ⚠ bot task terminated unexpectedly: {e}");
                     }
+                }
+                if ad_config.cluster.enabled {
+                    eprintln!(
+                        "  ▸ Cluster standby : Discord gateway leases unavailable; keeping HTTP and worker heartbeat online"
+                    );
+                    std::future::pending::<()>().await;
                 }
             }
         }
