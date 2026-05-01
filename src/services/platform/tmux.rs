@@ -210,6 +210,12 @@ pub fn pane_pid(session_name: &str) -> Option<u32> {
         .ok()
 }
 
+/// Return the PID of the active pane process for a tmux session.
+#[cfg(not(unix))]
+pub fn pane_pid(_session_name: &str) -> Option<u32> {
+    None
+}
+
 /// Capture pane content from a tmux session.
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).

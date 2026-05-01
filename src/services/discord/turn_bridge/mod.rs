@@ -80,6 +80,16 @@ use super::formatting::ReplaceLongMessageOutcome;
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE};
 
+#[cfg(unix)]
+fn tmux_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
+    super::tmux::read_generation_file_mtime_ns(tmux_session_name)
+}
+
+#[cfg(not(unix))]
+fn tmux_generation_file_mtime_ns(_tmux_session_name: &str) -> i64 {
+    0
+}
+
 fn sync_inflight_restart_mode_from_cancel(
     cancel_token: &crate::services::provider::CancelToken,
     inflight_state: &mut InflightTurnState,
@@ -536,7 +546,7 @@ fn advance_tmux_relay_confirmed_end(
     // the typical timeline (cancel → multi-second wait → respawn) keeps
     // this read aligned with the wrapper that produced the bytes.
     let mtime_at_attempt = tmux_session_name
-        .map(super::tmux::read_generation_file_mtime_ns)
+        .map(tmux_generation_file_mtime_ns)
         .filter(|m| *m != 0);
 
     let mut current = relay_coord
@@ -837,6 +847,7 @@ fn maybe_refresh_active_turn_activity_heartbeat(
     );
 }
 
+#[cfg(unix)]
 fn maybe_refresh_active_turn_activity_heartbeat_at(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -866,6 +877,17 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
     ) {
         *last_heartbeat_at = Some(now);
     }
+}
+
+#[cfg(not(unix))]
+fn maybe_refresh_active_turn_activity_heartbeat_at(
+    _shared: &SharedData,
+    _provider: &ProviderKind,
+    _inflight_state: &InflightTurnState,
+    _adk_session_name: Option<&str>,
+    _last_heartbeat_at: &mut Option<std::time::Instant>,
+    _now: std::time::Instant,
+) {
 }
 
 async fn enqueue_headless_delivery(

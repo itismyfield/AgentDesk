@@ -330,7 +330,7 @@
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
 | `services::discord::tmux_reaper` | `src/services/discord/tmux_reaper.rs` | 492 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 597 |  |
-| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 4186 | giant-file |
+| `services::discord::turn_bridge` | `src/services/discord/turn_bridge/mod.rs` | 4208 | giant-file |
 | `services::discord::turn_bridge::completion_guard` | `src/services/discord/turn_bridge/completion_guard.rs` | 2096 | giant-file |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
@@ -380,7 +380,7 @@
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1377 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 111 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 129 |  |
-| `services::platform::tmux` | `src/services/platform/tmux.rs` | 298 |  |
+| `services::platform::tmux` | `src/services/platform/tmux.rs` | 304 |  |
 | `services::process` | `src/services/process.rs` | 706 |  |
 | `services::provider` | `src/services/provider.rs` | 2170 | giant-file |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 29 |  |
