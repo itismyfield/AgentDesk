@@ -1187,6 +1187,51 @@ function getLatestCiRunForTrackedPr(repo, branch, headSha) {
   }
 }
 
+function loadRequiredPhaseKeysForCard(cardId) {
+  if (!cardId) return [];
+  var rows = agentdesk.db.query(
+    "SELECT required_phases FROM issue_specs WHERE card_id = ? ORDER BY updated_at DESC LIMIT 1",
+    [cardId]
+  );
+  if (!rows || rows.length === 0) return [];
+  var raw = rows[0].required_phases;
+  if (!raw) return [];
+  try {
+    var parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return [];
+    var phases = [];
+    for (var i = 0; i < parsed.length; i++) {
+      var item = parsed[i];
+      var phase = typeof item === "string" ? item : (item && (item.phase_key || item.key || item.phase));
+      if (phase && String(phase).trim()) phases.push(String(phase).trim());
+    }
+    return phases;
+  } catch (e) {
+    return [];
+  }
+}
+
+function verifyRequiredPhaseEvidence(cardId, headSha) {
+  var phases = loadRequiredPhaseKeysForCard(cardId);
+  if (phases.length === 0) return { ok: true, phases: [] };
+  if (!headSha) return { ok: false, reason: "missing head SHA for required phase evidence" };
+  var missing = [];
+  for (var i = 0; i < phases.length; i++) {
+    var rows = agentdesk.db.query(
+      "SELECT id FROM test_phase_runs WHERE phase_key = ? AND head_sha = ? AND status = 'passed' LIMIT 1",
+      [phases[i], headSha]
+    );
+    if (!rows || rows.length === 0) missing.push(phases[i]);
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      reason: "missing required phase evidence for head " + headSha + ": " + missing.join(", ")
+    };
+  }
+  return { ok: true, phases: phases };
+}
+
 function verifyTrackedPrMergeReadiness(tracking, currentSha) {
   if (!tracking) return { ok: false, reason: "missing pr_tracking" };
   if (!tracking.branch) return { ok: false, reason: "missing tracked branch" };
@@ -1205,6 +1250,8 @@ function verifyTrackedPrMergeReadiness(tracking, currentSha) {
   if (run.conclusion !== "success") {
     return { ok: false, reason: "CI not green (" + run.conclusion + ") for run " + run.databaseId };
   }
+  var phaseEvidence = verifyRequiredPhaseEvidence(tracking.card_id, currentSha || tracking.head_sha);
+  if (!phaseEvidence.ok) return phaseEvidence;
   return { ok: true, run: run };
 }
 
@@ -2343,6 +2390,19 @@ agentdesk.mergeAutomation.diagnoseTerminalMergeCandidate = function(cardId) {
   return details;
 };
 
-agentdesk.registerPolicy(mergeAutomation);
+if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPolicy === "function") {
+  agentdesk.registerPolicy(mergeAutomation);
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    policy: mergeAutomation,
+    __test: {
+      loadRequiredPhaseKeysForCard: loadRequiredPhaseKeysForCard,
+      verifyRequiredPhaseEvidence: verifyRequiredPhaseEvidence,
+      verifyTrackedPrMergeReadiness: verifyTrackedPrMergeReadiness
+    }
+  };
+}
 
 })();

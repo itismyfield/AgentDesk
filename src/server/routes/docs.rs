@@ -861,6 +861,84 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_curl("curl --get http://localhost:8787/api/cluster/test-phase-runs/evidence --data-urlencode phase_key=unreal-smoke --data-urlencode head_sha=abc123"),
         ep(
+            "POST",
+            "/api/cluster/task-dispatches/claim",
+            "cluster",
+            "Atomically claim pending task_dispatches for a worker with PG row locking and capability-match diagnostics.",
+        )
+        .with_example(
+            json!({
+                "claim_owner": "mac-book-release",
+                "ttl_secs": 600,
+                "limit": 10,
+                "dispatch_type": "implementation"
+            }),
+            json!({
+                "claimed": [{
+                    "id": "dispatch-123",
+                    "claim_owner": "mac-book-release",
+                    "required_capabilities": {"labels": ["mac-book"]}
+                }],
+                "skipped": [{
+                    "id": "dispatch-456",
+                    "reasons": ["missing label 'mac-mini'"]
+                }]
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"claim_owner": ""}),
+            json!({"error": "claim_owner is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/task-dispatches/claim -H 'content-type: application/json' -d '{\"claim_owner\":\"mac-book-release\",\"limit\":10}'"),
+        ep(
+            "GET",
+            "/api/cluster/issue-specs",
+            "cluster",
+            "List parsed Issue-as-Spec contracts, including required phases consumed by merge gates.",
+        )
+        .with_example(
+            json!({"card_id": "card-881"}),
+            json!({
+                "specs": [{
+                    "issue_id": "881",
+                    "card_id": "card-881",
+                    "required_phases": ["unreal-smoke"],
+                    "validation_errors": []
+                }]
+            }),
+        )
+        .with_curl("curl --get http://localhost:8787/api/cluster/issue-specs --data-urlencode card_id=card-881"),
+        ep(
+            "POST",
+            "/api/cluster/issue-specs/upsert",
+            "cluster",
+            "Parse a GitHub issue body into acceptance criteria, test plan, DoD, and required phase keys.",
+        )
+        .with_example(
+            json!({
+                "issue_id": "881",
+                "card_id": "card-881",
+                "repo_id": "itismyfield/AgentDesk",
+                "issue_number": 881,
+                "head_sha": "abc123",
+                "body": "## Acceptance Criteria\n- Evidence is persisted\n\n## Test Plan\n- Run regression\n\n## Definition of Done\n- Gate consumes evidence\n\n## Required Phases\n- Unreal Smoke"
+            }),
+            json!({
+                "spec": {
+                    "issue_id": "881",
+                    "required_phases": ["unreal-smoke"],
+                    "validation_errors": []
+                }
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"issue_id": "", "body": ""}),
+            json!({"error": "issue_id is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/issue-specs/upsert -H 'content-type: application/json' -d '{\"issue_id\":\"881\",\"body\":\"## Acceptance Criteria\\n- Done\\n\\n## Test Plan\\n- Test\\n\\n## Definition of Done\\n- Ship\"}'"),
+        ep(
             "GET",
             "/api/doctor/startup/latest",
             "health",

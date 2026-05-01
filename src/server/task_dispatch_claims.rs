@@ -1,0 +1,370 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sqlx::{PgPool, Row};
+
+const DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS: i64 = 10 * 60;
+const DEFAULT_TASK_DISPATCH_CLAIM_LIMIT: i64 = 10;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskDispatchClaimRequest {
+    pub claim_owner: String,
+    #[serde(default)]
+    pub ttl_secs: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub to_agent_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_type: Option<String>,
+    #[serde(default)]
+    pub lease_ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDispatchClaimOutcome {
+    pub claimed: Vec<TaskDispatchClaim>,
+    pub skipped: Vec<TaskDispatchClaimSkip>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDispatchClaim {
+    pub id: String,
+    pub kanban_card_id: Option<String>,
+    pub to_agent_id: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub title: Option<String>,
+    pub claim_owner: String,
+    pub claim_expires_at: DateTime<Utc>,
+    pub required_capabilities: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDispatchClaimSkip {
+    pub id: String,
+    pub reasons: Vec<String>,
+    pub required_capabilities: Option<Value>,
+}
+
+pub async fn claim_task_dispatches(
+    pool: &PgPool,
+    request: &TaskDispatchClaimRequest,
+) -> Result<TaskDispatchClaimOutcome, String> {
+    let claim_owner = normalize_required("claim_owner", &request.claim_owner)?;
+    let ttl_secs = request
+        .ttl_secs
+        .unwrap_or(DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS)
+        .clamp(1, 24 * 60 * 60);
+    let limit = request
+        .limit
+        .unwrap_or(DEFAULT_TASK_DISPATCH_CLAIM_LIMIT)
+        .clamp(1, 50);
+    let to_agent_id = clean_optional(request.to_agent_id.as_deref());
+    let dispatch_type = clean_optional(request.dispatch_type.as_deref());
+    let owner_node = crate::server::cluster::worker_node_snapshot_by_instance(
+        pool,
+        &claim_owner,
+        request.lease_ttl_secs.unwrap_or(60),
+    )
+    .await?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("claim task dispatches begin tx: {error}"))?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, kanban_card_id, to_agent_id, dispatch_type, title, required_capabilities
+          FROM task_dispatches
+         WHERE (
+                status = 'pending'
+             OR (
+                    status = 'dispatched'
+                AND (claim_expires_at IS NULL OR claim_expires_at <= NOW())
+                )
+           )
+           AND ($1::TEXT IS NULL OR to_agent_id = $1)
+           AND ($2::TEXT IS NULL OR dispatch_type = $2)
+         ORDER BY created_at ASC, id ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT $3
+        "#,
+    )
+    .bind(to_agent_id)
+    .bind(dispatch_type)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select task dispatch claims: {error}"))?;
+
+    let mut claimed = Vec::new();
+    let mut skipped = Vec::new();
+
+    for row in rows {
+        let id: String = row.get("id");
+        let required_capabilities = row
+            .try_get::<Option<Value>, _>("required_capabilities")
+            .ok()
+            .flatten();
+
+        if !required_capabilities_empty(required_capabilities.as_ref()) {
+            let decision = owner_node
+                .as_ref()
+                .map(|node| {
+                    crate::server::cluster::explain_capability_match(
+                        node,
+                        required_capabilities.as_ref().expect("checked above"),
+                    )
+                })
+                .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
+                    instance_id: Some(claim_owner.clone()),
+                    eligible: false,
+                    reasons: vec!["claim owner is not registered in worker_nodes".to_string()],
+                });
+            if !decision.eligible {
+                let diagnostics = json!({
+                    "claim_owner": claim_owner,
+                    "decision": decision,
+                    "required_capabilities": required_capabilities,
+                    "checked_at": Utc::now(),
+                });
+                sqlx::query(
+                    "UPDATE task_dispatches
+                        SET routing_diagnostics = $2,
+                            updated_at = NOW()
+                      WHERE id = $1",
+                )
+                .bind(&id)
+                .bind(&diagnostics)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("record task dispatch routing diagnostics: {error}"))?;
+                skipped.push(TaskDispatchClaimSkip {
+                    id,
+                    reasons: decision.reasons,
+                    required_capabilities,
+                });
+                continue;
+            }
+        }
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE task_dispatches
+               SET status = 'dispatched',
+                   claimed_at = NOW(),
+                   claim_owner = $2,
+                   claim_expires_at = NOW() + ($3::BIGINT * INTERVAL '1 second'),
+                   updated_at = NOW()
+             WHERE id = $1
+             RETURNING id, kanban_card_id, to_agent_id, dispatch_type, title,
+                       claim_owner, claim_expires_at, required_capabilities
+            "#,
+        )
+        .bind(&id)
+        .bind(&claim_owner)
+        .bind(ttl_secs)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("claim task dispatch {id}: {error}"))?;
+        claimed.push(claim_from_row(updated));
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("claim task dispatches commit: {error}"))?;
+    Ok(TaskDispatchClaimOutcome { claimed, skipped })
+}
+
+fn required_capabilities_empty(required: Option<&Value>) -> bool {
+    match required {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(map)) => map.is_empty(),
+        _ => false,
+    }
+}
+
+fn claim_from_row(row: sqlx::postgres::PgRow) -> TaskDispatchClaim {
+    TaskDispatchClaim {
+        id: row.get("id"),
+        kanban_card_id: row.get("kanban_card_id"),
+        to_agent_id: row.get("to_agent_id"),
+        dispatch_type: row.get("dispatch_type"),
+        title: row.get("title"),
+        claim_owner: row.get("claim_owner"),
+        claim_expires_at: row.get("claim_expires_at"),
+        required_capabilities: row.get("required_capabilities"),
+    }
+}
+
+fn normalize_required(field: &str, value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} is required"));
+    }
+    if trimmed.len() > 256 {
+        return Err(format!("{field} is too long"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    struct TestPostgresDb {
+        database_url: String,
+        database_name: String,
+    }
+
+    impl TestPostgresDb {
+        async fn create() -> Self {
+            let base = postgres_base_database_url();
+            let database_name =
+                format!("agentdesk_task_dispatch_claims_{}", Uuid::new_v4().simple());
+            let admin_url = format!("{base}/postgres");
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "task_dispatch_claims tests",
+            )
+            .await
+            .expect("create task_dispatch_claims postgres test database");
+            Self {
+                database_url: format!("{base}/{database_name}"),
+                database_name,
+            }
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "task_dispatch_claims tests",
+            )
+            .await
+            .expect("connect + migrate task_dispatch_claims postgres test db")
+        }
+
+        async fn drop(self) {
+            let base = postgres_base_database_url();
+            let admin_url = format!("{base}/postgres");
+            crate::db::postgres::drop_test_database(
+                &admin_url,
+                &self.database_name,
+                "task_dispatch_claims tests",
+            )
+            .await
+            .expect("drop task_dispatch_claims postgres test database");
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_capability_mismatch_and_claims_eligible_dispatch() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, role, effective_role, status, labels, capabilities,
+                last_heartbeat_at, started_at, updated_at
+             )
+             VALUES (
+                'mac-book-release', 'mac-book', 'worker', 'worker', 'online',
+                '[\"mac-book\"]'::jsonb,
+                '{\"providers\":[\"codex\"],\"mcp\":{\"filesystem\":{\"healthy\":true}}}'::jsonb,
+                NOW(), NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO kanban_cards (id, title) VALUES ('card-1', 'Card 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                required_capabilities, created_at, updated_at
+             )
+             VALUES
+                ('disp-ok', 'card-1', 'agent-1', 'implementation', 'pending', 'OK',
+                 '{\"labels\":[\"mac-book\"],\"providers\":[\"codex\"]}'::jsonb, NOW(), NOW()),
+                ('disp-skip', 'card-1', 'agent-1', 'implementation', 'pending', 'Skip',
+                 '{\"labels\":[\"mac-mini\"]}'::jsonb, NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let outcome = claim_task_dispatches(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-book-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.claimed.len(), 1);
+        assert_eq!(outcome.claimed[0].id, "disp-ok");
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].id, "disp-skip");
+        assert!(
+            outcome.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("missing label"))
+        );
+
+        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("disp-ok")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "dispatched");
+        let diagnostics: Option<Value> =
+            sqlx::query_scalar("SELECT routing_diagnostics FROM task_dispatches WHERE id = $1")
+                .bind("disp-skip")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(diagnostics.is_some());
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    fn postgres_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("postgres://{user}@127.0.0.1:5432")
+    }
+}

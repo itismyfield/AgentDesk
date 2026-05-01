@@ -1,8 +1,11 @@
 pub(crate) mod cluster;
 pub(crate) mod cron_catalog;
+pub(crate) mod issue_specs;
 pub(crate) mod maintenance;
+pub(crate) mod multinode_regression;
 pub(crate) mod resource_locks;
 pub mod routes;
+pub(crate) mod task_dispatch_claims;
 pub(crate) mod test_phase_runs;
 mod worker_registry;
 pub mod ws;

@@ -302,3 +302,51 @@ pub async fn latest_test_phase_evidence(
         Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
     }
 }
+
+pub async fn claim_task_dispatches(
+    State(state): State<AppState>,
+    Json(body): Json<crate::server::task_dispatch_claims::TaskDispatchClaimRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::task_dispatch_claims::claim_task_dispatches(pool, &body).await {
+        Ok(outcome) => (StatusCode::OK, Json(json!(outcome))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn list_issue_specs(
+    State(state): State<AppState>,
+    Query(params): Query<crate::server::issue_specs::IssueSpecListQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::issue_specs::list_issue_specs(pool, &params).await {
+        Ok(specs) => (StatusCode::OK, Json(json!({"specs": specs}))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn upsert_issue_spec(
+    State(state): State<AppState>,
+    Json(body): Json<crate::server::issue_specs::IssueSpecUpsertRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::issue_specs::upsert_issue_spec(pool, &body).await {
+        Ok(spec) => (StatusCode::OK, Json(json!({"spec": spec}))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
