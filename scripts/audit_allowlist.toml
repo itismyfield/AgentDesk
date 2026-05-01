@@ -24,7 +24,8 @@ route_srp_violations = [
 # fail the hard gate. Line numbers for tmux.rs / turn_bridge / mod.rs /
 # health.rs were refreshed in #1440 after the #1435 tmux watcher-lifecycle
 # extraction shifted callsites; #1450/#1472/#1467/#1476/#1477/#1480 refresh
-# the remaining drift detected by CI with no logical regressions.
+# the remaining drift detected by CI with no logical regressions. The upstream
+# routine port refreshes line-only drift after the durable routine modules land.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs:60",
   "src/services/discord/commands/skill.rs:278",
@@ -39,8 +40,8 @@ direct_discord_sends = [
   "src/services/discord/gateway.rs:212",
   "src/services/discord/gateway.rs:236",
   "src/services/discord/gateway.rs:263",
-  "src/services/discord/health.rs:2738",
-  "src/services/discord/health.rs:2806",
+  "src/services/discord/health.rs:2895",
+  "src/services/discord/health.rs:2963",
   "src/services/discord/meeting_orchestrator.rs:654",
   "src/services/discord/meeting_orchestrator.rs:678",
   "src/services/discord/mod.rs:2330",
@@ -62,17 +63,17 @@ direct_discord_sends = [
   "src/services/discord/tmux.rs:3825",
   "src/services/discord/tmux.rs:3959",
   "src/services/discord/tmux.rs:4247",
-  "src/services/discord/turn_bridge/mod.rs:1281",
-  "src/services/discord/turn_bridge/mod.rs:1314",
-  "src/services/discord/turn_bridge/mod.rs:1720",
-  "src/services/discord/turn_bridge/mod.rs:2348",
-  "src/services/discord/turn_bridge/mod.rs:2396",
+  "src/services/discord/turn_bridge/mod.rs:1284",
+  "src/services/discord/turn_bridge/mod.rs:1317",
+  "src/services/discord/turn_bridge/mod.rs:1723",
+  "src/services/discord/turn_bridge/mod.rs:2351",
   "src/services/discord/turn_bridge/mod.rs:2399",
-  "src/services/discord/turn_bridge/mod.rs:2480",
-  "src/services/discord/turn_bridge/mod.rs:2523",
-  "src/services/discord/turn_bridge/mod.rs:2945",
-  "src/services/discord/turn_bridge/mod.rs:3183",
-  "src/services/discord/turn_bridge/mod.rs:3464",
+  "src/services/discord/turn_bridge/mod.rs:2402",
+  "src/services/discord/turn_bridge/mod.rs:2483",
+  "src/services/discord/turn_bridge/mod.rs:2526",
+  "src/services/discord/turn_bridge/mod.rs:2948",
+  "src/services/discord/turn_bridge/mod.rs:3186",
+  "src/services/discord/turn_bridge/mod.rs:3467",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.

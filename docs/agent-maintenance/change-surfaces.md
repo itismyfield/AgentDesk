@@ -252,6 +252,10 @@ The remaining giant-file modules under `src/services/` not covered above:
   (GitClient extraction).
 - `src/services/platform/binary_resolver.rs` (1377).
 - `src/services/mcp_config.rs` (1072).
+- `src/services/routines/{store.rs (2178), loader.rs (2013),
+  discord_log.rs (1056)}` — durable routine storage, script loading, and
+  Discord notification plumbing. Split before broadening behavior outside the
+  current routine API/runtime contract.
 - `src/services/discord/mod.rs` (5519),
   `src/services/discord_config_audit.rs` (1310), and
   `src/services/qwen_tmux_wrapper.rs` (1194).

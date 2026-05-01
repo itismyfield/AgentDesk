@@ -252,6 +252,7 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 9] = [
         start_order: 55,
         restart_policy: WorkerRestartPolicy::SkipWhenDisabled,
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
+        execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "routine_runs row state and tracing logs",
         notes: "Skipped when routines.enabled=false or postgres pool unavailable; \
                 performs boot recovery of stale running runs before the tick loop starts",
