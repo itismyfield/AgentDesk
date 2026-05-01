@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::Row;
+use std::collections::HashSet;
 
 use super::action::RoutineAction;
 use super::agent_executor::RoutineAgentExecutor;
@@ -72,26 +73,61 @@ pub async fn execute_claimed_script_run(
 ) -> Result<Option<RoutineRunOutcome>> {
     let fresh_context_guaranteed = false;
     let agent = load_tick_agent_context(store, claimed.agent_id.as_deref()).await?;
-    let observations = store
+    let observations = match store
         .fetch_recent_run_observations(
             Some(&claimed.script_ref),
             MAX_OBSERVATIONS_PER_TICK,
             MAX_OBSERVATION_PAYLOAD_BYTES,
         )
         .await
-        .unwrap_or_default();
+    {
+        Ok(observations) => observations,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                routine_script = %claimed.script_ref,
+                "routine observation provider failed"
+            );
+            Vec::new()
+        }
+    };
     let observations = if observations.is_empty() {
         None
     } else {
         Some(observations)
     };
-    let automation_inventory = store
+    let mut automation_inventory = match store
         .fetch_active_routine_automation_inventory(
             MAX_AUTOMATION_INVENTORY_ITEMS,
             MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
         )
         .await
-        .unwrap_or_default();
+    {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                routine_script = %claimed.script_ref,
+                "routine automation inventory provider failed"
+            );
+            Vec::new()
+        }
+    };
+    match loader.script_refs() {
+        Ok(script_refs) => merge_loaded_script_automation_inventory(
+            &mut automation_inventory,
+            script_refs,
+            MAX_AUTOMATION_INVENTORY_ITEMS,
+            MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                routine_script = %claimed.script_ref,
+                "loaded routine script inventory unavailable"
+            );
+        }
+    }
     let automation_inventory = if automation_inventory.is_empty() {
         None
     } else {
@@ -154,6 +190,92 @@ pub async fn execute_claimed_script_run(
         fresh_context_guaranteed,
     )
     .await
+}
+
+fn merge_loaded_script_automation_inventory(
+    inventory: &mut Vec<Value>,
+    script_refs: Vec<String>,
+    max_items: usize,
+    max_payload_bytes: usize,
+) {
+    if max_items == 0 || max_payload_bytes == 0 {
+        return;
+    }
+
+    let existing_inventory = std::mem::take(inventory);
+    let mut merged = Vec::with_capacity(existing_inventory.len().min(max_items));
+    let mut seen = HashSet::new();
+    let mut total_bytes = 0;
+    let updated_at = chrono::Utc::now().to_rfc3339();
+
+    for script_ref in script_refs {
+        let script_ref = script_ref.trim();
+        if script_ref.is_empty() {
+            continue;
+        }
+        let pattern_id = format!("{script_ref}:*");
+
+        let item = json!({
+            "pattern_id": pattern_id,
+            "status": "implemented",
+            "reason": "loaded routine script",
+            "source_ref": format!("routine-script:{script_ref}"),
+            "updated_at": updated_at,
+        });
+        if !push_inventory_item(
+            &mut merged,
+            &mut seen,
+            &mut total_bytes,
+            item,
+            max_items,
+            max_payload_bytes,
+        ) {
+            break;
+        }
+    }
+
+    for item in existing_inventory {
+        if !push_inventory_item(
+            &mut merged,
+            &mut seen,
+            &mut total_bytes,
+            item,
+            max_items,
+            max_payload_bytes,
+        ) {
+            break;
+        }
+    }
+
+    *inventory = merged;
+}
+
+fn push_inventory_item(
+    inventory: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+    total_bytes: &mut usize,
+    item: Value,
+    max_items: usize,
+    max_payload_bytes: usize,
+) -> bool {
+    if inventory.len() >= max_items {
+        return false;
+    }
+    let pattern_id = item
+        .get("pattern_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if pattern_id.is_empty() || !seen.insert(pattern_id) {
+        return true;
+    }
+    let item_bytes = item.to_string().len();
+    if *total_bytes + item_bytes > max_payload_bytes {
+        return false;
+    }
+    *total_bytes += item_bytes;
+    inventory.push(item);
+    true
 }
 
 async fn load_tick_agent_context(
@@ -359,5 +481,104 @@ async fn close_action(
                 .await
                 .map(Some)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::merge_loaded_script_automation_inventory;
+
+    #[test]
+    fn loaded_script_refs_extend_automation_inventory_as_implemented_prefixes() {
+        let mut inventory = vec![json!({
+            "pattern_id": "monitoring/existing.js:*",
+            "status": "implemented",
+        })];
+
+        merge_loaded_script_automation_inventory(
+            &mut inventory,
+            vec![
+                "monitoring/working-watchdog.js".to_string(),
+                " monitoring/automation-candidate-recommender.js ".to_string(),
+                "monitoring/working-watchdog.js".to_string(),
+                String::new(),
+            ],
+            8,
+            4096,
+        );
+
+        let pattern_ids = inventory
+            .iter()
+            .filter_map(|item| item.get("pattern_id").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pattern_ids,
+            vec![
+                "monitoring/working-watchdog.js:*",
+                "monitoring/automation-candidate-recommender.js:*",
+                "monitoring/existing.js:*",
+            ]
+        );
+
+        let added = inventory
+            .iter()
+            .find(|item| {
+                item.get("pattern_id").and_then(|value| value.as_str())
+                    == Some("monitoring/working-watchdog.js:*")
+            })
+            .expect("loaded routine script inventory item");
+        assert_eq!(
+            added.get("status").and_then(|value| value.as_str()),
+            Some("implemented")
+        );
+        assert_eq!(
+            added.get("source_ref").and_then(|value| value.as_str()),
+            Some("routine-script:monitoring/working-watchdog.js")
+        );
+    }
+
+    #[test]
+    fn loaded_script_inventory_respects_item_cap() {
+        let mut inventory = Vec::new();
+
+        merge_loaded_script_automation_inventory(
+            &mut inventory,
+            vec!["monitoring/a.js".to_string(), "monitoring/b.js".to_string()],
+            1,
+            4096,
+        );
+
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory[0]
+                .get("pattern_id")
+                .and_then(|value| value.as_str()),
+            Some("monitoring/a.js:*")
+        );
+    }
+
+    #[test]
+    fn loaded_script_inventory_is_prioritized_over_existing_items() {
+        let mut inventory = vec![json!({
+            "pattern_id": "existing/noisy-pattern",
+            "status": "observing",
+        })];
+
+        merge_loaded_script_automation_inventory(
+            &mut inventory,
+            vec!["monitoring/a.js".to_string()],
+            1,
+            4096,
+        );
+
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory[0]
+                .get("pattern_id")
+                .and_then(|value| value.as_str()),
+            Some("monitoring/a.js:*")
+        );
     }
 }

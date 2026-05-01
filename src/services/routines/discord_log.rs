@@ -515,7 +515,32 @@ fn run_outcome_message(routine: &RoutineRecord, outcome: &RoutineRunOutcome) -> 
         message.push_str(" / error ");
         message.push_str(&compact(error, 160));
     }
+    if let Some(summary) = outcome_summary_for_message(outcome) {
+        message.push_str(" / 요약 ");
+        message.push_str(&compact(&summary, 220));
+    }
     message
+}
+
+fn outcome_summary_for_message(outcome: &RoutineRunOutcome) -> Option<String> {
+    let result = outcome.result_json.as_ref()?;
+    for key in [
+        "outcome_summary",
+        "summary",
+        "assistant_message_preview",
+        "reason",
+        "error",
+    ] {
+        if let Some(value) = result
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn script_ref_for_message(value: &str, max_chars: usize) -> String {
@@ -609,6 +634,44 @@ mod tests {
         assert!(message.contains("action \"complete\""));
         assert!(message.contains("status \"failed\""));
         assert!(message.contains("error boom"));
+    }
+
+    #[test]
+    fn run_outcome_message_includes_result_summary_preview() {
+        let routine = RoutineRecord {
+            id: "routine-123456789".to_string(),
+            agent_id: Some("monitoring".to_string()),
+            script_ref: "monitoring/automation-candidate-recommender.js".to_string(),
+            name: "automation-candidate-recommender".to_string(),
+            status: "enabled".to_string(),
+            execution_strategy: "fresh".to_string(),
+            schedule: None,
+            next_due_at: None,
+            last_run_at: None,
+            last_result: None,
+            checkpoint: None,
+            discord_thread_id: Some("1499416722204004372".to_string()),
+            timeout_secs: None,
+            in_flight_run_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let outcome = RoutineRunOutcome {
+            run_id: "run-123456789".to_string(),
+            routine_id: routine.id.clone(),
+            script_ref: routine.script_ref.clone(),
+            action: "complete".to_string(),
+            status: "succeeded".to_string(),
+            result_json: Some(json!({
+                "outcome_summary": "성공 요약: 새 자동화 추천 후보 없음"
+            })),
+            error: None,
+            fresh_context_guaranteed: false,
+        };
+
+        let message = run_outcome_message(&routine, &outcome);
+
+        assert!(message.contains("요약 성공 요약: 새 자동화 추천 후보 없음"));
     }
 
     #[test]

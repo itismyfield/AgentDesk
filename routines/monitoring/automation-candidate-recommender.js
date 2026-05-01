@@ -91,6 +91,35 @@ function observationOccurrences(obs) {
   return Math.min(50, Math.floor(value));
 }
 
+function utf8CharBytes(ch) {
+  const codePoint = ch.codePointAt(0);
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
+function utf8ByteLength(value) {
+  let bytes = 0;
+  for (const ch of String(value || "")) {
+    bytes += utf8CharBytes(ch);
+  }
+  return bytes;
+}
+
+function truncateUtf8(value, maxBytes) {
+  if (maxBytes <= 0) return "";
+  let bytes = 0;
+  let out = "";
+  for (const ch of String(value || "")) {
+    const nextBytes = utf8CharBytes(ch);
+    if (bytes + nextBytes > maxBytes) break;
+    out += ch;
+    bytes += nextBytes;
+  }
+  return out;
+}
+
 // --- Daily cap reset ---
 
 function resetDailyCapIfNeeded(cp, nowStr) {
@@ -164,6 +193,27 @@ function buildSuppressedSet(cp, inventory) {
       return exact.has(patternId) || prefixes.some((prefix) => patternId.startsWith(prefix));
     },
   };
+}
+
+function dropSuppressedCandidates(cp, suppressedSet) {
+  for (const [patternId, candidate] of Object.entries(cp.candidates || {})) {
+    if (suppressedSet.has(patternId)) {
+      const s = candidate.state;
+      if (
+        (s === "accepted" && hasDurableAcceptance(candidate)) ||
+        s === "implemented" ||
+        s === "suppressed" ||
+        s === "rejected"
+      ) {
+        continue;
+      }
+      delete cp.candidates[patternId];
+    }
+  }
+
+  if (Array.isArray(cp.recommendations)) {
+    cp.recommendations = cp.recommendations.filter((item) => !suppressedSet.has(item.pattern_id));
+  }
 }
 
 // --- Expired suppression cleanup ---
@@ -319,6 +369,7 @@ function markRecommended(cp, escalation, nowStr) {
   candidate.cooldown_until = addHours(nowStr, COOLDOWN_HOURS);
   candidate.suggested_automation = assessment.suggestedAutomation;
   candidate.recommended_execution = assessment.recommendedExecution;
+  candidate.outcome_summary = assessment.outcomeSummary;
   candidate.before_after = assessment.beforeAfter;
   candidate.expected_files = assessment.expectedFiles;
   candidate.expected_side_effects = assessment.expectedSideEffects;
@@ -332,6 +383,7 @@ function markRecommended(cp, escalation, nowStr) {
     hash,
     score: candidate.score,
     evidence_count: candidate.evidence_count,
+    outcome_summary: assessment.outcomeSummary,
   });
   // Keep recommendations list bounded
   if (cp.recommendations.length > 50) {
@@ -341,6 +393,28 @@ function markRecommended(cp, escalation, nowStr) {
 
 // --- Agent prompt builder ---
 
+function buildOutcomeSummary(patternId, candidate, isErrorPattern, category) {
+  const latestExample = (candidate.examples || []).slice(-1)[0] || {};
+  const latestSummary = String(latestExample.summary || patternId)
+    .replace(/\s+/g, " ")
+    .slice(0, 120);
+  const count = candidate.evidence_count || observationOccurrences(latestExample) || 0;
+  const categoryLabel = {
+    "routine-candidate": "루틴 반복",
+    "release-freshness": "릴리스 신선도",
+    "outbox-delivery": "메시지 발송",
+    "memento-hygiene": "메모리 위생",
+    "api-friction": "API 마찰",
+  }[category] || "루틴 후보";
+  const prefix = isErrorPattern || category === "outbox-delivery" || category === "api-friction"
+    ? "실패 요약"
+    : "성공 요약";
+  const action = prefix === "실패 요약"
+    ? "자동 복구나 알림 후보입니다"
+    : "수동 확인 없이 루틴화할 후보입니다";
+  return `${prefix}: ${categoryLabel} 패턴이 ${count}회 반복되어 ${action}. 최근 근거: ${latestSummary}`;
+}
+
 function candidateAssessment(patternId, candidate) {
   const isErrorPattern = Boolean(candidate.has_error_evidence) ||
     (candidate.examples || []).some((example) => example.weight === 2);
@@ -348,45 +422,45 @@ function candidateAssessment(patternId, candidate) {
   const categoryProfiles = {
     "routine-candidate": {
       suggestedAutomation: isErrorPattern
-        ? "Automatic retry or alert when this routine fails repeatedly"
-        : "Scheduled routine to handle this pattern automatically",
-      before: "Recurring routine evidence is only visible after manual log review.",
-      after: "A bounded routine/rule can handle the repeated pattern or escalate it with cooldowns.",
+        ? "반복 실패 루틴에 대한 자동 재시도 또는 알림"
+        : "반복 패턴을 자동 처리하는 예약 루틴",
+      before: "반복 루틴 근거는 수동 로그 확인 후에만 보입니다.",
+      after: "제한된 루틴/규칙이 반복 패턴을 처리하거나 쿨다운을 두고 에스컬레이션합니다.",
       files: ["routines/monitoring/*.js", "src/services/routines/*"],
-      sideEffects: "May add a routine or rule path; verify cooldown/dedup logic and Discord noise.",
-      verification: "Run targeted routine loader tests and inspect checkpoint candidate fields.",
+      sideEffects: "루틴 또는 규칙 경로가 추가될 수 있으므로 쿨다운, 중복 제거, Discord 노이즈를 검증해야 합니다.",
+      verification: "대상 루틴 로더 테스트를 실행하고 체크포인트 후보 필드를 확인합니다.",
     },
     "release-freshness": {
-      suggestedAutomation: "Release freshness monitor for stale deploy, version, or generated inventory signals",
-      before: "Release drift is discovered manually after stale versions or generated docs are noticed.",
-      after: "A freshness check proposes an update path before stale release state lingers.",
+      suggestedAutomation: "오래된 배포, 버전, 생성 인벤토리 신호를 감지하는 릴리스 신선도 모니터",
+      before: "버전이나 생성 문서가 오래된 뒤에야 사람이 릴리스 드리프트를 발견합니다.",
+      after: "신선도 점검이 오래된 릴리스 상태가 누적되기 전에 업데이트 경로를 제안합니다.",
       files: ["scripts/*release*", "src/cli/*", "docs/generated/worker-inventory.md"],
-      sideEffects: "May add read-only freshness checks; avoid publishing, tagging, or deploying automatically.",
-      verification: "Run script checks plus the freshness fixture that proves no release side effects occur.",
+      sideEffects: "읽기 전용 신선도 점검이 추가될 수 있으며 자동 게시, 태깅, 배포는 피해야 합니다.",
+      verification: "스크립트 검사와 릴리스 부작용이 없음을 증명하는 신선도 픽스처를 실행합니다.",
     },
     "outbox-delivery": {
-      suggestedAutomation: "Message outbox delivery monitor for repeated send or enqueue failures",
-      before: "Delivery failures require manual DB/log inspection to spot repeat patterns.",
-      after: "Repeated outbox failures are grouped into a bounded proposal with a clear delivery fix path.",
+      suggestedAutomation: "반복 전송 또는 큐 적재 실패를 감지하는 메시지 아웃박스 전달 모니터",
+      before: "전달 실패 반복 패턴을 찾으려면 DB/로그를 사람이 직접 확인해야 합니다.",
+      after: "반복 아웃박스 실패가 명확한 전달 수정 경로를 가진 제한된 제안으로 묶입니다.",
       files: ["src/services/message_outbox.rs", "src/services/routines/discord_log.rs", "src/services/discord/*"],
-      sideEffects: "May change notification retry or fallback behavior; verify dedupe and delivery targets.",
-      verification: "Run outbox/routine targeted tests and inspect a failed-delivery fixture.",
+      sideEffects: "알림 재시도 또는 폴백 동작이 바뀔 수 있으므로 중복 제거와 전달 대상을 검증해야 합니다.",
+      verification: "아웃박스/루틴 대상 테스트를 실행하고 전달 실패 픽스처를 확인합니다.",
     },
     "memento-hygiene": {
-      suggestedAutomation: "Memento hygiene digest monitor for repeated memory quality or routing issues",
-      before: "Memory hygiene issues are scattered across raw notes and hard to act on safely.",
-      after: "Only topic/count/latest-example digests are converted into a bounded proposal.",
+      suggestedAutomation: "반복되는 메모리 품질 또는 라우팅 문제를 요약하는 Memento 위생 다이제스트 모니터",
+      before: "메모리 위생 문제는 원문 노트에 흩어져 있어 안전하게 조치하기 어렵습니다.",
+      after: "토픽/횟수/최신 예시 다이제스트만 제한된 제안으로 변환합니다.",
       files: ["src/services/memory/*", "src/services/routines/store.rs", "routines/monitoring/*.js"],
-      sideEffects: "Must not read or write raw memory bodies from this routine; verify digest truncation.",
-      verification: "Run recommender digest fixtures and confirm the prompt contains no raw memory body.",
+      sideEffects: "이 루틴은 원문 메모리 본문을 읽거나 쓰면 안 되며 다이제스트 절단을 검증해야 합니다.",
+      verification: "추천기 다이제스트 픽스처를 실행하고 프롬프트에 원문 메모리 본문이 없는지 확인합니다.",
     },
     "api-friction": {
-      suggestedAutomation: "API friction monitor for repeated docs or endpoint workflow breakdowns",
-      before: "API friction repeats in agent replies without a consolidated remediation proposal.",
-      after: "Repeated friction markers are grouped by fingerprint with docs and verification guidance.",
+      suggestedAutomation: "반복되는 문서 또는 엔드포인트 워크플로 붕괴를 감지하는 API 마찰 모니터",
+      before: "API 마찰이 에이전트 응답에서 반복되지만 통합 개선 제안으로 이어지지 않습니다.",
+      after: "반복 마찰 마커가 지문별로 묶이고 문서 및 검증 가이드가 함께 제안됩니다.",
       files: ["src/services/api_friction.rs", "src/server/routes/*", "docs/*"],
-      sideEffects: "May update docs or API routing; verify no DB-direct workaround is introduced.",
-      verification: "Run API friction parsing tests and targeted routine recommender fixtures.",
+      sideEffects: "문서 또는 API 라우팅이 바뀔 수 있으며 DB 직접 우회가 도입되지 않았는지 검증해야 합니다.",
+      verification: "API 마찰 파싱 테스트와 대상 루틴 추천기 픽스처를 실행합니다.",
     },
   };
   const profile = categoryProfiles[category] || categoryProfiles["routine-candidate"];
@@ -397,6 +471,7 @@ function candidateAssessment(patternId, candidate) {
   return {
     suggestedAutomation: profile.suggestedAutomation,
     recommendedExecution,
+    outcomeSummary: buildOutcomeSummary(patternId, candidate, isErrorPattern, category),
     beforeAfter: {
       before: profile.before,
       after: profile.after,
@@ -410,16 +485,16 @@ function candidateAssessment(patternId, candidate) {
         title: `[automation-candidate] ${title}`,
         category,
         acceptance: [
-          "Implementation is proposal-approved before any branch/card mutation",
-          "Routine remains bounded and idempotent",
-          "Verification command or fixture is recorded in the PR/card",
+          "브랜치/카드 변경 전에 제안 승인이 완료되어야 합니다",
+          "루틴은 제한적이고 멱등적으로 유지되어야 합니다",
+          "검증 명령 또는 픽스처가 PR/카드에 기록되어야 합니다",
         ],
       },
       pr_draft: {
-        title: `Implement automation candidate: ${title}`,
-        body_hint: "Include Before/After, expected files, side effects, and verification evidence.",
+        title: `자동화 후보 구현: ${title}`,
+        body_hint: "Before/After, 예상 파일, 부작용, 검증 근거를 포함합니다.",
       },
-      side_effects: "none until a human explicitly approves the gated handoff",
+      side_effects: "사람이 게이트된 핸드오프를 명시적으로 승인하기 전까지는 없음",
     },
   };
 }
@@ -437,63 +512,76 @@ function buildPrompt(escalation) {
     expectedFiles,
     expectedSideEffects,
     verificationMethod,
+    outcomeSummary,
     gatedHandoff,
   } = candidateAssessment(patternId, candidate);
   const handoffAcceptance = (gatedHandoff.kanban_card_draft.acceptance || [])
     .map((item) => `- ${item}`)
     .join("\n");
 
-  const raw = `# Automation Candidate Recommendation
+  const raw = `# 자동화 후보 추천
 
-Pattern: ${patternId}
-Category: ${normalizeCategory(candidate.category)}
-Score: ${candidate.score}/100
-Evidence: ${candidate.evidence_count} occurrences (first: ${candidate.first_seen_at || "?"}, last: ${candidate.last_seen_at || "?"})
+패턴: ${patternId}
+카테고리: ${normalizeCategory(candidate.category)}
+점수: ${candidate.score}/100
+근거: ${candidate.evidence_count}회 발생 (최초: ${candidate.first_seen_at || "?"}, 최신: ${candidate.last_seen_at || "?"})
 
-## Evidence Examples
-${evidenceLines || "(none recorded)"}
+## 근거 예시
+${evidenceLines || "(기록 없음)"}
+
+## 성공/실패 한 줄 요약
+${outcomeSummary}
+
+## 루트 기반 JS 자동화 패턴 탐지 가이드
+- 이 제안은 runtime이 제공한 bounded observation, checkpoint, automation inventory만 근거로 판단합니다.
+- 같은 증상이 아니라 같은 루트 원인 또는 같은 수동 작업이 반복되는지 pattern/category/count/first-last/example을 연결해 설명합니다.
+- 단순 빈도만 보지 말고 최근성, 실패 weight, 운영 ROI, 부작용, 이미 구현/억제된 자동화와의 중복 가능성을 함께 평가합니다.
+- 규칙으로 충분한 deterministic retry/check/threshold인지, 문맥 판단과 코드 변경 설계가 필요한 agent 주도 자동화인지 구분합니다.
+- 근거가 부족하거나 오탐 가능성이 높으면 자동화 보류로 결론을 내립니다.
 
 ## Before / After
 - Before: ${beforeAfter.before}
 - After: ${beforeAfter.after}
 
-## Expected Implementation Files
+## 예상 구현 파일
 ${expectedFiles.map((file) => `- ${file}`).join("\n")}
 
-## Assessment
-- Suggested automation: ${suggestedAutomation}
-- Recommended execution: ${recommendedExecution} (rule-based vs agent-driven)
-- Potential side effects: ${expectedSideEffects}
+## 판단
+- 제안 자동화: ${suggestedAutomation}
+- 권장 실행 방식: ${recommendedExecution} (규칙 기반 vs 에이전트 주도)
+- 예상 부작용: ${expectedSideEffects}
 
-## Verification Method
+## 검증 방법
 ${verificationMethod}
 
-## Gated Handoff Draft
-- Status: ${gatedHandoff.status}
-- Kanban title: ${gatedHandoff.kanban_card_draft.title}
-- PR title: ${gatedHandoff.pr_draft.title}
-- Handoff side effects: ${gatedHandoff.side_effects}
+## 게이트된 핸드오프 초안
+- 상태: ${gatedHandoff.status}
+- Kanban 제목: ${gatedHandoff.kanban_card_draft.title}
+- PR 제목: ${gatedHandoff.pr_draft.title}
+- 핸드오프 부작용: ${gatedHandoff.side_effects}
 ${handoffAcceptance}
 
-## Instructions
-Evaluate whether this automation is worth building. Provide:
-1. Whether to automate (yes / no / defer), and why
-2. If yes: proposed implementation approach and affected files/routines
-3. Estimated side effects and how to verify the automation is working
+## 지시사항
+에이전트가 도출한 내용은 반드시 한국어로 작성합니다. 이 자동화를 구현할 가치가 있는지 평가하고 다음을 제공합니다:
+1. 자동화 여부(예 / 아니오 / 보류), 신뢰도, 그리고 이유
+2. 루트 원인 또는 반복 수동 작업 가설과 그 근거
+3. 구현한다면 제안 구현 방식, rule-vs-agent 선택 이유, 영향 파일/루틴
+4. 성공/실패에 대한 한 줄 요약
+5. 예상 부작용, 오탐/중복 억제 방법, 자동화 동작 검증 방법
 
-DO NOT implement, modify files, restart services, write to memento, or create PRs/cards/issues.
-This is a proposal-only request.`;
+구현, 파일 수정, 서비스 재시작, memento 쓰기, PR/카드/이슈 생성은 금지합니다.
+이 요청은 제안 전용입니다.`;
 
-  if (raw.length <= PROMPT_CAP_BYTES) {
+  if (utf8ByteLength(raw) <= PROMPT_CAP_BYTES) {
     return raw;
   }
 
   // Trim examples to fit cap
-  const header = raw.split("## Evidence Examples")[0];
-  const footer = "\n\n## Instructions\n" + raw.split("## Instructions\n")[1];
-  const budget = PROMPT_CAP_BYTES - header.length - footer.length - 20;
-  const trimmedEvidence = evidenceLines.slice(0, Math.max(0, budget));
-  return header + "## Evidence Examples\n" + trimmedEvidence + footer;
+  const header = raw.split("## 근거 예시")[0];
+  const footer = "\n\n## 지시사항\n" + raw.split("## 지시사항\n")[1];
+  const budget = PROMPT_CAP_BYTES - utf8ByteLength(header) - utf8ByteLength(footer) - 20;
+  const trimmedEvidence = truncateUtf8(evidenceLines, budget);
+  return header + "## 근거 예시\n" + trimmedEvidence + footer;
 }
 
 // --- Checkpoint size guard ---
@@ -543,6 +631,7 @@ agentdesk.routines.register({
     expireStaleCandidates(cp, nowStr);
 
     const suppressedSet = buildSuppressedSet(cp, inventory);
+    dropSuppressedCandidates(cp, suppressedSet);
     scoreObservations(cp, observations, suppressedSet, nowStr);
 
     cp.stats.ticks++;
@@ -554,11 +643,20 @@ agentdesk.routines.register({
       const activeCandidates = Object.values(cp.candidates).filter(
         (c) => c.state === "observing" || c.state === "recommended"
       ).length;
-      const summary = `observed=${observations.length}, candidates=${activeCandidates}, recommendations=${cp.stats.recommendations_today}`;
+      const summary = `관찰=${observations.length}, 후보=${activeCandidates}, 오늘 추천=${cp.stats.recommendations_today}`;
+      const outcomeSummary = `성공 요약: 새 자동화 추천 후보 없음 (${summary})`;
       return {
         action: "complete",
+        result: {
+          status: "ok",
+          summary,
+          outcome_summary: outcomeSummary,
+          observation_count: observations.length,
+          active_candidate_count: activeCandidates,
+          recommendations_today: cp.stats.recommendations_today,
+        },
         checkpoint: guardCheckpointSize(cp),
-        lastResult: summary,
+        lastResult: outcomeSummary,
       };
     }
 

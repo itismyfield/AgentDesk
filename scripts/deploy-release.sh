@@ -492,6 +492,19 @@ rm -rf "$POLICIES_STAGED"
 mkdir -p "$POLICIES_STAGED"
 rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
+# Stage routine scripts before stopping release so the runtime never executes a
+# stale JS asset after a binary deploy.
+if [ -d "$REPO/routines" ]; then
+    echo "▸ Staging routines..."
+    ROUTINES_STAGED="$ADK_REL/routines.new"
+    rm -rf "$ROUTINES_STAGED"
+    mkdir -p "$ROUTINES_STAGED"
+    rsync -a --delete "$REPO/routines/" "$ROUTINES_STAGED/"
+else
+    echo "⚠ Routines source missing: $REPO/routines"
+    echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
+fi
+
 # Wait for active turns to finish before stopping the server.
 # dcserver SIGTERM preserves turn state (#43e3cacc): tmux sessions stay alive
 # and the watcher silent-reattaches after restart. What the drain gate guards
@@ -606,6 +619,14 @@ rm -rf "$ADK_REL/policies.old"
 mv "$POLICIES_STAGED" "$ADK_REL/policies"
 POLICIES_STAGED=""
 rm -rf "$ADK_REL/policies.old"
+
+if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
+    rm -rf "$ADK_REL/routines.old"
+    [ -d "$ADK_REL/routines" ] && mv "$ADK_REL/routines" "$ADK_REL/routines.old"
+    mv "$ROUTINES_STAGED" "$ADK_REL/routines"
+    ROUTINES_STAGED=""
+    rm -rf "$ADK_REL/routines.old"
+fi
 
 if [ -n "${PROMPTS_STAGED:-}" ] && [ -d "$PROMPTS_STAGED" ]; then
     rm -rf "$ADK_REL/config/agents.old"

@@ -505,6 +505,12 @@ if [ -d "$PROJECT_DIR/policies" ]; then
   ok "Policies: $AD_HOME/policies/"
 fi
 
+if [ -d "$PROJECT_DIR/routines" ]; then
+  mkdir -p "$AD_HOME/routines"
+  rsync -a --delete "$PROJECT_DIR/routines/" "$AD_HOME/routines/"
+  ok "Routines: $AD_HOME/routines/"
+fi
+
 if [ -d "$PROJECT_DIR/skills" ]; then
   mkdir -p "$AD_HOME/skills"
   rsync -a --delete "$PROJECT_DIR/skills/" "$AD_HOME/skills/"

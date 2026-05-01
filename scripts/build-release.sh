@@ -168,6 +168,16 @@ if [ -d "policies" ]; then
   fi
 fi
 
+# Routine scripts
+if [ -d "routines" ]; then
+  mkdir -p "$STAGING/routines"
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "routines/" "$STAGING/routines/"
+  else
+    cp -R "routines/." "$STAGING/routines/"
+  fi
+fi
+
 # Managed skills
 if [ -d "skills" ]; then
   mkdir -p "$STAGING/skills"

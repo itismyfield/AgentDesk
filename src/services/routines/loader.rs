@@ -208,7 +208,6 @@ impl RoutineScriptLoader {
             .contains_key(script_ref))
     }
 
-    #[cfg(test)]
     pub fn script_refs(&self) -> Result<Vec<String>> {
         let mut refs: Vec<String> = self
             .scripts
@@ -1041,12 +1040,106 @@ mod tests {
             .unwrap();
 
         match action {
+            crate::services::routines::RoutineAction::Complete {
+                result_json,
+                checkpoint,
+                last_result,
+                ..
+            } => {
+                assert_eq!(
+                    last_result.as_deref(),
+                    Some("성공 요약: 새 자동화 추천 후보 없음 (관찰=6, 후보=0, 오늘 추천=0)")
+                );
+                let result = result_json.expect("complete action should include summary result");
+                assert_eq!(
+                    result.get("summary").and_then(Value::as_str),
+                    Some("관찰=6, 후보=0, 오늘 추천=0")
+                );
+                assert!(
+                    result
+                        .get("outcome_summary")
+                        .and_then(Value::as_str)
+                        .is_some_and(|summary| summary.starts_with("성공 요약:"))
+                );
+                let checkpoint = checkpoint.unwrap();
+                assert_eq!(
+                    checkpoint
+                        .get("candidates")
+                        .and_then(Value::as_object)
+                        .unwrap()
+                        .len(),
+                    0
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn automation_recommender_inventory_wildcard_drops_matching_checkpoint_candidates() {
+        let loader = automation_recommender_loader();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let checkpoint = serde_json::json!({
+            "version": 1,
+            "cursors": {},
+            "candidates": {
+                "monitoring/working-watchdog.js:complete": {
+                    "category": "routine-candidate",
+                    "state": "recommended",
+                    "score": 100,
+                    "evidence_count": 89,
+                    "cooldown_until": null
+                }
+            },
+            "suppressions": {},
+            "recommendations": [{
+                "pattern_id": "monitoring/working-watchdog.js:complete",
+                "recommended_at": "2026-04-30T06:59:00Z",
+                "hash": "existing",
+                "score": 100,
+                "evidence_count": 89
+            }],
+            "last_tick_at": "2026-04-30T06:59:00Z",
+            "stats": {
+                "ticks": 7,
+                "observations_seen": 100,
+                "agent_escalations": 1,
+                "recommendations_today": 1,
+                "recommendation_day": "2026-04-30"
+            }
+        });
+        let inventory = vec![serde_json::json!({
+            "pattern_id": "monitoring/working-watchdog.js:*",
+            "status": "implemented",
+            "reason": "registered routine",
+            "source_ref": "routine:monitoring-working-watchdog",
+            "updated_at": "2026-04-30T06:00:00Z"
+        })];
+
+        let action = loader
+            .execute_tick(
+                "monitoring/automation-candidate-recommender.js",
+                automation_recommender_context(Some(checkpoint), vec![], inventory, now),
+            )
+            .unwrap();
+
+        match action {
             crate::services::routines::RoutineAction::Complete { checkpoint, .. } => {
                 let checkpoint = checkpoint.unwrap();
                 assert_eq!(
                     checkpoint
                         .get("candidates")
                         .and_then(Value::as_object)
+                        .unwrap()
+                        .len(),
+                    0
+                );
+                assert_eq!(
+                    checkpoint
+                        .get("recommendations")
+                        .and_then(Value::as_array)
                         .unwrap()
                         .len(),
                     0
@@ -1077,7 +1170,8 @@ mod tests {
             crate::services::routines::RoutineAction::Agent {
                 prompt, checkpoint, ..
             } => {
-                assert!(prompt.contains("Automatic retry or alert"));
+                assert!(prompt.contains("반복 실패 루틴에 대한 자동 재시도 또는 알림"));
+                assert!(prompt.contains("실패 요약:"));
                 let checkpoint = checkpoint.unwrap();
                 let candidate = checkpoint
                     .pointer("/candidates/ops~1retry.js:complete")
@@ -1086,7 +1180,13 @@ mod tests {
                     candidate
                         .get("suggested_automation")
                         .and_then(Value::as_str),
-                    Some("Automatic retry or alert when this routine fails repeatedly")
+                    Some("반복 실패 루틴에 대한 자동 재시도 또는 알림")
+                );
+                assert!(
+                    candidate
+                        .get("outcome_summary")
+                        .and_then(Value::as_str)
+                        .is_some_and(|summary| summary.starts_with("실패 요약:"))
                 );
                 assert_eq!(
                     candidate
@@ -1103,6 +1203,12 @@ mod tests {
                         .pointer("/gated_handoff/status")
                         .and_then(Value::as_str),
                     Some("requires_human_approval")
+                );
+                assert!(
+                    checkpoint
+                        .pointer("/recommendations/0/outcome_summary")
+                        .and_then(Value::as_str)
+                        .is_some_and(|summary| summary.starts_with("실패 요약:"))
                 );
             }
             other => panic!("unexpected action: {other:?}"),
@@ -1128,12 +1234,56 @@ mod tests {
 
         match action {
             crate::services::routines::RoutineAction::Agent { prompt, .. } => {
+                assert!(prompt.contains("에이전트가 도출한 내용은 반드시 한국어"));
+                assert!(prompt.contains("## 성공/실패 한 줄 요약"));
+                assert!(prompt.contains("## 루트 기반 JS 자동화 패턴 탐지 가이드"));
+                assert!(prompt.contains("루트 원인 또는 반복 수동 작업 가설"));
+                assert!(prompt.contains("rule-vs-agent 선택 이유"));
+                assert!(prompt.contains("오탐/중복 억제 방법"));
                 assert!(prompt.contains("## Before / After"));
-                assert!(prompt.contains("## Expected Implementation Files"));
-                assert!(prompt.contains("## Verification Method"));
-                assert!(prompt.contains("## Gated Handoff Draft"));
+                assert!(prompt.contains("## 예상 구현 파일"));
+                assert!(prompt.contains("## 검증 방법"));
+                assert!(prompt.contains("## 게이트된 핸드오프 초안"));
                 assert!(prompt.contains("requires_human_approval"));
-                assert!(prompt.contains("DO NOT implement"));
+                assert!(prompt.contains("구현, 파일 수정, 서비스 재시작"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn automation_recommender_truncates_prompt_by_utf8_bytes_without_node_buffer() {
+        let loader = automation_recommender_loader();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-30T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let long_summary = "가나다라마바사아자차카타파하".repeat(320);
+        let observations = (0..5)
+            .map(|idx| {
+                serde_json::json!({
+                    "timestamp": "2026-04-30T06:59:00Z",
+                    "source": "routine_result",
+                    "category": "routine-candidate",
+                    "signature": "ops/long.js:complete",
+                    "summary": format!("{idx}: {long_summary}"),
+                    "occurrences": 1,
+                    "evidence_ref": format!("long:{idx}"),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let action = loader
+            .execute_tick(
+                "monitoring/automation-candidate-recommender.js",
+                automation_recommender_context(None, observations, vec![], now),
+            )
+            .unwrap();
+
+        match action {
+            crate::services::routines::RoutineAction::Agent { prompt, .. } => {
+                assert!(prompt.len() <= 12_288);
+                assert!(prompt.contains("## 지시사항"));
+                assert!(!prompt.contains('\u{FFFD}'));
             }
             other => panic!("unexpected action: {other:?}"),
         }
@@ -1164,8 +1314,8 @@ mod tests {
             crate::services::routines::RoutineAction::Agent {
                 prompt, checkpoint, ..
             } => {
-                assert!(prompt.contains("Category: api-friction"));
-                assert!(prompt.contains("API friction monitor"));
+                assert!(prompt.contains("카테고리: api-friction"));
+                assert!(prompt.contains("API 마찰 모니터"));
                 assert!(prompt.contains("src/services/api_friction.rs"));
                 let candidate = checkpoint
                     .unwrap()
@@ -1205,8 +1355,8 @@ mod tests {
             .unwrap();
         match release_action {
             crate::services::routines::RoutineAction::Agent { prompt, .. } => {
-                assert!(prompt.contains("Category: release-freshness"));
-                assert!(prompt.contains("Release freshness monitor"));
+                assert!(prompt.contains("카테고리: release-freshness"));
+                assert!(prompt.contains("릴리스 신선도 모니터"));
                 let inventory_path = ["docs", "generated", "worker-inventory.md"].join("/");
                 assert!(prompt.contains(&inventory_path));
             }
@@ -1232,8 +1382,8 @@ mod tests {
             .unwrap();
         match outbox_action {
             crate::services::routines::RoutineAction::Agent { prompt, .. } => {
-                assert!(prompt.contains("Category: outbox-delivery"));
-                assert!(prompt.contains("Message outbox delivery monitor"));
+                assert!(prompt.contains("카테고리: outbox-delivery"));
+                assert!(prompt.contains("메시지 아웃박스 전달 모니터"));
                 assert!(prompt.contains("src/services/message_outbox.rs"));
             }
             other => panic!("unexpected action: {other:?}"),
@@ -1265,8 +1415,8 @@ mod tests {
             crate::services::routines::RoutineAction::Agent {
                 prompt, checkpoint, ..
             } => {
-                assert!(prompt.contains("Category: memento-hygiene"));
-                assert!(prompt.contains("Memento hygiene digest monitor"));
+                assert!(prompt.contains("카테고리: memento-hygiene"));
+                assert!(prompt.contains("Memento 위생 다이제스트 모니터"));
                 assert!(prompt.contains("src/services/memory"));
                 assert_eq!(
                     checkpoint

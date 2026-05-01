@@ -645,7 +645,7 @@ impl RoutineStore {
         let mut total_bytes: usize = 0;
         let now = Utc::now();
 
-        let digest_rows = sqlx::query(
+        let digest_rows = match sqlx::query(
             r#"
             SELECT key, value
             FROM kv_meta
@@ -658,7 +658,16 @@ impl RoutineStore {
         .bind(limit.min(50))
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow!("fetch precomputed routine observations: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "skipping precomputed routine observation source"
+                );
+                Vec::new()
+            }
+        };
 
         for row in &digest_rows {
             let key: String = row.try_get("key").unwrap_or_default();
@@ -677,7 +686,7 @@ impl RoutineStore {
             }
         }
 
-        let api_rows = sqlx::query(
+        let api_rows = match sqlx::query(
             r#"
             SELECT fingerprint,
                    endpoint,
@@ -696,7 +705,13 @@ impl RoutineStore {
         .bind(limit.min(20))
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow!("fetch api friction observations: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping api friction observation source");
+                Vec::new()
+            }
+        };
 
         for row in &api_rows {
             let fingerprint: String = row.try_get("fingerprint").unwrap_or_default();
@@ -740,7 +755,7 @@ impl RoutineStore {
             }
         }
 
-        let outbox_rows = sqlx::query(
+        let outbox_rows = match sqlx::query(
             r#"
             SELECT COALESCE(NULLIF(source, ''), 'message_outbox') AS source,
                    COALESCE(NULLIF(reason_code, ''), status) AS reason_code,
@@ -759,7 +774,13 @@ impl RoutineStore {
         .bind(limit.min(20))
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow!("fetch outbox delivery observations: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping outbox delivery observation source");
+                Vec::new()
+            }
+        };
 
         for row in &outbox_rows {
             let source: String = row
@@ -801,7 +822,7 @@ impl RoutineStore {
             }
         }
 
-        let rows = sqlx::query(
+        let rows = match sqlx::query(
             r#"
             SELECT rr.id,
                    r.script_ref,
@@ -824,7 +845,13 @@ impl RoutineStore {
         .bind(limit)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| anyhow!("fetch routine run observations: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping routine run observation source");
+                Vec::new()
+            }
+        };
 
         for row in &rows {
             let id: String = row.try_get("id").unwrap_or_default();
