@@ -589,9 +589,12 @@ async fn handle_reaction_remove(
                 return Ok(());
             }
 
-            let stop_lookup =
-                super::message_handler::cancel_text_stop_token_mailbox(&data.shared, channel_id)
-                    .await;
+            let stop_lookup = super::message_handler::cancel_text_stop_token_mailbox(
+                &data.shared,
+                &data.provider,
+                channel_id,
+            )
+            .await;
             match stop_lookup {
                 super::message_handler::TextStopLookup::Stop(token) => {
                     // #1218: stop_active_turn sends the provider abort key

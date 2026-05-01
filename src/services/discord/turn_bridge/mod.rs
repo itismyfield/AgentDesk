@@ -42,7 +42,9 @@ pub(super) use recovery_text::{
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
+pub(super) use tmux_runtime::bind_cancel_token_tmux_runtime;
 pub(super) use tmux_runtime::cancel_active_token;
+pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::interrupt_provider_cli_turn;
 pub(super) use tmux_runtime::stale_inflight_message;

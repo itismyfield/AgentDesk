@@ -15,12 +15,21 @@ enum TextStopLookup {
 
 async fn cancel_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
+    provider: &crate::services::provider::ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> TextStopLookup {
     let result = mailbox_cancel_active_turn(shared, channel_id).await;
     match result.token {
         Some(_) if result.already_stopping => TextStopLookup::AlreadyStopping,
-        Some(token) => TextStopLookup::Stop(token),
+        Some(token) => {
+            ensure_cancel_token_bound_from_inflight(
+                provider,
+                channel_id,
+                &token,
+                "text command stop mailbox lookup",
+            );
+            TextStopLookup::Stop(token)
+        }
         None => TextStopLookup::NoActiveTurn,
     }
 }
@@ -323,7 +332,8 @@ pub(in crate::services::discord) async fn handle_text_command(
         }
 
         "!stop" => {
-            let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+            let stop_lookup =
+                cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
             match stop_lookup {
                 TextStopLookup::Stop(token) => {
                     // #1218: send abort key first, then SIGKILL — see
@@ -1128,7 +1138,8 @@ Any other message is sent to {p}.
                         return Ok(true);
                     }
                     let stop_lookup =
-                        cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+                        cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id)
+                            .await;
                     match stop_lookup {
                         TextStopLookup::Stop(token) => {
                             super::super::turn_bridge::stop_active_turn(

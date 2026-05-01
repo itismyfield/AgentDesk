@@ -4317,12 +4317,21 @@ pub(super) async fn lookup_text_stop_token_mailbox(
 
 pub(super) async fn cancel_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> TextStopLookup {
     let result = super::super::mailbox_cancel_active_turn(shared, channel_id).await;
     match result.token {
         Some(_) if result.already_stopping => TextStopLookup::AlreadyStopping,
-        Some(token) => TextStopLookup::Stop(token),
+        Some(token) => {
+            super::super::ensure_cancel_token_bound_from_inflight(
+                provider,
+                channel_id,
+                &token,
+                "text stop mailbox lookup",
+            );
+            TextStopLookup::Stop(token)
+        }
         None => TextStopLookup::NoActiveTurn,
     }
 }
@@ -4574,7 +4583,8 @@ pub(super) async fn handle_text_command(
                 // turn whose `child_pid` is `None` (handoff/restart/Codex
                 // TUI). The previous code only called `cancel_active_token`
                 // here, so those runs never received an abort key.
-                let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+                let stop_lookup =
+                    cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
                 match stop_lookup {
                     TextStopLookup::Stop(token) => {
                         super::super::turn_bridge::stop_active_turn(
@@ -5330,7 +5340,8 @@ Any other message is sent to {p}.
                         // → stop_active_turn → token.cancelled triggers turn_bridge loop exit
                         // → mailbox_finish_turn canonical cleanup
                         let stop_lookup =
-                            cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
+                            cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id)
+                                .await;
                         match stop_lookup {
                             TextStopLookup::Stop(token) => {
                                 super::super::turn_bridge::stop_active_turn(

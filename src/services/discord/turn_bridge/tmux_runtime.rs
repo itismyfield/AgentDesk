@@ -46,6 +46,7 @@ pub(in crate::services::discord) struct ProviderTurnInterruptOutcome {
     pub tmux_session: Option<String>,
     pub sent_keys: bool,
     pub fallback_sigint_pid: Option<u32>,
+    pub missing_tmux_session: bool,
 }
 
 fn provider_turn_interrupt_plan(provider: &ProviderKind) -> Option<ProviderTurnInterruptPlan> {
@@ -94,10 +95,16 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         .and_then(|guard| guard.clone());
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     let Some(tmux_session_name) = tmux_session.as_deref() else {
+        tracing::error!(
+            "provider turn interrupt skipped: provider={} reason={} error=cancel_token_missing_tmux_session",
+            provider.as_str(),
+            reason
+        );
         return ProviderTurnInterruptOutcome {
             tmux_session,
             sent_keys: false,
             fallback_sigint_pid: None,
+            missing_tmux_session: true,
         };
     };
     let Some(plan) = provider_turn_interrupt_plan(provider) else {
@@ -105,6 +112,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             tmux_session,
             sent_keys: false,
             fallback_sigint_pid: None,
+            missing_tmux_session: false,
         };
     };
 
@@ -165,6 +173,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
             tmux_session,
             sent_keys,
             fallback_sigint_pid: None,
+            missing_tmux_session: false,
         };
     }
 
@@ -225,7 +234,62 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         tmux_session,
         sent_keys,
         fallback_sigint_pid,
+        missing_tmux_session: false,
     }
+}
+
+pub(in crate::services::discord) fn cancel_token_has_tmux_session(token: &CancelToken) -> bool {
+    token
+        .tmux_session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .is_some()
+}
+
+pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
+    provider: &ProviderKind,
+    token: &Arc<CancelToken>,
+    tmux_session_name: &str,
+    reason: &str,
+) -> Option<u32> {
+    if let Ok(mut guard) = token.tmux_session.lock() {
+        if guard.as_deref() != Some(tmux_session_name) {
+            *guard = Some(tmux_session_name.to_string());
+        }
+    } else {
+        tracing::error!(
+            "cancel token tmux rebind failed: provider={} session={} reason={} error=tmux_session_lock_poisoned",
+            provider.as_str(),
+            tmux_session_name,
+            reason
+        );
+    }
+
+    let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
+    let provider_pid = provider_cli_pid_in_tmux(tmux_session_name, provider, tracked_child_pid);
+    if let Some(pid) = provider_pid {
+        if let Ok(mut guard) = token.child_pid.lock()
+            && guard.is_none()
+        {
+            *guard = Some(pid);
+        }
+        tracing::info!(
+            "cancel token tmux runtime rebound: provider={} session={} pid={} reason={}",
+            provider.as_str(),
+            tmux_session_name,
+            pid,
+            reason
+        );
+    } else {
+        tracing::warn!(
+            "cancel token tmux runtime rebound without provider pid: provider={} session={} reason={}",
+            provider.as_str(),
+            tmux_session_name,
+            reason
+        );
+    }
+    provider_pid
 }
 
 /// Standard turn-stop sequence: send the provider abort key (e.g. C-c) FIRST,
@@ -283,6 +347,12 @@ async fn hard_stop_unresponsive_provider_cli_turn(
             .and_then(|guard| guard.clone())
     });
     let Some(tmux_session_name) = tmux_session_name else {
+        tracing::error!(
+            "provider hard-stop skipped: provider={} reason={} error=cancel_token_missing_tmux_session interrupt_missing_tmux_session={}",
+            provider.as_str(),
+            reason,
+            interrupt_outcome.missing_tmux_session
+        );
         return;
     };
 
@@ -899,6 +969,22 @@ mod tests {
         )
         .await;
         assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupt_reports_missing_tmux_session_for_naked_token() {
+        let token = Arc::new(CancelToken::new());
+
+        let outcome =
+            super::interrupt_provider_cli_turn(&ProviderKind::Claude, &token, "test naked token")
+                .await;
+
+        assert!(
+            outcome.missing_tmux_session,
+            "naked cancel token must be surfaced as an explicit diagnostic"
+        );
+        assert!(!outcome.sent_keys);
+        assert!(outcome.fallback_sigint_pid.is_none());
     }
 
     #[cfg(unix)]

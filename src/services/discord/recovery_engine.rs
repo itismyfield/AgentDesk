@@ -447,14 +447,40 @@ pub(super) async fn reregister_active_turn_from_inflight(
     let channel_id = ChannelId::new(state.channel_id);
     let user_msg_id = MessageId::new(state.user_msg_id);
     let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    let Some(provider) = ProviderKind::from_str(&state.provider) else {
+        tracing::error!(
+            "inflight reregister failed: provider={} channel_id={} error=unsupported_provider",
+            state.provider,
+            state.channel_id
+        );
+        return false;
+    };
     if snapshot.cancel_token.is_some() {
+        if let Some(token) = snapshot.cancel_token.as_ref()
+            && snapshot.active_user_message_id == Some(user_msg_id)
+        {
+            super::ensure_cancel_token_bound_from_inflight_state(
+                &provider,
+                state,
+                token,
+                "inflight reregister existing active turn",
+            );
+        }
         return snapshot.active_user_message_id == Some(user_msg_id);
     }
+
+    let cancel_token = Arc::new(CancelToken::new());
+    super::ensure_cancel_token_bound_from_inflight_state(
+        &provider,
+        state,
+        &cancel_token,
+        "inflight reregister active turn",
+    );
 
     super::mailbox_try_start_turn(
         shared,
         channel_id,
-        Arc::new(CancelToken::new()),
+        cancel_token,
         UserId::new(state.request_owner_user_id),
         user_msg_id,
     )
@@ -2509,9 +2535,12 @@ pub(super) async fn restore_inflight_turns(
         );
 
         let cancel_token = Arc::new(CancelToken::new());
-        if let Ok(mut guard) = cancel_token.tmux_session.lock() {
-            *guard = Some(tmux_session_name.clone());
-        }
+        super::turn_bridge::bind_cancel_token_tmux_runtime(
+            provider,
+            &cancel_token,
+            &tmux_session_name,
+            "recovery kickoff",
+        );
 
         {
             let mut data = shared.core.lock().await;
@@ -3900,6 +3929,14 @@ mod tests {
         assert_eq!(
             snapshot.active_user_message_id,
             Some(MessageId::new(state.user_msg_id))
+        );
+        let token = snapshot
+            .cancel_token
+            .expect("reregistered active turn must expose a cancel token");
+        assert_eq!(
+            token.tmux_session.lock().unwrap().as_deref(),
+            state.tmux_session_name.as_deref(),
+            "inflight reregister must not leave a naked cancel token"
         );
     }
 
