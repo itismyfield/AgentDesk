@@ -136,6 +136,70 @@ impl StreamMessage {
     }
 }
 
+/// Provider-normalized status events consumed by Discord status-panel rendering.
+/// The panel code should not depend on provider-specific JSONL shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusEvent {
+    ToolStart {
+        name: String,
+        args_summary: Option<String>,
+    },
+    ToolEnd {
+        success: bool,
+    },
+    SubagentStart {
+        subagent_type: Option<String>,
+        desc: Option<String>,
+    },
+    SubagentEvent {
+        summary: String,
+    },
+    SubagentEnd {
+        success: bool,
+    },
+    TodoUpdate {
+        items: Vec<StatusTodoItem>,
+    },
+    MonitorWait,
+    ScheduleWakeup {
+        eta_secs: Option<u64>,
+    },
+    Heartbeat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusTodoItem {
+    pub content: String,
+    pub status: StatusTodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl StatusTodoStatus {
+    pub fn from_provider_str(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "completed" | "done" | "success" => Self::Completed,
+            "in_progress" | "in-progress" | "active" | "running" => Self::InProgress,
+            "cancelled" | "canceled" | "cancelled_by_user" => Self::Cancelled,
+            _ => Self::Pending,
+        }
+    }
+
+    pub fn checkbox_marker(self) -> &'static str {
+        match self {
+            Self::Completed => "[x]",
+            Self::Cancelled => "[-]",
+            Self::Pending | Self::InProgress => "[ ]",
+        }
+    }
+}
+
 /// Cached regex pattern for session ID validation.
 pub(crate) fn session_id_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();

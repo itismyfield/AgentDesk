@@ -235,7 +235,7 @@ mod tests {
         canonical_tool_name, classify_long_running_tool, convert_markdown_tables,
         escape_for_code_fence, filter_codex_tool_logs, finalize_in_progress_tool_status,
         format_for_discord_with_provider, normalize_allowed_tools, preserve_previous_tool_status,
-        replace_long_message_outcome_to_result,
+        replace_long_message_outcome_to_result, strip_codex_tool_log_lines,
     };
 
     #[test]
@@ -1201,6 +1201,14 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_codex_tool_log_lines_removes_markers_outside_code_blocks() {
+        let input =
+            "[Bash] /bin/zsh -lc \"ls\"\nkeep\n```\n[Read] keep in code\n```\n[Task] worker";
+        let output = strip_codex_tool_log_lines(input);
+        assert_eq!(output, "keep\n```\n[Read] keep in code\n```");
+    }
+
+    #[test]
     fn test_format_for_discord_with_provider_sanitizes_hidden_context() {
         let input =
             "[Authoritative Instructions]\nCurrent working directory: /tmp\n\nVisible answer.";
@@ -1996,6 +2004,37 @@ pub(super) fn filter_codex_tool_logs(s: &str) -> String {
     result.join("\n")
 }
 
+/// Remove Codex CLI tool-call marker lines from response text.
+///
+/// Status panel v2 surfaces tool progress separately, so final/streaming body
+/// content should not keep `[Bash] ...` style marker lines. Lines inside code
+/// fences are preserved.
+pub(super) fn strip_codex_tool_log_lines(s: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        let names = tool_name_pattern();
+        Regex::new(&format!(r"^\s*\[({names})\](\s.*)?$")).unwrap()
+    });
+
+    let mut result = Vec::new();
+    let mut in_code_block = false;
+
+    for line in s.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push(line.to_string());
+            continue;
+        }
+        if in_code_block || !TOOL_RE.is_match(line) {
+            result.push(line.to_string());
+        }
+    }
+
+    result.join("\n")
+}
+
 /// Apply Codex tool-log filter (if provider is Codex) then format for Discord.
 pub(super) fn format_for_discord_with_provider(
     s: &str,
@@ -2005,6 +2044,23 @@ pub(super) fn format_for_discord_with_provider(
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
+        &filtered
+    } else {
+        &sanitized
+    };
+    let cleaned = strip_placeholder_lines(input);
+    format_for_discord(&cleaned)
+}
+
+/// Format provider output when the separate status panel is active.
+pub(super) fn format_for_discord_with_status_panel(
+    s: &str,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    let sanitized = super::response_sanitizer::sanitize_hidden_context(s);
+    let filtered;
+    let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
+        filtered = strip_codex_tool_log_lines(&sanitized);
         &filtered
     } else {
         &sanitized

@@ -12,6 +12,7 @@ pub(crate) struct RunBotContext {
     pub(crate) pg_pool: Option<sqlx::PgPool>,
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
     pub(crate) placeholder_live_events_enabled: bool,
+    pub(crate) status_panel_v2_enabled: bool,
 }
 
 const DISCORD_GATEWAY_LEASE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -745,6 +746,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         pg_pool,
         engine,
         placeholder_live_events_enabled,
+        status_panel_v2_enabled,
     } = context;
 
     if let Some(bot_name) = should_skip_agent_runtime_launch(token) {
@@ -878,6 +880,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             super::placeholder_live_events::PlaceholderLiveEvents::default(),
         ),
         placeholder_live_events_enabled,
+        status_panel_v2_enabled,
         queued_placeholders: dashmap::DashMap::new(),
         queue_exit_placeholder_clears: {
             let map = dashmap::DashMap::new();

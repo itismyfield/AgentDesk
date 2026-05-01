@@ -685,11 +685,13 @@ impl ReviewConfig {
 pub struct PlaceholderConfig {
     #[serde(default)]
     pub live_events_enabled: bool,
+    #[serde(default)]
+    pub status_panel_v2_enabled: bool,
 }
 
 impl PlaceholderConfig {
     pub fn is_empty(&self) -> bool {
-        !self.live_events_enabled
+        !self.live_events_enabled && !self.status_panel_v2_enabled
     }
 }
 

@@ -1676,6 +1676,7 @@ impl TestHealthHarness {
                 super::placeholder_live_events::PlaceholderLiveEvents::default(),
             ),
             placeholder_live_events_enabled: false,
+            status_panel_v2_enabled: false,
             queued_placeholders: dashmap::DashMap::new(),
             queue_exit_placeholder_clears: dashmap::DashMap::new(),
             queued_placeholders_persist_locks: dashmap::DashMap::new(),

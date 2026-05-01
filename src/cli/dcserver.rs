@@ -1331,6 +1331,7 @@ pub fn handle_dcserver(token: Option<String>) {
         // HTTP API port for self-referencing requests (dcserver → own HTTP server)
         let api_port = ad_config.server.port;
         let placeholder_live_events_enabled = ad_config.placeholder.live_events_enabled;
+        let status_panel_v2_enabled = ad_config.placeholder.status_panel_v2_enabled;
 
         // Self-watchdog: probes the axum server's /api/health endpoint
         services::discord::health::spawn_watchdog(api_port);
@@ -1374,6 +1375,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         pg_pool: Some(discord_pg_pool),
                         engine: discord_engine,
                         placeholder_live_events_enabled,
+                        status_panel_v2_enabled,
                     },
                 )
                 .await;
@@ -1444,6 +1446,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let pg_pool_clone = Some(discord_pg_pool.clone());
                     let engine_clone = discord_engine.clone();
                     let live_events_enabled = placeholder_live_events_enabled;
+                    let status_panel_v2 = status_panel_v2_enabled;
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
                             &config.token,
@@ -1459,6 +1462,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 pg_pool: pg_pool_clone,
                                 engine: engine_clone,
                                 placeholder_live_events_enabled: live_events_enabled,
+                                status_panel_v2_enabled: status_panel_v2,
                             },
                         )
                         .await;

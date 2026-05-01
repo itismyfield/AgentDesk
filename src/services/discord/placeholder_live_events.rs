@@ -5,10 +5,15 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
 use super::formatting::{canonical_tool_name, format_tool_input, redact_sensitive_for_placeholder};
+use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, StatusTodoStatus};
+use crate::services::provider::ProviderKind;
 
 const CHANNEL_EVENT_CAPACITY: usize = 20;
 const EVENT_LINE_MAX_CHARS: usize = 100;
 const EVENT_BLOCK_MAX_CHARS: usize = 1500;
+const STATUS_PANEL_MAX_CHARS: usize = 4096;
+const STATUS_PANEL_TODO_LIMIT: usize = 8;
+const STATUS_PANEL_SUBAGENT_LIMIT: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecentPlaceholderEvent {
@@ -72,11 +77,13 @@ impl RecentPlaceholderEvent {
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderLiveEvents {
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
+    status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
 }
 
 impl PlaceholderLiveEvents {
     pub(super) fn clear_channel(&self, channel_id: ChannelId) {
         self.by_channel.remove(&channel_id);
+        self.status_by_channel.remove(&channel_id);
     }
 
     pub(super) fn push_event(&self, channel_id: ChannelId, event: RecentPlaceholderEvent) {
@@ -109,6 +116,280 @@ impl PlaceholderLiveEvents {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         render_events(guard.iter())
     }
+
+    pub(super) fn push_status_event(&self, channel_id: ChannelId, event: StatusEvent) {
+        let entry = self
+            .status_by_channel
+            .entry(channel_id)
+            .or_insert_with(|| Mutex::new(StatusPanelState::default()));
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.apply(event);
+    }
+
+    pub(super) fn push_status_events<I>(&self, channel_id: ChannelId, events: I)
+    where
+        I: IntoIterator<Item = StatusEvent>,
+    {
+        for event in events {
+            self.push_status_event(channel_id, event);
+        }
+    }
+
+    pub(super) fn render_status_panel(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        started_at_unix: i64,
+    ) -> String {
+        let snapshot = self
+            .status_by_channel
+            .get(&channel_id)
+            .map(|entry| {
+                entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default();
+        render_status_panel(
+            snapshot,
+            self.render_block(channel_id),
+            provider,
+            started_at_unix,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubagentSlot {
+    subagent_type: String,
+    desc: String,
+    recent: Option<String>,
+    finished: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DerivedStatus {
+    Running,
+    MonitorWait,
+    ScheduleWakeup(Option<u64>),
+    ToolRunning {
+        name: String,
+        summary: Option<String>,
+    },
+    SubagentRunning {
+        desc: String,
+    },
+}
+
+impl Default for DerivedStatus {
+    fn default() -> Self {
+        Self::Running
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StatusPanelState {
+    status: DerivedStatus,
+    todos: Vec<StatusTodoItem>,
+    subagents: Vec<SubagentSlot>,
+}
+
+impl StatusPanelState {
+    fn apply(&mut self, event: StatusEvent) {
+        match event {
+            StatusEvent::ToolStart { name, args_summary } => {
+                if is_schedule_wakeup_tool(&name) {
+                    self.status =
+                        DerivedStatus::ScheduleWakeup(parse_eta_secs(args_summary.as_deref()));
+                } else {
+                    self.status = DerivedStatus::ToolRunning {
+                        name,
+                        summary: args_summary,
+                    };
+                }
+            }
+            StatusEvent::ToolEnd { success } => {
+                if let Some(slot) = self
+                    .subagents
+                    .iter_mut()
+                    .rev()
+                    .find(|slot| slot.finished.is_none())
+                {
+                    slot.finished = Some(success);
+                }
+                self.status = DerivedStatus::Running;
+            }
+            StatusEvent::SubagentStart {
+                subagent_type,
+                desc,
+            } => {
+                let desc = desc
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "subagent".to_string());
+                let subagent_type = subagent_type
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Task".to_string());
+                self.subagents.push(SubagentSlot {
+                    subagent_type,
+                    desc: desc.clone(),
+                    recent: None,
+                    finished: None,
+                });
+                self.status = DerivedStatus::SubagentRunning { desc };
+                trim_subagents(&mut self.subagents);
+            }
+            StatusEvent::SubagentEvent { summary } => {
+                if let Some(slot) = self
+                    .subagents
+                    .iter_mut()
+                    .rev()
+                    .find(|slot| slot.finished.is_none())
+                {
+                    slot.recent = Some(normalize_summary(&summary));
+                    self.status = DerivedStatus::SubagentRunning {
+                        desc: slot.desc.clone(),
+                    };
+                }
+            }
+            StatusEvent::SubagentEnd { success } => {
+                if let Some(slot) = self
+                    .subagents
+                    .iter_mut()
+                    .rev()
+                    .find(|slot| slot.finished.is_none())
+                {
+                    slot.finished = Some(success);
+                }
+                self.status = DerivedStatus::Running;
+            }
+            StatusEvent::TodoUpdate { items } => {
+                self.todos = items
+                    .into_iter()
+                    .filter(|item| !item.content.trim().is_empty())
+                    .take(STATUS_PANEL_TODO_LIMIT)
+                    .collect();
+            }
+            StatusEvent::MonitorWait => {
+                self.status = DerivedStatus::MonitorWait;
+            }
+            StatusEvent::ScheduleWakeup { eta_secs } => {
+                self.status = DerivedStatus::ScheduleWakeup(eta_secs);
+            }
+            StatusEvent::Heartbeat => {
+                if matches!(self.status, DerivedStatus::Running) {
+                    self.status = DerivedStatus::Running;
+                }
+            }
+        }
+    }
+}
+
+fn render_status_panel(
+    snapshot: StatusPanelState,
+    live_block: Option<String>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+) -> String {
+    let mut sections = vec![format!(
+        "{} — {} (<t:{started_at_unix}:R>)",
+        render_derived_status(&snapshot.status),
+        provider.as_str()
+    )];
+
+    if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
+        let lines = snapshot
+            .todos
+            .iter()
+            .take(STATUS_PANEL_TODO_LIMIT)
+            .map(|item| {
+                format!(
+                    "- {} {}",
+                    item.status.checkbox_marker(),
+                    truncate_chars(&normalize_summary(&item.content), 110)
+                )
+            })
+            .collect::<Vec<_>>();
+        sections.push(format!("Plan\n{}", lines.join("\n")));
+    }
+
+    if !matches!(provider, ProviderKind::Codex) && !snapshot.subagents.is_empty() {
+        let lines = snapshot
+            .subagents
+            .iter()
+            .rev()
+            .take(STATUS_PANEL_SUBAGENT_LIMIT)
+            .map(render_subagent_slot)
+            .collect::<Vec<_>>();
+        sections.push(format!("Subagents\n{}", lines.join("\n")));
+    }
+
+    if let Some(block) = live_block.filter(|block| !block.trim().is_empty()) {
+        sections.push(format!("Recent\n{block}"));
+    }
+
+    truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
+}
+
+fn render_derived_status(status: &DerivedStatus) -> String {
+    match status {
+        DerivedStatus::Running => "🟢 진행 중".to_string(),
+        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
+        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
+            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
+        }
+        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
+        DerivedStatus::ToolRunning { name, summary } => {
+            let mut rendered = tool_prefix(name);
+            if let Some(summary) = summary.as_deref().filter(|value| !value.trim().is_empty()) {
+                rendered.push(' ');
+                rendered.push_str(&normalize_summary(summary));
+            }
+            format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
+        }
+        DerivedStatus::SubagentRunning { desc } => {
+            format!("🧵 subagent 실행 중 ({})", truncate_chars(desc, 120))
+        }
+    }
+}
+
+fn render_subagent_slot(slot: &SubagentSlot) -> String {
+    let marker = match slot.finished {
+        Some(true) => "✓",
+        Some(false) => "✗",
+        None => "",
+    };
+    let mut line = format!(
+        "└ {} {}",
+        sanitize_label(&slot.subagent_type),
+        normalize_summary(&slot.desc)
+    );
+    if let Some(recent) = slot
+        .recent
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        line.push_str(" — ");
+        line.push_str(&normalize_summary(recent));
+    }
+    if !marker.is_empty() {
+        line.push(' ');
+        line.push_str(marker);
+    }
+    truncate_chars(&line, EVENT_LINE_MAX_CHARS)
+}
+
+fn sanitize_label(raw: &str) -> String {
+    sanitized_tool_name(raw).unwrap_or_else(|| "Task".to_string())
+}
+
+fn trim_subagents(slots: &mut Vec<SubagentSlot>) {
+    if slots.len() > STATUS_PANEL_SUBAGENT_LIMIT {
+        let excess = slots.len() - STATUS_PANEL_SUBAGENT_LIMIT;
+        slots.drain(0..excess);
+    }
 }
 
 pub(super) fn events_from_json(value: &Value) -> Vec<RecentPlaceholderEvent> {
@@ -120,6 +401,306 @@ pub(super) fn events_from_json(value: &Value) -> Vec<RecentPlaceholderEvent> {
         "background_event" => background_event(value).into_iter().collect(),
         "result" => result_event(value).into_iter().collect(),
         _ => Vec::new(),
+    }
+}
+
+pub(super) fn status_events_from_tool_use(name: &str, input: &str) -> Vec<StatusEvent> {
+    let args_summary = format_tool_input(name, input)
+        .trim()
+        .is_empty()
+        .then(|| first_content_line(input))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let summary = format_tool_input(name, input);
+            (!summary.trim().is_empty()).then_some(summary)
+        })
+        .map(|summary| truncate_chars(&summary, EVENT_LINE_MAX_CHARS));
+
+    let mut events = vec![StatusEvent::ToolStart {
+        name: name.to_string(),
+        args_summary: args_summary.clone(),
+    }];
+    if is_task_tool(name) {
+        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        events.push(StatusEvent::SubagentStart {
+            subagent_type: value
+                .get("subagent_type")
+                .or_else(|| value.get("agent_type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(name.to_string())),
+            desc: subagent_description(&value).or(args_summary.clone()),
+        });
+    }
+    if is_todo_write_tool(name) {
+        let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+        if let Some(items) = todo_items_from_input(&value) {
+            events.push(StatusEvent::TodoUpdate { items });
+        }
+    }
+    if is_schedule_wakeup_tool(name) {
+        events.push(StatusEvent::ScheduleWakeup {
+            eta_secs: parse_eta_secs(input.into()),
+        });
+    }
+    events
+}
+
+pub(super) fn status_events_from_tool_result(is_error: bool) -> Vec<StatusEvent> {
+    vec![
+        StatusEvent::ToolEnd { success: !is_error },
+        StatusEvent::SubagentEnd { success: !is_error },
+    ]
+}
+
+pub(super) fn status_events_from_task_notification(
+    kind: &str,
+    status: &str,
+    summary: &str,
+) -> Vec<StatusEvent> {
+    let mut events = Vec::new();
+    match kind {
+        "monitor_auto_turn" => events.push(StatusEvent::MonitorWait),
+        "subagent" => {
+            let summary = first_content_line(summary);
+            if !summary.is_empty() {
+                events.push(StatusEvent::SubagentEvent { summary });
+            }
+            if task_notification_is_terminal(status) {
+                events.push(StatusEvent::SubagentEnd {
+                    success: !task_notification_is_error(status),
+                });
+            }
+        }
+        "background" => {
+            let summary = first_content_line(summary);
+            if !summary.is_empty() {
+                events.push(StatusEvent::Heartbeat);
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
+pub(super) fn status_events_from_json(value: &Value) -> Vec<StatusEvent> {
+    match value.get("type").and_then(Value::as_str).unwrap_or("") {
+        "assistant" => assistant_status_events(value),
+        "content_block_start" => content_block_start_status_events(value),
+        "user" => user_status_events(value),
+        "system" => system_status_events(value),
+        "background_event" => background_status_events(value),
+        _ => Vec::new(),
+    }
+}
+
+fn is_task_tool(name: &str) -> bool {
+    matches!(
+        normalize_tool_key(name).as_str(),
+        "task" | "taskcreate" | "agent" | "spawnagent"
+    )
+}
+
+fn is_todo_write_tool(name: &str) -> bool {
+    matches!(
+        normalize_tool_key(name).as_str(),
+        "todowrite" | "updateplan"
+    )
+}
+
+fn is_schedule_wakeup_tool(name: &str) -> bool {
+    normalize_tool_key(name) == "schedulewakeup"
+}
+
+fn normalize_tool_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn subagent_description(value: &Value) -> Option<String> {
+    [
+        "description",
+        "desc",
+        "prompt",
+        "task",
+        "message",
+        "request",
+    ]
+    .into_iter()
+    .find_map(|key| value.get(key).and_then(Value::as_str))
+    .map(normalize_summary)
+    .filter(|summary| !summary.is_empty())
+}
+
+fn todo_items_from_input(value: &Value) -> Option<Vec<StatusTodoItem>> {
+    let items = value
+        .get("todos")
+        .or_else(|| value.get("items"))
+        .or_else(|| value.get("todo_list"))
+        .and_then(Value::as_array)?;
+    let parsed = items
+        .iter()
+        .filter_map(|item| {
+            let content = item
+                .get("content")
+                .or_else(|| item.get("text"))
+                .or_else(|| item.get("title"))
+                .or_else(|| item.get("task"))
+                .and_then(Value::as_str)
+                .map(normalize_summary)
+                .filter(|content| !content.is_empty())?;
+            let status = item
+                .get("status")
+                .or_else(|| item.get("state"))
+                .and_then(Value::as_str)
+                .map(StatusTodoStatus::from_provider_str)
+                .unwrap_or(StatusTodoStatus::Pending);
+            Some(StatusTodoItem { content, status })
+        })
+        .collect::<Vec<_>>();
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+fn parse_eta_secs(raw: Option<&str>) -> Option<u64> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = value.parse::<u64>() {
+        return Some(parsed);
+    }
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .and_then(|json| eta_secs_from_value(&json))
+        .or_else(|| {
+            value
+                .split(|ch: char| !ch.is_ascii_digit())
+                .find(|part| !part.is_empty())
+                .and_then(|part| part.parse::<u64>().ok())
+        })
+}
+
+fn eta_secs_from_value(value: &Value) -> Option<u64> {
+    if let Some(value) = value.as_u64() {
+        return Some(value);
+    }
+    if let Some(value) = value.as_str() {
+        return parse_eta_secs(Some(value));
+    }
+    for key in [
+        "eta_secs",
+        "seconds",
+        "delay_secs",
+        "delay_seconds",
+        "duration_secs",
+    ] {
+        if let Some(value) = value.get(key).and_then(eta_secs_from_value) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn task_notification_is_terminal(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "completed"
+            | "done"
+            | "finished"
+            | "success"
+            | "failed"
+            | "error"
+            | "aborted"
+            | "cancelled"
+            | "canceled"
+    )
+}
+
+fn task_notification_is_error(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "failed" | "error" | "aborted" | "cancelled" | "canceled"
+    )
+}
+
+fn assistant_status_events(value: &Value) -> Vec<StatusEvent> {
+    value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                return Vec::new();
+            }
+            let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+            let input = value_to_compact_string(block.get("input").unwrap_or(&Value::Null));
+            status_events_from_tool_use(name, &input)
+        })
+        .collect()
+}
+
+fn content_block_start_status_events(value: &Value) -> Vec<StatusEvent> {
+    let Some(block) = value.get("content_block") else {
+        return Vec::new();
+    };
+    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+        return Vec::new();
+    }
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+    let input = block
+        .get("input")
+        .map(value_to_compact_string)
+        .unwrap_or_default();
+    status_events_from_tool_use(name, &input)
+}
+
+fn user_status_events(value: &Value) -> Vec<StatusEvent> {
+    value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                return Vec::new();
+            }
+            let is_error = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            status_events_from_tool_result(is_error)
+        })
+        .collect()
+}
+
+fn system_status_events(value: &Value) -> Vec<StatusEvent> {
+    if value.get("subtype").and_then(Value::as_str) != Some("task_notification") {
+        return Vec::new();
+    }
+    let kind = value
+        .get("task_notification_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("system");
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("");
+    let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
+    status_events_from_task_notification(kind, status, summary)
+}
+
+fn background_status_events(value: &Value) -> Vec<StatusEvent> {
+    let summary = value
+        .get("message")
+        .or_else(|| value.get("summary"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if summary.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![StatusEvent::Heartbeat]
     }
 }
 
