@@ -262,7 +262,8 @@ fn canonical_category(category: &str) -> &'static str {
         "kanban" | "kanban-repos" | "pipeline" | "pm" | "reviews" => "kanban",
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "cron" | "queue" => "queue",
-        "analytics" | "auth" | "docs" | "health" | "monitoring" | "stats" | "provider-cli" => "ops",
+        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
+        | "provider-cli" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
         | "skills" => "admin",
@@ -318,7 +319,7 @@ fn category_to_group(category: &str) -> &'static str {
         "settings" | "onboarding" | "skills" | "offices" | "departments" | "memory" => "config",
         // observability — analytics, metrics, events, slo, diagnostics,
         // monitoring, stats, health, auth
-        "analytics" | "monitoring" | "stats" | "health" | "auth" => "observability",
+        "analytics" | "cluster" | "monitoring" | "stats" | "health" | "auth" => "observability",
         // internal — debug, testing, internal endpoints, docs discovery
         "internal" | "docs" => "internal",
         _ => "internal",
@@ -393,6 +394,7 @@ fn category_description(category: &str) -> &'static str {
             "Auto-queue generation, activation, slot repair, and queue execution control."
         }
         "cron" => "Registered cron jobs per agent.",
+        "cluster" => "Multinode worker-node registry, heartbeat, and role diagnostics.",
         "departments" => "Department CRUD and ordering.",
         "discord" => "Discord delivery helpers, bindings, message reads, and DM reply hooks.",
         "dispatched-sessions" => "Persisted dispatched-session lifecycle and cleanup helpers.",
@@ -536,6 +538,38 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"ok": false, "error": "auth_token required for non-loopback host"}),
         )
         .with_curl("curl http://localhost:8787/api/health/detail"),
+        ep(
+            "GET",
+            "/api/cluster/nodes",
+            "cluster",
+            "Protected multinode worker registry view with configured/effective role, heartbeat, labels, and capabilities.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "cluster": {
+                    "enabled": true,
+                    "configured_role": "auto",
+                    "lease_ttl_secs": 30,
+                    "heartbeat_interval_secs": 10
+                },
+                "nodes": [{
+                    "instance_id": "mac-mini",
+                    "hostname": "mac-mini",
+                    "role": "auto",
+                    "effective_role": "leader",
+                    "status": "online",
+                    "labels": ["mac-mini"],
+                    "capabilities": {"providers": ["codex"]}
+                }]
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres unavailable"}),
+        )
+        .with_curl("curl http://localhost:8787/api/cluster/nodes"),
         ep(
             "GET",
             "/api/doctor/startup/latest",

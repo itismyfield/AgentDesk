@@ -1,3 +1,4 @@
+pub(crate) mod cluster;
 pub(crate) mod cron_catalog;
 pub(crate) mod maintenance;
 pub mod routes;
@@ -180,6 +181,7 @@ pub(crate) async fn run(
         crate::db::cancel_tombstones::set_global_pool(pool.clone());
     }
     crate::services::observability::init_observability(pg_pool.clone());
+    let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
     crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
@@ -203,6 +205,7 @@ pub(crate) async fn run(
         engine.clone(),
         health_registry.clone(),
         pg_pool.clone().map(Arc::new),
+        cluster_runtime,
     );
     worker_registry.run_boot_only_steps().await?;
     worker_registry.start_after_boot_reconcile()?;
@@ -281,7 +284,11 @@ pub(crate) async fn run(
 /// - OnTick1min (1m): non-critical timeouts [A][C][D][E][L], stale detection
 /// - OnTick5min (5m): non-critical reconciliation [R][B][F][G][H][M][O], idle session cleanup
 /// - OnTick (legacy, 5m): backward compat for policies that only register onTick
-async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
+async fn policy_tick_loop(
+    engine: PolicyEngine,
+    pg_pool: Option<Arc<PgPool>>,
+    cluster_runtime: Option<cluster::ClusterRuntime>,
+) {
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
     let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
@@ -293,6 +300,16 @@ async fn policy_tick_loop(engine: PolicyEngine, pg_pool: Option<Arc<PgPool>>) {
     loop {
         interval_30s.tick().await;
         count += 1;
+
+        if let Some(runtime) = cluster_runtime.as_ref()
+            && !runtime.is_leader()
+        {
+            tracing::warn!(
+                instance_id = runtime.instance_id(),
+                "[policy-tick] self-fenced after cluster leadership was lost"
+            );
+            break;
+        }
 
         let advisory_lock = if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
             match try_acquire_pg_singleton_lock(pool, POLICY_TICK_ADVISORY_LOCK_ID, "policy-tick")

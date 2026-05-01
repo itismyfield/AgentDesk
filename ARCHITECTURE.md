@@ -153,6 +153,7 @@ src/
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
+│   │   ├── cluster.rs
 │   │   ├── cron_api.rs
 │   │   ├── departments.rs
 │   │   ├── discord.rs
@@ -189,6 +190,7 @@ src/
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   └── v1.rs
+│   ├── cluster.rs
 │   ├── cron_catalog.rs
 │   ├── maintenance.rs
 │   ├── mod.rs

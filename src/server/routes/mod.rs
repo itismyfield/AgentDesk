@@ -4,6 +4,7 @@ mod agents_setup;
 pub mod analytics;
 pub mod auth;
 pub mod auto_queue;
+pub mod cluster;
 pub mod cron_api;
 pub mod departments;
 pub mod discord;

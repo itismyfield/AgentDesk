@@ -27,6 +27,8 @@ pub struct Config {
     pub data: DataConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default, skip_serializing_if = "ClusterConfig::is_default")]
+    pub cluster: ClusterConfig,
     #[serde(default, skip_serializing_if = "KanbanConfig::is_empty")]
     pub kanban: KanbanConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
@@ -643,6 +645,45 @@ pub struct DatabaseConfig {
     pub pool_max: u32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClusterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(default = "default_cluster_role")]
+    pub role: String,
+    #[serde(default = "default_cluster_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_cluster_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub capabilities: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            instance_id: None,
+            role: default_cluster_role(),
+            heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
+            lease_ttl_secs: default_cluster_lease_ttl_secs(),
+            labels: Vec::new(),
+            capabilities: serde_json::Map::new(),
+        }
+    }
+}
+
+impl ClusterConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KanbanConfig {
@@ -1107,6 +1148,15 @@ fn default_database_user() -> String {
 fn default_database_pool_max() -> u32 {
     12
 }
+fn default_cluster_role() -> String {
+    "auto".into()
+}
+fn default_cluster_heartbeat_interval_secs() -> u64 {
+    10
+}
+fn default_cluster_lease_ttl_secs() -> u64 {
+    30
+}
 fn default_memory_backend() -> String {
     "auto".into()
 }
@@ -1239,6 +1289,7 @@ impl Default for Config {
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
             database: DatabaseConfig::default(),
+            cluster: ClusterConfig::default(),
             kanban: KanbanConfig::default(),
             review: ReviewConfig::default(),
             placeholder: PlaceholderConfig::default(),

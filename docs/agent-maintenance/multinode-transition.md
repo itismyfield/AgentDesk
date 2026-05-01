@@ -4,7 +4,7 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-04-30 (against `main` @ `6392ce0832e7360725ebc03849b8f04bee018d7b`).
+> Last refreshed: 2026-05-01 (against #876 worker_nodes bootstrap, #877 leader-only self-fence, and #878 dispatch_outbox claim ownership).
 
 ## Read This First
 
@@ -56,10 +56,13 @@
   assume that every server process may start its local loop.
 - do_not_edit_without_migration_plan: `src/server/worker_registry.rs` and the
   worker starts in `src/server/mod.rs`.
-- active_callsite_coverage: partial. `policy_tick_loop` already uses a PG
-  advisory lock at `src/server/mod.rs:297`, and `github_sync_loop` uses one at
-  `src/server/mod.rs:2798`; other supervised side effects still need an explicit
-  leader or multi-consumer contract.
+- active_callsite_coverage: partial. Cluster identity and heartbeat are persisted
+  through `src/server/cluster.rs`, and `src/server/worker_registry.rs` now
+  classifies supervised workers as `leader_only` or `worker_local` before
+  startup. `policy_tick_loop` already uses a PG advisory lock at
+  `src/server/mod.rs:297`, and `github_sync_loop` uses one at
+  `src/server/mod.rs:2798`; leader lease loss still needs per-loop self-fencing
+  before every side effect is considered failover-safe.
 - invariants: `singleton_on_leader`, `pg_lease_backed_claim`.
 - allowed_changes: `bugfix` for existing workers. `new_feature` workers must add
   a leader-only, lease-backed, or worker-local classification in the same change.
@@ -196,7 +199,7 @@
 | assumption | owning module | current risk |
 | --- | --- | --- |
 | Discord gateway singleton | `src/services/discord/runtime_bootstrap.rs:1526`, `src/services/discord/runtime_bootstrap.rs:1531`, `src/services/discord/runtime_bootstrap.rs:1730` | Two nodes starting a gateway for the same provider can duplicate command intake, watcher startup, and shutdown cleanup unless #877 fences gateway ownership to the leader. |
-| Supervised workers singleton | `src/server/worker_registry.rs:134`, `src/server/mod.rs:201`, `src/server/mod.rs:208` | Every dcserver process can start the registered workers; only some loops currently take advisory locks. |
+| Supervised workers singleton | `src/server/worker_registry.rs:151`, `src/server/mod.rs:202`, `src/server/mod.rs:209` | Cluster-enabled worker nodes skip `leader_only` supervised workers unless they hold the startup leader lease; lease-loss self-fencing for already-running loops remains follow-up work. |
 | Merge/review side effects local | `policies/merge-automation.js:46`, `policies/merge-automation.js:522`, `policies/merge-automation.js:1761` | Duplicate policy runners can race direct pushes, PR auto-merge, review notifications, and worktree cleanup. |
 | GitHub issue/body mutation local | `src/github/mod.rs:166`, `src/github/mod.rs:218`, `src/github/dod.rs:122`, `src/server/routes/github.rs:275` | Multiple nodes can create, close, comment, or edit issue bodies unless calls are leader-only or idempotent. |
 | Tmux/provider sessions local | `src/services/discord/mod.rs:538`, `src/services/discord/router/message_handler.rs:1420`, `src/services/claude.rs:1166`, `src/services/claude.rs:1300` | Live provider state depends on local tmux panes, FIFOs, output files, watcher handles, and wrapper processes. |
@@ -244,21 +247,24 @@
   and any unleased outbox delivery.
 - Current anchors: gateway lease keepalive at
   `src/services/discord/runtime_bootstrap.rs:1531`, policy tick advisory lock at
-  `src/server/mod.rs:297`, GitHub sync advisory lock at `src/server/mod.rs:2798`.
+  `src/server/mod.rs:301`, GitHub sync advisory lock at `src/server/mod.rs:2818`,
+  server cluster leader lease bootstrap at `src/server/cluster.rs`, and
+  leader-only worker self-fence at `src/server/worker_registry.rs:522`.
 - Enablement condition: every supervised worker in
-  `src/server/worker_registry.rs:134` is classified as leader-only,
+  `src/server/worker_registry.rs:151` is classified as leader-only,
   lease-backed multi-consumer, or worker-local.
 
 ### `pg_lease_backed_claim`
 
 - Any durable queue that can be drained by more than one node must claim work in
   PostgreSQL, record ownership/attempt state, and make delivery idempotent.
-- Current anchors: `dispatch_outbox` uses `FOR UPDATE SKIP LOCKED` at
-  `src/server/routes/dispatches/outbox.rs:248`, calls delivery with a reservation
-  guard at `src/server/routes/dispatches/outbox.rs:654`, and updates retry state
-  at `src/server/routes/dispatches/outbox.rs:719`.
-- Enablement condition: #878 proves that a crashed worker cannot lose,
-  duplicate, or permanently hide a row.
+- Current anchors: `dispatch_outbox` records `claimed_at`/`claim_owner` through
+  `migrations/postgres/0030_dispatch_outbox_claims.sql`, uses `FOR UPDATE SKIP
+  LOCKED` plus stale processing reclaim at `src/server/routes/dispatches/outbox.rs:250`,
+  calls delivery with a reservation guard at `src/server/routes/dispatches/outbox.rs:681`,
+  and clears claim fields on done/retry/failure.
+- Enablement condition: #878 still needs the same claim model on
+  `task_dispatches`; `dispatch_outbox` now has a stale-claim regression test.
 
 ### `resource_locks_before_exclusive_editor_test`
 
@@ -277,7 +283,8 @@
 - The dispatcher must route provider, MCP, and tool work only to live workers
   that advertised the required capability. Expired heartbeats must remove the
   worker from routing before new work is assigned.
-- Current anchors: provider execution context carries node-local details at
+- Current anchors: `worker_nodes` stores `labels` and `capabilities` through
+  `src/server/cluster.rs`; provider execution context carries node-local details at
   `src/services/discord/router/message_handler.rs:1420`; MCP capability checks
   are local in `src/services/mcp_config.rs:34`; tmux watcher state is in-process
   at `src/services/discord/mod.rs:538`.

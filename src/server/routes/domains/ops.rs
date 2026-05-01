@@ -4,9 +4,9 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, auto_queue, cron_api, dispatched_sessions, dispatches, docs, health_api,
-    hooks, maintenance, messages, pipeline, protected_api_domain, provider_cli_api, queue_api,
-    skills_api, termination_events,
+    ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
+    health_api, hooks, maintenance, messages, pipeline, protected_api_domain, provider_cli_api,
+    queue_api, skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
@@ -23,6 +23,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/doctor/startup/latest",
                 get(health_api::startup_doctor_latest_handler),
             )
+            .route("/cluster/nodes", get(cluster::list_nodes))
             .route(
                 "/doctor/stale-mailbox/repair",
                 post(health_api::stale_mailbox_repair_handler),

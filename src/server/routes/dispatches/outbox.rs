@@ -6,6 +6,8 @@ use sqlx::{PgPool, Row as SqlxRow};
 use std::process::Command;
 use std::sync::Arc;
 
+const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
+
 #[derive(Clone, Debug)]
 pub(crate) struct DispatchFollowupConfig {
     pub discord_api_base: String,
@@ -245,23 +247,39 @@ type DispatchOutboxRow = (
     i64,
 );
 
-async fn claim_pending_dispatch_outbox_batch_pg(pool: &PgPool) -> Vec<DispatchOutboxRow> {
+async fn claim_pending_dispatch_outbox_batch_pg(
+    pool: &PgPool,
+    claim_owner: &str,
+) -> Vec<DispatchOutboxRow> {
     let rows = match sqlx::query(
         "WITH claimed AS (
             SELECT id
               FROM dispatch_outbox
-             WHERE status = 'pending'
-               AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+             WHERE (
+                    status = 'pending'
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+                 )
+                OR (
+                    status = 'processing'
+                    AND (
+                        claimed_at IS NULL
+                        OR claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
+                    )
+                )
              ORDER BY id ASC
              FOR UPDATE SKIP LOCKED
              LIMIT 5
         )
         UPDATE dispatch_outbox o
-           SET status = 'processing'
+           SET status = 'processing',
+               claimed_at = NOW(),
+               claim_owner = $2
           FROM claimed
          WHERE o.id = claimed.id
         RETURNING o.id, o.dispatch_id, o.action, o.agent_id, o.card_id, o.title, o.retry_count",
     )
+    .bind(DISPATCH_OUTBOX_CLAIM_STALE_SECS)
+    .bind(claim_owner)
     .fetch_all(pool)
     .await
     {
@@ -391,7 +409,7 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
 ) -> usize {
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     {
-        return process_outbox_batch_with_pg(Some(db), None, notifier).await;
+        return process_outbox_batch_with_pg(Some(db), None, notifier, None).await;
     }
     #[cfg(not(feature = "legacy-sqlite-tests"))]
     {
@@ -597,6 +615,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     notifier: &N,
+    claim_owner: Option<&str>,
 ) -> usize {
     #[cfg(all(test, feature = "legacy-sqlite-tests"))]
     if pg_pool.is_none() {
@@ -611,7 +630,9 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
     let Some(pool) = pg_pool else {
         return 0;
     };
-    let pending: Vec<DispatchOutboxRow> = claim_pending_dispatch_outbox_batch_pg(pool).await;
+    let pending: Vec<DispatchOutboxRow> =
+        claim_pending_dispatch_outbox_batch_pg(pool, claim_owner.unwrap_or("dispatch-outbox"))
+            .await;
 
     let count = pending.len();
     for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
@@ -633,7 +654,9 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                             processed_at = NOW(),
                             error = NULL,
                             delivery_status = $2,
-                            delivery_result = $3::jsonb
+                            delivery_result = $3::jsonb,
+                            claimed_at = NULL,
+                            claim_owner = NULL
                       WHERE id = $1",
                 )
                 .bind(id)
@@ -702,7 +725,9 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                             processed_at = NOW(),
                             error = NULL,
                             delivery_status = $2,
-                            delivery_result = $3::jsonb
+                            delivery_result = $3::jsonb,
+                            claimed_at = NULL,
+                            claim_owner = NULL
                       WHERE id = $1",
                 )
                 .bind(id)
@@ -735,7 +760,9 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                                 retry_count = $2,
                                 processed_at = NOW(),
                                 delivery_status = $4,
-                                delivery_result = $5::jsonb
+                                delivery_result = $5::jsonb,
+                                claimed_at = NULL,
+                                claim_owner = NULL
                           WHERE id = $3",
                     )
                     .bind(&err)
@@ -759,7 +786,9 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                             SET status = 'pending',
                                 error = $1,
                                 retry_count = $2,
-                                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second')
+                                next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second'),
+                                claimed_at = NULL,
+                                claim_owner = NULL
                           WHERE id = $4",
                     )
                     .bind(&err)
@@ -782,7 +811,7 @@ pub(crate) async fn process_outbox_batch_with_real_notifier(
     pg_pool: &PgPool,
 ) -> usize {
     let notifier = RealOutboxNotifier::new(Arc::new(pg_pool.clone()));
-    process_outbox_batch_with_pg(db, Some(pg_pool), &notifier).await
+    process_outbox_batch_with_pg(db, Some(pg_pool), &notifier, None).await
 }
 
 // ── Followup & verdict helpers ──────────────────────────────────
@@ -1905,7 +1934,9 @@ pub(crate) async fn requeue_dispatch_notify_pg(
                 processed_at = NULL,
                 error = NULL,
                 delivery_status = NULL,
-                delivery_result = NULL
+                delivery_result = NULL,
+                claimed_at = NULL,
+                claim_owner = NULL
           WHERE dispatch_id = $1
             AND action = 'notify'",
     )
@@ -1950,7 +1981,9 @@ pub(crate) async fn requeue_dispatch_notify_pg(
                 processed_at = NULL,
                 error = NULL,
                 delivery_status = NULL,
-                delivery_result = NULL
+                delivery_result = NULL,
+                claimed_at = NULL,
+                claim_owner = NULL
           WHERE dispatch_id = $1
             AND action = 'notify'",
     )
@@ -1969,12 +2002,15 @@ pub(crate) async fn requeue_dispatch_notify_pg(
 ///
 /// This is the SINGLE place where dispatch-related Discord HTTP calls originate.
 /// All other code paths insert into the outbox table and return immediately.
-pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>) {
+pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>, claim_owner: String) {
     use std::time::Duration;
 
     // Wait for server to be ready
     tokio::time::sleep(Duration::from_secs(3)).await;
-    tracing::info!("[dispatch-outbox] Worker started (adaptive backoff 500ms-5s)");
+    tracing::info!(
+        claim_owner,
+        "[dispatch-outbox] Worker started (adaptive backoff 500ms-5s)"
+    );
 
     let notifier = RealOutboxNotifier::new(pg_pool);
     let mut poll_interval = Duration::from_millis(500);
@@ -1983,8 +2019,13 @@ pub(crate) async fn dispatch_outbox_loop(pg_pool: Arc<PgPool>) {
     loop {
         tokio::time::sleep(poll_interval).await;
 
-        let processed =
-            process_outbox_batch_with_pg(None, Some(notifier.pg_pool.as_ref()), &notifier).await;
+        let processed = process_outbox_batch_with_pg(
+            None,
+            Some(notifier.pg_pool.as_ref()),
+            &notifier,
+            Some(&claim_owner),
+        )
+        .await;
         if processed == 0 {
             poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
         } else {
@@ -2087,6 +2128,42 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn claim_pending_dispatch_outbox_batch_pg_records_owner_and_reclaims_stale() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, claimed_at, claim_owner
+             ) VALUES ($1, 'status_reaction', 'processing', NOW() - INTERVAL '10 minutes', $2)",
+        )
+        .bind("dispatch-stale-outbox")
+        .bind("old-node")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let claimed = claim_pending_dispatch_outbox_batch_pg(&pool, "new-node").await;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].1, "dispatch-stale-outbox");
+
+        let row: (String, String) = sqlx::query_as(
+            "SELECT status, claim_owner
+               FROM dispatch_outbox
+              WHERE dispatch_id = $1",
+        )
+        .bind("dispatch-stale-outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "processing");
+        assert_eq!(row.1, "new-node");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     fn postgres_base_database_url() -> String {
@@ -2785,7 +2862,8 @@ mod tests {
         .unwrap();
 
         let notifier = MockOutboxNotifier::default();
-        let processed = process_outbox_batch_with_pg(Some(&sqlite), Some(&pool), &notifier).await;
+        let processed =
+            process_outbox_batch_with_pg(Some(&sqlite), Some(&pool), &notifier, None).await;
         assert_eq!(processed, 1);
         assert_eq!(
             notifier.calls.lock().unwrap().as_slice(),
