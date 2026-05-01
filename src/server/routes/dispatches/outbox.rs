@@ -2,6 +2,7 @@ use super::discord_delivery::{
     DispatchNotifyDeliveryResult, DispatchTransport, HttpDispatchTransport, discord_api_base_url,
     discord_api_url,
 };
+use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
 use std::process::Command;
 use std::sync::Arc;
@@ -245,65 +246,199 @@ type DispatchOutboxRow = (
     Option<String>,
     Option<String>,
     i64,
+    Option<Value>,
 );
+
+fn required_capabilities_empty(required: Option<&Value>) -> bool {
+    match required {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(map)) => map.is_empty(),
+        _ => false,
+    }
+}
 
 async fn claim_pending_dispatch_outbox_batch_pg(
     pool: &PgPool,
     claim_owner: &str,
 ) -> Vec<DispatchOutboxRow> {
-    let rows = match sqlx::query(
-        "WITH claimed AS (
-            SELECT id
-              FROM dispatch_outbox
-             WHERE (
-                    status = 'pending'
-                    AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
-                 )
-                OR (
-                    status = 'processing'
-                    AND (
-                        claimed_at IS NULL
-                        OR claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
-                    )
-                )
-             ORDER BY id ASC
-             FOR UPDATE SKIP LOCKED
-             LIMIT 5
-        )
-        UPDATE dispatch_outbox o
-           SET status = 'processing',
-               claimed_at = NOW(),
-               claim_owner = $2
-          FROM claimed
-         WHERE o.id = claimed.id
-        RETURNING o.id, o.dispatch_id, o.action, o.agent_id, o.card_id, o.title, o.retry_count",
-    )
-    .bind(DISPATCH_OUTBOX_CLAIM_STALE_SECS)
-    .bind(claim_owner)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
+    let owner_node =
+        match crate::server::cluster::worker_node_snapshot_by_instance(pool, claim_owner, 60).await
+        {
+            Ok(node) => node,
+            Err(error) => {
+                tracing::warn!(
+                    claim_owner,
+                    error,
+                    "[dispatch-outbox] failed to load claim owner capabilities"
+                );
+                None
+            }
+        };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
         Err(error) => {
-            tracing::warn!("[dispatch-outbox] failed to claim postgres outbox rows: {error}");
+            tracing::warn!("[dispatch-outbox] failed to begin postgres claim transaction: {error}");
             return Vec::new();
         }
     };
 
-    let mut pending = rows
-        .into_iter()
-        .filter_map(|row| {
-            Some((
-                row.try_get::<i64, _>("id").ok()?,
-                row.try_get::<String, _>("dispatch_id").ok()?,
-                row.try_get::<String, _>("action").ok()?,
-                row.try_get::<Option<String>, _>("agent_id").ok()?,
-                row.try_get::<Option<String>, _>("card_id").ok()?,
-                row.try_get::<Option<String>, _>("title").ok()?,
-                row.try_get::<i64, _>("retry_count").ok()?,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let rows = match sqlx::query(
+        "SELECT
+            o.id,
+            o.dispatch_id,
+            o.action,
+            o.agent_id,
+            o.card_id,
+            o.title,
+            o.retry_count,
+            COALESCE(o.required_capabilities, td.required_capabilities) AS required_capabilities
+         FROM dispatch_outbox o
+         LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
+         WHERE (
+                o.status = 'pending'
+                AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= NOW())
+             )
+            OR (
+                o.status = 'processing'
+                AND (
+                    o.claimed_at IS NULL
+                    OR o.claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
+                )
+            )
+         ORDER BY o.id ASC
+         FOR UPDATE OF o SKIP LOCKED
+         LIMIT 20",
+    )
+    .bind(DISPATCH_OUTBOX_CLAIM_STALE_SECS)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!("[dispatch-outbox] failed to select postgres outbox rows: {error}");
+            let _ = tx.rollback().await;
+            return Vec::new();
+        }
+    };
+
+    let mut pending = Vec::new();
+    for row in rows {
+        let id = match row.try_get::<i64, _>("id") {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let dispatch_id = match row.try_get::<String, _>("dispatch_id") {
+            Ok(dispatch_id) => dispatch_id,
+            Err(_) => continue,
+        };
+        let required_capabilities = row
+            .try_get::<Option<Value>, _>("required_capabilities")
+            .ok()
+            .flatten();
+
+        if !required_capabilities_empty(required_capabilities.as_ref()) {
+            let decision = owner_node
+                .as_ref()
+                .map(|node| {
+                    crate::server::cluster::explain_capability_match(
+                        node,
+                        required_capabilities.as_ref().expect("checked above"),
+                    )
+                })
+                .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
+                    instance_id: Some(claim_owner.to_string()),
+                    eligible: false,
+                    reasons: vec!["claim owner is not registered in worker_nodes".to_string()],
+                });
+            if !decision.eligible {
+                let diagnostics = serde_json::json!({
+                    "claim_owner": claim_owner,
+                    "decision": decision,
+                    "required_capabilities": required_capabilities,
+                    "checked_at": chrono::Utc::now(),
+                });
+                if let Err(error) = sqlx::query(
+                    "UPDATE dispatch_outbox
+                        SET routing_diagnostics = $2,
+                            next_attempt_at = NOW() + INTERVAL '5 seconds'
+                      WHERE id = $1",
+                )
+                .bind(id)
+                .bind(&diagnostics)
+                .execute(&mut *tx)
+                .await
+                {
+                    tracing::warn!(
+                        outbox_id = id,
+                        dispatch_id,
+                        error = %error,
+                        "[dispatch-outbox] failed to record routing diagnostics"
+                    );
+                }
+                if let Err(error) = sqlx::query(
+                    "UPDATE task_dispatches
+                        SET routing_diagnostics = $2,
+                            updated_at = NOW()
+                      WHERE id = $1",
+                )
+                .bind(&dispatch_id)
+                .bind(&diagnostics)
+                .execute(&mut *tx)
+                .await
+                {
+                    tracing::warn!(
+                        dispatch_id,
+                        error = %error,
+                        "[dispatch-outbox] failed to record dispatch routing diagnostics"
+                    );
+                }
+                continue;
+            }
+        }
+
+        if let Err(error) = sqlx::query(
+            "UPDATE dispatch_outbox
+                SET status = 'processing',
+                    claimed_at = NOW(),
+                    claim_owner = $2
+              WHERE id = $1",
+        )
+        .bind(id)
+        .bind(claim_owner)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::warn!(
+                outbox_id = id,
+                dispatch_id,
+                error = %error,
+                "[dispatch-outbox] failed to claim postgres outbox row"
+            );
+            continue;
+        }
+
+        pending.push((
+            id,
+            dispatch_id,
+            row.try_get::<String, _>("action").ok().unwrap_or_default(),
+            row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
+            row.try_get::<Option<String>, _>("card_id").ok().flatten(),
+            row.try_get::<Option<String>, _>("title").ok().flatten(),
+            row.try_get::<i64, _>("retry_count")
+                .ok()
+                .unwrap_or_default(),
+            required_capabilities,
+        ));
+        if pending.len() >= 5 {
+            break;
+        }
+    }
+
+    if let Err(error) = tx.commit().await {
+        tracing::warn!("[dispatch-outbox] failed to commit postgres outbox claims: {error}");
+        return Vec::new();
+    }
+
     pending.sort_by_key(|row| row.0);
     pending
 }
@@ -444,6 +579,7 @@ async fn process_outbox_batch_sqlite<N: OutboxNotifier>(db: &crate::db::Db, noti
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                None,
             ))
         })
         .ok()
@@ -452,7 +588,7 @@ async fn process_outbox_batch_sqlite<N: OutboxNotifier>(db: &crate::db::Db, noti
     };
 
     let count = pending.len();
-    for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
+    for (id, dispatch_id, action, agent_id, card_id, title, retry_count, _) in pending {
         check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
 
         if action == "notify" {
@@ -635,7 +771,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
             .await;
 
     let count = pending.len();
-    for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
+    for (id, dispatch_id, action, agent_id, card_id, title, retry_count, _) in pending {
         check_dispatch_outbox_retry_count_in_bounds(id, &dispatch_id, retry_count);
         if action == "notify" {
             let suppress_delivery = dispatch_notify_delivery_suppressed_pg(pool, &dispatch_id)
@@ -2161,6 +2297,74 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, "processing");
         assert_eq!(row.1, "new-node");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn claim_pending_dispatch_outbox_batch_pg_filters_required_capabilities() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, process_id, role, effective_role, status,
+                labels, capabilities, last_heartbeat_at, started_at, updated_at
+             ) VALUES
+                (
+                    'mac-mini-release', 'mac-mini', 100, 'auto', 'leader', 'online',
+                    $1, $2, NOW(), NOW(), NOW()
+                ),
+                (
+                    'mac-book-release', 'mac-book', 101, 'worker', 'worker', 'online',
+                    $3, $4, NOW(), NOW(), NOW()
+                )",
+        )
+        .bind(serde_json::json!(["mac-mini"]))
+        .bind(serde_json::json!({"providers": ["claude"]}))
+        .bind(serde_json::json!(["mac-book"]))
+        .bind(serde_json::json!({"providers": ["codex"]}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, status, required_capabilities
+             ) VALUES ($1, 'status_reaction', 'pending', $2)",
+        )
+        .bind("dispatch-capability-filtered")
+        .bind(serde_json::json!({"labels": ["mac-book"], "providers": ["codex"]}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rejected = claim_pending_dispatch_outbox_batch_pg(&pool, "mac-mini-release").await;
+        assert!(rejected.is_empty());
+        let diagnostics: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT routing_diagnostics
+               FROM dispatch_outbox
+              WHERE dispatch_id = 'dispatch-capability-filtered'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let diagnostics = diagnostics.expect("mismatch should record routing diagnostics");
+        assert_eq!(diagnostics["decision"]["eligible"], false);
+
+        sqlx::query(
+            "UPDATE dispatch_outbox
+                SET next_attempt_at = NULL
+              WHERE dispatch_id = 'dispatch-capability-filtered'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let claimed = claim_pending_dispatch_outbox_batch_pg(&pool, "mac-book-release").await;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].1, "dispatch-capability-filtered");
 
         pool.close().await;
         pg_db.drop().await;

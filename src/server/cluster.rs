@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 
 use crate::config::{ClusterConfig, Config};
@@ -43,6 +44,13 @@ pub(crate) struct ClusterRuntime {
     configured_role: ClusterRole,
     effective_role: ClusterRole,
     leader_active: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct CapabilityRouteDecision {
+    pub(crate) instance_id: Option<String>,
+    pub(crate) eligible: bool,
+    pub(crate) reasons: Vec<String>,
 }
 
 impl ClusterRuntime {
@@ -151,6 +159,9 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
     {
         tracing::warn!("[cluster] worker node registration failed: {error}");
     }
+    if let Err(error) = upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await {
+        tracing::warn!("[cluster] worker MCP endpoint registration failed: {error}");
+    }
 
     spawn_heartbeat_loop(
         pool,
@@ -222,6 +233,11 @@ fn spawn_heartbeat_loop(
             {
                 tracing::warn!("[cluster] heartbeat failed: {error}");
             }
+            if let Err(error) =
+                upsert_worker_mcp_endpoints(&pool, &instance_id, &capabilities).await
+            {
+                tracing::warn!("[cluster] heartbeat MCP endpoint sync failed: {error}");
+            }
         }
     });
 }
@@ -269,6 +285,96 @@ async fn upsert_worker_node(
     .map_err(|error| format!("upsert worker_nodes: {error}"))
 }
 
+async fn upsert_worker_mcp_endpoints(
+    pool: &PgPool,
+    instance_id: &str,
+    capabilities: &Value,
+) -> Result<(), String> {
+    let mut endpoint_names = Vec::new();
+    let Some(mcp) = capabilities.get("mcp") else {
+        sqlx::query("DELETE FROM worker_mcp_endpoints WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(pool)
+            .await
+            .map_err(|error| format!("clear worker_mcp_endpoints: {error}"))?;
+        return Ok(());
+    };
+
+    match mcp {
+        Value::Object(map) => {
+            for (name, metadata) in map {
+                if name.trim().is_empty() {
+                    continue;
+                }
+                endpoint_names.push(name.clone());
+                let healthy = metadata
+                    .get("healthy")
+                    .and_then(|value| value.as_bool())
+                    .or_else(|| metadata.as_bool());
+                sqlx::query(
+                    r#"
+                    INSERT INTO worker_mcp_endpoints (
+                        instance_id, endpoint_name, healthy, metadata, last_checked_at, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, NOW(), NOW())
+                    ON CONFLICT (instance_id, endpoint_name) DO UPDATE SET
+                        healthy = EXCLUDED.healthy,
+                        metadata = EXCLUDED.metadata,
+                        last_checked_at = NOW(),
+                        updated_at = NOW()
+                    "#,
+                )
+                .bind(instance_id)
+                .bind(name)
+                .bind(healthy)
+                .bind(metadata)
+                .execute(pool)
+                .await
+                .map_err(|error| format!("upsert worker_mcp_endpoints: {error}"))?;
+            }
+        }
+        Value::Array(names) => {
+            for endpoint in names.iter().filter_map(|value| value.as_str()) {
+                if endpoint.trim().is_empty() {
+                    continue;
+                }
+                endpoint_names.push(endpoint.to_string());
+                sqlx::query(
+                    r#"
+                    INSERT INTO worker_mcp_endpoints (
+                        instance_id, endpoint_name, healthy, metadata, last_checked_at, updated_at
+                    )
+                    VALUES ($1, $2, NULL, '{}'::jsonb, NOW(), NOW())
+                    ON CONFLICT (instance_id, endpoint_name) DO UPDATE SET
+                        healthy = EXCLUDED.healthy,
+                        metadata = EXCLUDED.metadata,
+                        last_checked_at = NOW(),
+                        updated_at = NOW()
+                    "#,
+                )
+                .bind(instance_id)
+                .bind(endpoint)
+                .execute(pool)
+                .await
+                .map_err(|error| format!("upsert worker_mcp_endpoints: {error}"))?;
+            }
+        }
+        _ => {}
+    }
+
+    sqlx::query(
+        "DELETE FROM worker_mcp_endpoints
+          WHERE instance_id = $1
+            AND NOT (endpoint_name = ANY($2))",
+    )
+    .bind(instance_id)
+    .bind(endpoint_names)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("prune worker_mcp_endpoints: {error}"))?;
+    Ok(())
+}
+
 fn resolve_instance_id(config: &ClusterConfig) -> String {
     if let Some(value) = config
         .instance_id
@@ -288,28 +394,6 @@ fn resolve_instance_id(config: &ClusterConfig) -> String {
         crate::services::platform::hostname_short(),
         std::process::id()
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ClusterRole, resolve_instance_id};
-    use crate::config::ClusterConfig;
-
-    #[test]
-    fn cluster_role_parses_known_values_and_defaults_to_auto() {
-        assert_eq!(ClusterRole::parse("leader"), ClusterRole::Leader);
-        assert_eq!(ClusterRole::parse("WORKER"), ClusterRole::Worker);
-        assert_eq!(ClusterRole::parse("anything-else"), ClusterRole::Auto);
-    }
-
-    #[test]
-    fn configured_instance_id_wins() {
-        let config = ClusterConfig {
-            instance_id: Some("mac-mini-release".to_string()),
-            ..ClusterConfig::default()
-        };
-        assert_eq!(resolve_instance_id(&config), "mac-mini-release");
-    }
 }
 
 pub(crate) async fn list_worker_nodes(
@@ -368,4 +452,207 @@ pub(crate) async fn list_worker_nodes(
             })
         })
         .collect())
+}
+
+pub(crate) async fn worker_node_snapshot_by_instance(
+    pool: &PgPool,
+    instance_id: &str,
+    lease_ttl_secs: u64,
+) -> Result<Option<Value>, String> {
+    Ok(list_worker_nodes(pool, lease_ttl_secs)
+        .await?
+        .into_iter()
+        .find(|node| node.get("instance_id").and_then(|value| value.as_str()) == Some(instance_id)))
+}
+
+pub(crate) fn explain_capability_match(
+    node: &Value,
+    required_capabilities: &Value,
+) -> CapabilityRouteDecision {
+    let instance_id = node
+        .get("instance_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let mut reasons = Vec::new();
+
+    if !required_capabilities.is_object() {
+        return CapabilityRouteDecision {
+            instance_id,
+            eligible: true,
+            reasons,
+        };
+    }
+
+    let labels = node
+        .get("labels")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let labels = labels
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(required_labels) = required_capabilities
+        .get("labels")
+        .and_then(|value| value.as_array())
+    {
+        for label in required_labels.iter().filter_map(|value| value.as_str()) {
+            if !labels.contains(label) {
+                reasons.push(format!("missing label '{label}'"));
+            }
+        }
+    }
+
+    let capabilities = node.get("capabilities").unwrap_or(&Value::Null);
+    let providers = capabilities
+        .get("providers")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let providers = providers
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(required_providers) = required_capabilities
+        .get("providers")
+        .and_then(|value| value.as_array())
+    {
+        for provider in required_providers.iter().filter_map(|value| value.as_str()) {
+            if !providers.contains(provider) {
+                reasons.push(format!("missing provider '{provider}'"));
+            }
+        }
+    }
+
+    if let Some(required_mcp) = required_capabilities.get("mcp") {
+        match required_mcp {
+            Value::Array(names) => {
+                for endpoint in names.iter().filter_map(|value| value.as_str()) {
+                    if capabilities
+                        .get("mcp")
+                        .and_then(|mcp| mcp.get(endpoint))
+                        .is_none()
+                    {
+                        reasons.push(format!("missing MCP endpoint '{endpoint}'"));
+                    }
+                }
+            }
+            Value::Object(map) => {
+                for (endpoint, requirement) in map {
+                    let actual = capabilities.get("mcp").and_then(|mcp| mcp.get(endpoint));
+                    let Some(actual) = actual else {
+                        reasons.push(format!("missing MCP endpoint '{endpoint}'"));
+                        continue;
+                    };
+                    let requires_healthy = requirement
+                        .get("healthy")
+                        .and_then(|value| value.as_bool())
+                        .or_else(|| requirement.as_bool())
+                        .unwrap_or(false);
+                    let actual_healthy = actual
+                        .get("healthy")
+                        .and_then(|value| value.as_bool())
+                        .or_else(|| actual.as_bool())
+                        .unwrap_or(false);
+                    if requires_healthy && !actual_healthy {
+                        reasons.push(format!("MCP endpoint '{endpoint}' is not healthy"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    CapabilityRouteDecision {
+        instance_id,
+        eligible: reasons.is_empty(),
+        reasons,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClusterRole, explain_capability_match, resolve_instance_id};
+    use crate::config::ClusterConfig;
+    use serde_json::json;
+
+    #[test]
+    fn cluster_role_parses_known_values_and_defaults_to_auto() {
+        assert_eq!(ClusterRole::parse("leader"), ClusterRole::Leader);
+        assert_eq!(ClusterRole::parse("WORKER"), ClusterRole::Worker);
+        assert_eq!(ClusterRole::parse("anything-else"), ClusterRole::Auto);
+    }
+
+    #[test]
+    fn configured_instance_id_wins() {
+        let config = ClusterConfig {
+            instance_id: Some("mac-mini-release".to_string()),
+            ..ClusterConfig::default()
+        };
+        assert_eq!(resolve_instance_id(&config), "mac-mini-release");
+    }
+
+    #[test]
+    fn capability_match_accepts_labels_providers_and_healthy_mcp() {
+        let node = json!({
+            "instance_id": "mac-book-release",
+            "labels": ["mac-book"],
+            "capabilities": {
+                "providers": ["codex"],
+                "mcp": {"filesystem": {"healthy": true}}
+            }
+        });
+        let required = json!({
+            "labels": ["mac-book"],
+            "providers": ["codex"],
+            "mcp": {"filesystem": {"healthy": true}}
+        });
+
+        let decision = explain_capability_match(&node, &required);
+        assert!(decision.eligible, "{:?}", decision.reasons);
+    }
+
+    #[test]
+    fn capability_match_reports_exclusion_reasons() {
+        let node = json!({
+            "instance_id": "mac-mini-release",
+            "labels": ["mac-mini"],
+            "capabilities": {
+                "providers": ["claude"],
+                "mcp": {"filesystem": {"healthy": false}}
+            }
+        });
+        let required = json!({
+            "labels": ["mac-book"],
+            "providers": ["codex"],
+            "mcp": {"filesystem": {"healthy": true}, "unreal": true}
+        });
+
+        let decision = explain_capability_match(&node, &required);
+        assert!(!decision.eligible);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("mac-book"))
+        );
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("codex"))
+        );
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("filesystem"))
+        );
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unreal"))
+        );
+    }
 }

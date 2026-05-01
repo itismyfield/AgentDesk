@@ -27,6 +27,7 @@ pub struct CreateDispatchBody {
     pub dispatch_type: Option<String>,
     pub title: String,
     pub context: Option<serde_json::Value>,
+    pub required_capabilities: Option<serde_json::Value>,
     pub skip_outbox: Option<bool>,
 }
 
@@ -93,7 +94,14 @@ pub async fn create_dispatch(
     let to_agent_id = resolve_dispatch_target_agent_id_pg(pool, &body.to_agent_id)
         .await
         .unwrap_or(body.to_agent_id);
-    let context = body.context.unwrap_or_else(|| json!({}));
+    let mut context = body.context.unwrap_or_else(|| json!({}));
+    if let Some(required_capabilities) = body.required_capabilities {
+        if let Some(obj) = context.as_object_mut() {
+            obj.insert("required_capabilities".to_string(), required_capabilities);
+        } else {
+            context = json!({"value": context, "required_capabilities": required_capabilities});
+        }
+    }
     let options = crate::dispatch::DispatchCreateOptions {
         skip_outbox: body.skip_outbox.unwrap_or(false),
         sidecar_dispatch: context

@@ -276,8 +276,12 @@ pub(super) async fn create_activate_dispatch_pg(
     .map_err(|error| format!("insert postgres dispatch event for {dispatch_id}: {error}"))?;
 
     sqlx::query(
-        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title)
-         VALUES ($1, 'notify', $2, $3, $4)
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, agent_id, card_id, title, required_capabilities
+         )
+         SELECT $1, 'notify', $2, $3, $4, required_capabilities
+           FROM task_dispatches
+          WHERE id = $1
          ON CONFLICT DO NOTHING",
     )
     .bind(&dispatch_id)

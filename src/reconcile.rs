@@ -179,8 +179,17 @@ fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
 
 async fn backfill_missing_notify_outbox_pg(pool: &PgPool) -> Result<usize> {
     sqlx::query(
-        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status)
-         SELECT td.id, 'notify', td.to_agent_id, td.kanban_card_id, td.title, 'pending'
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, agent_id, card_id, title, status, required_capabilities
+         )
+         SELECT
+            td.id,
+            'notify',
+            td.to_agent_id,
+            td.kanban_card_id,
+            td.title,
+            'pending',
+            td.required_capabilities
          FROM task_dispatches td
          WHERE td.status IN ('pending', 'dispatched')
            AND NOT EXISTS (

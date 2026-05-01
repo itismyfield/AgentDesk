@@ -394,6 +394,16 @@ fn parse_dispatch_json_text_pg(raw: Option<&str>) -> Option<serde_json::Value> {
     raw.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
 }
 
+fn dispatch_required_capabilities(context_str: &str) -> Option<serde_json::Value> {
+    let context = serde_json::from_str::<serde_json::Value>(context_str).ok()?;
+    let required = context.get("required_capabilities")?.clone();
+    match &required {
+        serde_json::Value::Null => None,
+        serde_json::Value::Object(map) if map.is_empty() => None,
+        _ => Some(required),
+    }
+}
+
 pub(crate) async fn query_dispatch_row_pg(
     pool: &PgPool,
     dispatch_id: &str,
@@ -414,7 +424,9 @@ pub(crate) async fn query_dispatch_row_pg(
             created_at::text AS created_at,
             updated_at::text AS updated_at,
             completed_at::text AS completed_at,
-            COALESCE(retry_count, 0)::bigint AS retry_count
+            COALESCE(retry_count, 0)::bigint AS retry_count,
+            required_capabilities,
+            routing_diagnostics
          FROM task_dispatches
          WHERE id = $1",
     )
@@ -469,6 +481,8 @@ pub(crate) async fn query_dispatch_row_pg(
         "updated_at": updated_at,
         "completed_at": completed_at,
         "retry_count": row.try_get::<i64, _>("retry_count").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "required_capabilities": row.try_get::<Option<serde_json::Value>, _>("required_capabilities").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
+        "routing_diagnostics": row.try_get::<Option<serde_json::Value>, _>("routing_diagnostics").map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?,
     }))
 }
 
@@ -1432,8 +1446,12 @@ async fn ensure_dispatch_notify_outbox_on_pg_tx(
     }
 
     let inserted = sqlx::query(
-        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title)
-         VALUES ($1, 'notify', $2, $3, $4)
+        "INSERT INTO dispatch_outbox (
+            dispatch_id, action, agent_id, card_id, title, required_capabilities
+         )
+         SELECT $1, 'notify', $2, $3, $4, required_capabilities
+           FROM task_dispatches
+          WHERE id = $1
          ON CONFLICT DO NOTHING",
     )
     .bind(dispatch_id)
@@ -1610,13 +1628,14 @@ pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
     if let TransitionOutcome::Blocked(reason) = &decision.outcome {
         return Err(anyhow::anyhow!("{}", reason));
     }
+    let required_capabilities = dispatch_required_capabilities(context_str);
 
     if let Err(error) = sqlx::query(
         "INSERT INTO task_dispatches (
             id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
-            parent_dispatch_id, chain_depth, created_at, updated_at
+            parent_dispatch_id, chain_depth, required_capabilities, created_at, updated_at
         ) VALUES (
-            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, NOW(), NOW()
+            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, NOW(), NOW()
         )",
     )
     .bind(dispatch_id)
@@ -1627,6 +1646,7 @@ pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
     .bind(context_str)
     .bind(parent_dispatch_id)
     .bind(chain_depth)
+    .bind(required_capabilities.as_ref())
     .execute(&mut **tx)
     .await
     {

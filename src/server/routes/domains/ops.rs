@@ -25,6 +25,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/cluster/nodes", get(cluster::list_nodes))
             .route(
+                "/cluster/routing-diagnostics",
+                get(cluster::routing_diagnostics),
+            )
+            .route(
                 "/doctor/stale-mailbox/repair",
                 post(health_api::stale_mailbox_repair_handler),
             )

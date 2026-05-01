@@ -235,9 +235,9 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 8] = [
         start_order: 50,
         restart_policy: WorkerRestartPolicy::LoopOwned,
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
-        execution_scope: WorkerExecutionScope::LeaderOnly,
+        execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "dispatch outbox tables and delivery tracing",
-        notes: "Shares the boot-reconcile boundary with other DB-backed recovery workers",
+        notes: "Runs on each cluster node; PostgreSQL row claims and capability filters select the worker",
     },
     WorkerSpec {
         id: ServerWorkerId::DmReplyRetry,
@@ -644,14 +644,14 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::LeaderOnly)
                 .count(),
-            7
+            6
         );
         assert_eq!(
             WORKER_SPECS
                 .iter()
                 .filter(|spec| spec.execution_scope == WorkerExecutionScope::WorkerLocal)
                 .count(),
-            1
+            2
         );
         assert!(WORKER_SPECS.iter().all(|spec| !spec.owner.is_empty()));
         assert!(

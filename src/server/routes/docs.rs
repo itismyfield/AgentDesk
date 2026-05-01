@@ -572,6 +572,42 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl http://localhost:8787/api/cluster/nodes"),
         ep(
             "GET",
+            "/api/cluster/routing-diagnostics",
+            "cluster",
+            "Explain which multinode workers satisfy a required capability set and why excluded workers do not match.",
+        )
+        .with_example(
+            json!({"required": "{\"labels\":[\"mac-book\"],\"providers\":[\"codex\"],\"mcp\":{\"filesystem\":{\"healthy\":true}}}"}),
+            json!({
+                "required": {
+                    "labels": ["mac-book"],
+                    "providers": ["codex"],
+                    "mcp": {"filesystem": {"healthy": true}}
+                },
+                "decisions": [{
+                    "instance_id": "mac-book-release",
+                    "eligible": true,
+                    "reasons": []
+                }, {
+                    "instance_id": "mac-mini-release",
+                    "eligible": false,
+                    "reasons": ["missing label 'mac-book'"]
+                }]
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"required": "{not-json"}),
+            json!({"error": "invalid required JSON: expected object key"}),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres unavailable"}),
+        )
+        .with_curl("curl --get http://localhost:8787/api/cluster/routing-diagnostics --data-urlencode 'required={\"labels\":[\"mac-book\"],\"providers\":[\"codex\"]}'"),
+        ep(
+            "GET",
             "/api/doctor/startup/latest",
             "health",
             "Local/protected latest startup doctor artifact envelope for agent rescue and diagnosis.",
