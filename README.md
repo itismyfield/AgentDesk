@@ -250,6 +250,16 @@ Agent turn lifecycle is managed by a dedicated orchestration layer (`src/service
 - **Reaction cleanup** — Mixed ⏳/❌ dispatch reactions are normalized by the cleanup pass added in #1445
 - **Inflight tracking** — Per-provider inflight files for concurrent session management
 
+### Multinode Runtime
+AgentDesk can run multiple release instances against one PostgreSQL control plane. Each node advertises identity, labels, provider capabilities, and node-local MCP health through `worker_nodes`, while PostgreSQL leases prevent duplicate cluster-wide side effects.
+
+- **Leader/worker split** — Each node boots with `cluster.instance_id`, acquires the cluster leader advisory lease when eligible, and records its effective role through `/api/cluster/nodes`.
+- **Capability-aware routing** — Dispatch claims compare required labels/providers/MCP health against registered worker capabilities and record routing diagnostics when a node is ineligible.
+- **Lease-backed work claims** — `task_dispatches` and dispatch outbox rows use PG claim owner, expiry, and idempotency fields so multiple nodes do not process the same work item concurrently.
+- **Exclusive resource locks** — `/api/cluster/resource-locks*` serializes node-local resources such as Unreal Editor, MCP endpoints, and project-level test execution.
+- **Issue-as-spec phase evidence** — `issue_specs`, `test_phase_runs`, and `test_results` connect GitHub issue acceptance criteria to deterministic phase runs, and `policies/merge-automation.js` blocks merge when required phase evidence is missing for the current PR head SHA.
+- **Regression coverage** — `.github/workflows/ci-nightly.yml` runs the `multinode_regression` job; the physical MacBook + Mac mini smoke plan lives in `docs/agent-maintenance/multinode-two-node-smoke.md`.
+
 ## Configuration
 
 ### agentdesk.yaml
@@ -330,6 +340,24 @@ database:
   port: 5432
   dbname: agentdesk
   user: agentdesk
+
+# Optional multinode runtime identity. Nodes that share the same PostgreSQL
+# database coordinate through worker heartbeats, advisory leadership leases,
+# dispatch claims, and resource locks.
+cluster:
+  enabled: true
+  instance_id: mac-mini-release    # use a unique value per host, e.g. mac-book-release
+  role: auto                       # auto | leader | worker
+  heartbeat_interval_secs: 10
+  lease_ttl_secs: 30
+  labels: [mac-mini, release]
+  capabilities:
+    providers: [codex, claude, gemini, qwen]
+    max_agent_turns: 1
+    max_unreal_tests: 0
+    mcp:
+      unreal_editor:
+        healthy: false
 
 # Optional file/MCP memory configuration. Omit the section entirely to use defaults.
 memory:
@@ -644,6 +672,7 @@ AgentDesk exposes 150+ REST API endpoints. Key groups:
 | `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
 | `/api/github` | Repo sync, dashboard views, issue actions | GitHub integration |
 | `/api/discord` | `/send`, `/send-to-agent`, `/send-dm`, channel messages, bindings, DM reply hooks. Legacy top-level `/api/send*` aliases were removed. | Discord access layer |
+| `/api/cluster` | Nodes, routing diagnostics, resource locks, task-dispatch claims, issue specs, phase evidence | Multinode coordination |
 | `/api/health` | Public safe health summary | Service status |
 | `/api/health/detail` | Authenticated/local detailed diagnostics | Provider/runtime diagnostics |
 | `/api/onboarding` | Status, validate, complete | Setup wizard backend |
@@ -687,8 +716,8 @@ Full API documentation is available at `/api/docs` when the server is running, w
 
 ### Design Principles
 1. **Single Binary** — One Rust binary; PostgreSQL is the only required external runtime dependency
-2. **Single Process** — No inter-process communication for the control plane, minimal failure points
-3. **Single Database** — PostgreSQL holds all live state (agents, cards, dispatches, sessions, kv_meta). The legacy SQLite path is gated behind a `legacy-sqlite-tests` cargo feature and only used by tests after the #868 / #1239 cutover
+2. **Single Process Per Node** — Each node is one `agentdesk dcserver` process; multinode coordination is persisted in PostgreSQL rather than a sidecar coordinator
+3. **Single Database Control Plane** — PostgreSQL holds all live state (agents, cards, dispatches, sessions, kv_meta, worker nodes, resource locks, phase evidence). The legacy SQLite path is gated behind a `legacy-sqlite-tests` cargo feature and only used by tests after the #868 / #1239 cutover
 4. **Hot-Reloadable Policies** — Business logic in JS, editable without rebuild
 5. **Self-Contained** — No Node.js, Python, or other runtimes needed at deploy time
 6. **Pipeline-Driven** — State machines defined in YAML, not hardcoded in Rust or JS
@@ -696,10 +725,10 @@ Full API documentation is available at `/api/docs` when the server is running, w
 ## Limitations
 
 - **Installer is macOS-focused** — The `curl | bash` installer and launchd integration target macOS. Linux systemd and Windows service support exist in `--init`, but native runtime setup is still a manual path.
-- **Local execution** — Agents run on the same machine as AgentDesk. Distributed agent execution is not supported.
+- **Node-local provider execution** — Agents run on registered AgentDesk nodes. Each node still needs its own authenticated provider CLIs and local MCP/tooling for the capabilities it advertises.
 - **Discord-dependent** — Agent communication requires Discord. There is no built-in alternative messaging backend.
 - **tmux optional** — Agent sessions use tmux by default, but a backend process mode is available that does not require tmux. That fallback keeps heartbeats, not tmux-style watcher reattachment after restart.
-- **Single PostgreSQL instance** — Not yet designed for multi-instance or clustered deployment. Multinode coordination work is being scoped under issues #875–#884.
+- **Single PostgreSQL control plane** — Multiple AgentDesk nodes can share one PostgreSQL instance. Multi-PostgreSQL HA, sharding, and split-brain recovery are outside the current design.
 - **Provider CLI required** — AI providers (Claude Code, Codex) must be installed and authenticated on the host machine for agents to function.
 - **GitHub integration via CLI** — GitHub features require the `gh` CLI tool to be installed and authenticated.
 
