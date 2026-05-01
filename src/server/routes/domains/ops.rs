@@ -46,6 +46,26 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(cluster::reclaim_expired_resource_locks),
             )
             .route(
+                "/cluster/test-phase-runs",
+                get(cluster::list_test_phase_runs),
+            )
+            .route(
+                "/cluster/test-phase-runs/upsert",
+                post(cluster::upsert_test_phase_run),
+            )
+            .route(
+                "/cluster/test-phase-runs/start",
+                post(cluster::start_test_phase_run),
+            )
+            .route(
+                "/cluster/test-phase-runs/complete",
+                post(cluster::complete_test_phase_run),
+            )
+            .route(
+                "/cluster/test-phase-runs/evidence",
+                get(cluster::latest_test_phase_evidence),
+            )
+            .route(
                 "/doctor/stale-mailbox/repair",
                 post(health_api::stale_mailbox_repair_handler),
             )

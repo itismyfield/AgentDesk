@@ -205,3 +205,100 @@ pub async fn reclaim_expired_resource_locks(
         ),
     }
 }
+
+pub async fn list_test_phase_runs(
+    State(state): State<AppState>,
+    Query(params): Query<crate::server::test_phase_runs::TestPhaseRunListQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::test_phase_runs::list_test_phase_runs(pool, &params).await {
+        Ok(runs) => (StatusCode::OK, Json(json!({"runs": runs}))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn upsert_test_phase_run(
+    State(state): State<AppState>,
+    Json(body): Json<crate::server::test_phase_runs::TestPhaseRunRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::test_phase_runs::upsert_test_phase_run(pool, &body).await {
+        Ok(run) => (StatusCode::OK, Json(json!({"run": run}))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn start_test_phase_run(
+    State(state): State<AppState>,
+    Json(body): Json<crate::server::test_phase_runs::TestPhaseRunStartRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::test_phase_runs::start_test_phase_run(pool, &body).await {
+        Ok(outcome) => {
+            let status = if outcome.started {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            };
+            (status, Json(json!(outcome)))
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn complete_test_phase_run(
+    State(state): State<AppState>,
+    Json(body): Json<crate::server::test_phase_runs::TestPhaseRunCompleteRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::test_phase_runs::complete_test_phase_run(pool, &body).await {
+        Ok(outcome) => (StatusCode::OK, Json(json!(outcome))),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}
+
+pub async fn latest_test_phase_evidence(
+    State(state): State<AppState>,
+    Query(params): Query<crate::server::test_phase_runs::TestPhaseEvidenceQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "postgres unavailable"})),
+        );
+    };
+    match crate::server::test_phase_runs::latest_passing_evidence(
+        pool,
+        &params.phase_key,
+        &params.head_sha,
+    )
+    .await
+    {
+        Ok(Some(run)) => (StatusCode::OK, Json(json!({"ok": true, "run": run}))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "error": "passing evidence not found"})),
+        ),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))),
+    }
+}

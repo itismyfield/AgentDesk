@@ -714,6 +714,154 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST http://localhost:8787/api/cluster/resource-locks/reclaim-expired"),
         ep(
             "GET",
+            "/api/cluster/test-phase-runs",
+            "cluster",
+            "List deterministic test phase evidence records by phase, head SHA, and status for multinode merge gates.",
+        )
+        .with_example(
+            json!({"phase_key": "unreal-smoke", "head_sha": "abc123", "status": "passed"}),
+            json!({
+                "runs": [{
+                    "id": "tpr-123",
+                    "idempotency_key": "unreal-smoke:abc123",
+                    "phase_key": "unreal-smoke",
+                    "head_sha": "abc123",
+                    "status": "passed",
+                    "required_capabilities": {"labels": ["mac-book"], "unreal": true},
+                    "resource_lock_key": "unreal:project:CookingHeart",
+                    "evidence": {"log": "passed"},
+                    "completed_at": "2026-05-01T06:30:00Z"
+                }]
+            }),
+        )
+        .with_error_example(
+            503,
+            json!({}),
+            json!({"error": "postgres unavailable"}),
+        )
+        .with_curl("curl --get http://localhost:8787/api/cluster/test-phase-runs --data-urlencode phase_key=unreal-smoke --data-urlencode head_sha=abc123"),
+        ep(
+            "POST",
+            "/api/cluster/test-phase-runs/upsert",
+            "cluster",
+            "Create or update the idempotent evidence row for one test phase and commit head SHA.",
+        )
+        .with_example(
+            json!({
+                "phase_key": "unreal-smoke",
+                "head_sha": "abc123",
+                "status": "passed",
+                "issue_id": "881",
+                "card_id": "card-881",
+                "required_capabilities": {"labels": ["mac-book"], "unreal": true},
+                "resource_lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-book-release",
+                "holder_job_id": "phase-unreal-smoke-abc123",
+                "evidence": {"runner": "deterministic-phase-runner", "result": "passed"}
+            }),
+            json!({
+                "run": {
+                    "idempotency_key": "unreal-smoke:abc123",
+                    "phase_key": "unreal-smoke",
+                    "head_sha": "abc123",
+                    "status": "passed"
+                }
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"phase_key": "", "head_sha": "abc123"}),
+            json!({"error": "phase_key is required"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/test-phase-runs/upsert -H 'content-type: application/json' -d '{\"phase_key\":\"unreal-smoke\",\"head_sha\":\"abc123\",\"status\":\"passed\"}'"),
+        ep(
+            "POST",
+            "/api/cluster/test-phase-runs/start",
+            "cluster",
+            "Acquire the required resource lock and mark a deterministic test phase as running.",
+        )
+        .with_example(
+            json!({
+                "phase_key": "unreal-smoke",
+                "head_sha": "abc123",
+                "resource_lock_key": "unreal:project:CookingHeart",
+                "holder_instance_id": "mac-book-release",
+                "holder_job_id": "phase-unreal-smoke-abc123",
+                "ttl_secs": 900,
+                "required_capabilities": {"labels": ["mac-book"], "unreal": true}
+            }),
+            json!({
+                "started": true,
+                "run": {
+                    "phase_key": "unreal-smoke",
+                    "head_sha": "abc123",
+                    "status": "running"
+                },
+                "lock": {"lock_key": "unreal:project:CookingHeart"},
+                "current_lock": null
+            }),
+        )
+        .with_error_example(
+            409,
+            json!({}),
+            json!({"started": false, "run": null, "lock": null, "current_lock": {"holder_instance_id": "mac-mini-release"}}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/test-phase-runs/start -H 'content-type: application/json' -d '{\"phase_key\":\"unreal-smoke\",\"head_sha\":\"abc123\",\"resource_lock_key\":\"unreal:project:CookingHeart\",\"holder_instance_id\":\"mac-book-release\",\"holder_job_id\":\"phase-unreal-smoke-abc123\"}'"),
+        ep(
+            "POST",
+            "/api/cluster/test-phase-runs/complete",
+            "cluster",
+            "Record terminal phase evidence and optionally release the resource lock held by the runner.",
+        )
+        .with_example(
+            json!({
+                "phase_key": "unreal-smoke",
+                "head_sha": "abc123",
+                "status": "passed",
+                "release_lock": true,
+                "evidence": {"result": "passed", "log_path": "Saved/Logs/phase.log"}
+            }),
+            json!({
+                "run": {
+                    "phase_key": "unreal-smoke",
+                    "head_sha": "abc123",
+                    "status": "passed"
+                },
+                "lock_released": true
+            }),
+        )
+        .with_error_example(
+            400,
+            json!({"phase_key": "unreal-smoke", "head_sha": "abc123", "status": "running"}),
+            json!({"error": "complete requires status passed, failed, or canceled"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/cluster/test-phase-runs/complete -H 'content-type: application/json' -d '{\"phase_key\":\"unreal-smoke\",\"head_sha\":\"abc123\",\"status\":\"passed\",\"release_lock\":true}'"),
+        ep(
+            "GET",
+            "/api/cluster/test-phase-runs/evidence",
+            "cluster",
+            "Fetch the latest passing evidence for a required phase/head SHA pair. Merge gates should use this shape before accepting phase evidence.",
+        )
+        .with_example(
+            json!({"phase_key": "unreal-smoke", "head_sha": "abc123"}),
+            json!({
+                "ok": true,
+                "run": {
+                    "phase_key": "unreal-smoke",
+                    "head_sha": "abc123",
+                    "status": "passed",
+                    "evidence": {"result": "passed"}
+                }
+            }),
+        )
+        .with_error_example(
+            404,
+            json!({"phase_key": "unreal-smoke", "head_sha": "missing"}),
+            json!({"ok": false, "error": "passing evidence not found"}),
+        )
+        .with_curl("curl --get http://localhost:8787/api/cluster/test-phase-runs/evidence --data-urlencode phase_key=unreal-smoke --data-urlencode head_sha=abc123"),
+        ep(
+            "GET",
             "/api/doctor/startup/latest",
             "health",
             "Local/protected latest startup doctor artifact envelope for agent rescue and diagnosis.",

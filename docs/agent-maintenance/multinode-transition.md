@@ -235,6 +235,12 @@
 - Local resource locks for exclusive editor/test execution: #880 owns the durable
   lock implementation; the lock acquisition is worker-local but must be recorded
   in PG before the local tool starts.
+- Deterministic test phase evidence: #881 starts at
+  `src/server/test_phase_runs.rs`, `migrations/postgres/0033_test_phase_runs.sql`,
+  and `/api/cluster/test-phase-runs*`. `start` acquires the durable resource
+  lock and records a running row; `complete` records terminal evidence and can
+  release the lock. Each phase/head SHA pair has an idempotent evidence row so
+  later merge gates can require the exact tested commit before accepting a phase.
 - Local telemetry capture and cache state: `src/services/memory/memento_throttle.rs:128`,
   `src/services/observability/mod.rs:460`, `src/services/observability/metrics.rs:238`.
 
@@ -311,7 +317,7 @@
 | #878 `[multinode 3] task_dispatches / dispatch_outbox PG lease claim + idempotency` | `pg_lease_backed_claim`, `singleton_on_leader` |
 | #879 `[multinode 4] worker capability registry + node-local MCP routing` | `heartbeat_capability_registry_routing` |
 | #880 `[multinode 5] Unreal resource_locks for exclusive editor/test execution` | `resource_locks_before_exclusive_editor_test`, `heartbeat_capability_registry_routing` |
-| #881 `[multinode 6] Unreal test_phase_runs + deterministic phase runner` | `resource_locks_before_exclusive_editor_test`, `merge_gate_tested_head_sha_phase_evidence` |
+| #881 `[multinode 6] Unreal test_phase_runs + deterministic phase runner` | `resource_locks_before_exclusive_editor_test`, `merge_gate_tested_head_sha_phase_evidence` — evidence store/API and lock-backed start/complete runner API added |
 | #882 `[multinode 7] issue_specs + Issue-as-Spec / phase-plan generation` | `merge_gate_tested_head_sha_phase_evidence` |
 | #883 `[multinode 8] merge gate: required phase evidence + tested head SHA` | `merge_gate_tested_head_sha_phase_evidence`, `singleton_on_leader` |
 | #884 `[multinode 9] two-node nightly regression / chaos suite for MacBook + Mac mini` | all invariants |

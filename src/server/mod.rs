@@ -3,6 +3,7 @@ pub(crate) mod cron_catalog;
 pub(crate) mod maintenance;
 pub(crate) mod resource_locks;
 pub mod routes;
+pub(crate) mod test_phase_runs;
 mod worker_registry;
 pub mod ws;
 
