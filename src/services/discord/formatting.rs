@@ -266,19 +266,21 @@ mod tests {
     }
 
     #[test]
-    fn replace_long_message_wrapper_does_not_report_fallback_send_as_success() {
+    fn replace_long_message_wrapper_treats_fallback_send_as_delivery_success() {
         assert!(
             replace_long_message_outcome_to_result(ReplaceLongMessageOutcome::EditedOriginal)
                 .is_ok()
         );
 
-        let error = replace_long_message_outcome_to_result(
+        let result = replace_long_message_outcome_to_result(
             ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "HTTP 403 Forbidden".to_string(),
             },
-        )
-        .expect_err("fallback send leaves original replace obligation open");
-        assert!(error.to_string().contains("HTTP 403"));
+        );
+        assert!(
+            result.is_ok(),
+            "fallback send committed visible delivery, so recovery callers can finalize"
+        );
     }
 
     #[test]
@@ -2364,10 +2366,7 @@ pub(super) async fn replace_long_message_raw(
 fn replace_long_message_outcome_to_result(outcome: ReplaceLongMessageOutcome) -> Result<(), Error> {
     match outcome {
         ReplaceLongMessageOutcome::EditedOriginal => Ok(()),
-        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => Err(format!(
-            "original message edit failed before fallback send succeeded: {edit_error}"
-        )
-        .into()),
+        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. } => Ok(()),
     }
 }
 
@@ -2379,8 +2378,9 @@ pub(super) enum ReplaceLongMessageOutcome {
 
 /// Replace an existing Discord message and report whether the original
 /// placeholder was actually edited. If the edit fails but the fallback send
-/// succeeds, callers that own placeholder lifecycle can still delete or
-/// terminal-edit the stale original.
+/// succeeds, wrapper callers treat delivery as committed, while callers that
+/// own placeholder lifecycle can still use this outcomeful variant to delete
+/// or terminal-edit the stale original.
 pub(super) async fn replace_long_message_raw_with_outcome(
     http: &serenity::Http,
     channel_id: ChannelId,
