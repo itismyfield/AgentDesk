@@ -634,7 +634,6 @@ pub(crate) async fn activate_with_deps_pg(
         let slot_index = slot_allocation
             .as_ref()
             .map(|allocation| allocation.slot_index);
-        let mut reset_slot_thread_before_reuse = false;
         let Some(allocation) = slot_allocation else {
             crate::auto_queue_log!(
                 warn,
@@ -645,7 +644,7 @@ pub(crate) async fn activate_with_deps_pg(
             continue;
         };
 
-        reset_slot_thread_before_reuse = match slot_requires_thread_reset_before_reuse_pg(
+        let reset_slot_thread_before_reuse = match slot_requires_thread_reset_before_reuse_pg(
             pool,
             &agent_id,
             allocation.slot_index,
@@ -668,8 +667,7 @@ pub(crate) async fn activate_with_deps_pg(
                 false
             }
         };
-        let clear_slot_session_before_dispatch =
-            reset_slot_thread_before_reuse || !allocation.newly_assigned;
+        let clear_slot_session_before_dispatch = reset_slot_thread_before_reuse;
         let slot_key = (agent_id.clone(), allocation.slot_index);
         if clear_slot_session_before_dispatch && !cleared_slots.contains(&slot_key) {
             match crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg(

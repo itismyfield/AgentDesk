@@ -74,15 +74,15 @@ pub(super) fn slot_has_dispatch_thread_history(
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(super) fn slot_requires_thread_reset_before_reuse(
-    conn: &sqlite_test::Connection,
-    agent_id: &str,
-    slot_index: i64,
-    newly_assigned: bool,
-    reassigned_from_other_group: bool,
+    _conn: &sqlite_test::Connection,
+    _agent_id: &str,
+    _slot_index: i64,
+    _newly_assigned: bool,
+    _reassigned_from_other_group: bool,
 ) -> bool {
-    (newly_assigned || reassigned_from_other_group)
-        && (slot_thread_map_has_bindings(conn, agent_id, slot_index)
-            || slot_has_dispatch_thread_history(conn, agent_id, slot_index))
+    // Slot bindings are sticky. If the saved Discord thread is stale, the
+    // dispatch delivery path probes it and replaces it with a fresh thread.
+    false
 }
 
 pub(super) fn json_value_kind(value: &serde_json::Value) -> &'static str {
@@ -226,20 +226,15 @@ pub(super) async fn slot_has_dispatch_thread_history_pg(
 }
 
 pub(super) async fn slot_requires_thread_reset_before_reuse_pg(
-    pool: &sqlx::PgPool,
-    agent_id: &str,
-    slot_index: i64,
-    newly_assigned: bool,
-    reassigned_from_other_group: bool,
+    _pool: &sqlx::PgPool,
+    _agent_id: &str,
+    _slot_index: i64,
+    _newly_assigned: bool,
+    _reassigned_from_other_group: bool,
 ) -> Result<bool, String> {
-    if !(newly_assigned || reassigned_from_other_group) {
-        return Ok(false);
-    }
-
-    Ok(
-        slot_thread_map_has_bindings_pg(pool, agent_id, slot_index).await?
-            || slot_has_dispatch_thread_history_pg(pool, agent_id, slot_index).await?,
-    )
+    // Slot bindings are sticky. If the saved Discord thread is stale, the
+    // dispatch delivery path probes it and replaces it with a fresh thread.
+    Ok(false)
 }
 
 pub(super) fn build_auto_queue_dispatch_context(
