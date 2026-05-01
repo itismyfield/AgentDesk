@@ -184,6 +184,8 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                                 // channel_name → for agent identification
                                 // tmux_session_name → for diagnostics
                                 // session_id → Claude session ID
+                                // synthetic rebind fields → let policies distinguish adopted
+                                // tmux sessions from real Discord foreground turns.
                                 // session_key, dispatch_id → for long-turn detection (#130)
                                 let channel_name = data
                                     .get("channel_name")
@@ -200,7 +202,12 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                                     "updated_at": data.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
                                     "channel_name": channel_name,
                                     "tmux_session_name": tmux_name,
-                                    "session_id": data.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "session_id": data.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+                                    "request_owner_user_id": data.get("request_owner_user_id").cloned().unwrap_or_else(|| serde_json::json!(0)),
+                                    "user_msg_id": data.get("user_msg_id").cloned().unwrap_or_else(|| serde_json::json!(0)),
+                                    "any_tool_used": data.get("any_tool_used").cloned().unwrap_or_else(|| serde_json::json!(false)),
+                                    "has_post_tool_text": data.get("has_post_tool_text").cloned().unwrap_or_else(|| serde_json::json!(false)),
+                                    "rebind_origin": data.get("rebind_origin").cloned().unwrap_or_else(|| serde_json::json!(false)),
                                     "session_key": data.get("session_key").and_then(|v| v.as_str()).unwrap_or(""),
                                     "dispatch_id": data.get("dispatch_id").and_then(|v| v.as_str()).unwrap_or(""),
                                 }));
@@ -317,6 +324,107 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     ad.set("session", session_obj)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod inflight_list_tests {
+    use super::*;
+
+    struct EnvVarOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarOverride {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let guard = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                _guard: guard,
+                key,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn inflight_list_exposes_synthetic_rebind_fields() {
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let _env = EnvVarOverride::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let inflight_dir = temp.path().join("runtime/discord_inflight/claude");
+        std::fs::create_dir_all(&inflight_dir).expect("inflight dir");
+        std::fs::write(
+            inflight_dir.join("12345.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "started_at": "2026-05-01T00:00:00Z",
+                "updated_at": "2026-05-01T00:02:00Z",
+                "channel_name": "project-agentdesk",
+                "tmux_session_name": "AgentDesk-claude-project-agentdesk",
+                "session_id": null,
+                "request_owner_user_id": 0,
+                "user_msg_id": 0,
+                "any_tool_used": false,
+                "has_post_tool_text": false,
+                "rebind_origin": true,
+                "session_key": "claude:AgentDesk-claude-project-agentdesk",
+                "dispatch_id": "dispatch-1"
+            }))
+            .expect("serialize inflight"),
+        )
+        .expect("write inflight");
+
+        let rt = rquickjs::Runtime::new().expect("runtime");
+        let ctx = rquickjs::Context::full(&rt).expect("context");
+
+        ctx.with(|ctx| {
+            let globals = ctx.globals();
+            let agentdesk = Object::new(ctx.clone()).expect("agentdesk object");
+            globals.set("agentdesk", agentdesk).expect("set agentdesk");
+            register_exec_ops(&ctx).expect("register exec ops");
+
+            let listed: String = ctx
+                .eval(
+                    r#"
+                    const inf = agentdesk.inflight.list().find(function(item) {
+                        return item.provider === "claude" && item.channel_id === "12345";
+                    });
+                    JSON.stringify(inf || null);
+                    "#,
+                )
+                .expect("list inflights");
+            let parsed: serde_json::Value = serde_json::from_str(&listed).expect("json");
+
+            assert_ne!(
+                parsed,
+                serde_json::Value::Null,
+                "expected inflight: {listed}"
+            );
+            assert_eq!(parsed["session_id"], serde_json::Value::Null);
+            assert_eq!(parsed["request_owner_user_id"], 0);
+            assert_eq!(parsed["user_msg_id"], 0);
+            assert_eq!(parsed["any_tool_used"], false);
+            assert_eq!(parsed["has_post_tool_text"], false);
+            assert_eq!(parsed["rebind_origin"], true);
+            assert_eq!(
+                parsed["session_key"],
+                "claude:AgentDesk-claude-project-agentdesk"
+            );
+            assert_eq!(parsed["dispatch_id"], "dispatch-1");
+        });
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

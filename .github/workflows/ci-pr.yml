@@ -146,14 +146,14 @@ jobs:
 
   fast_targeted_tests_required_context:
     name: Fast targeted tests (ubuntu-latest)
-    needs: check_fast
+    needs: test_fast
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Mirror targeted test result for branch protection
         run: |
-          if [ "${{ needs.check_fast.result }}" != "success" ]; then
-            echo "check_fast result: ${{ needs.check_fast.result }}"
+          if [ "${{ needs.test_fast.result }}" != "success" ]; then
+            echo "test_fast result: ${{ needs.test_fast.result }}"
             exit 1
           fi
 

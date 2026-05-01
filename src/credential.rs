@@ -29,21 +29,20 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    use std::sync::OnceLock;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    use std::sync::MutexGuard;
 
     // A helper to safely manage environment variables in tests.
-    struct EnvVarGuard<'a> {
+    struct EnvVarGuard {
         key: String,
         previous_value: Option<std::ffi::OsString>,
-        _lock: MutexGuard<'a, ()>,
+        _lock: MutexGuard<'static, ()>,
     }
 
-    impl<'a> EnvVarGuard<'a> {
+    impl EnvVarGuard {
         fn set_path(key: &str, path: &Path) -> Self {
-            let lock = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let previous_value = std::env::var_os(key);
             unsafe { std::env::set_var(key, path) };
             Self {
@@ -54,7 +53,7 @@ mod tests {
         }
     }
 
-    impl<'a> Drop for EnvVarGuard<'a> {
+    impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match &self.previous_value {
                 Some(val) => unsafe { std::env::set_var(&self.key, val) },
