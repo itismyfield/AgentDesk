@@ -223,7 +223,11 @@
 - do_not_edit_without_migration_plan (giant-file):
   - `src/db/auto_queue.rs` (4533 lines).
   - `src/db/schema.rs` (3194 lines).
+  - `src/db/kanban_cards.rs` (1903 lines; kanban card persistence and GitHub
+    sync lookup surface).
   - `src/db/postgres.rs` (1536 lines).
+  - `src/db/dispatched_sessions.rs` (1200 lines; dispatched session
+    persistence helpers).
   - `src/db/session_transcripts.rs` (877 lines, retained PG-cleanup surface).
   - `src/db/agents.rs` (1125 lines).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
@@ -243,6 +247,9 @@ The remaining giant-file modules under `src/services/` not covered above:
   `src/services/auto_queue/activate_command.rs` (1012); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
+- `src/services/onboarding.rs` (5279), `src/services/dispatched_sessions.rs`
+  (2954), and `src/services/settings.rs` (1015) — service-layer route support
+  surfaces split out of the large dashboard route modules.
 - `src/services/claude.rs` (2477), `src/services/gemini.rs` (2565),
   `src/services/qwen.rs` (2466), `src/services/codex.rs` (1665),
   `src/services/opencode.rs` (2133), `src/services/provider.rs` (2177) —

@@ -244,6 +244,7 @@ src/
 │   │   │   ├── diagnostics.rs
 │   │   │   ├── fast_mode.rs
 │   │   │   ├── help.rs
+│   │   │   ├── inspect.rs
 │   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
