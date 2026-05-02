@@ -1,5 +1,6 @@
 pub(crate) mod cluster;
 pub(crate) mod cron_catalog;
+pub mod dto;
 pub(crate) mod issue_specs;
 pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;

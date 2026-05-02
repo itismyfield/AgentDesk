@@ -3,6 +3,7 @@ pub mod auto_queue;
 pub mod cancel_tombstones;
 pub mod dispatched_sessions;
 pub mod kanban;
+pub mod kanban_cards;
 pub mod memento_feedback_stats;
 pub mod postgres;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]

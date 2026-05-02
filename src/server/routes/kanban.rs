@@ -4,69 +4,20 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use poise::serenity_prelude::ChannelId;
-use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row as SqlxRow;
 
 use super::AppState;
-use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
+use crate::db::kanban_cards as kanban_db;
+use crate::db::kanban_cards::{IssueCardUpsert, upsert_card_from_issue_pg};
+pub use crate::server::dto::kanban::{
+    AssignCardBody, AssignIssueBody, BatchRereviewBody, BatchTransitionBody, BulkActionBody,
+    CreateCardBody, DeferDodBody, ForceTransitionBody, ListCardsQuery, PmDecisionBody,
+    RedispatchCardBody, ReopenBody, RereviewBody, RetryCardBody, UpdateCardBody,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 
-/// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.
-pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
-    kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
-    kc.created_at, kc.updated_at, \
-    td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth, \
-    td.result AS d_result, td.context AS d_context, \
-    kc.description, kc.blocked_reason, kc.review_notes, kc.review_status, \
-    kc.started_at, kc.requested_at, kc.completed_at, kc.pipeline_stage_id, \
-    kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth, kc.review_entered_at \
-    FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
-
-/// Latest meaningful activity for in-progress stall detection.
-///
-/// We intentionally consider the newest of:
-/// - latest dispatch creation time (fresh dispatch / redispatch)
-/// - card.updated_at (manual or pipeline-driven re-entry to in_progress)
-/// - started_at fallback for legacy rows
-pub(crate) const STALLED_ACTIVITY_AT_SQL: &str =
-    "MAX(COALESCE(td.created_at, ''), COALESCE(kc.updated_at, ''), COALESCE(kc.started_at, ''))";
-
 // ── Query / Body types ─────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ListCardsQuery {
-    pub status: Option<String>,
-    pub repo_id: Option<String>,
-    pub assigned_agent_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateCardBody {
-    pub title: String,
-    pub repo_id: Option<String>,
-    pub priority: Option<String>,
-    pub github_issue_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateCardBody {
-    pub title: Option<String>,
-    pub status: Option<String>,
-    pub priority: Option<String>,
-    /// Canonical: `assignee_agent_id`.
-    /// Legacy `assigned_agent_id` still accepted via serde alias during migration (#1065).
-    #[serde(default, alias = "assigned_agent_id")]
-    pub assignee_agent_id: Option<String>,
-    pub repo_id: Option<String>,
-    pub github_issue_url: Option<String>,
-    pub metadata: Option<serde_json::Value>,
-    pub description: Option<String>,
-    pub metadata_json: Option<String>,
-    pub review_status: Option<String>,
-    pub review_notes: Option<String>,
-}
 
 const MIXED_STATUS_FIELD_UPDATE_ERROR: &str = "PATCH /api/kanban-cards/{id} cannot combine status changes with metadata or other field updates. Send metadata/field updates in one request, then send a status-only PATCH request, or use POST /api/kanban-cards/{id}/transition for administrative force transitions.";
 
@@ -91,32 +42,6 @@ fn validate_update_card_fields(body: &UpdateCardBody) -> Result<bool, &'static s
     }
 
     Ok(has_non_status_updates)
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AssignCardBody {
-    pub agent_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct RetryCardBody {
-    pub assignee_agent_id: Option<String>,
-    pub request_now: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct RedispatchCardBody {
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DeferDodBody {
-    pub items: Option<Vec<String>>,
-    pub verify: Option<Vec<String>>,
-    pub unverify: Option<Vec<String>>,
-    pub remove: Option<Vec<String>>,
 }
 
 fn apply_deferred_dod_changes(current: Option<String>, body: DeferDodBody) -> serde_json::Value {
@@ -191,72 +116,15 @@ fn apply_deferred_dod_changes(current: Option<String>, body: DeferDodBody) -> se
     dod
 }
 
-#[derive(Debug, Deserialize)]
-pub struct BulkActionBody {
-    pub action: String,
-    pub card_ids: Vec<String>,
-    /// Target status for "transition" action (e.g. "ready", "backlog").
-    pub target_status: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AssignIssueBody {
-    pub github_repo: String,
-    pub github_issue_number: i64,
-    pub github_issue_url: Option<String>,
-    pub title: String,
-    pub description: Option<String>,
-    pub assignee_agent_id: String,
-}
-
-#[derive(Debug, Clone)]
-struct ActiveTurnTarget {
-    session_key: String,
-    provider: Option<String>,
-    thread_channel_id: Option<String>,
-}
-
 fn is_allowed_manual_transition(from: &str, to: &str) -> bool {
     (from == "backlog" && to == "ready") || (from != to && to == "backlog")
 }
 
-async fn load_active_turn_targets_for_card_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> anyhow::Result<Vec<ActiveTurnTarget>> {
-    let rows = sqlx::query(
-        "SELECT DISTINCT session_key, provider, thread_channel_id
-         FROM sessions
-         WHERE active_dispatch_id IN (
-             SELECT id
-             FROM task_dispatches
-             WHERE kanban_card_id = $1
-               AND status IN ('pending', 'dispatched')
-         )",
-    )
-    .bind(card_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("load postgres active turn targets for {card_id}: {error}"))?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ActiveTurnTarget {
-                session_key: row.try_get("session_key").map_err(|error| {
-                    anyhow::anyhow!("decode session_key for {card_id}: {error}")
-                })?,
-                provider: row
-                    .try_get("provider")
-                    .map_err(|error| anyhow::anyhow!("decode provider for {card_id}: {error}"))?,
-                thread_channel_id: row.try_get("thread_channel_id").map_err(|error| {
-                    anyhow::anyhow!("decode thread_channel_id for {card_id}: {error}")
-                })?,
-            })
-        })
-        .collect()
-}
-
-async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], reason: &str) {
+async fn cancel_turn_targets(
+    state: &AppState,
+    targets: &[kanban_db::ActiveTurnTarget],
+    reason: &str,
+) {
     for target in targets {
         let tmux_name = target
             .session_key
@@ -289,17 +157,9 @@ async fn cancel_turn_targets(state: &AppState, targets: &[ActiveTurnTarget], rea
         );
 
         if let Some(pool) = state.pg_pool_ref() {
-            sqlx::query(
-                "UPDATE sessions
-                 SET status = 'disconnected',
-                     active_dispatch_id = NULL,
-                     claude_session_id = NULL
-                 WHERE session_key = $1",
-            )
-            .bind(&target.session_key)
-            .execute(pool)
-            .await
-            .ok();
+            kanban_db::clear_session_for_turn_target_pg(pool, &target.session_key)
+                .await
+                .ok();
         } else {
             tracing::warn!(
                 target = %target.session_key,
@@ -317,7 +177,7 @@ async fn transition_card_to_backlog_with_cleanup(
     let pool = state.pg_pool_ref().ok_or_else(|| {
         anyhow::anyhow!("transition_card_to_backlog_with_cleanup requires postgres pool (#1239)")
     })?;
-    let turn_targets = load_active_turn_targets_for_card_pg(pool, card_id).await?;
+    let turn_targets = kanban_db::load_active_turn_targets_for_card_pg(pool, card_id).await?;
     let result = crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
         pool,
         &state.engine,
@@ -394,69 +254,6 @@ fn review_state_sync_pg(state: &AppState, payload: serde_json::Value) -> anyhow:
     Ok(result)
 }
 
-async fn load_retry_dispatch_spec_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> Result<Option<(String, String, String)>, sqlx::Error> {
-    let Some((card_agent_id, card_title, latest_dispatch_id)) =
-        sqlx::query_as::<_, (Option<String>, String, Option<String>)>(
-            "SELECT assigned_agent_id, title, latest_dispatch_id
-             FROM kanban_cards
-             WHERE id = $1",
-        )
-        .bind(card_id)
-        .fetch_optional(pool)
-        .await?
-    else {
-        return Ok(None);
-    };
-
-    let latest_dispatch = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
-        sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
-            "SELECT to_agent_id, dispatch_type, title
-             FROM task_dispatches
-             WHERE id = $1",
-        )
-        .bind(dispatch_id)
-        .fetch_optional(pool)
-        .await?
-    } else {
-        None
-    };
-    let latest_dispatch = match latest_dispatch {
-        Some(row) => Some(row),
-        None => {
-            sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
-                "SELECT to_agent_id, dispatch_type, title
-             FROM task_dispatches
-             WHERE kanban_card_id = $1
-             ORDER BY created_at DESC, id DESC
-             LIMIT 1",
-            )
-            .bind(card_id)
-            .fetch_optional(pool)
-            .await?
-        }
-    };
-
-    let (dispatch_agent_id, dispatch_type, dispatch_title) =
-        latest_dispatch.unwrap_or((None, None, None));
-
-    let effective_agent_id = dispatch_agent_id.or(card_agent_id).unwrap_or_default();
-    let effective_dispatch_type = dispatch_type
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "implementation".to_string());
-    let effective_title = dispatch_title
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(card_title);
-
-    Ok(Some((
-        effective_agent_id,
-        effective_dispatch_type,
-        effective_title,
-    )))
-}
-
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/kanban-cards
@@ -512,31 +309,20 @@ pub async fn create_card(
         crate::pipeline::ensure_loaded();
         let initial_state = crate::pipeline::get().initial_state().to_string();
 
-        let result = sqlx::query(
-            "INSERT INTO kanban_cards (
-                id,
-                repo_id,
-                title,
-                status,
-                priority,
-                github_issue_url,
-                created_at,
-                updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+        if let Err(error) = kanban_db::insert_card_pg(
+            pool,
+            &id,
+            body.repo_id.as_deref(),
+            &body.title,
+            &initial_state,
+            &priority,
+            body.github_issue_url.as_deref(),
         )
-        .bind(&id)
-        .bind(&body.repo_id)
-        .bind(&body.title)
-        .bind(&initial_state)
-        .bind(&priority)
-        .bind(&body.github_issue_url)
-        .execute(pool)
-        .await;
-
-        if let Err(error) = result {
+        .await
+        {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
+                Json(json!({"error": error})),
             );
         }
 
@@ -573,13 +359,7 @@ pub async fn update_card(
         return pg_pool_required_error();
     };
 
-    let old_status = match sqlx::query_scalar::<_, String>(
-        "SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    {
+    let old_status = match kanban_db::card_status_pg(pool, &id).await {
         Ok(Some(status)) => status,
         Ok(None) => {
             return (
@@ -590,7 +370,7 @@ pub async fn update_card(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
@@ -653,44 +433,34 @@ pub async fn update_card(
             .map(|metadata| serde_json::to_string(metadata).unwrap_or_default())
             .or(body.metadata_json.clone());
 
-        match sqlx::query(
-            "UPDATE kanban_cards
-             SET title = COALESCE($1, title),
-                 priority = COALESCE($2, priority),
-                 assigned_agent_id = COALESCE($3, assigned_agent_id),
-                 repo_id = COALESCE($4, repo_id),
-                 github_issue_url = COALESCE($5, github_issue_url),
-                 description = COALESCE($6, description),
-                 metadata = COALESCE($7::jsonb, metadata),
-                 review_status = COALESCE($8, review_status),
-                 review_notes = COALESCE($9, review_notes),
-                 updated_at = NOW()
-             WHERE id = $10",
+        match kanban_db::update_card_fields_pg(
+            pool,
+            &id,
+            &kanban_db::UpdateCardFields {
+                title: body.title.clone(),
+                priority: body.priority.clone(),
+                assigned_agent_id: body.assignee_agent_id.clone(),
+                repo_id: body.repo_id.clone(),
+                github_issue_url: body.github_issue_url.clone(),
+                description: body.description.clone(),
+                metadata_json,
+                review_status: body.review_status.clone(),
+                review_notes: body.review_notes.clone(),
+            },
         )
-        .bind(body.title.as_deref())
-        .bind(body.priority.as_deref())
-        .bind(body.assignee_agent_id.as_deref())
-        .bind(body.repo_id.as_deref())
-        .bind(body.github_issue_url.as_deref())
-        .bind(body.description.as_deref())
-        .bind(metadata_json.as_deref())
-        .bind(body.review_status.as_deref())
-        .bind(body.review_notes.as_deref())
-        .bind(&id)
-        .execute(pool)
         .await
         {
-            Ok(result) if result.rows_affected() == 0 => {
+            Ok(false) => {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({"error": "card not found"})),
                 );
             }
-            Ok(_) => {}
+            Ok(true) => {}
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
+                    Json(json!({"error": error})),
                 );
             }
         }
@@ -726,13 +496,7 @@ pub async fn assign_card(
     Json(body): Json<AssignCardBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool_ref() {
-        let old_status = match sqlx::query_scalar::<_, String>(
-            "SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        {
+        let old_status = match kanban_db::card_status_pg(pool, &id).await {
             Ok(Some(status)) => status,
             Ok(None) => {
                 return (
@@ -743,33 +507,23 @@ pub async fn assign_card(
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
+                    Json(json!({"error": error})),
                 );
             }
         };
 
-        match sqlx::query(
-            "UPDATE kanban_cards
-             SET assigned_agent_id = $1,
-                 updated_at = NOW()
-             WHERE id = $2",
-        )
-        .bind(&body.agent_id)
-        .bind(&id)
-        .execute(pool)
-        .await
-        {
-            Ok(result) if result.rows_affected() == 0 => {
+        match kanban_db::assign_card_agent_pg(pool, &id, &body.agent_id).await {
+            Ok(false) => {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({"error": "card not found"})),
                 );
             }
-            Ok(_) => {}
+            Ok(true) => {}
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
+                    Json(json!({"error": error})),
                 );
             }
         }
@@ -814,16 +568,12 @@ pub async fn delete_card(
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Some(pool) = state.pg_pool_ref() {
-        return match sqlx::query("DELETE FROM kanban_cards WHERE id = $1")
-            .bind(&id)
-            .execute(pool)
-            .await
-        {
-            Ok(result) if result.rows_affected() == 0 => (
+        return match kanban_db::delete_card_pg(pool, &id).await {
+            Ok(false) => (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "card not found"})),
             ),
-            Ok(_) => {
+            Ok(true) => {
                 crate::server::ws::emit_event(
                     &state.broadcast_tx,
                     "kanban_card_deleted",
@@ -833,7 +583,7 @@ pub async fn delete_card(
             }
             Err(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
+                Json(json!({"error": error})),
             ),
         };
     }
@@ -856,32 +606,31 @@ pub async fn retry_card(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_pool_required_error();
     };
-    let (stored_agent_id, retry_dispatch_type, retry_title) =
-        match load_retry_dispatch_spec_pg(pool, &id).await {
-            Ok(Some(spec)) => spec,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
+    let retry_spec = match kanban_db::load_retry_dispatch_spec_pg(pool, &id).await {
+        Ok(Some(spec)) => spec,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "card not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
 
-    let existing_dispatch_id = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let existing_dispatch_id = match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
+        Ok(dispatch_id) => dispatch_id,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
     // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
     // call actually transitioned a `pending`/`dispatched` row to `cancelled`.
     // The cancel helper returns `Ok(0)` for stale/already-terminal rows
@@ -912,34 +661,23 @@ pub async fn retry_card(
 
     use crate::engine::transition::TransitionIntent as TI2;
     let agent_id_for_dispatch = if let Some(agent_id) = body.assignee_agent_id.as_deref() {
-        if let Err(error) = sqlx::query(
-            "UPDATE kanban_cards
-             SET assigned_agent_id = $1,
-                 updated_at = NOW()
-             WHERE id = $2",
-        )
-        .bind(agent_id)
-        .bind(&id)
-        .execute(pool)
-        .await
-        {
+        if let Err(error) = kanban_db::assign_card_agent_pg(pool, &id, agent_id).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
+                Json(json!({"error": error})),
             );
         }
         agent_id.to_string()
     } else {
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT assigned_agent_id FROM kanban_cards WHERE id = $1",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .flatten()
-        .unwrap_or_default()
+        match kanban_db::assigned_agent_id_for_card_pg(pool, &id).await {
+            Ok(agent_id) => agent_id.unwrap_or_default(),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        }
     };
 
     if let Err(error) = execute_transition_intent_pg(
@@ -956,10 +694,12 @@ pub async fn retry_card(
     }
 
     let dispatch_agent_id = if agent_id_for_dispatch.is_empty() {
-        stored_agent_id
+        retry_spec.agent_id
     } else {
         agent_id_for_dispatch
     };
+    let retry_dispatch_type = retry_spec.dispatch_type;
+    let retry_title = retry_spec.title;
     let mut new_dispatch_id: Option<String> = None;
     let mut next_action = "none_required".to_string();
     if !dispatch_agent_id.is_empty() {
@@ -1043,32 +783,34 @@ pub async fn redispatch_card(
         return pg_pool_required_error();
     };
 
-    let (agent_id, dispatch_type, dispatch_title) =
-        match load_retry_dispatch_spec_pg(pool, &id).await {
-            Ok(Some(spec)) => spec,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
+    let spec = match kanban_db::load_retry_dispatch_spec_pg(pool, &id).await {
+        Ok(Some(spec)) => spec,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "card not found"})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    let agent_id = spec.agent_id;
+    let dispatch_type = spec.dispatch_type;
+    let dispatch_title = spec.title;
 
-    let dispatch_id = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let dispatch_id = match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
+        Ok(dispatch_id) => dispatch_id,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
     // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
     // call actually transitioned a `pending`/`dispatched` row to `cancelled`.
     // The cancel helper returns `Ok(0)` for stale/already-terminal rows, and
@@ -1198,46 +940,32 @@ pub async fn defer_dod(
         return pg_pool_required_error();
     };
 
-    let row = match sqlx::query_as::<_, (Option<String>, String, Option<String>)>(
-        "SELECT deferred_dod_json, status, review_status
-         FROM kanban_cards
-         WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    {
+    let row = match kanban_db::load_dod_state_pg(pool, &id).await {
         Ok(row) => row,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("load postgres DoD state: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
 
-    let Some((current, card_status, review_status)) = row else {
+    let Some(dod_state) = row else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "card not found"})),
         );
     };
+    let current = dod_state.deferred_dod_json;
+    let card_status = dod_state.status;
+    let review_status = dod_state.review_status;
 
     let dod = apply_deferred_dod_changes(current, body);
     let dod_str = serde_json::to_string(&dod).unwrap_or_default();
-    if let Err(error) = sqlx::query(
-        "UPDATE kanban_cards
-         SET deferred_dod_json = $1, updated_at = NOW()
-         WHERE id = $2",
-    )
-    .bind(&dod_str)
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
+    if let Err(error) = kanban_db::update_deferred_dod_pg(pool, &id, &dod_str).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("update postgres DoD state: {error}")})),
+            Json(json!({"error": error})),
         );
     }
 
@@ -1276,18 +1004,10 @@ pub async fn defer_dod(
                 );
             }
         }
-        if let Err(error) = sqlx::query(
-            "UPDATE kanban_cards
-             SET review_entered_at = NOW(), awaiting_dod_at = NULL
-             WHERE id = $1",
-        )
-        .bind(&id)
-        .execute(pool)
-        .await
-        {
+        if let Err(error) = kanban_db::update_review_clock_after_dod_pg(pool, &id).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("update postgres review clock: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     }
@@ -1326,47 +1046,15 @@ pub async fn get_card_review_state(
         return pg_pool_required_error();
     };
 
-    match sqlx::query(
-        "SELECT
-            card_id,
-            review_round::BIGINT AS review_round,
-            state,
-            pending_dispatch_id,
-            last_verdict,
-            last_decision,
-            decided_by,
-            decided_at::text AS decided_at,
-            review_entered_at::text AS review_entered_at,
-            updated_at::text AS updated_at
-         FROM card_review_state
-         WHERE card_id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(row)) => (
-            StatusCode::OK,
-            Json(json!({
-                "card_id": row.try_get::<String, _>("card_id").unwrap_or_else(|_| id.clone()),
-                "review_round": row.try_get::<i64, _>("review_round").unwrap_or(0),
-                "state": row.try_get::<String, _>("state").unwrap_or_else(|_| "idle".to_string()),
-                "pending_dispatch_id": row.try_get::<Option<String>, _>("pending_dispatch_id").ok().flatten(),
-                "last_verdict": row.try_get::<Option<String>, _>("last_verdict").ok().flatten(),
-                "last_decision": row.try_get::<Option<String>, _>("last_decision").ok().flatten(),
-                "decided_by": row.try_get::<Option<String>, _>("decided_by").ok().flatten(),
-                "decided_at": row.try_get::<Option<String>, _>("decided_at").ok().flatten(),
-                "review_entered_at": row.try_get::<Option<String>, _>("review_entered_at").ok().flatten(),
-                "updated_at": row.try_get::<Option<String>, _>("updated_at").ok().flatten(),
-            })),
-        ),
+    match kanban_db::load_card_review_state_json_pg(pool, &id).await {
+        Ok(Some(state_json)) => (StatusCode::OK, Json(state_json)),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "no review state for this card"})),
         ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
+            Json(json!({"error": error})),
         ),
     }
 }
@@ -1380,41 +1068,11 @@ pub async fn list_card_reviews(
         return pg_pool_required_error();
     };
 
-    match sqlx::query(
-        "SELECT
-            id::BIGINT AS id,
-            kanban_card_id,
-            dispatch_id,
-            item_index::BIGINT AS item_index,
-            decision,
-            decided_at::text AS decided_at
-         FROM review_decisions
-         WHERE kanban_card_id = $1
-         ORDER BY id",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => {
-            let reviews = rows
-                .into_iter()
-                .map(|row| {
-                    json!({
-                        "id": row.try_get::<i64, _>("id").unwrap_or(0),
-                        "kanban_card_id": row.try_get::<Option<String>, _>("kanban_card_id").ok().flatten(),
-                        "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id").ok().flatten(),
-                        "item_index": row.try_get::<Option<i64>, _>("item_index").ok().flatten(),
-                        "decision": row.try_get::<Option<String>, _>("decision").ok().flatten(),
-                        "decided_at": row.try_get::<Option<String>, _>("decided_at").ok().flatten(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            (StatusCode::OK, Json(json!({"reviews": reviews})))
-        }
+    match kanban_db::list_card_reviews_json_pg(pool, &id).await {
+        Ok(reviews) => (StatusCode::OK, Json(json!({"reviews": reviews}))),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {error}")})),
+            Json(json!({"error": error})),
         ),
     }
 }
@@ -1425,49 +1083,18 @@ pub async fn stalled_cards(State(state): State<AppState>) -> (StatusCode, Json<s
         return pg_pool_required_error();
     };
 
-    let rows = match sqlx::query(
-        "SELECT kc.id
-         FROM kanban_cards kc
-         LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id
-         WHERE kc.status = 'in_progress'
-           AND GREATEST(
-               COALESCE(td.created_at, '-infinity'::timestamptz),
-               COALESCE(kc.updated_at, '-infinity'::timestamptz),
-               COALESCE(kc.started_at, '-infinity'::timestamptz)
-           ) < NOW() - INTERVAL '2 hours'
-           AND (
-               NOT EXISTS (SELECT 1 FROM github_repos)
-               OR kc.repo_id IN (SELECT id FROM github_repos)
-           )
-         ORDER BY GREATEST(
-               COALESCE(td.created_at, '-infinity'::timestamptz),
-               COALESCE(kc.updated_at, '-infinity'::timestamptz),
-               COALESCE(kc.started_at, '-infinity'::timestamptz)
-           ) ASC",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
+    let ids = match kanban_db::stalled_card_ids_pg(pool).await {
+        Ok(ids) => ids,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query postgres stalled cards: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
 
-    let mut cards = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = match row.try_get::<String, _>("id") {
-            Ok(id) => id,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("decode postgres stalled card id: {error}")})),
-                );
-            }
-        };
+    let mut cards = Vec::with_capacity(ids.len());
+    for id in ids {
         match load_card_json_pg(pool, &id).await {
             Ok(Some(card)) => cards.push(card),
             Ok(None) => {}
@@ -1590,13 +1217,7 @@ pub async fn assign_issue(
         let old_status = if upserted.created {
             "backlog".to_string()
         } else {
-            match sqlx::query_scalar::<_, String>(
-                "SELECT status FROM kanban_cards WHERE id = $1 LIMIT 1",
-            )
-            .bind(&upserted.card_id)
-            .fetch_optional(pool)
-            .await
-            {
+            match kanban_db::card_status_pg(pool, &upserted.card_id).await {
                 Ok(Some(status)) => status,
                 Ok(None) => {
                     return (
@@ -1607,7 +1228,7 @@ pub async fn assign_issue(
                 Err(error) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
+                        Json(json!({"error": error})),
                     );
                 }
             }
@@ -1750,204 +1371,14 @@ async fn assign_transition_to_dispatchable_pg(
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(super) fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_json::Value> {
-    let repo_id = row.get::<_, Option<String>>(1)?;
-    let assigned_agent_id = row.get::<_, Option<String>>(5)?;
-    let metadata_raw = row.get::<_, Option<String>>(10).unwrap_or(None);
-    let metadata_parsed = metadata_raw
-        .as_ref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let latest_dispatch_status = row.get::<_, Option<String>>(13).unwrap_or(None);
-    let latest_dispatch_type = row.get::<_, Option<String>>(14).unwrap_or(None);
-    let latest_dispatch_result_raw = row.get::<_, Option<String>>(17).unwrap_or(None);
-    let latest_dispatch_context_raw = row.get::<_, Option<String>>(18).unwrap_or(None);
-    let latest_dispatch_result_summary = crate::dispatch::summarize_dispatch_from_text(
-        latest_dispatch_type.as_deref(),
-        latest_dispatch_status.as_deref(),
-        latest_dispatch_result_raw.as_deref(),
-        latest_dispatch_context_raw.as_deref(),
-    );
-
-    // Extended columns (indices 19-31)
-    let description = row.get::<_, Option<String>>(19).unwrap_or(None);
-    let blocked_reason = row.get::<_, Option<String>>(20).unwrap_or(None);
-    let review_notes = row.get::<_, Option<String>>(21).unwrap_or(None);
-    let review_status = row.get::<_, Option<String>>(22).unwrap_or(None);
-    let started_at = row.get::<_, Option<String>>(23).unwrap_or(None);
-    let requested_at = row.get::<_, Option<String>>(24).unwrap_or(None);
-    let completed_at = row.get::<_, Option<String>>(25).unwrap_or(None);
-    let pipeline_stage_id = row.get::<_, Option<String>>(26).unwrap_or(None);
-    let owner_agent_id = row.get::<_, Option<String>>(27).unwrap_or(None);
-    let requester_agent_id = row.get::<_, Option<String>>(28).unwrap_or(None);
-    let parent_card_id = row.get::<_, Option<String>>(29).unwrap_or(None);
-    let sort_order = row.get::<_, i64>(30).unwrap_or(0);
-    let depth = row.get::<_, i64>(31).unwrap_or(0);
-    let review_entered_at = row.get::<_, Option<String>>(32).unwrap_or(None);
-
-    Ok(json!({
-        "id": row.get::<_, String>(0)?,
-        // existing fields
-        "repo_id": repo_id,
-        "title": row.get::<_, String>(2)?,
-        "status": row.get::<_, String>(3)?,
-        "priority": row.get::<_, String>(4)?,
-        "assigned_agent_id": assigned_agent_id,
-        "github_issue_url": row.get::<_, Option<String>>(6)?,
-        "github_issue_number": row.get::<_, Option<i64>>(7)?,
-        "latest_dispatch_id": row.get::<_, Option<String>>(8)?,
-        "review_round": row.get::<_, i64>(9).unwrap_or(0),
-        "metadata": metadata_parsed,
-        "created_at": row.get::<_, Option<String>>(11).ok().flatten().or_else(|| row.get::<_, Option<i64>>(11).ok().flatten().map(|v| v.to_string())),
-        "updated_at": row.get::<_, Option<String>>(12).ok().flatten().or_else(|| row.get::<_, Option<i64>>(12).ok().flatten().map(|v| v.to_string())),
-        // alias fields for frontend compatibility
-        "github_repo": repo_id,
-        "assignee_agent_id": assigned_agent_id,
-        "metadata_json": metadata_raw,
-        // extended fields from DB
-        "description": description,
-        "blocked_reason": blocked_reason,
-        "review_notes": review_notes,
-        "review_status": review_status,
-        "started_at": started_at,
-        "requested_at": requested_at,
-        "completed_at": completed_at,
-        "pipeline_stage_id": pipeline_stage_id,
-        "owner_agent_id": owner_agent_id,
-        "requester_agent_id": requester_agent_id,
-        "parent_card_id": parent_card_id,
-        "sort_order": sort_order,
-        "depth": depth,
-        "review_entered_at": review_entered_at,
-        // dispatch join fields
-        "latest_dispatch_status": latest_dispatch_status.clone(),
-        "latest_dispatch_title": row.get::<_, Option<String>>(15).unwrap_or(None),
-        "latest_dispatch_type": latest_dispatch_type.clone(),
-        "latest_dispatch_result_summary": latest_dispatch_result_summary,
-        "latest_dispatch_chain_depth": row.get::<_, Option<i64>>(16).unwrap_or(None),
-        "child_count": 0,
-    }))
+    kanban_db::card_row_to_json(row)
 }
 
 pub(super) async fn load_card_json_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let row = sqlx::query(
-        "SELECT
-            kc.id,
-            kc.repo_id,
-            kc.title,
-            kc.status,
-            COALESCE(kc.priority, 'medium') AS priority,
-            kc.assigned_agent_id,
-            kc.github_issue_url,
-            kc.github_issue_number::BIGINT AS github_issue_number,
-            kc.latest_dispatch_id,
-            COALESCE(kc.review_round, 0)::BIGINT AS review_round,
-            kc.metadata::text AS metadata,
-            kc.created_at::text AS created_at,
-            kc.updated_at::text AS updated_at,
-            td.status AS d_status,
-            td.dispatch_type AS d_type,
-            td.title AS d_title,
-            td.chain_depth::BIGINT AS d_depth,
-            td.result AS d_result,
-            td.context AS d_context,
-            kc.description,
-            kc.blocked_reason,
-            kc.review_notes,
-            kc.review_status,
-            kc.started_at::text AS started_at,
-            kc.requested_at::text AS requested_at,
-            kc.completed_at::text AS completed_at,
-            kc.pipeline_stage_id,
-            kc.owner_agent_id,
-            kc.requester_agent_id,
-            kc.parent_card_id,
-            COALESCE(kc.sort_order, 0)::BIGINT AS sort_order,
-            COALESCE(kc.depth, 0)::BIGINT AS depth,
-            kc.review_entered_at::text AS review_entered_at
-         FROM kanban_cards kc
-         LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id
-         WHERE kc.id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres card {card_id}: {error}"))?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    let repo_id: Option<String> = row
-        .try_get("repo_id")
-        .map_err(|error| format!("decode repo_id for {card_id}: {error}"))?;
-    let assigned_agent_id: Option<String> = row
-        .try_get("assigned_agent_id")
-        .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
-    let metadata_raw: Option<String> = row
-        .try_get("metadata")
-        .map_err(|error| format!("decode metadata for {card_id}: {error}"))?;
-    let metadata_parsed = metadata_raw
-        .as_ref()
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
-    let latest_dispatch_status: Option<String> = row
-        .try_get("d_status")
-        .map_err(|error| format!("decode d_status for {card_id}: {error}"))?;
-    let latest_dispatch_type: Option<String> = row
-        .try_get("d_type")
-        .map_err(|error| format!("decode d_type for {card_id}: {error}"))?;
-    let latest_dispatch_result_raw: Option<String> = row
-        .try_get("d_result")
-        .map_err(|error| format!("decode d_result for {card_id}: {error}"))?;
-    let latest_dispatch_context_raw: Option<String> = row
-        .try_get("d_context")
-        .map_err(|error| format!("decode d_context for {card_id}: {error}"))?;
-    let latest_dispatch_result_summary = crate::dispatch::summarize_dispatch_from_text(
-        latest_dispatch_type.as_deref(),
-        latest_dispatch_status.as_deref(),
-        latest_dispatch_result_raw.as_deref(),
-        latest_dispatch_context_raw.as_deref(),
-    );
-
-    Ok(Some(json!({
-        "id": row.try_get::<String, _>("id").map_err(|error| format!("decode id for {card_id}: {error}"))?,
-        "repo_id": repo_id,
-        "title": row.try_get::<String, _>("title").map_err(|error| format!("decode title for {card_id}: {error}"))?,
-        "status": row.try_get::<String, _>("status").map_err(|error| format!("decode status for {card_id}: {error}"))?,
-        "priority": row.try_get::<String, _>("priority").map_err(|error| format!("decode priority for {card_id}: {error}"))?,
-        "assigned_agent_id": assigned_agent_id,
-        "github_issue_url": row.try_get::<Option<String>, _>("github_issue_url").map_err(|error| format!("decode github_issue_url for {card_id}: {error}"))?,
-        "github_issue_number": row.try_get::<Option<i64>, _>("github_issue_number").map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?,
-        "latest_dispatch_id": row.try_get::<Option<String>, _>("latest_dispatch_id").map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?,
-        "review_round": row.try_get::<i64, _>("review_round").map_err(|error| format!("decode review_round for {card_id}: {error}"))?,
-        "metadata": metadata_parsed,
-        "created_at": row.try_get::<Option<String>, _>("created_at").map_err(|error| format!("decode created_at for {card_id}: {error}"))?,
-        "updated_at": row.try_get::<Option<String>, _>("updated_at").map_err(|error| format!("decode updated_at for {card_id}: {error}"))?,
-        "github_repo": repo_id,
-        "assignee_agent_id": assigned_agent_id,
-        "metadata_json": metadata_raw,
-        "description": row.try_get::<Option<String>, _>("description").map_err(|error| format!("decode description for {card_id}: {error}"))?,
-        "blocked_reason": row.try_get::<Option<String>, _>("blocked_reason").map_err(|error| format!("decode blocked_reason for {card_id}: {error}"))?,
-        "review_notes": row.try_get::<Option<String>, _>("review_notes").map_err(|error| format!("decode review_notes for {card_id}: {error}"))?,
-        "review_status": row.try_get::<Option<String>, _>("review_status").map_err(|error| format!("decode review_status for {card_id}: {error}"))?,
-        "started_at": row.try_get::<Option<String>, _>("started_at").map_err(|error| format!("decode started_at for {card_id}: {error}"))?,
-        "requested_at": row.try_get::<Option<String>, _>("requested_at").map_err(|error| format!("decode requested_at for {card_id}: {error}"))?,
-        "completed_at": row.try_get::<Option<String>, _>("completed_at").map_err(|error| format!("decode completed_at for {card_id}: {error}"))?,
-        "pipeline_stage_id": row.try_get::<Option<String>, _>("pipeline_stage_id").map_err(|error| format!("decode pipeline_stage_id for {card_id}: {error}"))?,
-        "owner_agent_id": row.try_get::<Option<String>, _>("owner_agent_id").map_err(|error| format!("decode owner_agent_id for {card_id}: {error}"))?,
-        "requester_agent_id": row.try_get::<Option<String>, _>("requester_agent_id").map_err(|error| format!("decode requester_agent_id for {card_id}: {error}"))?,
-        "parent_card_id": row.try_get::<Option<String>, _>("parent_card_id").map_err(|error| format!("decode parent_card_id for {card_id}: {error}"))?,
-        "sort_order": row.try_get::<i64, _>("sort_order").map_err(|error| format!("decode sort_order for {card_id}: {error}"))?,
-        "depth": row.try_get::<i64, _>("depth").map_err(|error| format!("decode depth for {card_id}: {error}"))?,
-        "review_entered_at": row.try_get::<Option<String>, _>("review_entered_at").map_err(|error| format!("decode review_entered_at for {card_id}: {error}"))?,
-        "latest_dispatch_status": latest_dispatch_status.clone(),
-        "latest_dispatch_title": row.try_get::<Option<String>, _>("d_title").map_err(|error| format!("decode d_title for {card_id}: {error}"))?,
-        "latest_dispatch_type": latest_dispatch_type.clone(),
-        "latest_dispatch_result_summary": latest_dispatch_result_summary,
-        "latest_dispatch_chain_depth": row.try_get::<Option<i64>, _>("d_depth").map_err(|error| format!("decode d_depth for {card_id}: {error}"))?,
-        "child_count": 0,
-    })))
+    kanban_db::load_card_json_pg(pool, card_id).await
 }
 
 // ── Audit Log API ────────────────────────────────────────────
@@ -1961,40 +1392,15 @@ pub async fn card_audit_log(
         return pg_pool_required_error();
     };
 
-    let rows = match sqlx::query(
-        "SELECT id::BIGINT AS id, card_id, from_status, to_status, source, result, created_at::text AS created_at
-         FROM kanban_audit_logs
-         WHERE card_id = $1
-         ORDER BY created_at DESC
-         LIMIT 50",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
+    let logs = match kanban_db::list_card_audit_logs_json_pg(pool, &id).await {
+        Ok(logs) => logs,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query postgres card audit log: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
-
-    let logs: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "id": row.try_get::<i64, _>("id").unwrap_or_default(),
-                "card_id": row.try_get::<String, _>("card_id").unwrap_or_default(),
-                "from_status": row.try_get::<Option<String>, _>("from_status").ok().flatten(),
-                "to_status": row.try_get::<Option<String>, _>("to_status").ok().flatten(),
-                "source": row.try_get::<Option<String>, _>("source").ok().flatten(),
-                "result": row.try_get::<Option<String>, _>("result").ok().flatten(),
-                "created_at": row.try_get::<Option<String>, _>("created_at").ok().flatten(),
-            })
-        })
-        .collect();
 
     (StatusCode::OK, Json(json!({"logs": logs})))
 }
@@ -2009,38 +1415,8 @@ pub async fn card_github_comments(
         return pg_pool_required_error();
     };
 
-    let (repo_id, issue_number) = match sqlx::query(
-        "SELECT repo_id, github_issue_number::BIGINT AS github_issue_number
-         FROM kanban_cards
-         WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(row)) => {
-            let repo_id = match row.try_get::<Option<String>, _>("repo_id") {
-                Ok(repo_id) => repo_id,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("decode postgres card repo_id: {error}")})),
-                    );
-                }
-            };
-            let issue_number = match row.try_get::<Option<i64>, _>("github_issue_number") {
-                Ok(issue_number) => issue_number,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("decode postgres card github_issue_number: {error}")}),
-                        ),
-                    );
-                }
-            };
-            (repo_id, issue_number)
-        }
+    let issue_ref = match kanban_db::card_github_issue_ref_pg(pool, &id).await {
+        Ok(Some(issue_ref)) => issue_ref,
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -2050,16 +1426,16 @@ pub async fn card_github_comments(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query postgres card github issue: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
 
-    let repo = match repo_id {
+    let repo = match issue_ref.repo_id {
         Some(r) => r,
         None => return (StatusCode::OK, Json(json!({"comments": []}))),
     };
-    let number = match issue_number {
+    let number = match issue_ref.issue_number {
         Some(n) => n,
         None => return (StatusCode::OK, Json(json!({"comments": []}))),
     };
@@ -2073,21 +1449,12 @@ pub async fn card_github_comments(
             let comments = serde_json::to_value(issue.comments).unwrap_or_else(|_| json!([]));
             let body = issue.body.unwrap_or_default();
 
-            if let Err(error) = sqlx::query(
-                "UPDATE kanban_cards
-                 SET description = $1,
-                     updated_at = NOW()
-                 WHERE id = $2
-                   AND (description IS DISTINCT FROM $1 OR description IS NULL)",
-            )
-            .bind(&body)
-            .bind(&id)
-            .execute(pool)
-            .await
+            if let Err(error) =
+                kanban_db::update_card_description_if_changed_pg(pool, &id, &body).await
             {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("update postgres card description: {error}")})),
+                    Json(json!({"error": error})),
                 );
             }
 
@@ -2108,13 +1475,6 @@ pub async fn card_github_comments(
 }
 
 // ── PM Decision API ──────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct PmDecisionBody {
-    pub card_id: String,
-    pub decision: String, // "resume", "rework", "dismiss", "requeue"
-    pub comment: Option<String>,
-}
 
 /// POST /api/pm-decision
 /// PM's decision on a manual-intervention card.
@@ -2139,31 +1499,28 @@ pub async fn pm_decision(
     }
 
     // Verify card exists and currently requires manual intervention.
-    let card_info: Option<(String, Option<String>, Option<String>, String, String)> =
-        match sqlx::query_as(
-            "SELECT COALESCE(status, ''), review_status, blocked_reason, COALESCE(assigned_agent_id, ''), title
-             FROM kanban_cards
-             WHERE id = $1",
-        )
-        .bind(&body.card_id)
-        .fetch_optional(transition_pool)
-        .await
-        {
+    let card_info =
+        match kanban_db::load_pm_decision_card_info_pg(transition_pool, &body.card_id).await {
             Ok(row) => row,
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("load card for pm decision: {error}")})),
+                    Json(json!({"error": error})),
                 );
             }
         };
 
-    let Some((status, review_status, blocked_reason, agent_id, title)) = card_info else {
+    let Some(card_info) = card_info else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "card not found"})),
         );
     };
+    let status = card_info.status;
+    let review_status = card_info.review_status;
+    let blocked_reason = card_info.blocked_reason;
+    let agent_id = card_info.agent_id;
+    let title = card_info.title;
 
     let manual_fingerprint = crate::manual_intervention::manual_intervention_fingerprint(
         review_status.as_deref(),
@@ -2182,24 +1539,18 @@ pub async fn pm_decision(
     // Complete any pending pm-decision dispatches (rework handles its own completion after dispatch success)
     if body.decision != "rework" {
         let completion_result = json!({"decision": body.decision, "comment": body.comment});
-        let pending_dispatch_ids: Vec<String> = match sqlx::query_scalar(
-            "SELECT id FROM task_dispatches
-             WHERE kanban_card_id = $1
-               AND dispatch_type = 'pm-decision'
-               AND status = 'pending'",
-        )
-        .bind(&body.card_id)
-        .fetch_all(transition_pool)
-        .await
-        {
-            Ok(ids) => ids,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("load pending pm-decision dispatches: {error}")})),
-                );
-            }
-        };
+        let pending_dispatch_ids =
+            match kanban_db::pending_pm_decision_dispatch_ids_pg(transition_pool, &body.card_id)
+                .await
+            {
+                Ok(ids) => ids,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    );
+                }
+            };
         for dispatch_id in pending_dispatch_ids {
             crate::dispatch::set_dispatch_status_with_backends(
                 None,
@@ -2215,16 +1566,12 @@ pub async fn pm_decision(
         }
     }
     // Clear manual-intervention markers before applying the selected decision.
-    if let Err(error) = sqlx::query(
-        "UPDATE kanban_cards SET blocked_reason = NULL, updated_at = NOW() WHERE id = $1",
-    )
-    .bind(&body.card_id)
-    .execute(transition_pool)
-    .await
+    if let Err(error) =
+        kanban_db::clear_manual_intervention_marker_pg(transition_pool, &body.card_id).await
     {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("clear manual intervention marker: {error}")})),
+            Json(json!({"error": error})),
         );
     }
     if legacy_manual_state || review_status.as_deref() == Some("dilemma_pending") {
@@ -2250,26 +1597,17 @@ pub async fn pm_decision(
         "resume" => {
             // Guard: resume requires a live dispatch + working session.
             // Without one the card would be stranded in in_progress with nothing driving it.
-            let has_live = match sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::BIGINT
-                 FROM task_dispatches td
-                 JOIN sessions s ON s.active_dispatch_id = td.id
-                    AND s.status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working', 'idle')
-                 WHERE td.kanban_card_id = $1
-                   AND td.status IN ('pending', 'dispatched')",
-            )
-            .bind(&body.card_id)
-            .fetch_one(transition_pool)
-            .await
-            {
-                Ok(count) => count > 0,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("check live dispatch/session: {error}")})),
-                    );
-                }
-            };
+            let has_live =
+                match kanban_db::has_live_dispatch_session_pg(transition_pool, &body.card_id).await
+                {
+                    Ok(has_live) => has_live,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                };
             if !has_live {
                 return (
                     StatusCode::CONFLICT,
@@ -2327,23 +1665,17 @@ pub async fn pm_decision(
                 Ok(_) => {
                     // Dispatch succeeded — now complete pm-decision dispatch + transition
                     let completion_result = json!({"decision": "rework", "comment": body.comment});
-                    let pending_dispatch_ids: Vec<String> = match sqlx::query_scalar(
-                        "SELECT id FROM task_dispatches
-                         WHERE kanban_card_id = $1
-                           AND dispatch_type = 'pm-decision'
-                           AND status = 'pending'",
+                    let pending_dispatch_ids = match kanban_db::pending_pm_decision_dispatch_ids_pg(
+                        transition_pool,
+                        &body.card_id,
                     )
-                    .bind(&body.card_id)
-                    .fetch_all(transition_pool)
                     .await
                     {
                         Ok(ids) => ids,
                         Err(error) => {
                             return (
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(
-                                    json!({"error": format!("load pending pm-decision dispatches: {error}")}),
-                                ),
+                                Json(json!({"error": error})),
                             );
                         }
                     };
@@ -2362,11 +1694,7 @@ pub async fn pm_decision(
                     }
                     // Pipeline-driven: rework target from current state's review_rework gate
                     let rework_status: String =
-                        match sqlx::query_scalar("SELECT status FROM kanban_cards WHERE id = $1")
-                            .bind(&body.card_id)
-                            .fetch_optional(transition_pool)
-                            .await
-                        {
+                        match kanban_db::card_status_pg(transition_pool, &body.card_id).await {
                             Ok(status) => status.unwrap_or_default(),
                             Err(error) => {
                                 return (
@@ -2506,40 +1834,13 @@ pub async fn pm_decision(
 
 // ── Administrative review recovery helpers ───────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct RereviewBody {
-    pub reason: Option<String>,
-}
-
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 fn find_active_review_dispatch_id(conn: &sqlite_test::Connection, card_id: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT id FROM task_dispatches
-         WHERE kanban_card_id = ?1
-           AND dispatch_type = 'review'
-           AND status IN ('pending', 'dispatched')
-         ORDER BY updated_at DESC, rowid DESC
-         LIMIT 1",
-        [card_id],
-        |row| row.get(0),
-    )
-    .ok()
+    kanban_db::find_active_review_dispatch_id_on_conn(conn, card_id)
 }
 
 async fn find_active_review_dispatch_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT id FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type = 'review'
-           AND status IN ('pending', 'dispatched')
-         ORDER BY updated_at DESC, id DESC
-         LIMIT 1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
+    kanban_db::find_active_review_dispatch_id_pg(pool, card_id).await
 }
 
 fn trimmed_header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -2593,37 +1894,14 @@ fn resolve_agent_id_from_channel_id_on_conn(
     conn: &sqlite_test::Connection,
     channel_id: &str,
 ) -> Option<String> {
-    conn.query_row(
-        "SELECT id FROM agents
-         WHERE discord_channel_id = ?1
-            OR discord_channel_alt = ?1
-            OR discord_channel_cc = ?1
-            OR discord_channel_cdx = ?1
-         LIMIT 1",
-        [channel_id],
-        |row| row.get(0),
-    )
-    .ok()
+    kanban_db::resolve_agent_id_from_channel_id_on_conn(conn, channel_id)
 }
 
 async fn resolve_agent_id_from_channel_id_with_pg(
     pool: &sqlx::PgPool,
     channel_id: &str,
 ) -> Option<String> {
-    sqlx::query(
-        "SELECT id FROM agents
-         WHERE discord_channel_id = $1
-            OR discord_channel_alt = $1
-            OR discord_channel_cc = $1
-            OR discord_channel_cdx = $1
-         LIMIT 1",
-    )
-    .bind(channel_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .and_then(|row| row.try_get::<String, _>("id").ok())
+    kanban_db::resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -2632,13 +1910,7 @@ pub(super) fn resolve_requesting_agent_id_on_conn(
     headers: &HeaderMap,
 ) -> Option<String> {
     if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
-        return conn
-            .query_row(
-                "SELECT id FROM agents WHERE id = ?1 LIMIT 1",
-                [agent_id],
-                |row| row.get(0),
-            )
-            .ok()
+        return kanban_db::resolve_existing_agent_id_on_conn(conn, agent_id)
             .or_else(|| Some(agent_id.to_string()));
     }
 
@@ -2651,13 +1923,8 @@ pub(crate) async fn resolve_requesting_agent_id_with_pg(
     headers: &HeaderMap,
 ) -> Option<String> {
     if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
-        return sqlx::query("SELECT id FROM agents WHERE id = $1 LIMIT 1")
-            .bind(agent_id)
-            .fetch_optional(pool)
+        return kanban_db::resolve_existing_agent_id_with_pg(pool, agent_id)
             .await
-            .ok()
-            .flatten()
-            .and_then(|row| row.try_get::<String, _>("id").ok())
             .or_else(|| Some(agent_id.to_string()));
     }
 
@@ -2685,34 +1952,30 @@ pub async fn rereview_card(
         return pg_pool_required_error();
     };
     let reason = body.reason.as_deref().unwrap_or("manual rereview");
-    let (current_status, assigned_agent_id, card_title, gh_url) =
-        match sqlx::query_as::<_, (String, Option<String>, String, Option<String>)>(
-            "SELECT status, assigned_agent_id, title, github_issue_url
-             FROM kanban_cards WHERE id = $1",
-        )
-        .bind(&id)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(values)) => values,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("card not found: {id}")})),
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    card_id = %id,
-                    %error,
-                    "[rereview] postgres lookup failed"
-                );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("postgres lookup failed: {error}")})),
-                );
-            }
-        };
+    let card_info = match kanban_db::load_rereview_card_info_pg(pool, &id).await {
+        Ok(Some(values)) => values,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("card not found: {id}")})),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                card_id = %id,
+                %error,
+                "[rereview] postgres lookup failed"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
+    let current_status = card_info.status;
+    let assigned_agent_id = card_info.assigned_agent_id;
+    let card_title = card_info.title;
+    let gh_url = card_info.github_issue_url;
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
         .unwrap_or_else(|| "api".to_string());
@@ -2727,21 +1990,12 @@ pub async fn rereview_card(
         }
     };
 
-    let stale_ids = match sqlx::query_scalar::<_, String>(
-        "SELECT id FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type IN ('review', 'review-decision')
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
+    let stale_ids = match kanban_db::stale_review_dispatch_ids_pg(pool, &id).await {
         Ok(ids) => ids,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("postgres stale dispatch lookup failed: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
@@ -2761,22 +2015,10 @@ pub async fn rereview_card(
         }
     }
 
-    if let Err(error) = sqlx::query(
-        "UPDATE kanban_cards
-         SET review_status = NULL,
-             suggestion_pending_at = NULL,
-             review_entered_at = NULL,
-             awaiting_dod_at = NULL,
-             updated_at = NOW()
-         WHERE id = $1",
-    )
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
+    if let Err(error) = kanban_db::cleanup_rereview_card_pg(pool, &id).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("postgres rereview cleanup failed: {error}")})),
+            Json(json!({"error": error})),
         );
     }
 
@@ -2791,17 +2033,7 @@ pub async fn rereview_card(
         tracing::warn!("[kanban] rereview review_state_sync cleanup failed: {error}");
     }
 
-    if let Err(error) = sqlx::query(
-        "UPDATE card_review_state
-         SET approach_change_round = NULL,
-             session_reset_round = NULL,
-             updated_at = NOW()
-         WHERE card_id = $1",
-    )
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
+    if let Err(error) = kanban_db::reset_repeated_finding_rounds_pg(pool, &id).await {
         tracing::warn!("[kanban] rereview repeated-finding postgres reset failed: {error}");
     }
 
@@ -2827,14 +2059,14 @@ pub async fn rereview_card(
         crate::kanban::fire_enter_hooks_with_backends(None, &state.engine, &id, "review");
     }
 
-    let mut review_dispatch_id = find_active_review_dispatch_id_pg(pool, &id).await;
+    let mut review_dispatch_id = kanban_db::find_active_review_dispatch_id_pg(pool, &id).await;
 
     if review_dispatch_id.is_none() && !transitioned_into_review {
         let _ = state
             .engine
             .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": id }));
         crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
-        review_dispatch_id = find_active_review_dispatch_id_pg(pool, &id).await;
+        review_dispatch_id = kanban_db::find_active_review_dispatch_id_pg(pool, &id).await;
     }
 
     if review_dispatch_id.is_none() {
@@ -2869,44 +2101,25 @@ pub async fn rereview_card(
 
     crate::kanban::correct_tn_to_fn_on_reopen(None, state.pg_pool_ref(), &id);
 
-    if let Err(error) = sqlx::query(
-        "UPDATE kanban_cards
-         SET completed_at = NULL, updated_at = NOW()
-         WHERE id = $1",
-    )
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
+    if let Err(error) = kanban_db::reset_completed_at_pg(pool, &id).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("postgres completed_at reset failed: {error}")})),
+            Json(json!({"error": error})),
         );
     }
 
-    let entry_ids = match sqlx::query_scalar::<_, String>(
-        "SELECT id FROM auto_queue_entries
-         WHERE kanban_card_id = $1
-           AND status IN ('pending', 'dispatched', 'done')
-           AND run_id IN (
-               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-           )",
-    )
-    .bind(&id)
-    .fetch_all(pool)
-    .await
-    {
+    let entry_ids = match kanban_db::active_auto_queue_entry_ids_for_rereview_pg(pool, &id).await {
         Ok(ids) => ids,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("postgres auto-queue entry lookup failed: {error}")})),
+                Json(json!({"error": error})),
             );
         }
     };
 
     for entry_id in entry_ids {
-        if let Err(error) = move_auto_queue_entry_to_dispatched_on_pg(
+        if let Err(error) = kanban_db::move_auto_queue_entry_to_dispatched_on_pg(
             pool,
             &entry_id,
             "rereview_dispatch",
@@ -2971,12 +2184,6 @@ pub async fn rereview_card(
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct BatchRereviewBody {
-    pub issues: Vec<i64>,
-    pub reason: Option<String>,
-}
-
 /// POST /api/kanban-cards/batch-rereview (formerly /api/re-review, removed in #1064)
 ///
 /// Batch endpoint. Accepts a list of GitHub issue numbers,
@@ -2998,13 +2205,7 @@ pub async fn batch_rereview(
     let mut results = Vec::new();
 
     for issue_number in &body.issues {
-        let card_id = match sqlx::query_scalar::<_, String>(
-            "SELECT id FROM kanban_cards WHERE github_issue_number = $1",
-        )
-        .bind(*issue_number)
-        .fetch_optional(pool)
-        .await
-        {
+        let card_id = match kanban_db::card_id_by_issue_number_pg(pool, *issue_number).await {
             Ok(value) => value,
             Err(error) => {
                 tracing::warn!(
@@ -3015,7 +2216,7 @@ pub async fn batch_rereview(
                 results.push(json!({
                     "issue": issue_number,
                     "ok": false,
-                    "error": format!("postgres lookup failed: {error}"),
+                    "error": error,
                 }));
                 continue;
             }
@@ -3063,23 +2264,6 @@ pub async fn batch_rereview(
     (StatusCode::OK, Json(json!({ "results": results })))
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct ReopenBody {
-    pub review_status: Option<String>,
-    pub dispatch_type: Option<String>,
-    pub reason: Option<String>,
-    pub reset_full: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchTransitionBody {
-    pub issue_numbers: Option<Vec<i64>>,
-    pub card_ids: Option<Vec<String>>,
-    pub status: String,
-    pub cancel_dispatches: Option<bool>,
-}
-
 /// POST /api/kanban-cards/:id/reopen
 ///
 /// Administrative endpoint. Reopens a done card by transitioning to in_progress,
@@ -3105,26 +2289,21 @@ pub async fn reopen_card(
         .unwrap_or_else(|| "api".to_string());
 
     // ── Pre-check: card must be in done state ──
-    let current_status: String =
-        match sqlx::query_scalar::<_, String>("SELECT status FROM kanban_cards WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(status)) => status,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("card not found: {id}")})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
+    let current_status: String = match kanban_db::card_status_pg(pool, &id).await {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("card not found: {id}")})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
 
     // Pipeline-driven: reopen only applies to terminal states
     crate::pipeline::ensure_loaded();
@@ -3152,7 +2331,7 @@ pub async fn reopen_card(
     let reason = body.reason.as_deref().unwrap_or("reopen via API");
 
     if let Some(pool) = state.pg_pool_ref() {
-        if let Err(error) = mark_api_reopen_skip_preflight_on_pg(pool, &id).await {
+        if let Err(error) = kanban_db::mark_api_reopen_skip_preflight_on_pg(pool, &id).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
@@ -3200,13 +2379,15 @@ pub async fn reopen_card(
                 crate::kanban::correct_tn_to_fn_on_reopen(None, state.pg_pool_ref(), &id);
 
                 if reset_full {
-                    if let Err(error) = clear_all_threads_pg(pool, &id).await {
+                    if let Err(error) = kanban_db::clear_all_threads_pg(pool, &id).await {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({"error": format!("{error}")})),
                         );
                     }
-                    if let Err(error) = clear_reopen_preflight_cache_on_pg(pool, &id).await {
+                    if let Err(error) =
+                        kanban_db::clear_reopen_preflight_cache_on_pg(pool, &id).await
+                    {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(
@@ -3214,7 +2395,8 @@ pub async fn reopen_card(
                             ),
                         );
                     }
-                } else if let Err(error) = consume_api_reopen_preflight_skip_on_pg(pool, &id).await
+                } else if let Err(error) =
+                    kanban_db::consume_api_reopen_preflight_skip_on_pg(pool, &id).await
                 {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -3224,33 +2406,24 @@ pub async fn reopen_card(
                     );
                 }
 
-                if let Err(error) = sqlx::query(
-                    "UPDATE kanban_cards
-                     SET completed_at = NULL,
-                         updated_at = NOW()
-                     WHERE id = $1",
-                )
-                .bind(&id)
-                .execute(pool)
-                .await
-                {
+                if let Err(error) = kanban_db::reset_completed_at_pg(pool, &id).await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
+                        Json(json!({"error": error})),
                     );
                 }
 
                 if let Some(ref rs) = body.review_status
-                    && let Err(error) = sqlx::query(
-                        "UPDATE kanban_cards
-                         SET review_status = $1,
-                             updated_at = NOW()
-                         WHERE id = $2",
-                    )
-                    .bind(rs)
-                    .bind(&id)
-                    .execute(pool)
-                    .await
+                    && let Err(error) = kanban_db::update_card_review_status_pg(pool, &id, rs).await
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    );
+                }
+
+                if let Err(error) =
+                    kanban_db::reactivate_done_auto_queue_entries_pg(pool, &id).await
                 {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -3258,25 +2431,12 @@ pub async fn reopen_card(
                     );
                 }
 
-                if let Err(error) = reactivate_done_auto_queue_entries_pg(pool, &id).await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-
-                let gh_url = match sqlx::query_scalar::<_, Option<String>>(
-                    "SELECT github_issue_url FROM kanban_cards WHERE id = $1",
-                )
-                .bind(&id)
-                .fetch_optional(pool)
-                .await
-                {
-                    Ok(value) => value.flatten(),
+                let gh_url = match kanban_db::github_issue_url_for_card_pg(pool, &id).await {
+                    Ok(value) => value,
                     Err(error) => {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
+                            Json(json!({"error": error})),
                         );
                     }
                 };
@@ -3329,7 +2489,7 @@ pub async fn reopen_card(
                 };
             }
             Err(error) => {
-                let _ = clear_api_reopen_skip_preflight_on_pg(pool, &id).await;
+                let _ = kanban_db::clear_api_reopen_skip_preflight_on_pg(pool, &id).await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{error}")})),
@@ -3385,24 +2545,16 @@ pub async fn batch_transition(
 
     if let Some(issue_numbers) = body.issue_numbers.as_ref() {
         for issue_number in issue_numbers {
-            let card_ids: Vec<String> = match sqlx::query_scalar::<_, String>(
-                "SELECT id
-                 FROM kanban_cards
-                 WHERE github_issue_number = $1
-                 ORDER BY id ASC",
-            )
-            .bind(issue_number)
-            .fetch_all(pg_pool)
-            .await
-            {
-                Ok(ids) => ids,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-            };
+            let card_ids: Vec<String> =
+                match kanban_db::card_ids_by_issue_number_pg(pg_pool, *issue_number).await {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": error})),
+                        );
+                    }
+                };
             if card_ids.is_empty() {
                 results.push(json!({
                     "issue_number": issue_number,
@@ -3419,49 +2571,42 @@ pub async fn batch_transition(
 
     for (card_id, issue_number) in targets {
         let pool = pg_pool;
-        let terminal_cleanup =
-            match sqlx::query("SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1")
-                .bind(&card_id)
-                .fetch_optional(pool)
+        let terminal_cleanup = match kanban_db::load_card_pipeline_context_pg(pool, &card_id).await
+        {
+            Ok(Some(card_context)) => {
+                match crate::kanban::resolve_pipeline_with_pg(
+                    pool,
+                    card_context.repo_id.as_deref(),
+                    card_context.assigned_agent_id.as_deref(),
+                )
                 .await
-            {
-                Ok(Some(row)) => {
-                    let card_repo_id: Option<String> = row.try_get("repo_id").unwrap_or_default();
-                    let card_agent_id: Option<String> =
-                        row.try_get("assigned_agent_id").unwrap_or_default();
-                    match crate::kanban::resolve_pipeline_with_pg(
-                        pool,
-                        card_repo_id.as_deref(),
-                        card_agent_id.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(effective) => {
-                            effective.is_terminal(&body.status)
-                                && body.cancel_dispatches.unwrap_or(true)
-                        }
-                        Err(error) => {
-                            results.push(json!({
-                                "card_id": card_id,
-                                "issue_number": issue_number,
-                                "ok": false,
-                                "error": format!("{error}"),
-                            }));
-                            continue;
-                        }
+                {
+                    Ok(effective) => {
+                        effective.is_terminal(&body.status)
+                            && body.cancel_dispatches.unwrap_or(true)
+                    }
+                    Err(error) => {
+                        results.push(json!({
+                            "card_id": card_id,
+                            "issue_number": issue_number,
+                            "ok": false,
+                            "error": format!("{error}"),
+                        }));
+                        continue;
                     }
                 }
-                Ok(None) => false,
-                Err(error) => {
-                    results.push(json!({
-                        "card_id": card_id,
-                        "issue_number": issue_number,
-                        "ok": false,
-                        "error": format!("{error}"),
-                    }));
-                    continue;
-                }
-            };
+            }
+            Ok(None) => false,
+            Err(error) => {
+                results.push(json!({
+                    "card_id": card_id,
+                    "issue_number": issue_number,
+                    "ok": false,
+                    "error": error,
+                }));
+                continue;
+            }
+        };
 
         let transition_result =
             if force_transition_needs_cleanup(&body.status, body.cancel_dispatches) {
@@ -3567,18 +2712,6 @@ pub async fn batch_transition(
 
 // ── Administrative force transition ──────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct ForceTransitionBody {
-    pub status: String,
-    pub cancel_dispatches: Option<bool>,
-    /// #1444: explicit opt-in to cancel a card's active dispatch when the
-    /// target_status is `ready`. Without `force=true` (and without legacy
-    /// `cancel_dispatches=true`), `/transition` returns 409 Conflict if the
-    /// card already has a pending/dispatched dispatch — preventing the
-    /// duplicate dispatch incident from #1442.
-    pub force: Option<bool>,
-}
-
 fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option<bool>) -> bool {
     matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
 }
@@ -3595,20 +2728,7 @@ fn count_live_auto_queue_entries_for_card_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<usize> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM auto_queue_entries
-             WHERE kanban_card_id = ?1
-               AND status IN ('pending', 'dispatched')
-               AND run_id IN (
-                   SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-               )",
-            [card_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| anyhow::anyhow!("count live auto-queue entries for {card_id}: {error}"))?;
-    Ok(count.max(0) as usize)
+    kanban_db::count_live_auto_queue_entries_for_card_on_conn(conn, card_id)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3616,26 +2736,7 @@ fn clear_force_transition_terminalized_links_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE auto_queue_entries
-         SET dispatch_id = NULL,
-             slot_index = NULL,
-             dispatched_at = NULL,
-             completed_at = COALESCE(completed_at, datetime('now'))
-         WHERE kanban_card_id = ?1
-           AND status = 'skipped'
-           AND dispatch_id IS NOT NULL
-           AND run_id IN (
-               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-           )",
-        [card_id],
-    )
-    .map_err(|error| {
-        anyhow::anyhow!(
-            "clear force-transition terminalized auto-queue links for {card_id}: {error}"
-        )
-    })?;
-    Ok(())
+    kanban_db::clear_force_transition_terminalized_links_on_conn(conn, card_id)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3644,20 +2745,7 @@ fn cleanup_force_transition_revert_on_conn(
     card_id: &str,
     target_status: &str,
 ) -> anyhow::Result<(usize, usize)> {
-    let reason = format!("force-transition to {target_status}");
-    // Model 2: generic cancel keeps the dispatch pointer for provenance and to
-    // avoid silently re-queuing abandoned work. Force-transition cleanup owns
-    // the explicit terminal cleanup, so it snapshots the live-entry count up
-    // front and then clears any skipped entry links left behind by cancel's
-    // terminal side-effect.
-    let skipped_auto_queue_entries = count_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
-    let cancelled_dispatches =
-        crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
-    skip_live_auto_queue_entries_for_card_legacy(conn, card_id)?;
-    clear_force_transition_terminalized_links_on_conn(conn, card_id)?;
-    crate::kanban::cleanup_force_transition_revert_fields_on_conn(conn, card_id)?;
-
-    Ok((cancelled_dispatches, skipped_auto_queue_entries))
+    kanban_db::cleanup_force_transition_revert_on_conn(conn, card_id, target_status)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3665,33 +2753,7 @@ fn skip_live_auto_queue_entries_for_card_legacy(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> sqlite_test::Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM auto_queue_entries
-         WHERE kanban_card_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND run_id IN (SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused'))",
-    )?;
-    let entry_ids: Vec<String> = stmt
-        .query_map([card_id], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(stmt);
-
-    let mut changed = 0usize;
-    for entry_id in entry_ids {
-        if conn.execute(
-            "UPDATE auto_queue_entries
-                 SET status = 'skipped',
-                     updated_at = datetime('now'),
-                     completed_at = COALESCE(completed_at, datetime('now'))
-                 WHERE id = ?1 AND status IN ('pending', 'dispatched')",
-            [&entry_id],
-        )? > 0
-        {
-            changed += 1;
-        }
-    }
-
-    Ok(changed)
+    kanban_db::skip_live_auto_queue_entries_for_card_legacy(conn, card_id)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3701,19 +2763,7 @@ fn move_auto_queue_entry_to_dispatched_on_conn(
     trigger_source: &str,
     options: &crate::db::auto_queue::EntryStatusUpdateOptions,
 ) -> sqlite_test::Result<()> {
-    conn.execute(
-        "UPDATE auto_queue_entries
-         SET status = 'dispatched',
-             dispatch_id = COALESCE(?2, dispatch_id),
-             slot_index = COALESCE(?3, slot_index),
-             dispatched_at = COALESCE(dispatched_at, datetime('now')),
-             completed_at = NULL,
-             updated_at = datetime('now')
-         WHERE id = ?1 AND status IN ('pending', 'dispatched', 'done')",
-        sqlite_test::params![entry_id, options.dispatch_id, options.slot_index],
-    )?;
-    let _ = trigger_source;
-    Ok(())
+    kanban_db::move_auto_queue_entry_to_dispatched_on_conn(conn, entry_id, trigger_source, options)
 }
 
 async fn move_auto_queue_entry_to_dispatched_on_pg(
@@ -3722,40 +2772,15 @@ async fn move_auto_queue_entry_to_dispatched_on_pg(
     trigger_source: &str,
     options: &crate::db::auto_queue::EntryStatusUpdateOptions,
 ) -> Result<(), String> {
-    crate::db::auto_queue::reactivate_done_entry_on_pg(pool, entry_id, trigger_source, options)
+    kanban_db::move_auto_queue_entry_to_dispatched_on_pg(pool, entry_id, trigger_source, options)
         .await
-        .map(|_| ())
 }
 
 async fn reactivate_done_auto_queue_entries_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let entry_ids = sqlx::query_scalar::<_, String>(
-        "SELECT id
-         FROM auto_queue_entries
-         WHERE kanban_card_id = $1
-           AND status = 'done'",
-    )
-    .bind(card_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        anyhow::anyhow!("load postgres done auto-queue entries for {card_id}: {error}")
-    })?;
-
-    for entry_id in entry_ids {
-        move_auto_queue_entry_to_dispatched_on_pg(
-            pool,
-            &entry_id,
-            "api_reopen",
-            &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    }
-
-    Ok(())
+    kanban_db::reactivate_done_auto_queue_entries_pg(pool, card_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3763,41 +2788,14 @@ fn load_card_metadata_map_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let metadata_raw: Option<String> = conn.query_row(
-        "SELECT metadata FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| row.get(0),
-    )?;
-
-    match metadata_raw {
-        Some(raw) if !raw.trim().is_empty() => {
-            let value: serde_json::Value = serde_json::from_str(&raw)?;
-            Ok(value.as_object().cloned().unwrap_or_default())
-        }
-        _ => Ok(serde_json::Map::new()),
-    }
+    kanban_db::load_card_metadata_map_on_conn(conn, card_id)
 }
 
 async fn load_card_metadata_map_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let metadata_raw = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT metadata::text FROM kanban_cards WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("load postgres metadata for {card_id}: {error}"))?
-    .flatten();
-
-    match metadata_raw {
-        Some(raw) if !raw.trim().is_empty() => {
-            let value: serde_json::Value = serde_json::from_str(&raw)?;
-            Ok(value.as_object().cloned().unwrap_or_default())
-        }
-        _ => Ok(serde_json::Map::new()),
-    }
+    kanban_db::load_card_metadata_map_pg(pool, card_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3806,18 +2804,7 @@ fn save_card_metadata_map_on_conn(
     card_id: &str,
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    if metadata.is_empty() {
-        conn.execute(
-            "UPDATE kanban_cards SET metadata = NULL WHERE id = ?1",
-            [card_id],
-        )?;
-    } else {
-        conn.execute(
-            "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-            sqlite_test::params![serde_json::to_string(metadata)?, card_id],
-        )?;
-    }
-    Ok(())
+    kanban_db::save_card_metadata_map_on_conn(conn, card_id, metadata)
 }
 
 async fn save_card_metadata_map_pg(
@@ -3825,31 +2812,7 @@ async fn save_card_metadata_map_pg(
     card_id: &str,
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    if metadata.is_empty() {
-        sqlx::query(
-            "UPDATE kanban_cards
-             SET metadata = NULL,
-                 updated_at = NOW()
-             WHERE id = $1",
-        )
-        .bind(card_id)
-        .execute(pool)
-        .await
-        .map_err(|error| anyhow::anyhow!("clear postgres metadata for {card_id}: {error}"))?;
-    } else {
-        sqlx::query(
-            "UPDATE kanban_cards
-             SET metadata = $1::jsonb,
-                 updated_at = NOW()
-             WHERE id = $2",
-        )
-        .bind(serde_json::to_string(metadata)?)
-        .bind(card_id)
-        .execute(pool)
-        .await
-        .map_err(|error| anyhow::anyhow!("save postgres metadata for {card_id}: {error}"))?;
-    }
-    Ok(())
+    kanban_db::save_card_metadata_map_pg(pool, card_id, metadata).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3857,24 +2820,14 @@ fn mark_api_reopen_skip_preflight_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    metadata.insert(
-        "skip_preflight_once".to_string(),
-        serde_json::Value::String("api_reopen".to_string()),
-    );
-    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+    kanban_db::mark_api_reopen_skip_preflight_on_conn(conn, card_id)
 }
 
 async fn mark_api_reopen_skip_preflight_on_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_pg(pool, card_id).await?;
-    metadata.insert(
-        "skip_preflight_once".to_string(),
-        serde_json::Value::String("api_reopen".to_string()),
-    );
-    save_card_metadata_map_pg(pool, card_id, &metadata).await
+    kanban_db::mark_api_reopen_skip_preflight_on_pg(pool, card_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3882,18 +2835,14 @@ fn clear_api_reopen_skip_preflight_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    metadata.remove("skip_preflight_once");
-    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+    kanban_db::clear_api_reopen_skip_preflight_on_conn(conn, card_id)
 }
 
 async fn clear_api_reopen_skip_preflight_on_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_pg(pool, card_id).await?;
-    metadata.remove("skip_preflight_once");
-    save_card_metadata_map_pg(pool, card_id, &metadata).await
+    kanban_db::clear_api_reopen_skip_preflight_on_pg(pool, card_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3901,58 +2850,14 @@ fn consume_api_reopen_preflight_skip_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    if matches!(
-        metadata
-            .get("skip_preflight_once")
-            .and_then(|value| value.as_str()),
-        Some("api_reopen") | Some("pmd_reopen")
-    ) {
-        metadata.remove("skip_preflight_once");
-        metadata.insert(
-            "preflight_status".to_string(),
-            serde_json::Value::String("skipped".to_string()),
-        );
-        metadata.insert(
-            "preflight_summary".to_string(),
-            serde_json::Value::String("Skipped for API reopen".to_string()),
-        );
-        metadata.insert(
-            "preflight_checked_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-        save_card_metadata_map_on_conn(conn, card_id, &metadata)?;
-    }
-    Ok(())
+    kanban_db::consume_api_reopen_preflight_skip_on_conn(conn, card_id)
 }
 
 async fn consume_api_reopen_preflight_skip_on_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_pg(pool, card_id).await?;
-    if matches!(
-        metadata
-            .get("skip_preflight_once")
-            .and_then(|value| value.as_str()),
-        Some("api_reopen") | Some("pmd_reopen")
-    ) {
-        metadata.remove("skip_preflight_once");
-        metadata.insert(
-            "preflight_status".to_string(),
-            serde_json::Value::String("skipped".to_string()),
-        );
-        metadata.insert(
-            "preflight_summary".to_string(),
-            serde_json::Value::String("Skipped for API reopen".to_string()),
-        );
-        metadata.insert(
-            "preflight_checked_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-        save_card_metadata_map_pg(pool, card_id, &metadata).await?;
-    }
-    Ok(())
+    kanban_db::consume_api_reopen_preflight_skip_on_pg(pool, card_id).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -3960,95 +2865,32 @@ fn clear_reopen_preflight_cache_on_conn(
     conn: &sqlite_test::Connection,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    for key in [
-        "skip_preflight_once",
-        "preflight_status",
-        "preflight_summary",
-        "preflight_checked_at",
-        "consultation_status",
-        "consultation_result",
-    ] {
-        metadata.remove(key);
-    }
-    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+    kanban_db::clear_reopen_preflight_cache_on_conn(conn, card_id)
 }
 
 async fn clear_reopen_preflight_cache_on_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_pg(pool, card_id).await?;
-    for key in [
-        "skip_preflight_once",
-        "preflight_status",
-        "preflight_summary",
-        "preflight_checked_at",
-        "consultation_status",
-        "consultation_result",
-    ] {
-        metadata.remove(key);
-    }
-    save_card_metadata_map_pg(pool, card_id, &metadata).await
+    kanban_db::clear_reopen_preflight_cache_on_pg(pool, card_id).await
 }
 
-/// Snapshot active dispatches (status IN ('pending','dispatched')) for a card.
-///
-/// Used by /transition (#1442) to report which dispatch IDs were cancelled by
-/// the cleanup paths in the response payload.
 async fn active_dispatch_ids_for_card_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let rows = sqlx::query_scalar::<_, String>(
-        "SELECT id
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND status IN ('pending', 'dispatched')",
-    )
-    .bind(card_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("load active dispatches for {card_id}: {error}"))?;
-    Ok(rows)
+    kanban_db::active_dispatch_ids_for_card_pg(pool, card_id).await
 }
 
-/// Filter the input dispatch IDs down to the ones currently in `cancelled`
-/// status. Used after a /transition cleanup to confirm which previously-active
-/// dispatches were actually terminated by the cleanup path (#1442).
 async fn cancelled_dispatch_ids_among_pg(
     pool: &sqlx::PgPool,
     dispatch_ids: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    if dispatch_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let rows = sqlx::query_scalar::<_, String>(
-        "SELECT id
-         FROM task_dispatches
-         WHERE id = ANY($1)
-           AND status = 'cancelled'",
-    )
-    .bind(dispatch_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("filter cancelled dispatches: {error}"))?;
-    Ok(rows)
+    kanban_db::cancelled_dispatch_ids_among_pg(pool, dispatch_ids).await
 }
 
 async fn clear_all_threads_pg(pool: &sqlx::PgPool, card_id: &str) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE kanban_cards
-         SET channel_thread_map = NULL,
-             active_thread_id = NULL,
-             updated_at = NOW()
-         WHERE id = $1",
-    )
-    .bind(card_id)
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("clear postgres thread state for {card_id}: {error}"))?;
-    Ok(())
+    kanban_db::clear_all_threads_pg(pool, card_id).await
 }
 
 /// POST /api/kanban-cards/:id/force-transition
@@ -4100,9 +2942,10 @@ pub async fn force_transition(
     // counts but not IDs; we reconcile by querying the post-transition status
     // of each pre-existing active dispatch and surfacing the ones now in
     // `cancelled` state.
-    let pre_active_dispatch_ids: Vec<String> = active_dispatch_ids_for_card_pg(pool, &id)
-        .await
-        .unwrap_or_default();
+    let pre_active_dispatch_ids: Vec<String> =
+        kanban_db::active_dispatch_ids_for_card_pg(pool, &id)
+            .await
+            .unwrap_or_default();
 
     // #1444 idempotency guard: when the caller asks to transition a card to
     // `ready` while it already has a pending/dispatched dispatch, refuse with
@@ -4124,54 +2967,47 @@ pub async fn force_transition(
             })),
         );
     }
-    let pre_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
-    let terminal_cleanup =
-        match sqlx::query("SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(row)) => {
-                let card_repo_id: Option<String> = row.try_get("repo_id").unwrap_or_default();
-                let card_agent_id: Option<String> =
-                    row.try_get("assigned_agent_id").unwrap_or_default();
-                match crate::kanban::resolve_pipeline_with_pg(
-                    pool,
-                    card_repo_id.as_deref(),
-                    card_agent_id.as_deref(),
-                )
-                .await
-                {
-                    Ok(effective) => {
-                        // #1444 codex iter-2 P2: same `force || cancel_dispatches`
-                        // unification as the ready/backlog cleanup decision so
-                        // `force=true` drives terminal cleanup too.
-                        effective.is_terminal(&target_status) && cleanup_opt_in
-                    }
-                    Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
-                        );
-                    }
-                }
-            }
-            Ok(None) => false,
+    let pre_latest_dispatch_id: Option<String> =
+        match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
+            Ok(value) => value,
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
+                    Json(json!({"error": error})),
                 );
             }
         };
+    let terminal_cleanup = match kanban_db::load_card_pipeline_context_pg(pool, &id).await {
+        Ok(Some(card_context)) => {
+            match crate::kanban::resolve_pipeline_with_pg(
+                pool,
+                card_context.repo_id.as_deref(),
+                card_context.assigned_agent_id.as_deref(),
+            )
+            .await
+            {
+                Ok(effective) => {
+                    // #1444 codex iter-2 P2: same `force || cancel_dispatches`
+                    // unification as the ready/backlog cleanup decision so
+                    // `force=true` drives terminal cleanup too.
+                    effective.is_terminal(&target_status) && cleanup_opt_in
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{error}")})),
+                    );
+                }
+            }
+        }
+        Ok(None) => false,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            );
+        }
+    };
 
     let transition_result = if needs_cleanup {
         crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
@@ -4271,7 +3107,7 @@ pub async fn force_transition(
             // current state to surface concrete cancelled IDs (#1442).
             let cancelled_dispatch_ids =
                 if cancelled_dispatches > 0 && !pre_active_dispatch_ids.is_empty() {
-                    cancelled_dispatch_ids_among_pg(pool, &pre_active_dispatch_ids)
+                    kanban_db::cancelled_dispatch_ids_among_pg(pool, &pre_active_dispatch_ids)
                         .await
                         .unwrap_or_default()
                 } else {
@@ -4280,15 +3116,10 @@ pub async fn force_transition(
 
             // Detect a brand-new dispatch that may have been kicked off by
             // hooks fired during the transition (e.g. on_enter).
-            let post_latest_dispatch_id: Option<String> = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = $1",
-            )
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .flatten();
+            let post_latest_dispatch_id: Option<String> =
+                kanban_db::latest_dispatch_id_for_card_pg(pool, &id)
+                    .await
+                    .unwrap_or_default();
             let created_dispatch_id = match (
                 pre_latest_dispatch_id.as_deref(),
                 post_latest_dispatch_id.as_deref(),
@@ -4306,7 +3137,7 @@ pub async fn force_transition(
             // Cleanup only runs for `backlog`/`ready` (or with
             // cancel_dispatches=true on terminal targets), so callers can
             // also reach `requested`/`ready` while a live dispatch persists.
-            let post_active_dispatch_count = active_dispatch_ids_for_card_pg(pool, &id)
+            let post_active_dispatch_count = kanban_db::active_dispatch_ids_for_card_pg(pool, &id)
                 .await
                 .map(|ids| ids.len())
                 .unwrap_or(0);
