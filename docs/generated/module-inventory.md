@@ -233,7 +233,7 @@
 | `services::auto_queue::dispatch_query` | `src/services/auto_queue/dispatch_query.rs` | 126 |  |
 | `services::auto_queue::fsm` | `src/services/auto_queue/fsm.rs` | 854 |  |
 | `services::auto_queue::order_routes` | `src/services/auto_queue/order_routes.rs` | 576 |  |
-| `services::auto_queue::phase_gate` | `src/services/auto_queue/phase_gate.rs` | 307 |  |
+| `services::auto_queue::phase_gate` | `src/services/auto_queue/phase_gate.rs` | 330 |  |
 | `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 445 |  |
 | `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 291 |  |
 | `services::auto_queue::route` | `src/services/auto_queue/route.rs` | 94 |  |
