@@ -68,11 +68,14 @@ impl RecentPlaceholderEvent {
     }
 
     fn render_line(&self) -> String {
-        truncate_chars(
-            format!("{} {}", self.prefix, self.summary).trim(),
-            EVENT_LINE_MAX_CHARS,
-        )
+        let raw = format!("{} {}", self.prefix, self.summary);
+        let sanitized = sanitize_for_code_fence(raw.trim());
+        truncate_chars(&sanitized, EVENT_LINE_MAX_CHARS)
     }
+}
+
+fn sanitize_for_code_fence(raw: &str) -> String {
+    raw.replace('`', "")
 }
 
 #[derive(Debug, Default)]
@@ -334,8 +337,17 @@ fn render_status_panel(
         sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
-    if let Some(block) = live_block.filter(|block| !block.trim().is_empty()) {
-        sections.push(format!("Recent\n{block}"));
+    let recent_section = live_block
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| format!("Recent\n{block}"));
+
+    if let Some(recent) = recent_section.as_ref() {
+        let mut with_recent = sections.clone();
+        with_recent.push(recent.clone());
+        let joined = with_recent.join("\n\n");
+        if joined.chars().count() <= STATUS_PANEL_MAX_CHARS {
+            return joined;
+        }
     }
 
     truncate_chars(&sections.join("\n\n"), STATUS_PANEL_MAX_CHARS)
