@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 // `turn_lifecycle` → durable turn lifecycle event model for session/context transitions.
 pub mod events;
 pub mod metrics;
+pub mod recovery_audit;
 pub mod session_inventory;
 pub mod turn_lifecycle;
 pub mod watcher_latency;

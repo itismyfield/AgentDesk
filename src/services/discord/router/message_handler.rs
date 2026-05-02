@@ -6,6 +6,7 @@ use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
 };
+use crate::services::observability::recovery_audit::RecoveryAuditRecord;
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -654,9 +655,30 @@ fn merge_reply_contexts(primary: Option<String>, secondary: Option<String>) -> O
     }
 }
 
-fn take_session_retry_context(shared: &Arc<SharedData>, channel_id: ChannelId) -> Option<String> {
-    super::super::turn_bridge::take_session_retry_context(None::<&crate::db::Db>, channel_id.get())
-        .and_then(|raw| format_session_retry_context(&raw))
+#[derive(Debug, Clone)]
+struct FormattedSessionRetryContext {
+    raw_context: String,
+    formatted_context: String,
+    audit_record: Option<RecoveryAuditRecord>,
+}
+
+fn take_session_retry_context(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    turn_id: Option<&str>,
+) -> Option<FormattedSessionRetryContext> {
+    let context = super::super::turn_bridge::take_session_retry_context_for_turn_with_audit(
+        None::<&crate::db::Db>,
+        shared.pg_pool.as_ref(),
+        channel_id.get(),
+        turn_id,
+    )?;
+    let formatted_context = format_session_retry_context(&context.raw_context)?;
+    Some(FormattedSessionRetryContext {
+        raw_context: context.raw_context,
+        formatted_context,
+        audit_record: context.audit_record,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -978,7 +1000,11 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         (settings.provider.clone(), settings.allowed_tools.clone())
     };
 
-    let reply_context = take_session_retry_context(shared, channel_id);
+    let turn_id = reservation.turn_id(channel_id);
+    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+    let reply_context = session_retry_context
+        .as_ref()
+        .map(|context| context.formatted_context.clone());
     let role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -1209,7 +1235,14 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
-    let system_prompt_owned = build_system_prompt(
+    let recovery_context_for_manifest =
+        session_retry_context
+            .as_ref()
+            .map(|context| RecoveryContextManifestInput {
+                raw_context: context.raw_context.as_str(),
+                audit_record: context.audit_record.as_ref(),
+            });
+    let built_system_prompt = build_system_prompt_with_manifest(
         &discord_context,
         &channel_participants,
         &current_path,
@@ -1224,7 +1257,28 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         longterm_catalog_for_prompt,
         Some(&memory_settings),
         memento_mcp_available,
+        recovery_context_for_manifest.as_ref(),
     );
+    match built_system_prompt.manifest.to_db_prompt_manifest(
+        &turn_id,
+        channel_id,
+        None,
+        Some(dispatch_profile_label(dispatch_profile)),
+    ) {
+        Ok(manifest) => {
+            crate::db::prompt_manifests::spawn_save_prompt_manifest(
+                shared.pg_pool.clone(),
+                manifest,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "agentdesk.prompt_manifest",
+                "failed to build prompt manifest for turn {turn_id}: {error}"
+            );
+        }
+    }
+    let system_prompt_owned = built_system_prompt.system_prompt;
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
     let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
@@ -2804,9 +2858,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id = restored;
         }
     }
+    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
     let reply_context = merge_reply_contexts(
         reply_context,
-        take_session_retry_context(shared, channel_id),
+        session_retry_context
+            .as_ref()
+            .map(|context| context.formatted_context.clone()),
     );
 
     // #1332: probe turn liveness BEFORE posting any placeholder so a queued
@@ -3573,7 +3631,14 @@ pub(in crate::services::discord) async fn handle_text_message(
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
 
-    let system_prompt_owned = build_system_prompt(
+    let recovery_context_for_manifest =
+        session_retry_context
+            .as_ref()
+            .map(|context| RecoveryContextManifestInput {
+                raw_context: context.raw_context.as_str(),
+                audit_record: context.audit_record.as_ref(),
+            });
+    let built_system_prompt = build_system_prompt_with_manifest(
         &discord_context,
         &channel_participants,
         &current_path,
@@ -3588,7 +3653,28 @@ pub(in crate::services::discord) async fn handle_text_message(
         longterm_catalog_for_prompt,
         Some(&memory_settings),
         memento_mcp_available,
+        recovery_context_for_manifest.as_ref(),
     );
+    match built_system_prompt.manifest.to_db_prompt_manifest(
+        &turn_id,
+        channel_id,
+        active_dispatch_id_for_prompt.as_deref(),
+        Some(dispatch_profile_label(dispatch_profile)),
+    ) {
+        Ok(manifest) => {
+            crate::db::prompt_manifests::spawn_save_prompt_manifest(
+                shared.pg_pool.clone(),
+                manifest,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "agentdesk.prompt_manifest",
+                "failed to build prompt manifest for turn {turn_id}: {error}"
+            );
+        }
+    }
+    let system_prompt_owned = built_system_prompt.system_prompt;
     if sak_for_system.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(

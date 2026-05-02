@@ -14,7 +14,7 @@ const UTF8_ELLIPSIS_EXTRA_BYTES: usize = "…".len().saturating_sub(1);
 const THINKING_STATUS_MAX_BYTES: usize = 600;
 const TOOL_STATUS_MAX_BYTES: usize = 300;
 
-pub(super) fn redact_sensitive_for_placeholder(input: &str) -> String {
+pub(crate) fn redact_sensitive_for_placeholder(input: &str) -> String {
     static OPENAI_KEY_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}").expect("valid key regex"));
     static BEARER_RE: LazyLock<Regex> =
@@ -23,12 +23,14 @@ pub(super) fn redact_sensitive_for_placeholder(input: &str) -> String {
         Regex::new(r"(?i)\b(password|token|api[_-]?key)=\S+")
             .expect("valid secret assignment regex")
     });
+    static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("valid email regex")
+    });
 
     let redacted = OPENAI_KEY_RE.replace_all(input, "***");
     let redacted = BEARER_RE.replace_all(&redacted, "Bearer ***");
-    ASSIGNMENT_RE
-        .replace_all(&redacted, "${1}=***")
-        .into_owned()
+    let redacted = ASSIGNMENT_RE.replace_all(&redacted, "${1}=***");
+    EMAIL_RE.replace_all(&redacted, "***@***").into_owned()
 }
 
 /// Inline footer appended to a summary when a long message is delivered as a

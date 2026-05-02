@@ -37,8 +37,9 @@ pub(super) use completion_guard::{
     queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
 };
 pub(super) use recovery_text::{
-    auto_retry_with_history, build_session_retry_context_from_history, store_session_retry_context,
-    take_session_retry_context,
+    SessionRetryContext, auto_retry_with_history, build_session_retry_context_from_history,
+    store_session_retry_context, take_session_retry_context, take_session_retry_context_for_turn,
+    take_session_retry_context_for_turn_with_audit,
 };
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(crate) use tmux_runtime::TmuxCleanupPolicy;
@@ -191,6 +192,38 @@ async fn child_progress_line(
                 error
             );
             None
+        }
+    }
+}
+
+async fn refresh_session_panel_line_from_lifecycle(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    turn_id: &str,
+) -> bool {
+    let Some(pg_pool) = shared.pg_pool.as_ref() else {
+        return false;
+    };
+    let channel_id_text = channel_id.get().to_string();
+    match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
+        pg_pool,
+        &channel_id_text,
+        turn_id,
+    )
+    .await
+    {
+        Ok(Some(event)) => shared
+            .placeholder_live_events
+            .set_session_panel_lifecycle_event(channel_id, &event.kind, &event.details_json),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::debug!(
+                "[turn_bridge] failed to load session lifecycle line for turn {} in channel {}: {}",
+                turn_id,
+                channel_id,
+                error
+            );
+            false
         }
     }
 }
@@ -1310,6 +1343,8 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
+        let mut last_session_panel_lifecycle_refresh =
+            tokio::time::Instant::now() - status_interval;
         let mut status_panel_msg_id = status_panel_message_id_for_turn(
             &mut inflight_state,
             bridge.reuse_status_panel_message,
@@ -2372,6 +2407,18 @@ pub(super) fn spawn_turn_bridge(
                         break;
                     }
                 }
+            }
+
+            if shared_owned.status_panel_v2_enabled
+                && last_session_panel_lifecycle_refresh.elapsed() >= status_interval
+            {
+                last_session_panel_lifecycle_refresh = tokio::time::Instant::now();
+                status_panel_dirty |= refresh_session_panel_line_from_lifecycle(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    turn_id.as_str(),
+                )
+                .await;
             }
 
             let indicator = SPINNER[spin_idx % SPINNER.len()];

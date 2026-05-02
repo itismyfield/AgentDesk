@@ -109,8 +109,77 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
         }
     }
 
-    let _ = db;
+    if let Some(db) = db {
+        return match enqueue_lifecycle_notification_sqlite(
+            db,
+            target,
+            session_key,
+            reason_code,
+            content,
+        ) {
+            Ok(enqueued) => enqueued,
+            Err(error) => {
+                warn_lifecycle_enqueue_failure("sqlite", target, session_key, reason_code, &error);
+                false
+            }
+        };
+    }
+
     false
+}
+
+fn enqueue_lifecycle_notification_sqlite(
+    db: &Db,
+    target: &str,
+    session_key: Option<&str>,
+    reason_code: &str,
+    content: &str,
+) -> Result<bool, String> {
+    let reason_code = reason_code.trim();
+    let Some(session_key) = normalized_session_key(target, session_key) else {
+        return Ok(false);
+    };
+    let ttl_secs = LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS.to_string();
+
+    let conn = db
+        .lock()
+        .map_err(|error| format!("db lock failed: {error}"))?;
+    let duplicate_id = conn
+        .query_row(
+            "SELECT id
+             FROM message_outbox
+             WHERE target = ?1
+               AND reason_code = ?2
+               AND session_key = ?3
+               AND status != 'failed'
+               AND created_at >= datetime('now', '-' || ?4 || ' seconds')
+             ORDER BY id DESC
+             LIMIT 1",
+            [target, reason_code, session_key.as_str(), ttl_secs.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok();
+
+    if duplicate_id.is_some() {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        [
+            target,
+            content,
+            "notify",
+            LIFECYCLE_NOTIFIER_SOURCE,
+            reason_code,
+            session_key.as_str(),
+        ],
+    )
+    .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
+
+    Ok(true)
 }
 
 pub(crate) async fn enqueue_outbox_pg(
