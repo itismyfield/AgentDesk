@@ -18,6 +18,12 @@ use std::time::Duration;
 
 const POLICY_DB_WARN_THRESHOLD: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Copy)]
+enum JsonColumnMode {
+    LegacyString,
+    Typed,
+}
+
 pub(super) fn register_db_ops<'js>(
     ctx: &Ctx<'js>,
     legacy_db: Option<Db>,
@@ -36,6 +42,22 @@ pub(super) fn register_db_ops<'js>(
         }),
     )?;
     db_obj.set("__query_raw", query_raw)?;
+
+    // Internal: __db_query_json_raw(sql, params_json) → json_string
+    let legacy_q_json = legacy_db.clone();
+    let pg_q_json = pg_pool.clone();
+    let query_json_raw = Function::new(
+        ctx.clone(),
+        rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
+            db_query_json_raw(
+                legacy_q_json.as_ref(),
+                pg_q_json.clone(),
+                &sql,
+                &params_json,
+            )
+        }),
+    )?;
+    db_obj.set("__query_json_raw", query_json_raw)?;
 
     // Internal: __db_execute_raw(sql, params_json) → json_string
     let legacy_e = legacy_db.clone();
@@ -62,6 +84,13 @@ pub(super) fn register_db_ops<'js>(
             agentdesk.db.query = function(sql, params) {
                 var result = JSON.parse(
                     agentdesk.db.__query_raw(sql, JSON.stringify(params || []))
+                );
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            agentdesk.db.queryJson = function(sql, params) {
+                var result = JSON.parse(
+                    agentdesk.db.__query_json_raw(sql, JSON.stringify(params || []))
                 );
                 if (result.error) throw new Error(result.error);
                 return result;
@@ -108,39 +137,95 @@ fn db_query_raw(
     sql: &str,
     params_json: &str,
 ) -> String {
+    db_query_raw_with_json_mode(
+        legacy_db,
+        pg_pool,
+        sql,
+        params_json,
+        JsonColumnMode::LegacyString,
+        "agentdesk.db.query",
+    )
+}
+
+fn db_query_json_raw(
+    legacy_db: Option<&Db>,
+    pg_pool: Option<PgPool>,
+    sql: &str,
+    params_json: &str,
+) -> String {
+    db_query_raw_with_json_mode(
+        legacy_db,
+        pg_pool,
+        sql,
+        params_json,
+        JsonColumnMode::Typed,
+        "agentdesk.db.queryJson",
+    )
+}
+
+fn db_query_raw_with_json_mode(
+    legacy_db: Option<&Db>,
+    pg_pool: Option<PgPool>,
+    sql: &str,
+    params_json: &str,
+    json_column_mode: JsonColumnMode,
+    origin: &str,
+) -> String {
     let started = std::time::Instant::now();
-    emit_raw_db_audit("agentdesk.db.query", sql);
-    let params: Vec<serde_json::Value> =
-        match parse_params_json(params_json, "agentdesk.db.query.parse_params", sql) {
-            Ok(params) => params,
-            Err(error_json) => return error_json,
-        };
+    emit_raw_db_audit(origin, sql);
+    let parse_operation = format!("{origin}.parse_params");
+    let params: Vec<serde_json::Value> = match parse_params_json(params_json, &parse_operation, sql)
+    {
+        Ok(params) => params,
+        Err(error_json) => return error_json,
+    };
 
     let Some(pg_pool) = pg_pool else {
         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
         if let Some(db) = legacy_db {
             return db_query_raw_sqlite(db, sql, &params, started);
         }
+        let backend_operation = format!("{origin}.pg_backend");
         return policy_db_error_json(
-            "agentdesk.db.query.pg_backend",
+            &backend_operation,
             sql,
-            "postgres backend is required for db.query".to_string(),
+            format!("postgres backend is required for {origin}"),
         );
     };
 
-    db_query_raw_pg(&pg_pool, sql, &params, started)
+    db_query_raw_pg_with_json_mode(&pg_pool, sql, &params, started, json_column_mode, origin)
 }
 
+#[cfg(test)]
 fn db_query_raw_pg(
     pg_pool: &PgPool,
     sql: &str,
     params: &[serde_json::Value],
     started: std::time::Instant,
 ) -> String {
+    db_query_raw_pg_with_json_mode(
+        pg_pool,
+        sql,
+        params,
+        started,
+        JsonColumnMode::LegacyString,
+        "agentdesk.db.query",
+    )
+}
+
+fn db_query_raw_pg_with_json_mode(
+    pg_pool: &PgPool,
+    sql: &str,
+    params: &[serde_json::Value],
+    started: std::time::Instant,
+    json_column_mode: JsonColumnMode,
+    origin: &str,
+) -> String {
     let prepared_sql = match prepare_policy_sql_for_pg(sql, params) {
         Ok(prepared) => prepared,
         Err(error) => {
-            return policy_db_bad_request_json("agentdesk.db.query.translate_pg", sql, error);
+            let operation = format!("{origin}.translate_pg");
+            return policy_db_bad_request_json(&operation, sql, error);
         }
     };
 
@@ -155,16 +240,18 @@ fn db_query_raw_pg(
     }) {
         Ok(rows) => rows,
         Err(error) => {
-            return policy_db_error_json("agentdesk.db.query.fetch_all_pg", sql, error);
+            let operation = format!("{origin}.fetch_all_pg");
+            return policy_db_error_json(&operation, sql, error);
         }
     };
 
     let mut result = Vec::with_capacity(rows.len());
     for row in &rows {
-        match pg_row_to_json(row) {
+        match pg_row_to_json(row, json_column_mode) {
             Ok(value) => result.push(value),
             Err(error) => {
-                return policy_db_error_json("agentdesk.db.query.collect_rows_pg", sql, error);
+                let operation = format!("{origin}.collect_rows_pg");
+                return policy_db_error_json(&operation, sql, error);
             }
         }
     }
@@ -181,11 +268,8 @@ fn db_query_raw_pg(
     }
 
     serde_json::to_string(&result).unwrap_or_else(|error| {
-        policy_db_error_json(
-            "agentdesk.db.query.serialize_pg",
-            sql,
-            format!("serialize query result: {error}"),
-        )
+        let operation = format!("{origin}.serialize_pg");
+        policy_db_error_json(&operation, sql, format!("serialize query result: {error}"))
     })
 }
 
@@ -946,12 +1030,20 @@ fn bind_policy_sql_params<'q>(
     params: Vec<serde_json::Value>,
 ) -> sqlx::query::Query<'q, Postgres, PgArguments> {
     for param in params {
-        query = query.bind(PolicySqlParam(param));
+        query = match param {
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                query.bind(sqlx::types::Json(param))
+            }
+            value => query.bind(PolicySqlParam(value)),
+        };
     }
     query
 }
 
-fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value, String> {
+fn pg_row_to_json(
+    row: &sqlx::postgres::PgRow,
+    json_column_mode: JsonColumnMode,
+) -> Result<serde_json::Value, String> {
     let mut map = serde_json::Map::new();
 
     for (index, column) in row.columns().iter().enumerate() {
@@ -982,7 +1074,10 @@ fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Result<serde_json::Value, Stri
                 .try_get::<Option<serde_json::Value>, _>(index)
                 .map_err(|error| format!("decode json column {column_name}: {error}"))?
             {
-                Some(value) => serde_json::Value::String(value.to_string()),
+                Some(value) => match json_column_mode {
+                    JsonColumnMode::LegacyString => serde_json::Value::String(value.to_string()),
+                    JsonColumnMode::Typed => value,
+                },
                 None => serde_json::Value::Null,
             },
             "TIMESTAMPTZ" => match row
@@ -1354,6 +1449,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings() {
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        let pool_for_js = pool.clone();
+        let result: String = ctx.with(|ctx| {
+            let ad = rquickjs::Object::new(ctx.clone()).unwrap();
+            ctx.globals().set("agentdesk", ad).unwrap();
+            register_db_ops(&ctx, None, Some(pool_for_js)).unwrap();
+            ctx.eval(
+                r#"
+                (function() {
+                    var sql =
+                        "SELECT " +
+                        "jsonb_build_object('nested', jsonb_build_object('count', 2), 'items', jsonb_build_array('a', 'b')) AS payload, " +
+                        "json_build_array(1, 2) AS numbers, " +
+                        "NULL::jsonb AS missing";
+                    var legacy = agentdesk.db.query(sql)[0];
+                    var typed = agentdesk.db.queryJson(sql)[0];
+                    return JSON.stringify({
+                        legacy_payload_type: typeof legacy.payload,
+                        legacy_payload_decoded: JSON.parse(legacy.payload),
+                        legacy_numbers_type: typeof legacy.numbers,
+                        typed_payload_is_object: typed.payload && typeof typed.payload === "object" && !Array.isArray(typed.payload),
+                        typed_payload: typed.payload,
+                        typed_numbers_is_array: Array.isArray(typed.numbers),
+                        typed_missing_is_null: typed.missing === null
+                    });
+                })()
+                "#,
+            )
+            .unwrap()
+        });
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["legacy_payload_type"], "string");
+        assert_eq!(parsed["legacy_payload_decoded"]["nested"]["count"], 2);
+        assert_eq!(parsed["legacy_payload_decoded"]["items"], json!(["a", "b"]));
+        assert_eq!(parsed["legacy_numbers_type"], "string");
+        assert_eq!(parsed["typed_payload_is_object"], true);
+        assert_eq!(parsed["typed_payload"]["nested"]["count"], 2);
+        assert_eq!(parsed["typed_payload"]["items"], json!(["a", "b"]));
+        assert_eq!(parsed["typed_numbers_is_array"], true);
+        assert_eq!(parsed["typed_missing_is_null"], true);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn policy_db_pg_exec_and_query_support_sqlite_compat_functions() {
         let test_db = TestDatabase::create().await;
         let pool = test_db.migrate().await;
@@ -1429,6 +1576,35 @@ mod tests {
         assert_eq!(typed_rows[0]["numeric_value"], 42);
         assert_eq!(typed_rows[0]["float_value"], 3.5);
         assert_eq!(typed_rows[0]["null_value"], true);
+
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-json-param', 'JSON Param', 'review', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed json param card");
+        let metadata_update = db_execute_raw_pg(
+            &pool,
+            "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+            &[
+                json!({"loop_guard": {"review_churn": {"enter_count": 1}}}),
+                json!("card-json-param"),
+            ],
+            std::time::Instant::now(),
+        );
+        let metadata_update_json: serde_json::Value =
+            serde_json::from_str(&metadata_update).expect("parse metadata update json");
+        assert_eq!(metadata_update_json["changes"], 1);
+        let stored_metadata: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM kanban_cards WHERE id = 'card-json-param'")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch json param metadata");
+        assert_eq!(
+            stored_metadata["loop_guard"]["review_churn"]["enter_count"],
+            1
+        );
 
         let expires_at: chrono::DateTime<chrono::Utc> = sqlx::query(
             "SELECT expires_at

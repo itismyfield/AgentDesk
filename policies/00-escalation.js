@@ -148,7 +148,7 @@ function loadCardMetadata(cardId) {
 function writeCardMetadata(cardId, metadata) {
   agentdesk.db.execute(
     "UPDATE kanban_cards SET metadata = ?, updated_at = datetime('now') WHERE id = ?",
-    [JSON.stringify(metadata || {}), cardId]
+    [metadata || {}, cardId]
   );
 }
 

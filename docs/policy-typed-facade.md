@@ -36,6 +36,14 @@ Current typed facade entrypoints:
 - Read facades return `null` for missing entities instead of throwing.
 - Command facades throw only on validation or execution failure.
 
+## Raw DB JSON Columns
+
+`agentdesk.db.query(sql, params)` is the compatibility API for remaining raw SQL policy slices.
+It keeps the historical bridge behavior: PostgreSQL `json` and `jsonb` columns are returned as serialized JSON strings.
+
+Use `agentdesk.db.queryJson(sql, params)` only when a transitional raw query must read PostgreSQL `json` or `jsonb` values as native JS values.
+Other scalar columns keep the same shape as `query`; the difference is limited to `json`/`jsonb` result columns.
+
 ## Migration Guidance
 
 - Prefer `agentdesk.cards.list(...)` over ad hoc `SELECT ... FROM kanban_cards`.

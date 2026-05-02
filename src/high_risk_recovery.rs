@@ -107,12 +107,23 @@ fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
 
 async fn seed_agent_pg(pool: &sqlx::PgPool) {
     sqlx::query(
-        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
-         VALUES ('agent-1', 'Test Agent', '111', '222')
+        "INSERT INTO agents (
+             id,
+             name,
+             provider,
+             discord_channel_id,
+             discord_channel_alt,
+             discord_channel_cc,
+             discord_channel_cdx
+         )
+         VALUES ('agent-1', 'Test Agent', 'codex', '111', '222', '111', '222')
          ON CONFLICT (id) DO UPDATE SET
              name = EXCLUDED.name,
+             provider = EXCLUDED.provider,
              discord_channel_id = EXCLUDED.discord_channel_id,
-             discord_channel_alt = EXCLUDED.discord_channel_alt",
+             discord_channel_alt = EXCLUDED.discord_channel_alt,
+             discord_channel_cc = EXCLUDED.discord_channel_cc,
+             discord_channel_cdx = EXCLUDED.discord_channel_cdx",
     )
     .execute(pool)
     .await
