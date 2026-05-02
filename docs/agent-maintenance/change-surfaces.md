@@ -62,7 +62,7 @@
   - `src/engine/ops/review_automation_ops.rs` (2140 lines, giant-file).
   - `src/engine/transition.rs` (1309 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1116 lines, giant-file).
-  - `src/engine/ops/db_ops.rs` (1195 lines, giant-file).
+  - `src/engine/ops/db_ops.rs` (1591 lines, giant-file).
   - `src/engine/intent.rs` (873 lines, retained migration-sensitive surface).
   - `src/pipeline.rs` (2125 lines, giant-file).
 - active_callsite_coverage: n/a (no canonical replacement yet).
@@ -81,10 +81,10 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/mod.rs` (4875 lines).
-  - `src/dispatch/dispatch_context.rs` (3913 lines).
-  - `src/dispatch/dispatch_create.rs` (2737 lines).
-  - `src/dispatch/dispatch_status.rs` (1828 lines).
+  - `src/dispatch/mod.rs` (5115 lines).
+  - `src/dispatch/dispatch_context.rs` (3943 lines).
+  - `src/dispatch/dispatch_create.rs` (2777 lines).
+  - `src/dispatch/dispatch_status.rs` (1875 lines).
 - active_callsite_coverage: n/a.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
   status transitions go through `dispatch_status`.
@@ -101,28 +101,28 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2145 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (1969 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (9910 lines after #1435 lifecycle
+  - `src/services/discord/tmux.rs` (10291 lines after #1435 lifecycle
     extraction; still giant-file territory).
-  - `src/services/discord/recovery_engine.rs` (4697 lines).
-  - `src/services/discord/health.rs` (4533 lines).
+  - `src/services/discord/recovery_engine.rs` (4831 lines).
+  - `src/services/discord/health.rs` (5921 lines).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).
-  - `src/services/discord/placeholder_live_events.rs` (1203 lines).
-  - `src/services/discord/router/message_handler.rs` (7158 lines).
+  - `src/services/discord/placeholder_live_events.rs` (1225 lines).
+  - `src/services/discord/router/message_handler.rs` (7374 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
-  - `src/services/discord/turn_bridge/mod.rs` (3645 lines).
+  - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1016 lines; provider
     stop-token/tmux binding runtime, split before adding non-bugfix behavior).
   - `src/services/discord/turn_bridge/completion_guard.rs` (2096 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1016 lines).
-  - `src/services/discord/formatting.rs` (3105 lines).
-  - `src/services/discord/settings.rs` (2394 lines).
-  - `src/services/discord/prompt_builder.rs` (2027 lines).
-  - `src/services/discord/runtime_bootstrap.rs` (2647 lines).
+  - `src/services/discord/formatting.rs` (3247 lines).
+  - `src/services/discord/settings.rs` (2445 lines).
+  - `src/services/discord/prompt_builder.rs` (2114 lines).
+  - `src/services/discord/runtime_bootstrap.rs` (2844 lines).
   - `src/services/discord/session_runtime.rs` (1887 lines).
-  - `src/services/discord/commands/config.rs` (1810 lines).
+  - `src/services/discord/commands/config.rs` (1877 lines).
   - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
     discord_config_audit.rs, router/intake_gate.rs, model_catalog.rs,
     qwen_tmux_wrapper.rs, agentdesk_config.rs, inflight.rs}` (all 1000+ lines).
@@ -144,19 +144,19 @@
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
   smaller route-delegation slices.
-  `src/services/auto_queue/activate_command.rs` (1012 lines, post-#1444
+  `src/services/auto_queue/activate_command.rs` (1010 lines, post-#1444
   idempotency-guard expansion) is the canonical activate/dispatch-next
   command surface; it is intentionally above the giant-file threshold and
   tracked here. Further growth requires a split issue.
 - legacy_modules: none, but several routes still call `legacy_db()` against
   the SQLite compat handle (see `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/dispatches/discord_delivery.rs` (5402 lines).
-  - `src/server/routes/kanban.rs` (4037 lines).
-  - `src/server/routes/dispatched_sessions.rs` (3998 lines).
+  - `src/server/routes/dispatches/discord_delivery.rs` (5564 lines).
+  - `src/server/routes/kanban.rs` (4426 lines).
+  - `src/server/routes/dispatched_sessions.rs` (4002 lines).
   - `src/server/routes/onboarding.rs` (5271 lines).
-  - `src/server/routes/docs.rs` (3755 lines).
-  - `src/server/routes/dispatches/outbox.rs` (2908 lines).
+  - `src/server/routes/docs.rs` (4632 lines).
+  - `src/server/routes/dispatches/outbox.rs` (3294 lines).
   - `src/server/routes/escalation.rs` (2110 lines).
   - `src/server/routes/meetings.rs` (2158 lines).
   - `src/server/routes/review_verdict/decision_route.rs` (1865 lines).
@@ -202,10 +202,10 @@
   `src/github/sync.rs`.
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2236 lines).
+  - `src/config.rs` (2601 lines).
   - `src/runtime_layout/mod.rs` (1425 lines).
-  - `src/server/mod.rs` (3234 lines).
-  - `src/kanban.rs` (3875 lines).
+  - `src/server/mod.rs` (3370 lines).
+  - `src/kanban.rs` (4041 lines).
   - `src/receipt.rs` (2133 lines).
   - `src/github/sync.rs` (1059 lines).
 - active_callsite_coverage: n/a.
@@ -223,7 +223,7 @@
 - do_not_edit_without_migration_plan (giant-file):
   - `src/db/auto_queue.rs` (4533 lines).
   - `src/db/schema.rs` (3194 lines).
-  - `src/db/postgres.rs` (1435 lines).
+  - `src/db/postgres.rs` (1536 lines).
   - `src/db/session_transcripts.rs` (877 lines, retained PG-cleanup surface).
   - `src/db/agents.rs` (1125 lines).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
