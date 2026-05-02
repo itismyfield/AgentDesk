@@ -1159,9 +1159,10 @@ pub fn handle_dcserver(token: Option<String>) {
                 if !ws_path.join(".git").exists() {
                     continue;
                 }
-                if let Ok(output) = std::process::Command::new("git")
-                    .args(["-C", ws, "branch", "--show-current"])
-                    .output()
+                if let Ok(output) = crate::services::git::GitCommand::new()
+                    .repo(ws)
+                    .args(["branch", "--show-current"])
+                    .run_output()
                 {
                     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if branch.starts_with("wt/") {
@@ -1169,18 +1170,27 @@ pub fn handle_dcserver(token: Option<String>) {
                             "  ⚠ [branch-guard] Workspace {} on worktree branch '{}' — recovering to main",
                             ws, branch
                         );
-                        let _ = std::process::Command::new("git")
-                            .args(["-C", ws, "stash", "--include-untracked", "-m", "auto-stash before branch-guard recovery"])
-                            .output();
-                        let _ = std::process::Command::new("git")
-                            .args(["-C", ws, "checkout", "main"])
-                            .output();
-                        let _ = std::process::Command::new("git")
-                            .args(["-C", ws, "pull", "--ff-only"])
-                            .output();
-                        let _ = std::process::Command::new("git")
-                            .args(["-C", ws, "worktree", "prune"])
-                            .output();
+                        let _ = crate::services::git::GitCommand::new()
+                            .repo(ws)
+                            .args([
+                                "stash",
+                                "--include-untracked",
+                                "-m",
+                                "auto-stash before branch-guard recovery",
+                            ])
+                            .run_output();
+                        let _ = crate::services::git::GitCommand::new()
+                            .repo(ws)
+                            .args(["checkout", "main"])
+                            .run_output();
+                        let _ = crate::services::git::GitCommand::new()
+                            .repo(ws)
+                            .args(["pull", "--ff-only"])
+                            .run_output();
+                        let _ = crate::services::git::GitCommand::new()
+                            .repo(ws)
+                            .args(["worktree", "prune"])
+                            .run_output();
                         eprintln!(
                             "  ✓ [branch-guard] Recovered {} to main (was: {})",
                             ws, branch
