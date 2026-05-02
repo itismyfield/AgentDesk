@@ -155,6 +155,12 @@ pub struct TurnLifecyclePersistedEvent {
     pub notify_user: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestSessionLifecycleEvent {
+    pub kind: String,
+    pub details_json: Value,
+}
+
 pub async fn emit_turn_lifecycle(
     pool: &PgPool,
     event: TurnLifecycleEmit,
@@ -204,6 +210,44 @@ pub async fn emit_turn_lifecycle(
             .try_get::<String, _>("severity")
             .map_err(|error| anyhow!("decode turn lifecycle severity: {error}"))?,
         notify_user: meta.notify_user,
+    }))
+}
+
+pub async fn load_latest_session_lifecycle_event(
+    pool: &PgPool,
+    channel_id: &str,
+    turn_id: &str,
+) -> Result<Option<LatestSessionLifecycleEvent>> {
+    let row = sqlx::query(
+        "SELECT kind, details_json
+         FROM turn_lifecycle_events
+         WHERE channel_id = $1
+           AND turn_id = $2
+           AND kind IN (
+               'session_fresh',
+               'session_resumed',
+               'session_resume_failed_with_recovery'
+           )
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(channel_id)
+    .bind(turn_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("load latest session lifecycle event: {error}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    Ok(Some(LatestSessionLifecycleEvent {
+        kind: row
+            .try_get::<String, _>("kind")
+            .map_err(|error| anyhow!("decode session lifecycle kind: {error}"))?,
+        details_json: row
+            .try_get::<Value, _>("details_json")
+            .map_err(|error| anyhow!("decode session lifecycle details_json: {error}"))?,
     }))
 }
 
