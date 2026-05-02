@@ -9,12 +9,30 @@ use sqlx::{PgPool, Row};
 
 use super::AppState;
 use crate::db::table_metadata;
+use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
 
 fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({"error": "postgres pool not configured"})),
     )
+}
+
+fn pipeline_override_error_response(
+    error: PipelineOverrideError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match error {
+        PipelineOverrideError::BadRequest(error) => {
+            (StatusCode::BAD_REQUEST, Json(json!({"error": error})))
+        }
+        PipelineOverrideError::NotFound(error) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": error})))
+        }
+        PipelineOverrideError::Database(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        ),
+    }
 }
 
 /// #1097 (910-3) — readonly guard.
@@ -560,40 +578,6 @@ pub struct SetPipelineOverrideBody {
     pub config: Option<serde_json::Value>,
 }
 
-fn parse_pipeline_override_body(
-    body: &SetPipelineOverrideBody,
-) -> Result<
-    (Option<String>, Option<crate::pipeline::PipelineOverride>),
-    (StatusCode, Json<serde_json::Value>),
-> {
-    match &body.config {
-        Some(value) if !value.is_null() => {
-            let config = value.to_string();
-            match crate::pipeline::parse_override(&config) {
-                Ok(parsed) => Ok((Some(config), parsed)),
-                Err(error) => Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid pipeline config: {error}")})),
-                )),
-            }
-        }
-        _ => Ok((None, None)),
-    }
-}
-
-fn validate_pipeline_override(
-    repo_override: Option<&crate::pipeline::PipelineOverride>,
-    agent_override: Option<&crate::pipeline::PipelineOverride>,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let effective = crate::pipeline::resolve(repo_override, agent_override);
-    effective.validate().map_err(|error| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("merged pipeline validation failed: {error}")})),
-        )
-    })
-}
-
 /// GET /api/pipeline/config/repo/:owner/:repo
 pub async fn get_repo_pipeline(
     State(state): State<AppState>,
@@ -603,26 +587,11 @@ pub async fn get_repo_pipeline(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
-    let config = match sqlx::query_scalar::<_, Option<String>>(
-        "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(config) => config.flatten(),
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
+    let service = PipelineOverrideService::new(pool);
+    let parsed = match service.get_repo_pipeline(&id).await {
+        Ok(parsed) => parsed,
+        Err(error) => return pipeline_override_error_response(error),
     };
-
-    let parsed: serde_json::Value = config
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(serde_json::Value::Null);
 
     (
         StatusCode::OK,
@@ -637,59 +606,14 @@ pub async fn set_repo_pipeline(
     Json(body): Json<SetPipelineOverrideBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let id = format!("{owner}/{repo}");
-    let (config_str, repo_override) = match parse_pipeline_override_body(&body) {
-        Ok(parsed) => parsed,
-        Err(response) => return response,
-    };
-
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
-    let exists = match sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM github_repos WHERE id = $1)",
-    )
-    .bind(&id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(exists) => exists,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    };
-    if !exists {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "repo not found"})),
-        );
+    let service = PipelineOverrideService::new(pool);
+    if let Err(error) = service.set_repo_pipeline(&id, body.config.as_ref()).await {
+        return pipeline_override_error_response(error);
     }
-    if let Err(response) = validate_pipeline_override(repo_override.as_ref(), None) {
-        return response;
-    }
-    match sqlx::query("UPDATE github_repos SET pipeline_config = $1::jsonb WHERE id = $2")
-        .bind(config_str.as_deref())
-        .bind(&id)
-        .execute(pool)
-        .await
-    {
-        Ok(result) if result.rows_affected() == 0 => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "repo not found"})),
-        ),
-        Ok(_) => {
-            // #1230 — refresh persisted override health report so /api/health and the
-            // postgres `kv_meta` mirror reflect the latest repo override warnings.
-            crate::pipeline::refresh_override_health_report(Some(pool)).await;
-            (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
-        }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
-    }
+    (StatusCode::OK, Json(json!({"ok": true, "repo": id})))
 }
 
 /// GET /api/pipeline/config/agent/:agent_id
@@ -700,26 +624,11 @@ pub async fn get_agent_pipeline(
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
-    let config = match sqlx::query_scalar::<_, Option<String>>(
-        "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
-    )
-    .bind(&agent_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(config) => config.flatten(),
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
+    let service = PipelineOverrideService::new(pool);
+    let parsed = match service.get_agent_pipeline(&agent_id).await {
+        Ok(parsed) => parsed,
+        Err(error) => return pipeline_override_error_response(error),
     };
-
-    let parsed: serde_json::Value = config
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(serde_json::Value::Null);
 
     (
         StatusCode::OK,
@@ -733,61 +642,20 @@ pub async fn set_agent_pipeline(
     Path(agent_id): Path<String>,
     Json(body): Json<SetPipelineOverrideBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (config_str, agent_override) = match parse_pipeline_override_body(&body) {
-        Ok(parsed) => parsed,
-        Err(response) => return response,
-    };
-
     let Some(pool) = state.pg_pool_ref() else {
         return pg_unavailable();
     };
-    let exists =
-        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM agents WHERE id = $1)")
-            .bind(&agent_id)
-            .fetch_one(pool)
-            .await
-        {
-            Ok(exists) => exists,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        };
-    if !exists {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        );
-    }
-    if let Err(response) = validate_pipeline_override(None, agent_override.as_ref()) {
-        return response;
-    }
-    match sqlx::query("UPDATE agents SET pipeline_config = $1::jsonb WHERE id = $2")
-        .bind(config_str.as_deref())
-        .bind(&agent_id)
-        .execute(pool)
+    let service = PipelineOverrideService::new(pool);
+    if let Err(error) = service
+        .set_agent_pipeline(&agent_id, body.config.as_ref())
         .await
     {
-        Ok(result) if result.rows_affected() == 0 => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Ok(_) => {
-            // #1230 — refresh persisted override health report so /api/health and the
-            // postgres `kv_meta` mirror reflect the latest agent override warnings.
-            crate::pipeline::refresh_override_health_report(Some(pool)).await;
-            (
-                StatusCode::OK,
-                Json(json!({"ok": true, "agent_id": agent_id})),
-            )
-        }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+        return pipeline_override_error_response(error);
     }
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "agent_id": agent_id})),
+    )
 }
 
 /// GET /api/pipeline/config/graph?repo=...&agent_id=...

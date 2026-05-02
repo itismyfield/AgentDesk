@@ -22,6 +22,7 @@ pub mod memory;
 pub mod message_outbox;
 pub mod observability;
 pub mod opencode;
+pub mod pipeline_override;
 pub mod platform;
 pub mod process;
 pub mod provider;
