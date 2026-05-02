@@ -240,7 +240,7 @@
 | `services::auto_queue::order_routes` | `src/services/auto_queue/order_routes.rs` | 576 |  |
 | `services::auto_queue::phase_gate` | `src/services/auto_queue/phase_gate.rs` | 330 |  |
 | `services::auto_queue::planning` | `src/services/auto_queue/planning.rs` | 445 |  |
-| `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 291 |  |
+| `services::auto_queue::query` | `src/services/auto_queue/query.rs` | 332 |  |
 | `services::auto_queue::route` | `src/services/auto_queue/route.rs` | 94 |  |
 | `services::auto_queue::route_generate` | `src/services/auto_queue/route_generate.rs` | 714 |  |
 | `services::auto_queue::route_types` | `src/services/auto_queue/route_types.rs` | 142 |  |
