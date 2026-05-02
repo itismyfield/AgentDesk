@@ -33,7 +33,7 @@ use std::collections::VecDeque;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
-    fail_dispatch_with_retry, guard_review_dispatch_completion,
+    fail_dispatch_auth_expired, fail_dispatch_with_retry, guard_review_dispatch_completion,
     queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
 };
 pub(super) use recovery_text::{

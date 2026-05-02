@@ -18,7 +18,9 @@ pub(super) fn is_auth_error_message(text: &str) -> bool {
         || (lower.contains("refresh token")
             && (lower.contains("expired")
                 || lower.contains("invalid")
-                || lower.contains("revoked")))
+                || lower.contains("revoked")
+                || lower.contains("already used")))
+        || lower.contains("please log out and sign in again")
         || lower.contains("token expired")
         || lower.contains("invalid api key")
         || (lower.contains("api key")
@@ -50,6 +52,17 @@ pub(super) fn detect_provider_overload_message(text: &str) -> Option<String> {
         Some(trimmed.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod pure_tests {
+    use super::is_auth_error_message;
+
+    #[test]
+    fn auth_error_detects_expired_refresh_token_variants() {
+        assert!(is_auth_error_message("refresh token was already used"));
+        assert!(is_auth_error_message("Please log out and sign in again"));
     }
 }
 
@@ -187,6 +200,8 @@ mod tests {
         assert!(is_auth_error_message("OAuth token refresh failed"));
         assert!(is_auth_error_message("access token could not be refreshed"));
         assert!(is_auth_error_message("refresh token expired"));
+        assert!(is_auth_error_message("refresh token was already used"));
+        assert!(is_auth_error_message("Please log out and sign in again"));
         assert!(is_auth_error_message("Token expired"));
         assert!(is_auth_error_message("Invalid API key"));
         assert!(is_auth_error_message("API key is missing"));

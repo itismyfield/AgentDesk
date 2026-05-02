@@ -3932,7 +3932,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 "authentication expired; re-authentication required: {}",
                 truncate_str(auth_detail, 300)
             );
-            super::turn_bridge::fail_dispatch_with_retry(
+            super::turn_bridge::fail_dispatch_auth_expired(
                 shared.api_port,
                 dispatch_id.as_deref(),
                 &failure_text,
