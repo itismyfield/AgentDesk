@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, QueryBuilder, Row};
 use std::path::{Path as FsPath, PathBuf};
-use tokio::process::Command;
 
 use super::{AppState, agents_setup};
+use crate::services::git::{GitCommand, GitCommandError};
 use crate::services::observability::session_inventory::derive_visual_status;
 
 // ── Query / Body structs ─────────────────────────────────────────
@@ -240,6 +240,15 @@ fn default_prompt_path(runtime_root: &FsPath, agent_id: &str) -> PathBuf {
         .join("IDENTITY.md")
 }
 
+fn git_command_error_detail(error: &GitCommandError) -> String {
+    let stderr = error.stderr_text();
+    if stderr.is_empty() {
+        error.to_string()
+    } else {
+        stderr
+    }
+}
+
 fn resolve_agent_prompt_path(agent_id: &str, provider: Option<&str>) -> Option<PathBuf> {
     let runtime_root = crate::config::runtime_root()?;
     let config = crate::services::discord::agentdesk_config::load_agent_setup_config(&runtime_root)
@@ -317,38 +326,45 @@ async fn run_prompt_auto_commit(
     let message = message
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("Update agent prompt from dashboard");
+        .unwrap_or("Update agent prompt from dashboard")
+        .to_string();
 
-    let add = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .arg("add")
-        .arg(prompt_path)
-        .output()
-        .await
-        .map_err(|error| format!("git add prompt: {error}"))?;
-    if !add.status.success() {
-        return Err(format!(
+    let add_repo = repo_dir.to_path_buf();
+    let add_path = prompt_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        GitCommand::new()
+            .repo(&add_repo)
+            .arg("add")
+            .arg(&add_path)
+            .run_output()
+    })
+    .await
+    .map_err(|error| format!("git add prompt join failed: {error}"))?
+    .map_err(|error| {
+        format!(
             "git add prompt failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        ));
-    }
+            git_command_error_detail(&error)
+        )
+    })?;
 
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(repo_dir)
-        .arg("commit")
-        .arg("-m")
-        .arg(message)
-        .output()
-        .await
-        .map_err(|error| format!("git commit prompt: {error}"))?;
-    if !commit.status.success() {
-        return Err(format!(
+    let commit_repo = repo_dir.to_path_buf();
+    let commit_message = message.clone();
+    let commit = tokio::task::spawn_blocking(move || {
+        GitCommand::new()
+            .repo(&commit_repo)
+            .arg("commit")
+            .arg("-m")
+            .arg(&commit_message)
+            .run_output()
+    })
+    .await
+    .map_err(|error| format!("git commit prompt join failed: {error}"))?
+    .map_err(|error| {
+        format!(
             "git commit prompt failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        ));
-    }
+            git_command_error_detail(&error)
+        )
+    })?;
 
     Ok(json!({
         "message": message,

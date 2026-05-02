@@ -4,8 +4,9 @@ use super::discord_delivery::{
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
-use std::process::Command;
 use std::sync::Arc;
+
+use crate::services::git::GitCommand;
 
 const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 
@@ -1054,11 +1055,11 @@ fn dispatch_completed_without_changes(result_json: Option<&serde_json::Value>) -
 }
 
 fn git_ref_exists(repo_dir: &str, git_ref: &str) -> bool {
-    Command::new("git")
+    GitCommand::new()
+        .repo(repo_dir)
         .args(["rev-parse", "--verify", git_ref])
-        .current_dir(repo_dir)
-        .output()
-        .map(|output| output.status.success())
+        .run_output()
+        .map(|_| true)
         .unwrap_or(false)
 }
 
@@ -1070,17 +1071,11 @@ fn resolve_upstream_base_ref(repo_dir: &str) -> Option<String> {
 }
 
 fn git_diff_stats(repo_dir: &str, diff_spec: &str) -> Result<DispatchChangeStats, String> {
-    let output = Command::new("git")
+    let output = GitCommand::new()
+        .repo(repo_dir)
         .args(["diff", "--numstat", "--find-renames", diff_spec])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|err| format!("git diff failed: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git diff {} failed with status {}",
-            diff_spec, output.status
-        ));
-    }
+        .run_output()
+        .map_err(|err| format!("git diff {diff_spec} failed: {err}"))?;
 
     let mut stats = DispatchChangeStats::default();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -1140,13 +1135,13 @@ fn compute_dispatch_merge_status(
         let Some(base_ref) = resolve_upstream_base_ref(repo_dir) else {
             return DispatchMergeStatus::Unknown;
         };
-        return match Command::new("git")
+        return match GitCommand::new()
+            .repo(repo_dir)
             .args(["merge-base", "--is-ancestor", completed_commit, &base_ref])
-            .current_dir(repo_dir)
-            .status()
+            .run_output()
         {
-            Ok(status) if status.success() => DispatchMergeStatus::Merged,
-            Ok(status) if status.code() == Some(1) => DispatchMergeStatus::Pending,
+            Ok(_) => DispatchMergeStatus::Merged,
+            Err(error) if error.status_code() == Some(1) => DispatchMergeStatus::Pending,
             _ => DispatchMergeStatus::Unknown,
         };
     }
