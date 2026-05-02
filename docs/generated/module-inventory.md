@@ -342,7 +342,7 @@
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 36 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 193 |  |
 | `services::discord::turn_bridge::recall_feedback` | `src/services/discord/turn_bridge/recall_feedback.rs` | 799 |  |
-| `services::discord::turn_bridge::recovery_text` | `src/services/discord/turn_bridge/recovery_text.rs` | 463 |  |
+| `services::discord::turn_bridge::recovery_text` | `src/services/discord/turn_bridge/recovery_text.rs` | 589 |  |
 | `services::discord::turn_bridge::retry_state` | `src/services/discord/turn_bridge/retry_state.rs` | 191 |  |
 | `services::discord::turn_bridge::skill_usage` | `src/services/discord/turn_bridge/skill_usage.rs` | 145 |  |
 | `services::discord::turn_bridge::stale_resume` | `src/services/discord/turn_bridge/stale_resume.rs` | 87 |  |
@@ -386,7 +386,7 @@
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 528 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |
-| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 769 |  |
+| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 793 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5279 | giant-file |
 | `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
