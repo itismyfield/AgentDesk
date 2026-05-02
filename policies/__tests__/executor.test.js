@@ -30,9 +30,15 @@ function makeNormalizedApprovedObs(signature, overrides = {}) {
   };
 }
 
-function makeDispatchedObs(signature) {
+function makeDispatchedObs(signature, overrides = {}) {
   return {
     key: `routine_observation:candidate_dispatched:${signature}`,
+    value: {
+      signature,
+      dispatched_at: overrides.dispatched_at,
+      timestamp: overrides.timestamp,
+      category: overrides.category || "routine-candidate",
+    },
     summary: `candidate_dispatched for ${signature}`,
   };
 }
@@ -72,6 +78,23 @@ test("already dispatched candidate is skipped", () => {
   assert.equal(r.checkpoint.stats.skipped_already_dispatched, 1, "skipped counter should be 1");
   assert.ok(r.checkpoint.dispatched_signatures["skip-sig"],
     "durable dispatched observation should be mirrored into checkpoint");
+});
+
+test("durable dispatched observation preserves marker timestamp", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const dispatchedAt = new Date(BASE_NOW.getTime() - 6 * 24 * 3600_000).toISOString();
+  const obs = [
+    makeApprovedObs("old-dispatch-sig"),
+    makeDispatchedObs("old-dispatch-sig", { dispatched_at: dispatchedAt }),
+  ];
+
+  const r = tick({ now: BASE_NOW, checkpoint: null, observations: obs, automationInventory: [] });
+  assert.equal(r.action, "complete", "already dispatched candidate should not produce agent action");
+  assert.equal(
+    r.checkpoint.dispatched_signatures["old-dispatch-sig"],
+    dispatchedAt,
+    "checkpoint should mirror durable marker time instead of now"
+  );
 });
 
 test("no approved candidates returns complete with empty summary", () => {

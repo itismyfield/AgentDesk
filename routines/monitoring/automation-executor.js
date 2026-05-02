@@ -35,6 +35,11 @@ function nowIso(now) {
   return typeof now === "string" ? now : now.toISOString ? now.toISOString() : String(now);
 }
 
+function validIso(value) {
+  const timestamp = new Date(value || "").getTime();
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 function observationKey(obs) {
   if (typeof obs.key === "string") return obs.key;
   if (typeof obs.evidence_ref === "string") {
@@ -55,6 +60,16 @@ function observationSignature(obs, prefix) {
 
 function observationPayload(obs) {
   return obs.value && typeof obs.value === "object" ? obs.value : obs;
+}
+
+function observationDispatchedAt(obs, fallback) {
+  const payload = observationPayload(obs);
+  return (
+    validIso(payload.dispatched_at) ||
+    validIso(payload.timestamp) ||
+    validIso(obs.timestamp) ||
+    fallback
+  );
 }
 
 // --- Prune expired dispatched_signatures ---
@@ -122,14 +137,17 @@ agentdesk.routines.register({
     const approvedObs = observations.filter((obs) => observationSignature(obs, approvedPrefix));
 
     // Find already-dispatched signatures (from kv_meta observations + checkpoint)
-    const dispatchedFromObs = new Set(
-      observations
-        .map((obs) => observationSignature(obs, dispatchedPrefix))
-        .filter(Boolean)
-    );
-    for (const signature of dispatchedFromObs) {
-      if (!cp.dispatched_signatures[signature]) {
-        cp.dispatched_signatures[signature] = nowStr;
+    const dispatchedFromObs = new Map();
+    for (const obs of observations) {
+      const signature = observationSignature(obs, dispatchedPrefix);
+      if (signature) {
+        dispatchedFromObs.set(signature, observationDispatchedAt(obs, nowStr));
+      }
+    }
+    for (const [signature, dispatchedAt] of dispatchedFromObs.entries()) {
+      const current = cp.dispatched_signatures[signature];
+      if (!current || new Date(dispatchedAt).getTime() < new Date(current).getTime()) {
+        cp.dispatched_signatures[signature] = dispatchedAt;
       }
     }
 

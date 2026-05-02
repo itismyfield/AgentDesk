@@ -101,6 +101,20 @@ test("previously emitted candidate is not re-emitted on second tick", () => {
   assert.equal(r2.action, "complete", "second tick should not re-emit");
 });
 
+test("emitted candidate is retried when durable approval is still missing", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const obs = [makeReviewObs("retry-sig")];
+
+  const r1 = tick({ now: BASE_NOW, checkpoint: null, observations: obs, automationInventory: [] });
+  assert.equal(r1.action, "agent", "first tick should emit");
+
+  const nowT2 = new Date(BASE_NOW.getTime() + 61 * 60_000);
+  const r2 = tick({ now: nowT2, checkpoint: r1.checkpoint, observations: obs, automationInventory: [] });
+  assert.equal(r2.action, "agent", "stale emit should retry when no approval marker exists");
+  assert.equal(r2.checkpoint.seen_candidates["retry-sig"].first_seen_at, BASE_NOW.toISOString());
+  assert.equal(r2.checkpoint.seen_candidates["retry-sig"].last_emitted_at, nowT2.toISOString());
+});
+
 test("multiple review observations only mark the emitted candidate", () => {
   const { tick } = loadRoutine(ROUTINE_PATH);
   const obs = [

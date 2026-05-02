@@ -7,13 +7,14 @@ const EVIDENCE_AGE_MAX_MS = 48 * 3600 * 1000;   // 48h — matches candidate_rev
 const MIN_SCORE_THRESHOLD = 80;
 const CHECKPOINT_VERSION = 1;
 const SEEN_CANDIDATE_TTL_MS = 72 * 3600 * 1000;   // matches candidate_approved TTL
+const EMITTED_RETRY_MS = 60 * 60 * 1000;          // retry if no durable approval marker appears
 
 // --- Checkpoint helpers ---
 
 function emptyCheckpoint() {
   return {
     version: CHECKPOINT_VERSION,
-    seen_candidates: {},   // signature -> { first_seen_at, status: "emitted"|"skipped" }
+    seen_candidates: {},   // signature -> { first_seen_at, last_emitted_at, status }
     stats: {
       ticks: 0,
       approved_emitted: 0,
@@ -35,6 +36,12 @@ function loadCheckpoint(raw) {
 
 function nowIso(now) {
   return typeof now === "string" ? now : now.toISOString ? now.toISOString() : String(now);
+}
+
+function isRecentIso(value, nowStr, maxAgeMs) {
+  const timestamp = new Date(value || "").getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  return new Date(nowStr).getTime() - timestamp < maxAgeMs;
 }
 
 function observationKey(obs) {
@@ -179,9 +186,18 @@ agentdesk.routines.register({
         continue;
       }
 
-      // Skip if we already emitted an approval prompt for this candidate.
+      // Skip only recent emits. If no durable approved/dispatched marker appears,
+      // retry before the candidate_review marker can age out.
       const seen = cp.seen_candidates[signature];
-      if ((seen && seen.status === "emitted") || queuedSignatures.has(signature)) {
+      if (queuedSignatures.has(signature)) {
+        cp.stats.skipped_already_approved++;
+        continue;
+      }
+      if (
+        seen &&
+        seen.status === "emitted" &&
+        isRecentIso(seen.last_emitted_at || seen.first_seen_at, nowStr, EMITTED_RETRY_MS)
+      ) {
         cp.stats.skipped_already_approved++;
         continue;
       }
@@ -215,7 +231,12 @@ agentdesk.routines.register({
     // Emit one approval prompt (first candidate, others handled on next ticks)
     const { signature, candidate } = emitPrompts[0];
     const prompt = buildApprovalPrompt(signature, candidate);
-    cp.seen_candidates[signature] = { first_seen_at: nowStr, status: "emitted" };
+    const previousSeen = cp.seen_candidates[signature];
+    cp.seen_candidates[signature] = {
+      first_seen_at: previousSeen?.first_seen_at || nowStr,
+      last_emitted_at: nowStr,
+      status: "emitted",
+    };
     cp.stats.approved_emitted++;
 
     return {
