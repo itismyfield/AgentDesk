@@ -59,6 +59,7 @@ src/
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
+│   ├── prompt_manifests.rs
 │   ├── schema.rs
 │   ├── session_agent_resolution.rs
 │   ├── session_observability.rs
@@ -370,6 +371,7 @@ src/
 │   │   ├── metrics.rs
 │   │   ├── mod.rs
 │   │   ├── session_inventory.rs
+│   │   ├── turn_lifecycle.rs
 │   │   └── watcher_latency.rs
 │   ├── platform/
 │   │   ├── binary_resolver.rs
