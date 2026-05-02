@@ -249,6 +249,12 @@ The remaining giant-file modules under `src/services/` not covered above:
   provider adapters.
 - `src/services/memory/memento.rs` (2479).
 - `src/services/observability/mod.rs` (3647).
+- `src/services/routines/loader.rs` (1753),
+  `src/services/routines/store.rs` (2178), and
+  `src/services/routines/discord_log.rs` (1056); routine loader/store and
+  Discord logging are the canonical scheduled JS routine surfaces. Further
+  feature work should split focused helper modules before growing these files
+  again.
 - `src/services/platform/shell.rs` (1507) — split owned by #1281
   (GitClient extraction).
 - `src/services/platform/binary_resolver.rs` (1377).
