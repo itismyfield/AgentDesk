@@ -2784,6 +2784,7 @@ fn is_allowed_send_source(source: &str) -> bool {
         "dashboard",
         "routine-runtime",
         "headless_turn",
+        "slo_alerter",
     ];
     INTERNAL_SOURCES.contains(&source) || super::settings::is_known_agent(source)
 }
@@ -4304,6 +4305,7 @@ mod tests {
     fn headless_turn_is_allowed_internal_send_source() {
         assert!(is_allowed_send_source("headless_turn"));
         assert!(is_allowed_send_source("routine-runtime"));
+        assert!(is_allowed_send_source("slo_alerter"));
         assert!(!is_allowed_send_source("not-a-real-source"));
     }
 
