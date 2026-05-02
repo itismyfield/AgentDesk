@@ -317,7 +317,7 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 22 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2050 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7446 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7675 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::runtime_bootstrap` | `src/services/discord/runtime_bootstrap.rs` | 2845 | giant-file |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 373 |  |
@@ -386,7 +386,7 @@
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 528 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |
-| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 717 |  |
+| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 769 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5279 | giant-file |
 | `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
