@@ -72,17 +72,51 @@ pub(super) fn slot_has_dispatch_thread_history(
     .unwrap_or(false)
 }
 
+fn should_reset_slot_thread_before_reuse(
+    newly_assigned: bool,
+    reassigned_from_other_group: bool,
+    has_slot_thread_binding: bool,
+    has_dispatch_thread_history: bool,
+) -> bool {
+    (newly_assigned || reassigned_from_other_group)
+        && (has_slot_thread_binding || has_dispatch_thread_history)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_reset_slot_thread_before_reuse;
+
+    #[test]
+    fn reset_before_reuse_requires_reassignment_and_existing_thread_state() {
+        assert!(!should_reset_slot_thread_before_reuse(
+            false, false, true, true
+        ));
+        assert!(!should_reset_slot_thread_before_reuse(
+            true, false, false, false
+        ));
+        assert!(should_reset_slot_thread_before_reuse(
+            true, false, true, false
+        ));
+        assert!(should_reset_slot_thread_before_reuse(
+            false, true, false, true
+        ));
+    }
+}
+
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(super) fn slot_requires_thread_reset_before_reuse(
-    _conn: &sqlite_test::Connection,
-    _agent_id: &str,
-    _slot_index: i64,
-    _newly_assigned: bool,
-    _reassigned_from_other_group: bool,
+    conn: &sqlite_test::Connection,
+    agent_id: &str,
+    slot_index: i64,
+    newly_assigned: bool,
+    reassigned_from_other_group: bool,
 ) -> bool {
-    // Slot bindings are sticky. If the saved Discord thread is stale, the
-    // dispatch delivery path probes it and replaces it with a fresh thread.
-    false
+    should_reset_slot_thread_before_reuse(
+        newly_assigned,
+        reassigned_from_other_group,
+        slot_thread_map_has_bindings(conn, agent_id, slot_index),
+        slot_has_dispatch_thread_history(conn, agent_id, slot_index),
+    )
 }
 
 pub(super) fn json_value_kind(value: &serde_json::Value) -> &'static str {
@@ -226,15 +260,22 @@ pub(super) async fn slot_has_dispatch_thread_history_pg(
 }
 
 pub(super) async fn slot_requires_thread_reset_before_reuse_pg(
-    _pool: &sqlx::PgPool,
-    _agent_id: &str,
-    _slot_index: i64,
-    _newly_assigned: bool,
-    _reassigned_from_other_group: bool,
+    pool: &sqlx::PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    newly_assigned: bool,
+    reassigned_from_other_group: bool,
 ) -> Result<bool, String> {
-    // Slot bindings are sticky. If the saved Discord thread is stale, the
-    // dispatch delivery path probes it and replaces it with a fresh thread.
-    Ok(false)
+    if !newly_assigned && !reassigned_from_other_group {
+        return Ok(false);
+    }
+
+    Ok(should_reset_slot_thread_before_reuse(
+        newly_assigned,
+        reassigned_from_other_group,
+        slot_thread_map_has_bindings_pg(pool, agent_id, slot_index).await?,
+        slot_has_dispatch_thread_history_pg(pool, agent_id, slot_index).await?,
+    ))
 }
 
 pub(super) fn build_auto_queue_dispatch_context(

@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn slot_thread_reset_is_not_implicit_for_auto_queue_assignment() {
+    fn slot_thread_reset_is_required_when_reusing_threaded_slot_for_new_group() {
         let conn = slot_reset_conn();
         conn.execute(
             "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
@@ -338,12 +338,12 @@ mod tests {
             "same-run slot rebind must keep the existing thread binding"
         );
         assert!(
-            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true, false),
-            "cross-run reclaim must keep the existing slot binding unless explicitly reset"
+            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, true, false),
+            "cross-run reclaim of a threaded slot must reset before reuse"
         );
         assert!(
-            !slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false, true),
-            "different-group same-run reuse must keep the existing slot binding"
+            slot_requires_thread_reset_before_reuse(&conn, "agent-a", 0, false, true),
+            "different-group same-run reuse of a threaded slot must reset before reuse"
         );
     }
 
