@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -59,6 +59,66 @@ fn json_count(value: &Value) -> u64 {
         .clamp(1, 50)
 }
 
+fn insert_bounded_json_string(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    if let Some(value) = json_str(payload, key) {
+        target.insert(key.to_owned(), Value::String(truncate_chars(value, 512)));
+    }
+}
+
+fn insert_json_number(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    if let Some(value) = payload.get(key).filter(|value| value.is_number()) {
+        target.insert(key.to_owned(), value.clone());
+    }
+}
+
+fn insert_bounded_string_array(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    let Some(items) = payload.get(key).and_then(Value::as_array) else {
+        return;
+    };
+    let values = items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| Value::String(truncate_chars(item, 80)))
+        .take(3)
+        .collect::<Vec<_>>();
+    if !values.is_empty() {
+        target.insert(key.to_owned(), Value::Array(values));
+    }
+}
+
+fn bounded_observation_value(payload: &Value) -> Value {
+    let mut value = Map::new();
+    for key in [
+        "topic",
+        "category",
+        "source",
+        "signature",
+        "timestamp",
+        "last_seen_at",
+        "approved_at",
+        "dispatched_at",
+        "suggested_automation",
+        "outcome_summary",
+    ] {
+        insert_bounded_json_string(&mut value, payload, key);
+    }
+    for key in [
+        "count",
+        "occurrences",
+        "weight",
+        "score",
+        "evidence_count",
+        "evidence_age_ms",
+    ] {
+        insert_json_number(&mut value, payload, key);
+    }
+    insert_bounded_string_array(&mut value, payload, "latest_examples");
+    insert_bounded_string_array(&mut value, payload, "examples");
+    Value::Object(value)
+}
+
 fn default_observation_category(source_kind: &str) -> &'static str {
     match source_kind {
         "memento_digest" => "memento-hygiene",
@@ -105,9 +165,10 @@ fn default_observation_source(source_kind: &str) -> &'static str {
 /// - `weight` — 1 or 2; auto-set from count if absent
 /// - `latest_examples` / `examples` — string array, up to 3 items kept, each ≤80 chars
 ///
-/// The returned observation also carries the original `key` and parsed `value`
-/// so JS routines can match candidate_review/candidate_approved markers without
-/// reverse-parsing `evidence_ref`.
+/// The returned observation also carries the original `key` and a bounded,
+/// allowlisted `value` projection so JS routines can match
+/// candidate_review/candidate_approved markers without reverse-parsing
+/// `evidence_ref` or receiving raw kv_meta payloads.
 ///
 /// **Role**: this is an internal precomputed digest surface. It is NOT a JS injection
 /// endpoint. Callers must write to `kv_meta` directly (Rust service / maintenance job).
@@ -162,7 +223,7 @@ fn precomputed_observation_from_kv(
         &format!("{topic}: {count} digest signal(s){example_suffix}"),
         240,
     );
-    let value = payload.clone();
+    let value = bounded_observation_value(&payload);
 
     Some(serde_json::json!({
         "key": key,
@@ -695,7 +756,14 @@ impl RoutineStore {
             FROM kv_meta
             WHERE key LIKE 'routine_observation:%'
               AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY key ASC
+            ORDER BY COALESCE(
+                       NULLIF(value::jsonb ->> 'timestamp', ''),
+                       NULLIF(value::jsonb ->> 'last_seen_at', ''),
+                       NULLIF(value::jsonb ->> 'approved_at', ''),
+                       NULLIF(value::jsonb ->> 'dispatched_at', ''),
+                       ''
+                     ) DESC,
+                     key ASC
             LIMIT $1
             "#,
         )
@@ -2245,10 +2313,59 @@ mod tests {
             obs.pointer("/value/topic").and_then(Value::as_str),
             Some("api friction repeats")
         );
+        assert!(
+            obs.pointer("/value/raw_memory_body").is_none(),
+            "raw kv_meta payload fields must not be forwarded"
+        );
         let summary = obs.get("summary").and_then(Value::as_str).unwrap();
         assert!(summary.contains("api friction repeats"));
         assert!(summary.contains("GET /api/docs before retry"));
         assert!(!summary.contains("SECRET_RAW_MEMORY_BODY"));
+    }
+
+    #[test]
+    fn candidate_marker_observation_keeps_only_bounded_value_fields() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let raw = serde_json::json!({
+            "signature": "candidate-a",
+            "score": 91,
+            "evidence_count": 8,
+            "category": "routine-candidate",
+            "suggested_automation": "x".repeat(600),
+            "outcome_summary": "safe summary",
+            "last_seen_at": "2026-05-02T09:59:00Z",
+            "raw_memory_body": "SECRET_RAW_MEMORY_BODY_SHOULD_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_review:candidate-a",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate review observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-a")
+        );
+        assert_eq!(
+            obs.pointer("/value/score").and_then(Value::as_u64),
+            Some(91)
+        );
+        assert_eq!(
+            obs.pointer("/value/evidence_count").and_then(Value::as_u64),
+            Some(8)
+        );
+        assert!(
+            obs.pointer("/value/suggested_automation")
+                .and_then(Value::as_str)
+                .unwrap()
+                .chars()
+                .count()
+                <= 515
+        );
+        assert!(obs.pointer("/value/raw_memory_body").is_none());
     }
 
     #[test]
