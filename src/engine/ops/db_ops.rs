@@ -1029,12 +1029,39 @@ fn bind_policy_sql_params<'q>(
     mut query: sqlx::query::Query<'q, Postgres, PgArguments>,
     params: Vec<serde_json::Value>,
 ) -> sqlx::query::Query<'q, Postgres, PgArguments> {
+    // Bind each policy param with the Postgres type that matches its JSON
+    // shape. The previous implementation routed everything through
+    // `PolicySqlParam` which advertises `text` only — that broke
+    // `xp + ?` style updates with `operator does not exist: bigint + text`
+    // and silently aborted the kanban OnDispatchCompleted hook, which in
+    // turn skipped the in_progress→review transition for auto-queue cards
+    // (run 24837914 Phase 4 entries observed in production).
     for param in params {
         query = match param {
+            serde_json::Value::Null => query.bind(Option::<i64>::None),
+            serde_json::Value::Bool(b) => query.bind(b),
+            serde_json::Value::Number(ref n) => {
+                if let Some(i) = n.as_i64() {
+                    query.bind(i)
+                } else if let Some(u) = n.as_u64() {
+                    // PostgreSQL has no UINT8 — clamp to i64 range. Values
+                    // larger than i64::MAX are exceptionally rare for
+                    // policy params; encoding as text preserves the value.
+                    if u <= i64::MAX as u64 {
+                        query.bind(u as i64)
+                    } else {
+                        query.bind(PolicySqlParam(param))
+                    }
+                } else if let Some(f) = n.as_f64() {
+                    query.bind(f)
+                } else {
+                    query.bind(PolicySqlParam(param))
+                }
+            }
+            serde_json::Value::String(s) => query.bind(s),
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
                 query.bind(sqlx::types::Json(param))
             }
-            value => query.bind(PolicySqlParam(value)),
         };
     }
     query
