@@ -6,6 +6,7 @@ pub mod kanban;
 pub mod kanban_cards;
 pub mod memento_feedback_stats;
 pub mod postgres;
+pub mod prompt_manifests;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(crate) mod schema;
 pub(crate) mod session_agent_resolution;
