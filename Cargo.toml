@@ -36,6 +36,7 @@ json5 = "0.4"
 # Utils
 futures = "0.3"
 ureq = { version = "2", features = ["json"] }
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 chrono-tz = "0.10"

@@ -364,6 +364,29 @@ fn test_engine_db_execute_warns_and_blocks_core_table_sql() {
 }
 
 #[test]
+fn http_ops_rejects_prefix_spoofed_loopback_hosts() {
+    let db = test_db();
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                JSON.stringify({
+                    localhost: agentdesk.http.post("http://localhost.evil.example:8791", {}).error,
+                    ipv4: agentdesk.http.post("http://127.0.0.1.evil.example:8791", {}).error
+                })
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["localhost"], "only localhost allowed");
+        assert_eq!(parsed["ipv4"], "only localhost allowed");
+    });
+}
+
+#[test]
 fn test_engine_db_query_raw_returns_unified_error_json() {
     let db = test_db();
     let rt = rquickjs::Runtime::new().unwrap();

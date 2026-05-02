@@ -13,8 +13,7 @@ pub(super) fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     http_obj.set(
         "__post_raw",
         Function::new(ctx.clone(), |url: String, body_json: String| -> String {
-            let loopback_prefix = format!("http://{}", crate::config::loopback());
-            if !url.starts_with(&loopback_prefix) {
+            if !crate::utils::loopback_url::is_loopback_url(&url, None) {
                 return r#"{"error":"only localhost allowed"}"#.to_string();
             }
             // Run on a dedicated thread to avoid blocking the tokio I/O

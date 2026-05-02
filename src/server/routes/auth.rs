@@ -51,11 +51,7 @@ pub async fn auth_middleware(
         .get("origin")
         .or_else(|| req.headers().get("referer"))
         .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            let loopback = crate::config::loopback();
-            // Accept both configured loopback (127.0.0.1) and "localhost" as valid local origins
-            v.starts_with(&format!("http://{loopback}")) || v.starts_with("http://localhost")
-        })
+        .map(|v| crate::utils::loopback_url::is_loopback_url(v, Some(state.config.server.port)))
         .unwrap_or(false);
     if is_same_origin {
         return next.run(req).await;

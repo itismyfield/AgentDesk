@@ -136,27 +136,7 @@ pub(crate) fn reasons_evidence(reasons: &[ClassifiedReason]) -> Value {
 }
 
 pub(crate) fn is_loopback_base_url(base: &str) -> bool {
-    let trimmed = base.trim();
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-        return false;
-    }
-
-    let Some(authority_and_path) = trimmed.split_once("://").map(|(_, rest)| rest) else {
-        return false;
-    };
-    let authority = authority_and_path
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split_once(']')
-            .map(|(host, _)| host)
-            .unwrap_or_default()
-    } else {
-        authority.split(':').next().unwrap_or_default()
-    };
-
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    crate::utils::loopback_url::is_loopback_url(base, None)
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -177,6 +157,8 @@ mod tests {
     fn loopback_base_url_rejects_remote_and_unsupported_targets() {
         assert!(!is_loopback_base_url("http://10.0.0.5:8791"));
         assert!(!is_loopback_base_url("https://example.com"));
+        assert!(!is_loopback_base_url("http://localhost.evil.example:8791"));
+        assert!(!is_loopback_base_url("http://127.0.0.1.evil.example:8791"));
         assert!(!is_loopback_base_url("ftp://localhost"));
     }
 }

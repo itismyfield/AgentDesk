@@ -925,6 +925,77 @@ async fn protected_domain_router_only_keeps_expected_auth_exemptions() {
 }
 
 #[tokio::test]
+async fn auth_middleware_same_origin_uses_parsed_loopback_host_and_port() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.port = 8791;
+    config.server.auth_token = Some("secret-token".to_string());
+    let state = AppState::test_state_with_config(db, engine, config);
+    let app = protected_api_domain(
+        axum::Router::new().route("/settings", axum::routing::get(|| async { StatusCode::OK })),
+        state.clone(),
+    )
+    .with_state(state);
+
+    for origin in [
+        "http://localhost:8791",
+        "http://127.0.0.1:8791",
+        "http://[::1]:8791",
+        "https://localhost:8791",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header("origin", origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "origin {origin}");
+    }
+
+    let referer_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/settings")
+                .header("referer", "http://localhost:8791/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(referer_response.status(), StatusCode::OK);
+
+    for origin in [
+        "http://localhost.evil.example:8791",
+        "http://127.0.0.1.evil.example:8791",
+        "http://localhost:8792",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/settings")
+                    .header("origin", origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "origin {origin}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn health_detail_and_stale_mailbox_repair_pg_require_bearer_when_auth_enabled() {
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;

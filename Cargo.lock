@@ -49,6 +49,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "ureq",
+ "url",
  "uuid",
  "which 8.0.2",
 ]
