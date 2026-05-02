@@ -664,7 +664,7 @@ fn render_status_panel(
 }
 
 fn render_session_panel_line(session: &SessionPanelSnapshot, provider: &ProviderKind) -> String {
-    let mut parts = vec![format!("Session  {}", session.kind.as_str())];
+    let mut parts = vec![format!("Lifecycle {}", session.kind.as_str())];
     if let Some(provider_session_id) = session
         .provider_session_id
         .as_deref()
@@ -682,7 +682,7 @@ fn render_session_panel_line(session: &SessionPanelSnapshot, provider: &Provider
 }
 
 fn render_task_panel_line(task: &TaskPanelSnapshot) -> String {
-    let mut parts = vec![format!("Task     dispatch #{}", task.dispatch_id)];
+    let mut parts = vec![format!("Task      dispatch #{}", task.dispatch_id)];
     if let Some(card_id) = task.card_id.as_deref() {
         parts.push(format!("card #{card_id}"));
     }
@@ -700,7 +700,7 @@ fn render_context_panel_line(context: &ContextPanelSnapshot) -> Option<String> {
         "📦"
     };
     let mut line = format!(
-        "Context  {icon} {usage_percent}% used · auto-compact {}%",
+        "Context   {icon} {usage_percent}% used · auto-compact {}%",
         context.compact_percent
     );
     if usage_percent >= 85 {
@@ -718,7 +718,7 @@ fn render_prompt_panel_line(prompt: &PromptPanelSnapshot) -> String {
         render_prompt_tokens(prompt.total_input_tokens_est),
     ];
     truncate_chars(
-        &format!("Prompt   {}", parts.join(" · ")),
+        &format!("Prompt    {}", parts.join(" · ")),
         PROMPT_PANEL_LINE_MAX_CHARS,
     )
 }
@@ -1650,7 +1650,7 @@ mod tests {
         ));
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(rendered.contains("Session  resumed"));
+        assert!(rendered.contains("Lifecycle resumed"));
         assert!(rendered.contains("provider session claude#8f21abcd…"));
         assert!(rendered.contains("tmux kept"));
     }
@@ -1671,7 +1671,7 @@ mod tests {
 
         let fresh =
             events.render_status_panel(fresh_channel_id, &ProviderKind::Codex, 1_700_000_000);
-        assert!(fresh.contains("Session  fresh"));
+        assert!(fresh.contains("Lifecycle fresh"));
         assert!(fresh.contains("provider session codex#fresh-se…"));
         assert!(fresh.contains("tmux new"));
 
@@ -1688,7 +1688,7 @@ mod tests {
 
         let fallback =
             events.render_status_panel(fallback_channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(fallback.contains("Session  fallback"));
+        assert!(fallback.contains("Lifecycle fallback"));
         assert!(fallback.contains("provider session claude#fallback…"));
         assert!(fallback.contains("tmux kept"));
     }
@@ -1704,7 +1704,7 @@ mod tests {
         ));
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(!rendered.contains("Session  "));
+        assert!(!rendered.contains("Lifecycle "));
     }
 
     #[test]
@@ -1714,7 +1714,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-        assert!(!rendered.contains("Context  "));
+        assert!(!rendered.contains("Context   "));
     }
 
     #[test]
@@ -1730,7 +1730,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-        assert!(rendered.contains("Task     dispatch #dsp_123 · card #42 · implementation"));
+        assert!(rendered.contains("Task      dispatch #dsp_123 · card #42 · implementation"));
     }
 
     #[test]
@@ -1740,7 +1740,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-        assert!(!rendered.contains("Task     "));
+        assert!(!rendered.contains("Task      "));
     }
 
     #[test]
@@ -1751,7 +1751,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-        assert!(rendered.contains("Task     dispatch #dsp_404"));
+        assert!(rendered.contains("Task      dispatch #dsp_404"));
         assert!(!rendered.contains("card #"));
     }
 
@@ -1762,7 +1762,7 @@ mod tests {
         assert!(events.set_context_panel_usage(normal_channel_id, 740, 0, 0, 1000, 90));
         let normal =
             events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(normal.contains("Context  📦 74% used · auto-compact 90%"));
+        assert!(normal.contains("Context   📦 74% used · auto-compact 90%"));
         assert!(!normal.contains("임박"));
         assert!(!normal.contains("자동 압축 직전"));
 
@@ -1773,13 +1773,13 @@ mod tests {
             &ProviderKind::Claude,
             1_700_000_000,
         );
-        assert!(approaching.contains("Context  📦 75% used · auto-compact 90% (임박)"));
+        assert!(approaching.contains("Context   📦 75% used · auto-compact 90% (임박)"));
 
         let critical_channel_id = ChannelId::new(184);
         events.set_context_panel_usage(critical_channel_id, 700, 100, 50, 1000, 90);
         let critical =
             events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(critical.contains("Context  ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
+        assert!(critical.contains("Context   ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
     }
 
     #[test]
@@ -1830,7 +1830,7 @@ mod tests {
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
         assert!(
             rendered
-                .contains("Prompt   Full profile · 8/9 layers — 1 skipped · ~21.4k input tokens")
+                .contains("Prompt    Full profile · 8/9 layers — 1 skipped · ~21.4k input tokens")
         );
     }
 
@@ -1840,7 +1840,7 @@ mod tests {
         let channel_id = ChannelId::new(186);
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(!rendered.contains("Prompt   "));
+        assert!(!rendered.contains("Prompt    "));
     }
 
     #[test]
