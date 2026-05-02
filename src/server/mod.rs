@@ -188,6 +188,9 @@ pub(crate) async fn run(
     }
     crate::services::observability::init_observability(pg_pool.clone());
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
+    if let Some(pool) = pg_pool.clone() {
+        crate::services::dispatch_watchdog::spawn(pool);
+    }
     crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
