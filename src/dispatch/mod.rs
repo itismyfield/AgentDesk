@@ -957,7 +957,7 @@ mod tests {
     use super::create_dispatch_record_sqlite_test as create_dispatch_record_test;
     use super::resolve_card_worktree_sqlite_test as resolve_card_worktree;
     use super::*;
-    use std::process::Command;
+    use crate::services::git::GitCommand;
     use std::sync::MutexGuard;
 
     struct DispatchEnvOverride {
@@ -1055,10 +1055,10 @@ mod tests {
     }
 
     fn run_git(repo_dir: &str, args: &[&str]) -> std::process::Output {
-        let output = Command::new("git")
+        let output = GitCommand::new()
+            .repo(repo_dir)
             .args(args)
-            .current_dir(repo_dir)
-            .output()
+            .run_output()
             .unwrap();
         assert!(
             output.status.success(),
@@ -3720,10 +3720,10 @@ mod tests {
         // this is what makes the test bite even if target_repo injection
         // silently misrouted to repo_dir (repo_dir HEAD is just the
         // initial empty commit, not reviewed_commit).
-        let head_output = std::process::Command::new("git")
+        let head_output = GitCommand::new()
+            .repo(actual_wt)
             .args(["rev-parse", "HEAD"])
-            .current_dir(actual_wt)
-            .output()
+            .run_output()
             .unwrap();
         let head = String::from_utf8_lossy(&head_output.stdout)
             .trim()
@@ -3808,10 +3808,10 @@ mod tests {
         // (c) worktree_path is the recorded wt_path — which is the failure
         //     this test guards against.
         if let Some(emitted) = parsed["worktree_path"].as_str() {
-            let head_output = std::process::Command::new("git")
+            let head_output = GitCommand::new()
+                .repo(emitted)
                 .args(["rev-parse", "HEAD"])
-                .current_dir(emitted)
-                .output()
+                .run_output()
                 .unwrap();
             let head = String::from_utf8_lossy(&head_output.stdout)
                 .trim()

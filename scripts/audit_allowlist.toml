@@ -87,14 +87,6 @@ limit_clamp_duplication = [
 
 # Git subprocess callsites tolerated outside services::git.
 git_subprocess_callsites = [
-  "src/dispatch/dispatch_context.rs:513",
-  "src/dispatch/dispatch_context.rs:551",
-  "src/dispatch/dispatch_context.rs:569",
-  "src/dispatch/dispatch_context.rs:1920",
-  "src/dispatch/dispatch_context.rs:2758",
-  "src/dispatch/mod.rs:1058",
-  "src/dispatch/mod.rs:3723",
-  "src/dispatch/mod.rs:3811",
   "src/server/routes/agents_crud.rs:322",
   "src/server/routes/agents_crud.rs:337",
   "src/server/routes/dispatches/outbox.rs:1057",

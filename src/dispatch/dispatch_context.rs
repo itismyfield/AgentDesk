@@ -9,6 +9,7 @@ use crate::db::agents::AgentChannelBindings;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::db::agents::load_agent_channel_bindings;
 use crate::db::agents::load_agent_channel_bindings_pg;
+use crate::services::git::GitCommand;
 use crate::services::provider::ProviderKind;
 
 use super::dispatch_channel::provider_from_channel_suffix;
@@ -510,23 +511,28 @@ pub(crate) fn commit_belongs_to_card_issue(
             return false;
         }
     };
-    let Ok(output) = std::process::Command::new("git")
+    let output = match GitCommand::new()
+        .repo(&repo_dir)
         .args(["log", "--format=%s", "-n", "1", commit_sha])
-        .current_dir(&repo_dir)
-        .output()
-    else {
-        tracing::warn!(
-            "[dispatch] commit_belongs_to_card_issue: git log failed — rejecting to fallback"
-        );
-        return false;
+        .run_output()
+    {
+        Ok(output) => output,
+        Err(err) if err.status_code().is_some() => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: commit {} not reachable: {} — rejecting to fallback",
+                &commit_sha[..8.min(commit_sha.len())],
+                err
+            );
+            return false;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: git log failed: {} — rejecting to fallback",
+                err
+            );
+            return false;
+        }
     };
-    if !output.status.success() {
-        tracing::warn!(
-            "[dispatch] commit_belongs_to_card_issue: commit {} not reachable — rejecting to fallback",
-            &commit_sha[..8.min(commit_sha.len())]
-        );
-        return false;
-    }
     let subject = String::from_utf8_lossy(&output.stdout);
     let pattern = format!("(#{})", issue_number);
     subject.contains(&pattern)
@@ -548,12 +554,11 @@ pub(crate) fn commit_belongs_to_card_issue(
 }
 
 fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
-    std::process::Command::new("git")
+    GitCommand::new()
+        .repo(dir)
         .args(["cat-file", "-e", &format!("{commit_sha}^{{commit}}")])
-        .current_dir(dir)
-        .output()
-        .ok()
-        .is_some_and(|output| output.status.success())
+        .run_output()
+        .is_ok()
 }
 
 /// #682: Exact-HEAD check — returns true only when the worktree's current
@@ -566,17 +571,13 @@ fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {
 /// match is the only way to guarantee the on-disk state matches the
 /// reviewed commit.
 fn worktree_head_matches_commit(dir: &str, commit_sha: &str) -> bool {
-    let Some(output) = std::process::Command::new("git")
+    let Ok(output) = GitCommand::new()
+        .repo(dir)
         .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
-        .output()
-        .ok()
+        .run_output()
     else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
     let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
     head == commit_sha
 }
@@ -1917,23 +1918,28 @@ pub(crate) async fn commit_belongs_to_card_issue_pg(
             return false;
         }
     };
-    let Ok(output) = std::process::Command::new("git")
+    let output = match GitCommand::new()
+        .repo(&repo_dir)
         .args(["log", "--format=%s", "-n", "1", commit_sha])
-        .current_dir(&repo_dir)
-        .output()
-    else {
-        tracing::warn!(
-            "[dispatch] commit_belongs_to_card_issue: git log failed — rejecting to fallback"
-        );
-        return false;
+        .run_output()
+    {
+        Ok(output) => output,
+        Err(err) if err.status_code().is_some() => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: commit {} not reachable: {} — rejecting to fallback",
+                &commit_sha[..8.min(commit_sha.len())],
+                err
+            );
+            return false;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] commit_belongs_to_card_issue: git log failed: {} — rejecting to fallback",
+                err
+            );
+            return false;
+        }
     };
-    if !output.status.success() {
-        tracing::warn!(
-            "[dispatch] commit_belongs_to_card_issue: commit {} not reachable — rejecting to fallback",
-            &commit_sha[..8.min(commit_sha.len())]
-        );
-        return false;
-    }
     let subject = String::from_utf8_lossy(&output.stdout);
     let pattern = format!("(#{})", issue_number);
     subject.contains(&pattern)
@@ -2621,7 +2627,6 @@ mod tests {
     use crate::engine::PolicyEngine;
     use serde_json::json;
     use std::io::{self, Write};
-    use std::process::Command;
     use std::sync::MutexGuard;
     use std::sync::{Arc, Mutex};
 
@@ -2755,11 +2760,7 @@ mod tests {
     }
 
     fn run_git(dir: &str, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
+        let output = GitCommand::new().repo(dir).args(args).run_output().unwrap();
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
