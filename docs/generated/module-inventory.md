@@ -373,7 +373,7 @@
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 194 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 406 |  |
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 248 |  |
-| `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 276 |  |
+| `services::maintenance::jobs::worktree_orphan_sweep` | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 279 |  |
 | `services::mcp_config` | `src/services/mcp_config.rs` | 1072 | giant-file |
 | `services::memory` | `src/services/memory/mod.rs` | 372 |  |
 | `services::memory::local` | `src/services/memory/local.rs` | 115 |  |
@@ -447,4 +447,4 @@
 | `utils::async_bridge` | `src/utils/async_bridge.rs` | 137 |  |
 | `utils::format` | `src/utils/format.rs` | 324 |  |
 | `utils::loopback_url` | `src/utils/loopback_url.rs` | 58 |  |
-| `utils::wip_detect` | `src/utils/wip_detect.rs` | 257 |  |
+| `utils::wip_detect` | `src/utils/wip_detect.rs` | 244 |  |

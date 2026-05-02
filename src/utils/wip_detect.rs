@@ -16,7 +16,8 @@
 //! prompt-side rule. This file is the runtime-side check.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use crate::services::git::GitCommand;
 
 /// Structured warning describing uncommitted state in a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,17 +62,11 @@ impl WipWarning {
 /// Errors from `git` are treated as "no warning" rather than propagating: this
 /// helper is meant to be a soft turn-end advisory, not a fatal check.
 pub fn check_wip_uncommitted_files(workspace: &Path) -> Option<WipWarning> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
+    let output = GitCommand::new()
+        .repo(workspace)
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .output()
+        .run_output()
         .ok()?;
-
-    if !output.status.success() {
-        // Not a git repo, or some other transient issue — stay quiet.
-        return None;
-    }
 
     parse_porcelain_z(&output.stdout, workspace)
 }
@@ -132,7 +127,6 @@ fn parse_porcelain_z(bytes: &[u8], workspace: &Path) -> Option<WipWarning> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command;
     use tempfile::TempDir;
 
     fn init_repo(dir: &Path) {
@@ -145,18 +139,11 @@ mod tests {
     }
 
     fn run(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .status()
-            .expect("git available in PATH for test");
-        assert!(
-            status.success(),
-            "git {:?} failed in {}",
-            args,
-            dir.display()
-        );
+        GitCommand::new()
+            .repo(dir)
+            .args(args.iter().copied())
+            .run_output()
+            .unwrap_or_else(|error| panic!("git {args:?} failed in {}: {error}", dir.display()));
     }
 
     #[test]
