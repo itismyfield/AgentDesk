@@ -830,11 +830,33 @@ pub async fn sync_dispatch_terminal_entries_on_pg_tx(
     trigger_source: &str,
     preserve_dispatch_link: bool,
 ) -> Result<usize, String> {
+    // #1562 RC8: also match entries via kanban_card_id when the agent has
+    // performed a self-recovery (replaced a cancelled dispatch with a fresh
+    // one on the same card). The entry's `dispatch_id` pointer still
+    // references the cancelled original, so direct dispatch_id match would
+    // miss the completion. Card-id fallback only fires when the entry's
+    // tracked dispatch is NOT itself the dispatch being completed (avoids
+    // cross-row updates when both pointers happen to align) AND when the
+    // entry's previously-tracked dispatch is in a terminal non-completed
+    // state — i.e. genuine self-recovery, not normal lifecycle.
     let rows = sqlx::query(
-        "SELECT id, dispatch_id, slot_index
-         FROM auto_queue_entries
-         WHERE dispatch_id = $1
-           AND status = 'dispatched'",
+        "SELECT e.id, e.dispatch_id, e.slot_index
+         FROM auto_queue_entries e
+         WHERE e.status = 'dispatched'
+           AND (
+                 e.dispatch_id = $1
+              OR (
+                   e.kanban_card_id = (
+                     SELECT kanban_card_id
+                     FROM task_dispatches
+                     WHERE id = $1
+                   )
+                   AND COALESCE(
+                     (SELECT status FROM task_dispatches WHERE id = e.dispatch_id),
+                     ''
+                   ) IN ('cancelled', 'failed', 'superseded')
+                 )
+           )",
     )
     .bind(dispatch_id)
     .fetch_all(&mut **tx)
