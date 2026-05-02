@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use sqlx::PgPool;
 
+use crate::services::git::GitCommand;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Root directory that contains one sub-directory per active worktree.
@@ -175,14 +177,15 @@ async fn remove_orphan_worktree(path: &Path) -> Result<()> {
     // from the parent repo, which we infer by reading the .git file inside
     // the worktree (format: `gitdir: /abs/path/.git/worktrees/<name>`).
     if let Some(repo_root) = infer_repo_root_from_worktree(path) {
-        let _ = tokio::process::Command::new("git")
-            .arg("worktree")
-            .arg("remove")
-            .arg("--force")
-            .arg(path)
-            .current_dir(&repo_root)
-            .output()
-            .await;
+        let worktree_path = path.to_path_buf();
+        let _ = tokio::task::spawn_blocking(move || {
+            GitCommand::new()
+                .repo(&repo_root)
+                .args(["worktree", "remove", "--force"])
+                .arg(worktree_path)
+                .run_output()
+        })
+        .await;
     }
 
     if path.exists() {

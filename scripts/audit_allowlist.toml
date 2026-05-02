@@ -110,9 +110,6 @@ git_subprocess_callsites = [
   "src/services/discord/session_runtime.rs:1162",
   "src/services/discord/turn_bridge/completion_guard.rs:808",
   "src/services/discord/turn_bridge/completion_guard.rs:1570",
-  "src/services/maintenance/jobs/worktree_orphan_sweep.rs:178",
-  "src/utils/wip_detect.rs:64",
-  "src/utils/wip_detect.rs:148",
 ]
 
 # Legacy SQLite references: cli/migrate, compat, and db/legacy_sqlite are
