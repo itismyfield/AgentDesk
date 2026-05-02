@@ -8,7 +8,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::config::{AgentChannel, AgentDef, Config};
-use crate::server::routes::settings::{KvSeedAction, config_default_seed_actions};
+use crate::services::settings::{KvSeedAction, config_default_seed_actions};
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";

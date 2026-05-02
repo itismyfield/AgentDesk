@@ -23,6 +23,7 @@ pub mod mcp_config;
 pub mod memory;
 pub mod message_outbox;
 pub mod observability;
+pub mod onboarding;
 pub mod opencode;
 pub mod pipeline_override;
 pub mod pipeline_routes;

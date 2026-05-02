@@ -8,6 +8,29 @@ pub(super) async fn create_activate_dispatch_pg(
     title: &str,
     context: &serde_json::Value,
 ) -> Result<String, String> {
+    // #1564 RC10: refuse to create policy-driven follow-up dispatches while
+    // the owning auto-queue run is paused. force_transition uses a separate
+    // path (kanban_cards/{id}/transition) and is not gated here, matching
+    // the "circuit breaker" intent of pause.
+    let paused_run_id = sqlx::query_scalar::<_, String>(
+        "SELECT r.id
+         FROM auto_queue_entries e
+         JOIN auto_queue_runs r ON r.id = e.run_id
+         WHERE e.kanban_card_id = $1
+           AND r.status = 'paused'
+         ORDER BY e.created_at DESC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("check paused run for {card_id}: {error}"))?;
+    if let Some(run_id) = paused_run_id {
+        return Err(format!(
+            "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
+        ));
+    }
+
     if dispatch_type != "review-decision"
         && let Some(existing_id) = sqlx::query_scalar::<_, String>(
             "SELECT id
