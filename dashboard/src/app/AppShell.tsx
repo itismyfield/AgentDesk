@@ -1178,8 +1178,15 @@ export default function AppShell({
                       agents={allAgents}
                       departments={allDepartments}
                       onAssignIssue={async (payload) => {
-                        const assigned = await api.assignKanbanIssue(payload);
-                        upsertKanbanCard(assigned);
+                        const result = await api.assignKanbanIssue(payload);
+                        upsertKanbanCard(result.card);
+                        if (result.transition?.attempted && !result.transition.ok) {
+                          throw new Error(
+                            result.transition.error
+                              ? `Issue assigned, but transition failed: ${result.transition.error}`
+                              : "Issue assigned, but transition failed.",
+                          );
+                        }
                       }}
                       onUpdateCard={async (id, patch) => {
                         const updated = await api.updateKanbanCard(id, patch);

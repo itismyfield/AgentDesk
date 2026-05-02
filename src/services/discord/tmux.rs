@@ -2054,6 +2054,25 @@ pub(super) fn notify_path_offset_advance_decision(
     OffsetAdvanceDecision::default()
 }
 
+#[inline]
+fn should_suppress_relay_before_emit(
+    paused: bool,
+    epoch_changed: bool,
+    turn_delivered: bool,
+    deferred_monitor_ready: bool,
+) -> bool {
+    (paused || epoch_changed || turn_delivered) && !deferred_monitor_ready
+}
+
+#[inline]
+fn should_stop_watcher_after_terminal_finalize(
+    terminal_output_committed: bool,
+    dispatch_ok: bool,
+    watcher_handled_mailbox_finish: bool,
+) -> bool {
+    terminal_output_committed && dispatch_ok && watcher_handled_mailbox_finish
+}
+
 /// #826: Build the dedupe session_key for a background-trigger outbox row.
 /// Includes the tmux output offset and a short content hash so distinct
 /// completions land as separate rows (different offsets ⇒ different keys)
@@ -4054,7 +4073,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let turn_delivered_now = turn_delivered.load(Ordering::Relaxed);
         let deferred_monitor_ready =
             monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
-        if (paused_now || epoch_changed_now || turn_delivered_now) && !deferred_monitor_ready {
+        if should_suppress_relay_before_emit(
+            paused_now,
+            epoch_changed_now,
+            turn_delivered_now,
+            deferred_monitor_ready,
+        ) {
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = delete_nonterminal_placeholder(
                     &http,
@@ -5114,6 +5138,19 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     "watcher completed with queued backlog",
                 );
             }
+            if should_stop_watcher_after_terminal_finalize(
+                terminal_output_committed,
+                dispatch_ok,
+                watcher_handled_mailbox_finish,
+            ) {
+                turn_delivered.store(true, Ordering::Release);
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 watcher: terminal turn finalized; stopping watcher for {} to avoid duplicate relay",
+                    tmux_session_name
+                );
+                break 'watcher_loop;
+            }
         } else if !relay_suppressed {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
@@ -6112,6 +6149,7 @@ mod tests {
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
         should_flush_post_terminal_success_continuation,
+        should_stop_watcher_after_terminal_finalize, should_suppress_relay_before_emit,
         should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
@@ -6172,6 +6210,38 @@ mod tests {
         assert!(!tmux_death_is_normal_completion(
             None,
             Some("recent_output=completed_result_present")
+        ));
+    }
+
+    #[test]
+    fn turn_delivered_suppresses_relay_before_emit() {
+        assert!(should_suppress_relay_before_emit(false, false, true, false));
+        assert!(should_suppress_relay_before_emit(true, false, false, false));
+        assert!(should_suppress_relay_before_emit(false, true, false, false));
+
+        assert!(
+            !should_suppress_relay_before_emit(false, false, true, true),
+            "deferred monitor handoff keeps its relay path alive"
+        );
+        assert!(!should_suppress_relay_before_emit(
+            false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn watcher_stops_after_terminal_finalize_only_when_mailbox_finished() {
+        assert!(should_stop_watcher_after_terminal_finalize(
+            true, true, true
+        ));
+
+        assert!(!should_stop_watcher_after_terminal_finalize(
+            false, true, true
+        ));
+        assert!(!should_stop_watcher_after_terminal_finalize(
+            true, false, true
+        ));
+        assert!(!should_stop_watcher_after_terminal_finalize(
+            true, true, false
         ));
     }
 

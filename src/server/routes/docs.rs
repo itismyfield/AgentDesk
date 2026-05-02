@@ -1677,7 +1677,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"body": {"github_repo": "itismyfield/AgentDesk", "github_issue_number": 426, "title": "Improve docs", "assignee_agent_id": "project-agentdesk"}}),
-            json!({"card": {"id": "card-426", "status": "ready", "github_issue_number": 426, "assigned_agent_id": "project-agentdesk"}}),
+            json!({
+                "card": {"id": "card-426", "status": "requested", "github_issue_number": 426, "assigned_agent_id": "project-agentdesk"},
+                "deduplicated": false,
+                "assignment": {"ok": true, "agent_id": "project-agentdesk"},
+                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested"}
+            }),
         )
         .with_error_example(
             404,
@@ -1784,7 +1789,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "card-1"}, "body": {"agent_id": "ch-td"}}),
-            json!({"card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "requested"}}),
+            json!({
+                "card": {"id": "card-1", "assigned_agent_id": "ch-td", "status": "requested"},
+                "assignment": {"ok": true, "agent_id": "ch-td"},
+                "transition": {"attempted": true, "ok": true, "from": "backlog", "to": "requested", "target": "requested"}
+            }),
         ),
         ep(
             "POST",
