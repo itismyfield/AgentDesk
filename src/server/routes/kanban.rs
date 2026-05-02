@@ -734,18 +734,6 @@ pub async fn assign_card(
             }
         };
 
-        crate::pipeline::ensure_loaded();
-        let pipeline = crate::pipeline::get();
-        let ready_state = pipeline
-            .dispatchable_states()
-            .into_iter()
-            .next()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                tracing::warn!("Pipeline has no dispatchable states, using initial state");
-                pipeline.initial_state().to_string()
-            });
-
         match sqlx::query(
             "UPDATE kanban_cards
              SET assigned_agent_id = $1,
@@ -772,38 +760,9 @@ pub async fn assign_card(
             }
         }
 
-        if old_status != ready_state {
-            if let Some(path) = pipeline.free_path_to_dispatchable(&old_status) {
-                for step in &path {
-                    if let Err(error) = crate::kanban::transition_status_with_opts_pg_only(
-                        pool,
-                        &state.engine,
-                        &id,
-                        step,
-                        "assign",
-                        crate::engine::transition::ForceIntent::None,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "[assign_card] postgres walk step to '{step}' failed: {error}"
-                        );
-                        break;
-                    }
-                }
-            } else if let Err(error) = crate::kanban::transition_status_with_opts_pg_only(
-                pool,
-                &state.engine,
-                &id,
-                &ready_state,
-                "assign",
-                crate::engine::transition::ForceIntent::None,
-            )
-            .await
-            {
-                tracing::warn!("[assign_card] postgres transition failed: {error}");
-            }
-        }
+        let transition =
+            assign_transition_to_dispatchable_pg(pool, &state.engine, &id, &old_status, "assign")
+                .await;
 
         return match load_card_json_pg(pool, &id).await {
             Ok(Some(card)) => {
@@ -812,7 +771,14 @@ pub async fn assign_card(
                     "kanban_card_updated",
                     card.clone(),
                 );
-                (StatusCode::OK, Json(json!({"card": card})))
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "card": card,
+                        "assignment": {"ok": true, "agent_id": body.agent_id},
+                        "transition": transition,
+                    })),
+                )
             }
             Ok(None) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1633,50 +1599,14 @@ pub async fn assign_issue(
             }
         };
 
-        crate::pipeline::ensure_loaded();
-        let pipeline = crate::pipeline::get();
-        let ready_state = pipeline
-            .dispatchable_states()
-            .into_iter()
-            .next()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                tracing::warn!("Pipeline has no dispatchable states, using initial state");
-                pipeline.initial_state().to_string()
-            });
-
-        if old_status != ready_state {
-            if let Some(path) = pipeline.free_path_to_dispatchable(&old_status) {
-                for step in &path {
-                    if let Err(error) = crate::kanban::transition_status_with_opts_pg_only(
-                        pool,
-                        &state.engine,
-                        &upserted.card_id,
-                        step,
-                        "assign",
-                        crate::engine::transition::ForceIntent::None,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "[assign_issue] postgres walk step to '{step}' failed: {error}"
-                        );
-                        break;
-                    }
-                }
-            } else if let Err(error) = crate::kanban::transition_status_with_opts_pg_only(
-                pool,
-                &state.engine,
-                &upserted.card_id,
-                &ready_state,
-                "assign",
-                crate::engine::transition::ForceIntent::None,
-            )
-            .await
-            {
-                tracing::warn!("[assign_issue] postgres transition failed: {error}");
-            }
-        }
+        let transition = assign_transition_to_dispatchable_pg(
+            pool,
+            &state.engine,
+            &upserted.card_id,
+            &old_status,
+            "assign_issue",
+        )
+        .await;
 
         return match load_card_json_pg(pool, &upserted.card_id).await {
             Ok(Some(card)) => {
@@ -1695,6 +1625,8 @@ pub async fn assign_issue(
                     Json(json!({
                         "card": card,
                         "deduplicated": !upserted.created,
+                        "assignment": {"ok": true, "agent_id": body.assignee_agent_id},
+                        "transition": transition,
                     })),
                 )
             }
@@ -1713,6 +1645,94 @@ pub async fn assign_issue(
 }
 
 // ── Helpers ────────────────────────────────────────────────────
+
+async fn assign_transition_to_dispatchable_pg(
+    pool: &sqlx::PgPool,
+    engine: &crate::engine::PolicyEngine,
+    card_id: &str,
+    old_status: &str,
+    source: &str,
+) -> serde_json::Value {
+    crate::pipeline::ensure_loaded();
+    let pipeline = crate::pipeline::get();
+    let ready_state = pipeline
+        .dispatchable_states()
+        .into_iter()
+        .next()
+        .map(|state| state.to_string())
+        .unwrap_or_else(|| {
+            tracing::warn!("Pipeline has no dispatchable states, using initial state");
+            pipeline.initial_state().to_string()
+        });
+
+    if old_status == ready_state {
+        return json!({
+            "attempted": false,
+            "ok": true,
+            "from": old_status,
+            "to": old_status,
+            "target": ready_state,
+            "steps": [],
+            "completed_steps": [],
+        });
+    }
+
+    let steps = pipeline
+        .free_path_to_dispatchable(old_status)
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| vec![ready_state.clone()]);
+    let mut completed_steps = Vec::new();
+    let mut current_status = old_status.to_string();
+
+    for step in &steps {
+        match crate::kanban::transition_status_with_opts_pg_only(
+            pool,
+            engine,
+            card_id,
+            step,
+            source,
+            crate::engine::transition::ForceIntent::None,
+        )
+        .await
+        {
+            Ok(result) => {
+                current_status = result.to.clone();
+                completed_steps.push(json!({
+                    "from": result.from,
+                    "to": result.to,
+                    "changed": result.changed,
+                }));
+            }
+            Err(error) => {
+                let error_message = format!("{error}");
+                tracing::warn!(
+                    "[{source}] postgres assign transition step to '{step}' failed: {error_message}"
+                );
+                return json!({
+                    "attempted": true,
+                    "ok": false,
+                    "from": old_status,
+                    "to": current_status,
+                    "target": ready_state,
+                    "steps": steps,
+                    "completed_steps": completed_steps,
+                    "failed_step": step,
+                    "error": error_message,
+                });
+            }
+        }
+    }
+
+    json!({
+        "attempted": true,
+        "ok": true,
+        "from": old_status,
+        "to": current_status,
+        "target": ready_state,
+        "steps": steps,
+        "completed_steps": completed_steps,
+    })
+}
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 pub(super) fn card_row_to_json(row: &sqlite_test::Row) -> sqlite_test::Result<serde_json::Value> {
