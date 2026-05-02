@@ -1,7 +1,7 @@
 ---
 doc_type: "prd"
 schema_version: "1"
-status: "draft"
+status: "implemented"
 topic_slug: "agentdesk-automation-candidate-pipeline"
 topic_folder: "agentdesk-automation-candidate-pipeline"
 linked_spec: "./agentdesk-automation-candidate-pipeline-spec.md"
@@ -12,7 +12,7 @@ updated_at: "2026-05-02"
 
 # PRD: AgentDesk Automation Candidate Pipeline
 
-> status: `draft`
+> status: `implemented`
 > linked_spec: [agentdesk-automation-candidate-pipeline-spec.md](./agentdesk-automation-candidate-pipeline-spec.md)
 
 ## PRD 업데이트 규칙

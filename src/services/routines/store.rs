@@ -860,7 +860,7 @@ impl RoutineStore {
                    status,
                    COUNT(*)::BIGINT AS occurrence_count,
                    MAX(created_at) AS last_seen_at,
-                   MAX(error) FILTER (WHERE error IS NOT NULL) AS last_error
+                   (ARRAY_AGG(error ORDER BY created_at DESC) FILTER (WHERE error IS NOT NULL))[1] AS last_error
             FROM message_outbox
             WHERE created_at > NOW() - INTERVAL '24 hours'
               AND (status IN ('failed', 'error') OR error IS NOT NULL)
@@ -2357,6 +2357,11 @@ mod tests {
             obs.pointer("/value/evidence_count").and_then(Value::as_u64),
             Some(8)
         );
+        assert_eq!(
+            obs.pointer("/value/last_seen_at").and_then(Value::as_str),
+            Some("2026-05-02T09:59:00Z"),
+            "last_seen_at must pass through bounded projection"
+        );
         assert!(
             obs.pointer("/value/suggested_automation")
                 .and_then(Value::as_str)
@@ -2366,6 +2371,87 @@ mod tests {
                 <= 515
         );
         assert!(obs.pointer("/value/raw_memory_body").is_none());
+    }
+
+    #[test]
+    fn candidate_approved_observation_forwards_approved_at() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let approved_at = "2026-05-02T09:55:00Z";
+        let raw = serde_json::json!({
+            "signature": "candidate-b",
+            "score": 87,
+            "category": "routine-candidate",
+            "approved_at": approved_at,
+            "suggested_automation": "자동화 제안",
+            "outcome_summary": "결과 요약",
+            "secret_field": "MUST_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_approved:candidate-b",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate approved observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-b")
+        );
+        assert_eq!(
+            obs.pointer("/value/approved_at").and_then(Value::as_str),
+            Some(approved_at),
+            "approved_at must pass through bounded projection so executor can read it"
+        );
+        assert_eq!(
+            obs.pointer("/value/score").and_then(Value::as_u64),
+            Some(87)
+        );
+        assert!(obs.pointer("/value/secret_field").is_none());
+        // source defaults to "precomputed_digest" for unknown source_kinds;
+        // the key itself is the authoritative route for JS to identify the marker type.
+        assert_eq!(
+            obs.get("key").and_then(Value::as_str),
+            Some("routine_observation:candidate_approved:candidate-b")
+        );
+    }
+
+    #[test]
+    fn candidate_dispatched_observation_forwards_dispatched_at() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let dispatched_at = "2026-05-02T08:00:00Z";
+        let raw = serde_json::json!({
+            "signature": "candidate-c",
+            "dispatched_at": dispatched_at,
+            "category": "routine-candidate",
+            "internal_state": "MUST_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_dispatched:candidate-c",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate dispatched observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-c")
+        );
+        assert_eq!(
+            obs.pointer("/value/dispatched_at").and_then(Value::as_str),
+            Some(dispatched_at),
+            "dispatched_at must pass through so executor and recommender can read actual dispatch time"
+        );
+        assert!(obs.pointer("/value/internal_state").is_none());
+        // source defaults to "precomputed_digest" for unknown source_kinds;
+        // the key itself is the authoritative route for JS to identify the marker type.
+        assert_eq!(
+            obs.get("key").and_then(Value::as_str),
+            Some("routine_observation:candidate_dispatched:candidate-c")
+        );
     }
 
     #[test]
