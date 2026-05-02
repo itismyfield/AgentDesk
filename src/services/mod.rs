@@ -10,6 +10,7 @@ pub mod discord;
 pub mod discord_config_audit;
 pub mod discord_dm_reply_store;
 pub mod disk_monitor;
+pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dispatches_followup;

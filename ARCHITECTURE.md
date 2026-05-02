@@ -412,6 +412,7 @@ src/
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
+│   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches.rs
 │   ├── dispatches_followup.rs
