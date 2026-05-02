@@ -4,18 +4,18 @@
 
 Automated audit of giant files, route SRP violations, direct Discord sends, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, and source-of-truth alias writes. See `scripts/audit_maintainability.py` (#1282).
 
-Hard-gating is **enabled** for 4 checks: `giant_files`, `direct_discord_sends`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
+Hard-gating is **enabled** for 5 checks: `giant_files`, `direct_discord_sends`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
 
 ## Summary
 
 | Rule | Hits | Hard gate |
 |---|---:|:--:|
 | `giant_files` | 0 | YES |
-| `route_srp_violations` | 21 | no |
+| `route_srp_violations` | 22 | no |
 | `direct_discord_sends` | 0 | YES |
 | `manual_json_row_mapping` | 0 | no |
-| `limit_clamp_duplication` | 3 | no |
-| `git_subprocess_callsites` | 49 | no |
+| `limit_clamp_duplication` | 5 | no |
+| `git_subprocess_callsites` | 0 | YES |
 | `legacy_sqlite_refs` | 0 | YES |
 | `source_of_truth_alias_writes` | 0 | YES |
 
@@ -31,18 +31,19 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/server/routes/agents.rs` |  | route file mixes SQL (32), json!() (79), and crate::services calls (10) |
+| warn | `src/server/routes/agents.rs` |  | route file mixes SQL (32), json!() (80), and crate::services calls (12) |
 | warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (73), and crate::services calls (5) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
 | warn | `src/server/routes/analytics.rs` |  | route file mixes SQL (32), json!() (61), and crate::services calls (30) |
 | warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
 | warn | `src/server/routes/dispatched_sessions.rs` |  | route file mixes SQL (219), json!() (58), and crate::services calls (9) |
-| warn | `src/server/routes/dispatches/discord_delivery.rs` |  | route file mixes SQL (160), json!() (25), and crate::services calls (13) |
-| warn | `src/server/routes/dispatches/outbox.rs` |  | route file mixes SQL (102), json!() (7), and crate::services calls (4) |
+| warn | `src/server/routes/dispatches/discord_delivery.rs` |  | route file mixes SQL (164), json!() (25), and crate::services calls (18) |
+| warn | `src/server/routes/dispatches/outbox.rs` |  | route file mixes SQL (129), json!() (12), and crate::services calls (12) |
+| warn | `src/server/routes/dispatches/thread_reuse.rs` |  | route file mixes SQL (36), json!() (19), and crate::services calls (1) |
 | warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (42), json!() (35), and crate::services calls (3) |
 | warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (27), and crate::services calls (5) |
-| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (18), json!() (56), and crate::services calls (6) |
-| warn | `src/server/routes/kanban.rs` |  | route file mixes SQL (123), json!() (179), and crate::services calls (4) |
+| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (20), json!() (64), and crate::services calls (6) |
+| warn | `src/server/routes/kanban.rs` |  | route file mixes SQL (131), json!() (185), and crate::services calls (4) |
 | warn | `src/server/routes/meetings.rs` |  | route file mixes SQL (68), json!() (70), and crate::services calls (3) |
 | warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (8), json!() (15), and crate::services calls (8) |
 | warn | `src/server/routes/onboarding.rs` |  | route file mixes SQL (53), json!() (131), and crate::services calls (8) |
@@ -71,69 +72,21 @@ Identical limit/days clamp expressions appearing in 3+ source files. Candidate f
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| info | `src/server/routes/agents.rs` | 1785 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
-| info | `src/server/routes/pipeline.rs` | 998 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
+| info | `src/server/routes/agents.rs` | 1795 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
+| info | `src/server/routes/pipeline.rs` | 1029 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 | info | `src/services/api_friction.rs` | 855 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
+| info | `src/services/routines/store.rs` | 444 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
+| info | `src/services/routines/store.rs` | 586 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 
 ## Direct git subprocess callsites (`git_subprocess_callsites`)
 
 std::process::Command::new("git") callsites outside src/services/git. Prefer the centralised git helper for consistent error handling.
 
-| Severity | File | Line | Message |
-|---|---|---:|---|
-| info | `src/cli/client.rs` | 136 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/client.rs` | 1111 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/dcserver.rs` | 1162 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/dcserver.rs` | 1172 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/dcserver.rs` | 1175 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/dcserver.rs` | 1178 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/dcserver.rs` | 1181 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 71 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 760 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 771 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 1253 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 1270 | direct git subprocess (consider services::git helper) |
-| info | `src/cli/direct.rs` | 1294 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/dispatch_context.rs` | 513 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/dispatch_context.rs` | 551 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/dispatch_context.rs` | 569 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/dispatch_context.rs` | 1890 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/dispatch_context.rs` | 2683 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/mod.rs` | 889 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/mod.rs` | 3483 | direct git subprocess (consider services::git helper) |
-| info | `src/dispatch/mod.rs` | 3571 | direct git subprocess (consider services::git helper) |
-| info | `src/server/routes/agents_crud.rs` | 322 | direct git subprocess (consider services::git helper) |
-| info | `src/server/routes/agents_crud.rs` | 337 | direct git subprocess (consider services::git helper) |
-| info | `src/server/routes/dispatches/outbox.rs` | 892 | direct git subprocess (consider services::git helper) |
-| info | `src/server/routes/dispatches/outbox.rs` | 908 | direct git subprocess (consider services::git helper) |
-| info | `src/server/routes/dispatches/outbox.rs` | 978 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/recovery_engine.rs` | 287 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/recovery_engine.rs` | 4297 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/router/message_handler.rs` | 6126 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/router/message_handler.rs` | 6131 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/router/message_handler.rs` | 6136 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/router/message_handler.rs` | 6141 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 254 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 282 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 304 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 314 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 321 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 341 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 353 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 376 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 616 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 644 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 1195 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/session_runtime.rs` | 1210 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/turn_bridge/completion_guard.rs` | 808 | direct git subprocess (consider services::git helper) |
-| info | `src/services/discord/turn_bridge/completion_guard.rs` | 1570 | direct git subprocess (consider services::git helper) |
-| info | `src/services/maintenance/jobs/worktree_orphan_sweep.rs` | 178 | direct git subprocess (consider services::git helper) |
-| info | `src/utils/wip_detect.rs` | 64 | direct git subprocess (consider services::git helper) |
-| info | `src/utils/wip_detect.rs` | 148 | direct git subprocess (consider services::git helper) |
+_No findings._
 
 ## Legacy SQLite references (`legacy_sqlite_refs`)
 
-rusqlite / Sqlite* / .sqlite references outside cli/migrate, compat, and db/legacy_sqlite. Surfaces fossils after the Postgres cutover.
+rusqlite / Sqlite* / .sqlite references outside cli/migrate, compat, and db/legacy_sqlite, plus sqlite3 / agentdesk.sqlite in operational shell scripts. Surfaces fossils after the Postgres cutover.
 
 _No findings._
 

@@ -1,5 +1,6 @@
 use super::runtime_store::worktrees_root;
 use super::*;
+use crate::services::git::GitCommand;
 
 /// Per-channel session state
 #[derive(Clone)]
@@ -251,11 +252,12 @@ pub(super) fn create_git_worktree(
     channel_name: &str,
     provider: &str,
 ) -> Result<(String, String), String> {
-    let git_check = std::process::Command::new("git")
-        .args(["-C", repo_path, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map_err(|e| format!("git check failed: {}", e))?;
-    if !git_check.status.success() {
+    if GitCommand::new()
+        .repo(repo_path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .run_output()
+        .is_err()
+    {
         return Err(format!("{} is not a git repository", repo_path));
     }
 
@@ -279,17 +281,14 @@ pub(super) fn create_git_worktree(
     let wt_path = wt_dir.display().to_string();
     let base_ref = git_upstream_base_ref(repo_path);
 
-    let output = std::process::Command::new("git")
-        .args([
-            "-C", repo_path, "worktree", "add", "-b", &branch, &wt_path, &base_ref,
-        ])
-        .output()
+    GitCommand::new()
+        .repo(repo_path)
+        .args(["worktree", "add", "-b"])
+        .arg(&branch)
+        .arg(&wt_path)
+        .arg(&base_ref)
+        .run_output()
         .map_err(|e| format!("git worktree add failed: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree add failed: {}", stderr));
-    }
 
     let ts_log = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
@@ -301,28 +300,28 @@ pub(super) fn create_git_worktree(
 }
 
 fn git_upstream_base_ref(repo_path: &str) -> String {
-    let check = std::process::Command::new("git")
-        .args(["-C", repo_path, "rev-parse", "--verify", "origin/main"])
-        .output();
-    if let Ok(out) = check
-        && out.status.success()
+    if GitCommand::new()
+        .repo(repo_path)
+        .args(["rev-parse", "--verify", "origin/main"])
+        .run_output()
+        .is_ok()
     {
         return "origin/main".to_string();
     }
 
     // origin/main not available locally — attempt a shallow fetch before falling back
-    let fetch = std::process::Command::new("git")
-        .args(["-C", repo_path, "fetch", "origin", "main", "--depth=1"])
-        .output();
-    if let Ok(out) = fetch
-        && out.status.success()
+    if GitCommand::new()
+        .repo(repo_path)
+        .args(["fetch", "origin", "main", "--depth=1"])
+        .run_output()
+        .is_ok()
     {
         // Re-verify after fetch
-        let recheck = std::process::Command::new("git")
-            .args(["-C", repo_path, "rev-parse", "--verify", "origin/main"])
-            .output();
-        if let Ok(out) = recheck
-            && out.status.success()
+        if GitCommand::new()
+            .repo(repo_path)
+            .args(["rev-parse", "--verify", "origin/main"])
+            .run_output()
+            .is_ok()
         {
             tracing::info!(
                 "git fetch origin main --depth=1 succeeded for repo {repo_path}; using origin/main as base ref"
@@ -338,22 +337,19 @@ fn git_upstream_base_ref(repo_path: &str) -> String {
 }
 
 fn worktree_has_local_changes(wt_info: &WorktreeInfo) -> Result<bool, String> {
-    let status = std::process::Command::new("git")
-        .args(["-C", &wt_info.worktree_path, "status", "--porcelain"])
-        .output()
+    let status = GitCommand::new()
+        .repo(&wt_info.worktree_path)
+        .args(["status", "--porcelain"])
+        .run_output()
         .map_err(|e| format!("git status failed: {e}"))?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr).trim().to_string();
-        return Err(format!("git status failed: {stderr}"));
-    }
     Ok(!status.stdout.is_empty())
 }
 
 fn git_command_output(repo_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
-    std::process::Command::new("git")
-        .args(["-C", repo_path])
-        .args(args)
-        .output()
+    GitCommand::new()
+        .repo(repo_path)
+        .args(args.iter().copied())
+        .run_output()
         .map_err(|e| format!("git {:?} failed: {e}", args))
 }
 
@@ -371,33 +367,10 @@ fn patch_id_from_diff(diff: &[u8]) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    use std::io::Write as _;
-
-    let mut child = std::process::Command::new("git")
+    let output = GitCommand::new()
         .args(["patch-id", "--stable"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .run_output_with_stdin(diff)
         .map_err(|e| format!("git patch-id failed: {e}"))?;
-
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "git patch-id stdin unavailable".to_string())?;
-        stdin
-            .write_all(diff)
-            .map_err(|e| format!("git patch-id stdin failed: {e}"))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("git patch-id failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git patch-id failed: {stderr}"));
-    }
 
     Ok(String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
@@ -613,54 +586,33 @@ pub(super) fn cleanup_git_worktree(
             wt_info.original_path
         );
     } else {
-        let remove = std::process::Command::new("git")
-            .args([
-                "-C",
-                &wt_info.original_path,
-                "worktree",
-                "remove",
-                &wt_info.worktree_path,
-            ])
-            .output();
-        let Ok(remove_output) = remove else {
-            tracing::warn!(
-                "  [{ts}] ⚠ Failed to remove worktree {}: unable to spawn git — preserving DB session path",
-                wt_info.worktree_path
-            );
-            return;
-        };
-        if !remove_output.status.success() {
-            let stderr = String::from_utf8_lossy(&remove_output.stderr)
-                .trim()
-                .to_string();
+        if let Err(err) = GitCommand::new()
+            .repo(&wt_info.original_path)
+            .args(["worktree", "remove"])
+            .arg(&wt_info.worktree_path)
+            .run_output()
+        {
             tracing::warn!(
                 "  [{ts}] ⚠ Failed to remove worktree {}: {} — preserving DB session path",
                 wt_info.worktree_path,
-                stderr
+                err
             );
             return;
         }
 
-        let branch_delete = std::process::Command::new("git")
-            .args([
-                "-C",
-                &wt_info.original_path,
-                "branch",
-                "-D",
-                &wt_info.branch_name,
-            ])
-            .output();
+        let branch_delete = GitCommand::new()
+            .repo(&wt_info.original_path)
+            .args(["branch", "-D"])
+            .arg(&wt_info.branch_name)
+            .run_output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
         disconnect_sessions_for_worktree_path(db, pg_pool, &wt_info.worktree_path);
-        if let Ok(output) = branch_delete
-            && !output.status.success()
-        {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if let Err(err) = branch_delete {
             tracing::warn!(
                 "  [{ts}] ⚠ Removed worktree {} but could not delete branch {}: {}",
                 wt_info.worktree_path,
                 wt_info.branch_name,
-                stderr
+                err
             );
         }
         tracing::info!("  [{ts}] 🧹 Cleaned up worktree: {}", wt_info.worktree_path);
