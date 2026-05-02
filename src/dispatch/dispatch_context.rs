@@ -2308,6 +2308,24 @@ async fn resolve_repo_head_fallback_target_pg(
         return Ok(None);
     };
 
+    // #1563 RC9: when the card already has a completed implementation
+    // dispatch with a recorded completed_commit, prefer that commit over
+    // repo HEAD and skip the dirty-state check entirely. Concurrent
+    // sub-issues can leave the main worktree contaminated, but the review
+    // target is the implementation commit — not whatever HEAD currently
+    // points at — so dirty paths in the worktree do not threaten review
+    // correctness when we have a stable commit pin.
+    if let Some(commit) = latest_completed_dispatch_commit_for_card_pg(pool, kanban_card_id).await {
+        let mut target = DispatchExecutionTarget {
+            reviewed_commit: commit,
+            branch: crate::services::platform::shell::git_branch_name(&repo_dir),
+            worktree_path: Some(repo_dir.clone()),
+            target_repo: None,
+        };
+        target.target_repo = resolve_card_target_repo_ref(pool, kanban_card_id, context).await;
+        return Ok(Some(target));
+    }
+
     let dirty_paths =
         crate::services::platform::shell::git_tracked_change_paths(&repo_dir).unwrap_or_default();
     if !dirty_paths.is_empty() {
@@ -2335,6 +2353,33 @@ async fn resolve_repo_head_fallback_target_pg(
     };
     target.target_repo = resolve_card_target_repo_ref(pool, kanban_card_id, context).await;
     Ok(Some(target))
+}
+
+/// #1563 RC9 helper: latest completed_commit (any) for this card. Looks at
+/// `task_dispatches.result->>'completed_commit'` across implementation and
+/// rework dispatches in completed status. Used to skip the dirty-worktree
+/// guard in the repo-HEAD fallback when we already have a stable commit
+/// pin for the card's review target.
+async fn latest_completed_dispatch_commit_for_card_pg(
+    pool: &PgPool,
+    kanban_card_id: &str,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT result->>'completed_commit'
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type IN ('implementation', 'rework')
+           AND status = 'completed'
+           AND result ? 'completed_commit'
+           AND length(result->>'completed_commit') > 0
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(kanban_card_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 /// PG-native variant of [`build_review_context`].
