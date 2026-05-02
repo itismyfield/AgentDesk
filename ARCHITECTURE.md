@@ -343,6 +343,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── remote.rs
 │   │   ├── repo_resolver.rs
+│   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── maintenance/
 │   │   ├── jobs/
@@ -415,6 +416,7 @@ src/
 │   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── opencode.rs
+│   ├── pipeline_override.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs
