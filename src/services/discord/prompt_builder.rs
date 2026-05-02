@@ -46,6 +46,8 @@ const RECOVERY_CONTEXT_LAYER_NAME: &str = "recovery_context";
 const RECOVERY_CONTEXT_LAYER_SOURCE: &str = "Discord recent N messages";
 const RECOVERY_CONTEXT_LAYER_REASON: &str = "provider-native resume failed";
 const ROLE_PROMPT_LAYER_NAME: &str = "role_prompt";
+const MEMORY_RECALL_LAYER_NAME: &str = "memory_recall";
+const MEMORY_RECALL_LAYER_SOURCE: &str = "memento";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BuiltSystemPrompt {
@@ -57,6 +59,13 @@ pub(super) struct BuiltSystemPrompt {
 pub(super) struct RecoveryContextManifestInput<'a> {
     pub(super) raw_context: &'a str,
     pub(super) audit_record: Option<&'a RecoveryAuditRecord>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemoryRecallManifestInput<'a> {
+    pub(crate) should_recall: bool,
+    pub(crate) gate_reason: &'a str,
+    pub(crate) external_recall: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -739,6 +748,68 @@ fn role_prompt_manifest_layer(
     layer
 }
 
+fn memory_recall_manifest_layer(
+    memory_settings: Option<&ResolvedMemorySettings>,
+    memento_mcp_available: bool,
+    recall: Option<&MemoryRecallManifestInput<'_>>,
+) -> Option<PromptManifestLayer> {
+    let memory_settings = memory_settings?;
+    let (enabled, reason, content) = if memory_settings.backend != MemoryBackendKind::Memento {
+        (
+            false,
+            format!("memory_backend={}", memory_settings.backend.as_str()),
+            "",
+        )
+    } else if !memento_mcp_available {
+        (
+            false,
+            "memory_backend=memento;mcp_unavailable".to_string(),
+            "",
+        )
+    } else if let Some(recall) = recall {
+        let content = recall.external_recall.map(str::trim).unwrap_or_default();
+        if recall.should_recall {
+            (
+                true,
+                format!("memory_backend=memento;recall={}", recall.gate_reason),
+                content,
+            )
+        } else {
+            (
+                false,
+                format!(
+                    "memory_backend=memento;recall_skipped={}",
+                    recall.gate_reason
+                ),
+                "",
+            )
+        }
+    } else {
+        (
+            false,
+            "memory_backend=memento;recall_state=unknown".to_string(),
+            "",
+        )
+    };
+
+    let (chars, tokens_est, content_sha256) = prompt_manifest_content_stats(content);
+    let mut layer = PromptManifestLayer::from_content(
+        MEMORY_RECALL_LAYER_NAME,
+        enabled,
+        Some(MEMORY_RECALL_LAYER_SOURCE),
+        Some(reason),
+        PromptContentVisibility::UserDerived,
+        content.to_string(),
+    );
+    layer.chars = chars;
+    layer.tokens_est = tokens_est;
+    layer.content_sha256 = content_sha256;
+    layer.redacted_preview =
+        (!content.is_empty()).then(|| redacted_prompt_manifest_preview(content));
+    layer.full_content = None;
+    Some(layer)
+}
+
 fn prompt_manifest_profile(profile: DispatchProfile) -> &'static str {
     match profile {
         DispatchProfile::Full => "full",
@@ -1048,6 +1119,7 @@ pub(super) fn build_system_prompt(
         memento_mcp_available,
         None,
         None,
+        None,
     )
     .system_prompt
 }
@@ -1068,6 +1140,7 @@ pub(super) fn build_system_prompt_with_manifest(
     memory_settings: Option<&ResolvedMemorySettings>,
     memento_mcp_available: bool,
     recovery_context: Option<&RecoveryContextManifestInput<'_>>,
+    memory_recall_manifest: Option<&MemoryRecallManifestInput<'_>>,
     turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
     let mut prompt_manifest_layers = Vec::new();
@@ -1260,6 +1333,13 @@ pub(super) fn build_system_prompt_with_manifest(
         dispatch_type,
         current_task,
     ));
+    if let Some(layer) = memory_recall_manifest_layer(
+        memory_settings,
+        memento_mcp_available,
+        memory_recall_manifest,
+    ) {
+        prompt_manifest_layers.push(layer);
+    }
     match recovery_context_manifest_layer(recovery_context) {
         Ok(layer) => prompt_manifest_layers.push(layer),
         Err(error) => {
@@ -1335,6 +1415,7 @@ mod dispatch_contract_tests {
             None,
             None,
             false,
+            None,
             None,
             Some("turn-current-task-test"),
         )
@@ -1588,6 +1669,7 @@ mod dispatch_contract_tests {
                 raw_context,
                 audit_record: None,
             }),
+            None,
             Some("turn-recovery-context-test"),
         );
 
@@ -1636,6 +1718,105 @@ mod dispatch_contract_tests {
         assert_eq!(layer.chars, 0);
         assert_eq!(layer.tokens_est, 0);
         assert_eq!(layer.content_sha256, prompt_manifest_content_sha256(""));
+        assert!(layer.full_content.is_none());
+        assert!(layer.redacted_preview.is_none());
+    }
+
+    #[test]
+    fn memory_recall_layer_records_memento_preview_only() {
+        let settings = ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        };
+        let recall = MemoryRecallManifestInput {
+            should_recall: true,
+            gate_reason: "previous_context_signal",
+            external_recall: Some(
+                "[External Recall]\nUser email owner@example.com token=private-token-123",
+            ),
+        };
+
+        let layer = memory_recall_manifest_layer(Some(&settings), true, Some(&recall))
+            .expect("memory recall layer");
+
+        assert_eq!(layer.layer_name, "memory_recall");
+        assert!(layer.enabled);
+        assert_eq!(layer.source.as_deref(), Some("memento"));
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("memory_backend=memento;recall=previous_context_signal")
+        );
+        assert_eq!(
+            layer.content_visibility,
+            PromptContentVisibility::UserDerived
+        );
+        assert!(layer.full_content.is_none());
+        assert!(layer.chars > 0);
+        assert!(layer.tokens_est > 0);
+        assert_eq!(
+            layer.content_sha256,
+            prompt_manifest_content_sha256(
+                "[External Recall]\nUser email owner@example.com token=private-token-123"
+            )
+        );
+
+        let preview = layer.redacted_preview.as_deref().expect("preview");
+        assert!(preview.contains("[redacted-email]"));
+        assert!(preview.contains("token=***"));
+        assert!(!preview.contains("owner@example.com"));
+        assert!(!preview.contains("private-token-123"));
+    }
+
+    #[test]
+    fn memory_recall_layer_disabled_when_recall_skipped() {
+        let settings = ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        };
+        let recall = MemoryRecallManifestInput {
+            should_recall: false,
+            gate_reason: "no_turn_signal",
+            external_recall: Some("raw memory that must not be stored"),
+        };
+
+        let layer = memory_recall_manifest_layer(Some(&settings), true, Some(&recall))
+            .expect("memory recall layer");
+
+        assert_eq!(layer.layer_name, "memory_recall");
+        assert!(!layer.enabled);
+        assert_eq!(layer.source.as_deref(), Some("memento"));
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("memory_backend=memento;recall_skipped=no_turn_signal")
+        );
+        assert_eq!(layer.chars, 0);
+        assert_eq!(layer.tokens_est, 0);
+        assert_eq!(layer.content_sha256, prompt_manifest_content_sha256(""));
+        assert!(layer.full_content.is_none());
+        assert!(layer.redacted_preview.is_none());
+    }
+
+    #[test]
+    fn memory_recall_layer_disabled_when_memento_backend_disabled() {
+        let settings = ResolvedMemorySettings {
+            backend: MemoryBackendKind::File,
+            ..ResolvedMemorySettings::default()
+        };
+        let recall = MemoryRecallManifestInput {
+            should_recall: true,
+            gate_reason: "non_memento_backend",
+            external_recall: Some("raw memory that must not be stored"),
+        };
+
+        let layer = memory_recall_manifest_layer(Some(&settings), true, Some(&recall))
+            .expect("memory recall layer");
+
+        assert_eq!(layer.layer_name, "memory_recall");
+        assert!(!layer.enabled);
+        assert_eq!(layer.source.as_deref(), Some("memento"));
+        assert_eq!(layer.reason.as_deref(), Some("memory_backend=file"));
+        assert_eq!(layer.chars, 0);
+        assert_eq!(layer.tokens_est, 0);
         assert!(layer.full_content.is_none());
         assert!(layer.redacted_preview.is_none());
     }
@@ -2075,6 +2256,7 @@ mod tests {
             None,
             None,
             false,
+            None,
             None,
             Some("turn-1"),
         );
