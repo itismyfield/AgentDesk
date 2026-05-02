@@ -398,7 +398,6 @@ pub(crate) enum Commands {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum LaunchdPlistFlavorArg {
     Release,
-    Dev,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -799,51 +798,6 @@ mod tests {
             }) => {
                 assert_eq!(channel_kind, AgentHandoffChannelKindArg::Cdx);
                 assert!(no_prefix);
-            }
-            other => panic!(
-                "unexpected parse result: {:?}",
-                other.map(|_| "other command")
-            ),
-        }
-    }
-
-    #[test]
-    fn emit_launchd_plist_parses_flavor_and_overrides() {
-        let cli = Cli::try_parse_from([
-            "agentdesk",
-            "emit-launchd-plist",
-            "--flavor",
-            "dev",
-            "--home",
-            "/tmp/home",
-            "--root-dir",
-            "/tmp/home/.adk/dev",
-            "--agentdesk-bin",
-            "/tmp/home/.adk/dev/bin/agentdesk",
-            "--output",
-            "/tmp/dev.plist",
-        ])
-        .expect("emit-launchd-plist args should parse");
-
-        match cli.command {
-            Some(Commands::EmitLaunchdPlist(args)) => {
-                assert_eq!(args.flavor, LaunchdPlistFlavorArg::Dev);
-                assert_eq!(
-                    args.home.as_deref(),
-                    Some(PathBuf::from("/tmp/home").as_path())
-                );
-                assert_eq!(
-                    args.root_dir.as_deref(),
-                    Some(PathBuf::from("/tmp/home/.adk/dev").as_path())
-                );
-                assert_eq!(
-                    args.agentdesk_bin.as_deref(),
-                    Some(PathBuf::from("/tmp/home/.adk/dev/bin/agentdesk").as_path())
-                );
-                assert_eq!(
-                    args.output.as_deref(),
-                    Some(PathBuf::from("/tmp/dev.plist").as_path())
-                );
             }
             other => panic!(
                 "unexpected parse result: {:?}",
