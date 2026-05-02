@@ -118,6 +118,29 @@ fn context_reset_slot_thread_before_reuse(dispatch_context: Option<&serde_json::
         .unwrap_or(false)
 }
 
+fn dispatch_type_requires_independent_slot_thread(dispatch_type: Option<&str>) -> bool {
+    matches!(dispatch_type, Some("review-decision"))
+}
+
+#[cfg(test)]
+mod slot_routing_pure_tests {
+    use super::dispatch_type_requires_independent_slot_thread;
+
+    #[test]
+    fn review_decision_requires_independent_slot_thread() {
+        assert!(dispatch_type_requires_independent_slot_thread(Some(
+            "review-decision"
+        )));
+        assert!(!dispatch_type_requires_independent_slot_thread(Some(
+            "implementation"
+        )));
+        assert!(!dispatch_type_requires_independent_slot_thread(Some(
+            "review"
+        )));
+        assert!(!dispatch_type_requires_independent_slot_thread(None));
+    }
+}
+
 /// #750: announce-bot reaction sync target. Command bot owns `⏳` (added at
 /// turn start, removed at turn end) and adds `✅` on response delivery; the
 /// announce-bot sync runs only for (a) failed/cancelled dispatches — to clean
@@ -1072,6 +1095,45 @@ async fn persist_dispatch_slot_index_pg(
     Ok(())
 }
 
+async fn persist_dispatch_slot_index_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    slot_index: i64,
+) -> Result<(), String> {
+    let existing: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT context
+         FROM task_dispatches
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load postgres dispatch context for {dispatch_id}: {error}"))?
+    .flatten();
+    let mut context = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if context.get("slot_index").and_then(|value| value.as_i64()) == Some(slot_index) {
+        return Ok(());
+    }
+    context["slot_index"] = serde_json::json!(slot_index);
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = $1,
+             updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(context.to_string())
+    .bind(dispatch_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("persist postgres slot index for {dispatch_id}: {error}"))?;
+    Ok(())
+}
+
 async fn ensure_agent_slot_pool_rows_pg(
     pool: &PgPool,
     agent_id: &str,
@@ -1092,6 +1154,83 @@ async fn ensure_agent_slot_pool_rows_pg(
         })?;
     }
     Ok(())
+}
+
+async fn slot_has_active_dispatch_excluding_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    agent_id: &str,
+    slot_index: i64,
+    exclude_dispatch_id: Option<&str>,
+) -> Result<bool, String> {
+    let exclude_id = exclude_dispatch_id.unwrap_or("");
+    let auto_queue_active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM auto_queue_entries
+         WHERE agent_id = $1
+           AND slot_index = $2
+           AND status = 'dispatched'
+           AND COALESCE(dispatch_id, '') != $3",
+    )
+    .bind(agent_id)
+    .bind(slot_index)
+    .bind(exclude_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("load postgres active slot entries for {agent_id}:{slot_index}: {error}")
+    })?;
+    if auto_queue_active > 0 {
+        return Ok(true);
+    }
+
+    let rows = sqlx::query(
+        "SELECT id, context
+         FROM task_dispatches
+         WHERE to_agent_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(agent_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("load postgres active dispatches for {agent_id}:{slot_index}: {error}")
+    })?;
+
+    for row in rows {
+        let dispatch_id: String = row.try_get("id").map_err(|error| {
+            format!("read postgres dispatch id for {agent_id}:{slot_index}: {error}")
+        })?;
+        if dispatch_id == exclude_id {
+            continue;
+        }
+        let context: Option<String> = row.try_get("context").ok().flatten();
+        let Some(context) = context else {
+            continue;
+        };
+        let Some(context_json) = serde_json::from_str::<serde_json::Value>(&context).ok() else {
+            continue;
+        };
+        if context_json
+            .get("slot_index")
+            .and_then(|value| value.as_i64())
+            != Some(slot_index)
+        {
+            continue;
+        }
+        if context_json
+            .get("sidecar_dispatch")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if context_json.get("phase_gate").is_some() {
+            continue;
+        }
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 async fn read_slot_thread_binding_pg(
@@ -1197,6 +1336,7 @@ async fn collect_slot_thread_candidates_pg(
     card_id: &str,
     slot_binding: Option<&SlotThreadBinding>,
     channel_id: u64,
+    include_card_thread: bool,
     include_recent_slot_history: bool,
 ) -> Result<Vec<String>, String> {
     let mut candidates = Vec::new();
@@ -1204,12 +1344,14 @@ async fn collect_slot_thread_candidates_pg(
         &mut candidates,
         slot_binding.and_then(|binding| binding.thread_id.as_deref()),
     );
-    push_unique_thread_candidate(
-        &mut candidates,
-        get_thread_for_channel_pg(pool, card_id, channel_id)
-            .await?
-            .as_deref(),
-    );
+    if include_card_thread {
+        push_unique_thread_candidate(
+            &mut candidates,
+            get_thread_for_channel_pg(pool, card_id, channel_id)
+                .await?
+                .as_deref(),
+        );
+    }
     if include_recent_slot_history && let Some(binding) = slot_binding {
         for thread_id in recent_slot_thread_history_pg(pool, agent_id, binding.slot_index).await? {
             push_unique_thread_candidate(&mut candidates, Some(thread_id.as_str()));
@@ -1224,10 +1366,23 @@ async fn allocate_manual_slot_binding_pg(
     dispatch_id: &str,
     channel_id: u64,
 ) -> Result<Option<SlotThreadBinding>, String> {
+    ensure_agent_slot_pool_rows_pg(pool, agent_id, SLOT_THREAD_MAX_SLOTS).await?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin postgres manual slot allocation: {error}"))?;
+
     for slot_index in 0..SLOT_THREAD_MAX_SLOTS {
-        ensure_agent_slot_pool_rows_pg(pool, agent_id, slot_index + 1).await?;
-        if crate::services::auto_queue::runtime::slot_has_active_dispatch_excluding_pg(
-            pool,
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("agentdesk:slot:{agent_id}:{slot_index}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!("lock postgres slot allocation for {agent_id}:{slot_index}: {error}")
+            })?;
+
+        if slot_has_active_dispatch_excluding_pg_tx(
+            &mut tx,
             agent_id,
             slot_index,
             Some(dispatch_id),
@@ -1236,9 +1391,15 @@ async fn allocate_manual_slot_binding_pg(
         {
             continue;
         }
-        persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
+        persist_dispatch_slot_index_pg_tx(&mut tx, dispatch_id, slot_index).await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit postgres manual slot allocation: {error}"))?;
         return read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await;
     }
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit postgres manual slot allocation miss: {error}"))?;
     Ok(None)
 }
 
@@ -1248,6 +1409,7 @@ async fn resolve_slot_thread_binding_pg(
     card_id: &str,
     dispatch_id: &str,
     dispatch_context: Option<&serde_json::Value>,
+    dispatch_type: Option<&str>,
     channel_id: u64,
 ) -> Result<Option<SlotThreadBinding>, String> {
     if let Some(slot_index) = context_slot_index(dispatch_context) {
@@ -1267,8 +1429,26 @@ async fn resolve_slot_thread_binding_pg(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("load postgres dispatch slot for {dispatch_id}: {error}"))?
-    .flatten()
-    .or(sqlx::query_scalar::<_, Option<i64>>(
+    .flatten();
+
+    if let Some(slot_index) = auto_queue_slot {
+        let binding = read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await?;
+        persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
+        return Ok(binding);
+    }
+
+    if dispatch_type_requires_independent_slot_thread(dispatch_type) {
+        let binding =
+            allocate_manual_slot_binding_pg(pool, agent_id, dispatch_id, channel_id).await?;
+        if binding.is_none() {
+            return Err(format!(
+                "no free slot available for independent {dispatch_type:?} dispatch {dispatch_id}"
+            ));
+        }
+        return Ok(binding);
+    }
+
+    let same_card_slot: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT slot_index
              FROM auto_queue_entries
              WHERE kanban_card_id = $1
@@ -1284,9 +1464,9 @@ async fn resolve_slot_thread_binding_pg(
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("load postgres card slot for {card_id}: {error}"))?
-    .flatten());
+    .flatten();
 
-    if let Some(slot_index) = auto_queue_slot {
+    if let Some(slot_index) = same_card_slot {
         let binding = read_slot_thread_binding_pg(pool, agent_id, slot_index, channel_id).await?;
         persist_dispatch_slot_index_pg(pool, dispatch_id, slot_index).await?;
         return Ok(binding);
@@ -2444,12 +2624,15 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         );
         return Ok(outcome.delivery);
     }
+    let independent_slot_thread =
+        dispatch_type_requires_independent_slot_thread(dispatch_type.as_deref());
     let mut slot_binding = resolve_slot_thread_binding_pg(
         pool,
         agent_id,
         card_id,
         dispatch_id,
         dispatch_context_json.as_ref(),
+        dispatch_type.as_deref(),
         channel_id_num,
     )
     .await?;
@@ -2510,6 +2693,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         card_id,
         slot_binding.as_ref(),
         channel_id_num,
+        !independent_slot_thread,
         !reset_slot_thread_before_reuse,
     )
     .await?;
@@ -2533,7 +2717,10 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         {
             Ok(Some((reused, delivery_outcome))) => {
                 if reused {
-                    set_thread_for_channel_pg(pool, card_id, channel_id_num, existing_tid).await?;
+                    if !independent_slot_thread {
+                        set_thread_for_channel_pg(pool, card_id, channel_id_num, existing_tid)
+                            .await?;
+                    }
                     if let Some(binding) = slot_binding.as_ref() {
                         upsert_slot_thread_id_pg(
                             pool,
@@ -2639,8 +2826,10 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                             .map_err(|error| {
                                 format!("persist postgres thread_id for {dispatch_id}: {error}")
                             })?;
-                            set_thread_for_channel_pg(pool, card_id, channel_id_num, thread_id)
-                                .await?;
+                            if !independent_slot_thread {
+                                set_thread_for_channel_pg(pool, card_id, channel_id_num, thread_id)
+                                    .await?;
+                            }
                             if let Some(binding) = slot_binding.as_ref() {
                                 upsert_slot_thread_id_pg(
                                     pool,
@@ -5560,5 +5749,208 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&slot_map.unwrap()).unwrap()["123"],
             "thread-created"
         );
+    }
+
+    #[tokio::test]
+    async fn review_decision_resolves_free_slot_and_skips_card_thread_candidate_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query(
+            "INSERT INTO agents (id, name, discord_channel_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("agent-1")
+        .bind("Agent 1")
+        .bind("123")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, assigned_agent_id, latest_dispatch_id, channel_thread_map,
+                created_at, updated_at
+             ) VALUES (
+                $1, $2, $3, $4, $5, $6::jsonb, NOW(), NOW()
+             )",
+        )
+        .bind("card-1")
+        .bind("Review decision card")
+        .bind("in_progress")
+        .bind("agent-1")
+        .bind("dispatch-work")
+        .bind(r#"{"123":"thread-work"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES
+                ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW()),
+                ($8, $2, $3, $9, $10, $11, $12, NOW(), NOW())",
+        )
+        .bind("dispatch-work")
+        .bind("card-1")
+        .bind("agent-1")
+        .bind("implementation")
+        .bind("dispatched")
+        .bind("Implementation")
+        .bind(r#"{"slot_index":0}"#)
+        .bind("dispatch-review-decision")
+        .bind("review-decision")
+        .bind("pending")
+        .bind("Review decision")
+        .bind("{}")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ($1, 0, $2::jsonb), ($1, 1, '{}'::jsonb)",
+        )
+        .bind("agent-1")
+        .bind(r#"{"123":"thread-work"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status)
+             VALUES ($1, $2, $3)",
+        )
+        .bind("run-1")
+        .bind("agent-1")
+        .bind("active")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+             ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0)",
+        )
+        .bind("entry-work")
+        .bind("run-1")
+        .bind("card-1")
+        .bind("agent-1")
+        .bind("dispatched")
+        .bind("dispatch-work")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let dispatch_context = serde_json::json!({});
+        let binding = resolve_slot_thread_binding_pg(
+            &pool,
+            "agent-1",
+            "card-1",
+            "dispatch-review-decision",
+            Some(&dispatch_context),
+            Some("review-decision"),
+            123,
+        )
+        .await
+        .unwrap()
+        .expect("review-decision should claim a free slot");
+
+        assert_eq!(binding.slot_index, 1);
+        assert!(binding.thread_id.is_none());
+
+        let candidates = collect_slot_thread_candidates_pg(
+            &pool,
+            "agent-1",
+            "card-1",
+            Some(&binding),
+            123,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(candidates.is_empty());
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate == "thread-work"),
+            "review-decision must not reuse the active work card thread"
+        );
+        let card_candidates = collect_slot_thread_candidates_pg(
+            &pool,
+            "agent-1",
+            "card-1",
+            Some(&binding),
+            123,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            card_candidates
+                .iter()
+                .any(|candidate| candidate == "thread-work"),
+            "test fixture must prove the card-thread candidate would be reused without the independent-slot guard"
+        );
+
+        let persisted_context: String =
+            sqlx::query_scalar("SELECT context FROM task_dispatches WHERE id = $1")
+                .bind("dispatch-review-decision")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let persisted_context =
+            serde_json::from_str::<serde_json::Value>(&persisted_context).unwrap();
+        assert_eq!(persisted_context["slot_index"], 1);
+
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())",
+        )
+        .bind("dispatch-full")
+        .bind("card-1")
+        .bind("agent-1")
+        .bind("review-decision")
+        .bind("pending")
+        .bind("Review decision with full pool")
+        .bind("{}")
+        .execute(&pool)
+        .await
+        .unwrap();
+        for slot_index in 2..SLOT_THREAD_MAX_SLOTS {
+            sqlx::query(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, thread_group
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+            )
+            .bind(format!("entry-active-{slot_index}"))
+            .bind("run-1")
+            .bind("card-1")
+            .bind("agent-1")
+            .bind("dispatched")
+            .bind(format!("dispatch-active-{slot_index}"))
+            .bind(slot_index)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let err = resolve_slot_thread_binding_pg(
+            &pool,
+            "agent-1",
+            "card-1",
+            "dispatch-full",
+            Some(&dispatch_context),
+            Some("review-decision"),
+            123,
+        )
+        .await
+        .expect_err("review-decision should fail closed when every slot is active");
+        assert!(err.contains("no free slot available"));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
