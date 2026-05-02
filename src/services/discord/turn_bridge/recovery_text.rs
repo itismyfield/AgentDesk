@@ -5,12 +5,16 @@ use crate::services::observability::recovery_audit::{
     RecoveryAuditDraft, RecoveryAuditRecord, insert_recovery_audit_record,
     mark_recovery_audit_consumed,
 };
+use crate::services::observability::turn_lifecycle::{
+    RecoveryContextDetails, RecoveryDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
+};
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use serenity::all::{ChannelId, MessageId};
 
 const SESSION_RETRY_CONTEXT_LIMIT: usize = 10;
 const SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT: usize = 300;
+const DISCORD_RECENT_MESSAGES_RECOVERY_SOURCE: &str = "discord_recent_messages";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct SessionRetryContext {
@@ -353,9 +357,75 @@ pub(in crate::services::discord) fn take_session_retry_context(
     take_session_retry_context_for_turn(db, None, channel_id, None)
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+fn build_discord_recent_recovery_context_from_parts<'a>(
+    messages: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Option<(String, usize)> {
+    let mut lines = Vec::new();
+    for (author, content) in messages {
+        let content = content
+            .chars()
+            .take(SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT)
+            .collect::<String>();
+        if !content.trim().is_empty() {
+            lines.push(format!("{author}: {content}"));
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        let message_count = lines.len();
+        Some((lines.join("\n"), message_count))
+    }
+}
+
+async fn emit_session_resume_failed_with_recovery(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+    reason: String,
+    recovery: Option<RecoveryContextDetails>,
+) {
+    let Some(pg_pool) = shared.pg_pool.as_ref() else {
+        return;
+    };
+    let session_key =
+        super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await;
+    let recovery_action = if recovery.is_some() {
+        "fresh_session_with_discord_history_context"
+    } else {
+        "fresh_session_without_recovery_context"
+    };
+    let turn_id = format!("discord:{}:{}", channel_id.get(), user_message_id.get());
+    let mut emit = TurnLifecycleEmit::new(
+        turn_id,
+        channel_id.get().to_string(),
+        TurnEvent::SessionResumeFailedWithRecovery(RecoveryDetails {
+            reason: reason.clone(),
+            recovery_action: recovery_action.to_string(),
+            previous_session_key: session_key.clone(),
+            recovered_session_key: None,
+            recovery,
+        }),
+        format!("session resume failed; recovery decision: {recovery_action}; reason: {reason}"),
+    );
+    if let Some(session_key) = session_key {
+        emit = emit.session_key(session_key);
+    }
+    if let Err(error) = emit_turn_lifecycle(pg_pool, emit).await {
+        tracing::warn!(
+            "failed to emit session resume recovery lifecycle event for channel {}: {error}",
+            channel_id
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::direct_runtime_context_unavailable;
+    use super::{
+        build_discord_recent_recovery_context_from_parts, direct_runtime_context_unavailable,
+    };
 
     #[test]
     fn direct_runtime_context_unavailable_matches_api_and_pg_errors() {
@@ -366,6 +436,20 @@ mod tests {
             "direct runtime pg context is unavailable"
         ));
         assert!(!direct_runtime_context_unavailable("other runtime error"));
+    }
+
+    #[test]
+    fn discord_recent_recovery_context_preserves_existing_format_and_limits() {
+        let long = "x".repeat(305);
+        let built = build_discord_recent_recovery_context_from_parts([
+            ("alice", "hello"),
+            ("bot", ""),
+            ("bob", long.as_str()),
+        ])
+        .expect("non-empty context");
+
+        assert_eq!(built.1, 2);
+        assert_eq!(built.0, format!("alice: hello\nbob: {}", "x".repeat(300)));
     }
 }
 
@@ -402,45 +486,87 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     tracing::warn!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
 
     // Fetch last 10 messages from Discord
-    let history = match channel_id
+    let recovery_context = match channel_id
         .messages(http, serenity::builder::GetMessages::new().limit(10))
         .await
     {
-        Ok(msgs) => {
-            let mut lines = Vec::new();
-            for msg in msgs.iter().rev() {
-                let author = &msg.author.name;
-                let content = msg.content.chars().take(300).collect::<String>();
-                if !content.trim().is_empty() {
-                    lines.push(format!("{}: {}", author, content));
-                }
-            }
-            if lines.is_empty() {
-                None
-            } else {
-                Some(lines.join("\n"))
-            }
-        }
+        Ok(msgs) => build_discord_recent_recovery_context_from_parts(
+            msgs.iter()
+                .rev()
+                .map(|msg| (msg.author.name.as_str(), msg.content.as_str())),
+        )
+        .map(|(history, message_count)| (history, message_count, None::<String>))
+        .or_else(|| {
+            Some((
+                String::new(),
+                0,
+                Some("discord recent messages were empty".to_string()),
+            ))
+        }),
         Err(e) => {
             tracing::warn!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
-            None
+            Some((
+                String::new(),
+                0,
+                Some(format!("failed to fetch Discord history: {e}")),
+            ))
         }
     };
 
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
-    if let Some(ref hist) = history {
+    if let Some((ref hist, message_count, ref skip_reason)) = recovery_context
+        && skip_reason.is_none()
+    {
         let session_key =
             super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
-        let _ = store_session_retry_context_with_notify(
+        let stored = store_session_retry_context_with_notify(
             None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             channel_id.get(),
             hist,
             Some(session_key.as_str()),
         );
+        match stored {
+            Ok(_) => {
+                emit_session_resume_failed_with_recovery(
+                    shared,
+                    provider,
+                    channel_id,
+                    user_message_id,
+                    "provider-native resume failed; Discord recovery context built".to_string(),
+                    Some(RecoveryContextDetails {
+                        source: DISCORD_RECENT_MESSAGES_RECOVERY_SOURCE.to_string(),
+                        message_count,
+                        max_chars: SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT,
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                emit_session_resume_failed_with_recovery(
+                    shared,
+                    provider,
+                    channel_id,
+                    user_message_id,
+                    format!("failed to store Discord recovery context: {error}"),
+                    None,
+                )
+                .await;
+            }
+        }
+    } else if let Some((_, _, Some(reason))) = recovery_context {
+        emit_session_resume_failed_with_recovery(
+            shared,
+            provider,
+            channel_id,
+            user_message_id,
+            reason,
+            None,
+        )
+        .await;
     }
 
     // Discord message: short notice only — history stays LLM-side

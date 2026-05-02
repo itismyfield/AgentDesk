@@ -30,11 +30,20 @@ impl TurnEventSeverity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecoveryContextDetails {
+    pub source: String,
+    pub message_count: usize,
+    pub max_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecoveryDetails {
     pub reason: String,
     pub recovery_action: String,
     pub previous_session_key: Option<String>,
     pub recovered_session_key: Option<String>,
+    pub recovery: Option<RecoveryContextDetails>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,12 +495,14 @@ mod tests {
             recovery_action: "fresh_session".to_string(),
             previous_session_key: Some("old-session".to_string()),
             recovered_session_key: Some("new-session".to_string()),
+            recovery: None,
         });
         assert_eq!(
             recovery.meta(),
             TurnEvent::SESSION_RESUME_FAILED_WITH_RECOVERY_META
         );
         assert_eq!(recovery.meta().severity, TurnEventSeverity::Warn);
+        assert!(recovery.details_json()["recovery"].is_null());
     }
 
     #[test]
@@ -526,6 +537,11 @@ mod tests {
             recovery_action: "최근 디스코드 메시지 10건을 다음 턴에 자동 주입".to_string(),
             previous_session_key: None,
             recovered_session_key: Some("agentdesk-new".to_string()),
+            recovery: Some(RecoveryContextDetails {
+                source: "discord_recent_messages".to_string(),
+                message_count: 10,
+                max_chars: 300,
+            }),
         });
         assert_eq!(
             recovery.notification_reason_code(),
@@ -571,6 +587,11 @@ mod tests {
                     recovery_action: "start fresh session".to_string(),
                     previous_session_key: Some("agentdesk-old".to_string()),
                     recovered_session_key: Some("agentdesk-new".to_string()),
+                    recovery: Some(RecoveryContextDetails {
+                        source: "discord_recent_messages".to_string(),
+                        message_count: 7,
+                        max_chars: 300,
+                    }),
                 }),
                 "resume failed; started fresh session",
             )
@@ -618,6 +639,9 @@ mod tests {
         assert_eq!(details["recoveryAction"], "start fresh session");
         assert_eq!(details["previousSessionKey"], "agentdesk-old");
         assert_eq!(details["recoveredSessionKey"], "agentdesk-new");
+        assert_eq!(details["recovery"]["source"], "discord_recent_messages");
+        assert_eq!(details["recovery"]["messageCount"], 7);
+        assert_eq!(details["recovery"]["maxChars"], 300);
 
         let outbox = sqlx::query(
             "SELECT target, content, bot, source, reason_code, session_key
