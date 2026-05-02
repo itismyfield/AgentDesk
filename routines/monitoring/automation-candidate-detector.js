@@ -8,6 +8,7 @@ const MIN_SCORE_THRESHOLD = 80;
 const CHECKPOINT_VERSION = 1;
 const SEEN_CANDIDATE_TTL_MS = 72 * 3600 * 1000;   // matches candidate_approved TTL
 const EMITTED_RETRY_MS = 60 * 60 * 1000;          // retry if no durable approval marker appears
+const MAX_EMIT_RETRIES = 5;                        // give up and mark stalled after this many no-shows
 
 // --- Checkpoint helpers ---
 
@@ -20,6 +21,7 @@ function emptyCheckpoint() {
       approved_emitted: 0,
       skipped_already_approved: 0,
       skipped_quality_gate: 0,
+      stalled_candidates: 0,
     },
   };
 }
@@ -193,6 +195,14 @@ agentdesk.routines.register({
         cp.stats.skipped_already_approved++;
         continue;
       }
+      // Give up if LLM has repeatedly failed to write the approved marker.
+      if (seen && (seen.emit_count || 0) >= MAX_EMIT_RETRIES) {
+        if (seen.status !== "stalled") {
+          cp.seen_candidates[signature] = Object.assign({}, seen, { status: "stalled" });
+        }
+        cp.stats.stalled_candidates++;
+        continue;
+      }
       if (
         seen &&
         seen.status === "emitted" &&
@@ -232,9 +242,11 @@ agentdesk.routines.register({
     const { signature, candidate } = emitPrompts[0];
     const prompt = buildApprovalPrompt(signature, candidate);
     const previousSeen = cp.seen_candidates[signature];
+    const emitCount = (previousSeen?.emit_count || 0) + 1;
     cp.seen_candidates[signature] = {
       first_seen_at: previousSeen?.first_seen_at || nowStr,
       last_emitted_at: nowStr,
+      emit_count: emitCount,
       status: "emitted",
     };
     cp.stats.approved_emitted++;

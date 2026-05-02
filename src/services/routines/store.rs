@@ -743,9 +743,12 @@ impl RoutineStore {
         // Per-source hard caps for fair merge so no single source monopolises the
         // ctx.observations slot budget (total 100 items / 64 KB).
         const CAP_KV_META: i64 = 20;
-        const CAP_API_FRICTION: i64 = 20;
-        const CAP_OUTBOX: i64 = 20;
-        const CAP_ROUTINE_RUNS: i64 = 40;
+        const CAP_API_FRICTION: i64 = 15;
+        const CAP_OUTBOX: i64 = 10;
+        const CAP_ROUTINE_RUNS: i64 = 25;
+        const CAP_KANBAN: i64 = 10;
+        const CAP_DISPATCHES: i64 = 10;
+        const CAP_SESSION: i64 = 10;
 
         let now = Utc::now();
 
@@ -1012,22 +1015,234 @@ impl RoutineStore {
             }));
         }
 
-        // --- Fair merge: fill global cap from all sources in order ---
+        // --- Source 5: kanban_cards stale or blocked (cap 10) ---
+        let kanban_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   status,
+                   COALESCE(assigned_agent_id, '') AS assigned_agent_id,
+                   blocked_reason,
+                   GREATEST(updated_at, created_at) AS last_seen_at,
+                   EXTRACT(EPOCH FROM (NOW() - GREATEST(updated_at, created_at))) / 3600.0
+                       AS stuck_hours
+            FROM kanban_cards
+            WHERE status NOT IN ('done', 'cancelled', 'archived', 'detached')
+              AND GREATEST(updated_at, created_at) < NOW() - INTERVAL '24 hours'
+              AND (
+                    blocked_reason IS NOT NULL
+                    OR GREATEST(updated_at, created_at) < NOW() - INTERVAL '48 hours'
+                  )
+            ORDER BY GREATEST(updated_at, created_at) ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_KANBAN)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping kanban stale observation source");
+                Vec::new()
+            }
+        };
+
+        let mut kanban_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &kanban_rows {
+            let card_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+            let assigned: String = row.try_get("assigned_agent_id").unwrap_or_default();
+            let blocked_reason: Option<String> = row.try_get("blocked_reason").ok().flatten();
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let stuck_hours: f64 = row.try_get("stuck_hours").unwrap_or(0.0);
+            let stuck_days = (stuck_hours / 24.0).round() as u32;
+            let summary = if let Some(ref reason) = blocked_reason {
+                format!(
+                    "kanban blocked: {} ({}d, agent={}) — {}",
+                    truncate_chars(&title, 80),
+                    stuck_days,
+                    assigned,
+                    truncate_chars(reason, 80)
+                )
+            } else {
+                format!(
+                    "kanban stale: {} ({}d stuck in {}, agent={})",
+                    truncate_chars(&title, 80),
+                    stuck_days,
+                    status,
+                    assigned
+                )
+            };
+            let weight: u8 = if blocked_reason.is_some() { 2 } else { 1 };
+            kanban_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "kanban_stale",
+                "category": "routine-candidate",
+                "signature": format!("kanban-stale:{card_id}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": weight,
+                "occurrences": stuck_days.clamp(1, 50),
+                "evidence_ref": format!("kanban_cards:{card_id}"),
+            }));
+        }
+
+        // --- Source 6: task_dispatches high-retry (cap 10) ---
+        let dispatch_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   from_agent_id,
+                   to_agent_id,
+                   status,
+                   retry_count,
+                   GREATEST(updated_at, created_at) AS last_seen_at
+            FROM task_dispatches
+            WHERE retry_count >= 2
+              AND status IN ('failed', 'error', 'pending', 'in_progress')
+              AND GREATEST(updated_at, created_at) > NOW() - INTERVAL '24 hours'
+            ORDER BY retry_count DESC, GREATEST(updated_at, created_at) DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_DISPATCHES)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping dispatch retry observation source");
+                Vec::new()
+            }
+        };
+
+        let mut dispatch_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &dispatch_rows {
+            let dispatch_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let from_agent: String = row.try_get("from_agent_id").unwrap_or_default();
+            let to_agent: String = row.try_get("to_agent_id").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+            let retry_count: i32 = row.try_get("retry_count").unwrap_or(0);
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let summary = format!(
+                "dispatch {status} ×{retry_count} retries: {} ({from_agent}→{to_agent})",
+                truncate_chars(&title, 100)
+            );
+            dispatch_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "dispatch_retry",
+                "category": "routine-candidate",
+                "signature": format!("dispatch-retry:{from_agent}:{to_agent}:{status}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": 2,
+                "occurrences": (retry_count as u32).clamp(1, 50),
+                "evidence_ref": format!("task_dispatches:{dispatch_id}"),
+            }));
+        }
+
+        // --- Source 7: session_transcripts repeated error patterns per agent (cap 10) ---
+        let session_rows = match sqlx::query(
+            r#"
+            SELECT agent_id,
+                   COUNT(*) FILTER (
+                       WHERE user_message ILIKE '%error%'
+                          OR user_message ILIKE '%fail%'
+                          OR user_message ILIKE '%오류%'
+                          OR user_message ILIKE '%실패%'
+                   )::BIGINT AS error_mention_count,
+                   COUNT(*)::BIGINT AS total_turns,
+                   MAX(created_at) AS last_seen_at,
+                   (ARRAY_AGG(user_message ORDER BY created_at DESC)
+                    FILTER (WHERE user_message IS NOT NULL AND LENGTH(TRIM(user_message)) > 0)
+                   )[1] AS latest_message
+            FROM session_transcripts
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+            GROUP BY agent_id
+            HAVING COUNT(*) FILTER (
+                       WHERE user_message ILIKE '%error%'
+                          OR user_message ILIKE '%fail%'
+                          OR user_message ILIKE '%오류%'
+                          OR user_message ILIKE '%실패%'
+                   ) >= 3
+            ORDER BY error_mention_count DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_SESSION)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping session pattern observation source");
+                Vec::new()
+            }
+        };
+
+        let mut session_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &session_rows {
+            let agent_id: String = row.try_get("agent_id").unwrap_or_default();
+            let error_count: i64 = row.try_get("error_mention_count").unwrap_or(0);
+            let total_turns: i64 = row.try_get("total_turns").unwrap_or(0);
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let latest_msg: Option<String> = row.try_get("latest_message").ok().flatten();
+            let summary = if let Some(ref msg) = latest_msg {
+                format!(
+                    "session error pattern: agent={agent_id} error_mentions={error_count}/{total_turns} turns; latest: {}",
+                    truncate_chars(msg, 120)
+                )
+            } else {
+                format!(
+                    "session error pattern: agent={agent_id} error_mentions={error_count}/{total_turns} turns"
+                )
+            };
+            session_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "session_pattern",
+                "category": "routine-candidate",
+                "signature": format!("session-pattern:{agent_id}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": 2,
+                "occurrences": (error_count as u32).clamp(1, 50),
+                "evidence_ref": format!("session_transcripts:{agent_id}"),
+            }));
+        }
+
+        // --- Fair merge: round-robin across all sources so no single source starves others ---
+        use std::collections::VecDeque;
+        let mut sources: Vec<VecDeque<serde_json::Value>> = vec![
+            kv_obs.into(),
+            friction_obs.into(),
+            outbox_obs.into(),
+            run_obs.into(),
+            kanban_obs.into(),
+            dispatch_obs.into(),
+            session_obs.into(),
+        ];
         let mut observations = Vec::with_capacity(max_items.min(100));
         let mut total_bytes: usize = 0;
-        for obs in kv_obs
-            .into_iter()
-            .chain(friction_obs)
-            .chain(outbox_obs)
-            .chain(run_obs)
-        {
-            if !bounded_observation_push(
-                &mut observations,
-                &mut total_bytes,
-                max_items,
-                max_payload_bytes,
-                obs,
-            ) {
+        'merge: loop {
+            let mut any = false;
+            for src in &mut sources {
+                if let Some(obs) = src.pop_front() {
+                    any = true;
+                    if !bounded_observation_push(
+                        &mut observations,
+                        &mut total_bytes,
+                        max_items,
+                        max_payload_bytes,
+                        obs,
+                    ) {
+                        break 'merge;
+                    }
+                }
+            }
+            if !any {
                 break;
             }
         }

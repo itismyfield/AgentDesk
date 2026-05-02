@@ -5,6 +5,8 @@
 // durable candidate_dispatched kv_meta is observed.
 
 const DISPATCHED_TTL_DAYS = 7;
+const DISPATCH_RETRY_MS = 60 * 60 * 1000;  // re-emit at most once per hour per candidate
+const MAX_DISPATCH_RETRIES = 5;             // give up and mark stalled after this many no-shows
 const CHECKPOINT_VERSION = 1;
 
 // --- Checkpoint helpers ---
@@ -13,10 +15,12 @@ function emptyCheckpoint() {
   return {
     version: CHECKPOINT_VERSION,
     dispatched_signatures: {},   // signature -> dispatched_at ISO string (TTL 7d)
+    pending_dispatches: {},      // signature -> { attempt_count, last_attempted_at, first_attempted_at }
     stats: {
       ticks: 0,
       dispatched: 0,
       skipped_already_dispatched: 0,
+      stalled_candidates: 0,
     },
   };
 }
@@ -27,6 +31,7 @@ function loadCheckpoint(raw) {
   }
   const cp = Object.assign(emptyCheckpoint(), raw);
   cp.dispatched_signatures = raw.dispatched_signatures || {};
+  cp.pending_dispatches = raw.pending_dispatches || {};
   cp.stats = Object.assign(emptyCheckpoint().stats, raw.stats || {});
   return cp;
 }
@@ -62,6 +67,12 @@ function observationPayload(obs) {
   return obs.value && typeof obs.value === "object" ? obs.value : obs;
 }
 
+function isRecentIso(value, nowStr, maxAgeMs) {
+  const timestamp = new Date(value || "").getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  return new Date(nowStr).getTime() - timestamp < maxAgeMs;
+}
+
 function observationDispatchedAt(obs, fallback) {
   const payload = observationPayload(obs);
   return (
@@ -80,6 +91,12 @@ function pruneDispatched(cp, nowStr) {
   for (const [sig, dispatchedAt] of Object.entries(cp.dispatched_signatures)) {
     if (new Date(dispatchedAt).getTime() < cutoff) {
       delete cp.dispatched_signatures[sig];
+    }
+  }
+  // Prune stale pending entries (same TTL as dispatched)
+  for (const [sig, entry] of Object.entries(cp.pending_dispatches)) {
+    if (new Date(entry.first_attempted_at || 0).getTime() < cutoff) {
+      delete cp.pending_dispatches[sig];
     }
   }
 }
@@ -176,6 +193,18 @@ agentdesk.routines.register({
         continue;
       }
 
+      // Give up if LLM has repeatedly failed to write the dispatched marker.
+      const pending = cp.pending_dispatches[signature];
+      if (pending && (pending.attempt_count || 0) >= MAX_DISPATCH_RETRIES) {
+        cp.stats.stalled_candidates = (cp.stats.stalled_candidates || 0) + 1;
+        continue;
+      }
+      // Throttle: don't re-emit within cooldown window.
+      if (pending && isRecentIso(pending.last_attempted_at, nowStr, DISPATCH_RETRY_MS)) {
+        cp.stats.skipped_already_dispatched++;
+        continue;
+      }
+
       toDispatch.push({ signature, candidate });
     }
 
@@ -194,6 +223,12 @@ agentdesk.routines.register({
 
     // Dispatch first pending candidate; remaining handled on next ticks
     const { signature, candidate } = toDispatch[0];
+    const prevPending = cp.pending_dispatches[signature];
+    cp.pending_dispatches[signature] = {
+      first_attempted_at: prevPending?.first_attempted_at || nowStr,
+      last_attempted_at: nowStr,
+      attempt_count: (prevPending?.attempt_count || 0) + 1,
+    };
     cp.stats.dispatched++;
 
     const prompt = buildDispatchPrompt(signature, candidate);
