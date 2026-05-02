@@ -8,10 +8,10 @@ use serde_json::{Value, json};
 use sqlx::Row as _;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 
 use crate::server::routes::AppState;
+use crate::services::git::GitCommand;
 
 pub(crate) fn run_async<F>(future: F) -> Result<(), String>
 where
@@ -70,12 +70,11 @@ fn parse_health_status_code(status: &str) -> StatusCode {
 
 fn maybe_infer_repo_from_git() -> Option<String> {
     let repo_dir = crate::services::platform::resolve_repo_dir()?;
-    let output = Command::new("git")
+    let output = GitCommand::new()
+        .repo(repo_dir)
         .args(["config", "--get", "remote.origin.url"])
-        .current_dir(repo_dir)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
+        .run_output()
+        .ok()?;
     crate::services::platform::shell::parse_github_repo_from_remote(&String::from_utf8_lossy(
         &output.stdout,
     ))
@@ -791,23 +790,30 @@ fn collect_dispatch_commits(dispatches: &[Value]) -> Vec<String> {
 }
 
 fn commit_merged_to_main(repo_dir: &str, commit: &str) -> Result<bool, String> {
-    let status = Command::new("git")
+    let has_origin_main = match GitCommand::new()
+        .repo(repo_dir)
         .args(["rev-parse", "--verify", "origin/main"])
-        .current_dir(repo_dir)
-        .status()
-        .map_err(|e| format!("git rev-parse origin/main: {e}"))?;
-    let base = if status.success() {
+        .run_output()
+    {
+        Ok(_) => true,
+        Err(error) if error.status_code().is_some() => false,
+        Err(error) => return Err(format!("git rev-parse origin/main: {error}")),
+    };
+    let base = if has_origin_main {
         "origin/main"
     } else {
         "main"
     };
 
-    let merge_status = Command::new("git")
+    match GitCommand::new()
+        .repo(repo_dir)
         .args(["merge-base", "--is-ancestor", commit, base])
-        .current_dir(repo_dir)
-        .status()
-        .map_err(|e| format!("git merge-base: {e}"))?;
-    Ok(merge_status.success())
+        .run_output()
+    {
+        Ok(_) => Ok(true),
+        Err(error) if error.status_code() == Some(1) => Ok(false),
+        Err(error) => Err(format!("git merge-base: {error}")),
+    }
 }
 
 async fn load_pr_tracking_pg(pool: &sqlx::PgPool, card_id: &str) -> Option<Value> {
@@ -1284,29 +1290,20 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
 }
 
 fn git_output(dir: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    GitCommand::new()
+        .repo(dir)
         .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
+        .run_text()
+        .map(|stdout| stdout.trim().to_string())
+        .map_err(|error| format!("git {}: {error}", args.join(" ")))
 }
 
 fn git_status_output(dir: &str, args: &[&str]) -> Result<bool, String> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
-    Ok(status.success())
+    match GitCommand::new().repo(dir).args(args).run_output() {
+        Ok(_) => Ok(true),
+        Err(error) if error.status_code().is_some() => Ok(false),
+        Err(error) => Err(format!("git {}: {error}", args.join(" "))),
+    }
 }
 
 fn extract_issue_numbers(text: &str) -> Vec<String> {
@@ -1325,23 +1322,25 @@ fn maybe_restore_stash(main_worktree: &str, stash_created: bool) -> Result<Optio
     if !stash_created {
         return Ok(None);
     }
-    let output = Command::new("git")
+    let output = GitCommand::new()
+        .repo(main_worktree)
         .args(["stash", "pop"])
-        .current_dir(main_worktree)
-        .output()
-        .map_err(|e| format!("git stash pop: {e}"))?;
-    if output.status.success() {
-        return Ok(Some("stash restored".to_string()));
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        Ok(Some(
-            "stash created but restore needs manual check".to_string(),
-        ))
-    } else {
-        Ok(Some(format!(
-            "stash created but restore reported conflicts: {stderr}"
-        )))
+        .run_output();
+    match output {
+        Ok(_) => Ok(Some("stash restored".to_string())),
+        Err(error) if error.status_code().is_none() => Err(format!("git stash pop: {error}")),
+        Err(error) => {
+            let stderr = error.stderr_text();
+            if stderr.is_empty() {
+                Ok(Some(
+                    "stash created but restore needs manual check".to_string(),
+                ))
+            } else {
+                Ok(Some(format!(
+                    "stash created but restore reported conflicts: {stderr}"
+                )))
+            }
+        }
     }
 }
 

@@ -45,9 +45,9 @@
 | `bootstrap` | `src/bootstrap.rs` | 56 |  |
 | `cli` | `src/cli/mod.rs` | 20 |  |
 | `cli::args` | `src/cli/args.rs` | 939 |  |
-| `cli::client` | `src/cli/client.rs` | 1656 | giant-file |
-| `cli::dcserver` | `src/cli/dcserver.rs` | 1516 | giant-file |
-| `cli::direct` | `src/cli/direct.rs` | 1569 | giant-file |
+| `cli::client` | `src/cli/client.rs` | 1648 | giant-file |
+| `cli::dcserver` | `src/cli/dcserver.rs` | 1526 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1568 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |

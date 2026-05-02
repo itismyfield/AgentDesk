@@ -133,12 +133,11 @@ fn infer_dispatch_repo(repo: Option<&str>) -> Option<String> {
     }
 
     let repo_dir = crate::services::platform::resolve_repo_dir()?;
-    let output = std::process::Command::new("git")
+    let output = crate::services::git::GitCommand::new()
+        .repo(repo_dir)
         .args(["config", "--get", "remote.origin.url"])
-        .current_dir(repo_dir)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
+        .run_output()
+        .ok()?;
     let remote = String::from_utf8_lossy(&output.stdout);
     parse_github_repo_from_remote(&remote)
 }
@@ -1107,7 +1106,6 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::{Value, json};
     use std::ffi::OsString;
-    use std::process::Command;
     use std::sync::MutexGuard;
     use std::sync::{Arc, Mutex};
 
@@ -1155,17 +1153,11 @@ mod tests {
     }
 
     fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
+        crate::services::git::GitCommand::new()
+            .repo(repo_dir)
             .args(args)
-            .current_dir(repo_dir)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .run_output()
+            .unwrap_or_else(|error| panic!("git {args:?} failed: {error}"));
     }
 
     #[derive(Clone)]
