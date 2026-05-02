@@ -1,7 +1,7 @@
 ---
 doc_type: "spec_source"
 schema_version: "2"
-status: "draft"
+status: "implemented"
 topic_slug: "agentdesk-automation-candidate-pipeline"
 topic_folder: "agentdesk-automation-candidate-pipeline"
 linked_prd: "./agentdesk-automation-candidate-pipeline-prd.md"
@@ -21,10 +21,10 @@ updated_at: "2026-05-02"
 
 ## State
 
-- status: draft
+- status: implemented
 - source_of_truth_scope: requirements, tasks, tests, status
 - sync_policy: PRD 수정 후 spec-source 문서도 같이 갱신
-- implementation_stage: not-started
+- implementation_stage: implemented (PR #1497)
 
 ---
 
