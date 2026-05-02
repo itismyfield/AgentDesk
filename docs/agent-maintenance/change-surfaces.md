@@ -6,7 +6,7 @@
 > [`docs/generated/module-inventory.md`](../generated/module-inventory.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-04-30 (against #1435 tmux watcher lifecycle extraction).
+> Last refreshed: 2026-05-02 (against #1515 dispatched session SRP split).
 
 ## Read This First
 
@@ -256,6 +256,10 @@ The remaining giant-file modules under `src/services/` not covered above:
   provider adapters.
 - `src/services/memory/memento.rs` (2479).
 - `src/services/observability/mod.rs` (3647).
+- `src/services/dispatched_sessions.rs` (2954) — dispatched session domain
+  service. This is the post-#1515 SRP extraction target for route/database
+  callsites, but the module itself is now giant-file territory; split focused
+  helpers before adding non-bugfix behavior.
 - `src/services/routines/loader.rs` (1753),
   `src/services/routines/store.rs` (2178), and
   `src/services/routines/discord_log.rs` (1056); routine loader/store and
