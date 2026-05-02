@@ -370,6 +370,8 @@ pub(super) struct TurnBridgeContext {
     pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
     pub(super) memory_recall_usage: TokenUsage,
+    pub(super) context_window_tokens: u64,
+    pub(super) context_compact_percent: u64,
     pub(super) current_msg_id: MessageId,
     pub(super) response_sent_offset: usize,
     pub(super) full_response: String,
@@ -1218,6 +1220,8 @@ pub(super) fn spawn_turn_bridge(
         let adk_session_info = bridge.adk_session_info.clone();
         let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
+        let context_window_tokens = bridge.context_window_tokens;
+        let context_compact_percent = bridge.context_compact_percent;
 
         let mut full_response = bridge.full_response.clone();
         let mut last_edit_text = String::new();
@@ -2187,6 +2191,9 @@ pub(super) fn spawn_turn_bridge(
                             output_tokens,
                             ..
                         } => {
+                            let has_context_token_data = input_tokens.is_some()
+                                || cache_create_tokens.is_some()
+                                || cache_read_tokens.is_some();
                             // Use latest values (not cumulative) — provider adapters emit
                             // cumulative totals for the current turn/session snapshot.
                             if let Some(it) = input_tokens {
@@ -2200,6 +2207,18 @@ pub(super) fn spawn_turn_bridge(
                             }
                             if let Some(ot) = output_tokens {
                                 accumulated_output_tokens = ot;
+                            }
+                            if shared_owned.status_panel_v2_enabled && has_context_token_data {
+                                status_panel_dirty |= shared_owned
+                                    .placeholder_live_events
+                                    .set_context_panel_usage(
+                                        channel_id,
+                                        accumulated_input_tokens,
+                                        accumulated_cache_create_tokens,
+                                        accumulated_cache_read_tokens,
+                                        context_window_tokens,
+                                        context_compact_percent,
+                                    );
                             }
                         }
                         StreamMessage::TmuxReady {

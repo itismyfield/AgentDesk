@@ -2716,6 +2716,9 @@ pub(super) async fn restore_inflight_turns(
                 adk_cwd: recovery_adk_cwd.clone(),
                 dispatch_id: recovery_dispatch_id,
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
+                context_window_tokens: provider.default_context_window(),
+                context_compact_percent: super::adk_session::ContextThresholds::default()
+                    .compact_pct_for(&provider),
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,
                 full_response: state.full_response.clone(),

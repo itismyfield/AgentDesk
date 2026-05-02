@@ -16,6 +16,7 @@ const STATUS_PANEL_MAX_CHARS: usize = 4096;
 const STATUS_PANEL_TODO_LIMIT: usize = 8;
 const STATUS_PANEL_SUBAGENT_LIMIT: usize = 6;
 const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
+const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecentPlaceholderEvent {
@@ -171,6 +172,49 @@ impl PlaceholderLiveEvents {
         true
     }
 
+    pub(super) fn set_context_panel_usage(
+        &self,
+        channel_id: ChannelId,
+        input_tokens: u64,
+        cache_create_tokens: u64,
+        cache_read_tokens: u64,
+        context_window_tokens: u64,
+        compact_percent: u64,
+    ) -> bool {
+        if context_window_tokens == 0 {
+            return false;
+        }
+        self.set_context_panel_snapshot(
+            channel_id,
+            Some(ContextPanelSnapshot {
+                input_tokens,
+                cache_create_tokens,
+                cache_read_tokens,
+                context_window_tokens,
+                compact_percent,
+            }),
+        )
+    }
+
+    fn set_context_panel_snapshot(
+        &self,
+        channel_id: ChannelId,
+        snapshot: Option<ContextPanelSnapshot>,
+    ) -> bool {
+        let entry = self
+            .status_by_channel
+            .entry(channel_id)
+            .or_insert_with(|| Mutex::new(StatusPanelState::default()));
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.context == snapshot {
+            return false;
+        }
+        guard.context = snapshot;
+        true
+    }
+
     pub(super) fn render_status_panel(
         &self,
         channel_id: ChannelId,
@@ -275,6 +319,29 @@ impl SessionPanelSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextPanelSnapshot {
+    input_tokens: u64,
+    cache_create_tokens: u64,
+    cache_read_tokens: u64,
+    context_window_tokens: u64,
+    compact_percent: u64,
+}
+
+impl ContextPanelSnapshot {
+    fn usage_percent(&self) -> Option<u64> {
+        if self.context_window_tokens == 0 {
+            return None;
+        }
+        let used_tokens = self
+            .input_tokens
+            .saturating_add(self.cache_create_tokens)
+            .saturating_add(self.cache_read_tokens);
+        let percent = (u128::from(used_tokens) * 100) / u128::from(self.context_window_tokens);
+        Some(percent.min(u128::from(u64::MAX)) as u64)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DerivedStatus {
     Running,
     MonitorWait,
@@ -298,6 +365,7 @@ impl Default for DerivedStatus {
 struct StatusPanelState {
     status: DerivedStatus,
     session: Option<SessionPanelSnapshot>,
+    context: Option<ContextPanelSnapshot>,
     todos: Vec<StatusTodoItem>,
     subagents: Vec<SubagentSlot>,
 }
@@ -415,6 +483,14 @@ fn render_status_panel(
         sections.push(render_session_panel_line(session, provider));
     }
 
+    if let Some(context_line) = snapshot
+        .context
+        .as_ref()
+        .and_then(render_context_panel_line)
+    {
+        sections.push(context_line);
+    }
+
     if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
         let lines = snapshot
             .todos
@@ -474,6 +550,25 @@ fn render_session_panel_line(session: &SessionPanelSnapshot, provider: &Provider
         parts.push(format!("tmux {}", tmux.as_str()));
     }
     truncate_chars(&parts.join(" · "), SESSION_PANEL_LINE_MAX_CHARS)
+}
+
+fn render_context_panel_line(context: &ContextPanelSnapshot) -> Option<String> {
+    let usage_percent = context.usage_percent()?;
+    let icon = if usage_percent >= 85 {
+        "⚠️"
+    } else {
+        "📦"
+    };
+    let mut line = format!(
+        "Context  {icon} {usage_percent}% used · auto-compact {}%",
+        context.compact_percent
+    );
+    if usage_percent >= 85 {
+        line.push_str(" — 자동 압축 직전");
+    } else if usage_percent >= 75 {
+        line.push_str(" (임박)");
+    }
+    Some(truncate_chars(&line, CONTEXT_PANEL_LINE_MAX_CHARS))
 }
 
 fn render_provider_session_label(provider: &ProviderKind, session_id: &str) -> String {
@@ -1413,6 +1508,43 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
         assert!(!rendered.contains("Session  "));
+    }
+
+    #[test]
+    fn status_panel_omits_context_line_when_token_data_is_absent() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(181);
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+        assert!(!rendered.contains("Context  "));
+    }
+
+    #[test]
+    fn status_panel_renders_context_usage_severity_levels() {
+        let events = PlaceholderLiveEvents::default();
+        let normal_channel_id = ChannelId::new(182);
+        assert!(events.set_context_panel_usage(normal_channel_id, 740, 0, 0, 1000, 90));
+        let normal =
+            events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(normal.contains("Context  📦 74% used · auto-compact 90%"));
+        assert!(!normal.contains("임박"));
+        assert!(!normal.contains("자동 압축 직전"));
+
+        let approaching_channel_id = ChannelId::new(183);
+        events.set_context_panel_usage(approaching_channel_id, 700, 40, 10, 1000, 90);
+        let approaching = events.render_status_panel(
+            approaching_channel_id,
+            &ProviderKind::Claude,
+            1_700_000_000,
+        );
+        assert!(approaching.contains("Context  📦 75% used · auto-compact 90% (임박)"));
+
+        let critical_channel_id = ChannelId::new(184);
+        events.set_context_panel_usage(critical_channel_id, 700, 100, 50, 1000, 90);
+        let critical =
+            events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(critical.contains("Context  ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
     }
 
     #[test]
