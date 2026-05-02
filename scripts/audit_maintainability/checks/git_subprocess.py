@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from ..common import Finding, line_of, read_text, rel_posix, strip_rust_comments
+from ..common import Finding, is_allowlisted, line_of, read_text, rel_posix, strip_rust_comments
 from . import CheckSpec
 
 ALLOWED_PARENTS = (
@@ -37,12 +37,15 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             continue
         text = strip_rust_comments(read_text(path))
         for match in PATTERN.finditer(text):
+            line = line_of(text, match.start())
+            if is_allowlisted(allowlist, rel, line):
+                continue
             findings.append(
                 Finding(
                     rule="git_subprocess_callsites",
                     severity="info",
                     file=rel,
-                    line=line_of(text, match.start()),
+                    line=line,
                     message="direct git subprocess (consider services::git helper)",
                 )
             )
@@ -57,6 +60,6 @@ CHECK = CheckSpec(
         "std::process::Command::new(\"git\") callsites outside src/services/git. "
         "Prefer the centralised git helper for consistent error handling."
     ),
-    hard_gate=False,
+    hard_gate=True,
     runner=_run,
 )

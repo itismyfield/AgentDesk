@@ -11,10 +11,11 @@ Stdlib only; Python 3.11+.
 
 Hard gates
 ----------
-Four checks are blocking in ``--check`` mode: direct Discord send regressions,
-runtime SQLite/legacy DB references, source-of-truth alias writes, and giant
-files missing from ``docs/agent-maintenance/change-surfaces.md``. Existing
-findings from the enablement commit are captured in ``scripts/audit_allowlist.toml``.
+Five checks are blocking in ``--check`` mode: direct Discord send regressions,
+direct git subprocess regressions, runtime SQLite/legacy DB references,
+source-of-truth alias writes, and giant files missing from
+``docs/agent-maintenance/change-surfaces.md``. Existing findings from the
+enablement commit are captured in ``scripts/audit_allowlist.toml``.
 """
 
 from __future__ import annotations

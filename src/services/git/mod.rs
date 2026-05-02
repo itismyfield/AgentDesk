@@ -4,6 +4,7 @@ pub mod branch_resolver;
 pub mod commit_resolver;
 pub mod remote;
 pub mod repo_resolver;
+pub mod runner;
 pub mod worktree_resolver;
 
 pub(crate) use branch_resolver::is_mainlike_branch;
@@ -15,6 +16,8 @@ pub use commit_resolver::{
 };
 pub(crate) use remote::parse_github_repo_from_remote;
 pub use repo_resolver::{resolve_repo_dir, resolve_repo_dir_for_id, resolve_repo_dir_for_target};
+#[allow(unused_imports)]
+pub use runner::{GitCommand, GitCommandError};
 pub use worktree_resolver::{
     ManagedWorktreeCleanup, cleanup_managed_worktree, ensure_worktree_for_issue,
     find_worktree_for_issue,
