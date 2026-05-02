@@ -2679,11 +2679,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
         );
     }
     // Rolling-size-cap rotation state. The watcher loop spins predictably
-    // (~500ms sleeps) so a mod-N gate on an iteration counter gives a
+    // (~250ms sleeps) so a mod-N gate on an iteration counter gives a
     // regular-ish cadence for the size check without hitting the fs every
     // spin. See issue #892.
     let mut rotation_tick: u32 = 0;
-    const ROTATION_CHECK_EVERY: u32 = 60; // ~30s at 500ms base cadence
+    const ROTATION_CHECK_EVERY: u32 = 120; // ~30s at 250ms base cadence
 
     'watcher_loop: loop {
         last_heartbeat_ts_ms.store(
@@ -2854,7 +2854,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     probe_tmux_session_liveness(&tmux_session_name).await,
                 ) {
                     TmuxLivenessDecision::Continue => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                         continue;
                     }
                     TmuxLivenessDecision::QuietStop => {
@@ -2898,7 +2898,7 @@ pub(super) async fn tmux_output_watcher_with_restore(
         match poll_decision {
             WatcherOutputPollDecision::DrainOutput => {}
             WatcherOutputPollDecision::Continue => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 continue;
             }
             WatcherOutputPollDecision::QuietStop => {
