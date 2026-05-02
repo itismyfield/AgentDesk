@@ -98,7 +98,7 @@
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 718 |  |
 | `engine::ops::ci_recovery_ops` | `src/engine/ops/ci_recovery_ops.rs` | 270 |  |
 | `engine::ops::config_ops` | `src/engine/ops/config_ops.rs` | 90 |  |
-| `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1591 | giant-file |
+| `engine::ops::db_ops` | `src/engine/ops/db_ops.rs` | 1625 | giant-file |
 | `engine::ops::dispatch_ops` | `src/engine/ops/dispatch_ops.rs` | 759 |  |
 | `engine::ops::dm_reply_ops` | `src/engine/ops/dm_reply_ops.rs` | 534 |  |
 | `engine::ops::exec_ops` | `src/engine/ops/exec_ops.rs` | 507 |  |
@@ -121,7 +121,7 @@
 | `github::dod` | `src/github/dod.rs` | 395 |  |
 | `github::sync` | `src/github/sync.rs` | 1059 | giant-file |
 | `github::triage` | `src/github/triage.rs` | 159 |  |
-| `high_risk_recovery` | `src/high_risk_recovery.rs` | 368 |  |
+| `high_risk_recovery` | `src/high_risk_recovery.rs` | 379 |  |
 | `integration_tests::agents_setup_e2e` | `src/integration_tests/agents_setup_e2e.rs` | 651 |  |
 | `integration_tests::discord_flow` | `src/integration_tests/discord_flow/mod.rs` | 46 |  |
 | `integration_tests::discord_flow::harness` | `src/integration_tests/discord_flow/harness.rs` | 265 |  |
