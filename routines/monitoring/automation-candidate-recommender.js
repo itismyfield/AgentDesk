@@ -11,6 +11,24 @@ const PROMPT_CAP_BYTES = 12288;
 const CHECKPOINT_CAP_BYTES = 65536;
 const CHECKPOINT_VERSION = 1;
 const CANDIDATE_TTL_DAYS = 30;
+
+// seen_evidence dedup: prevents the same evidence from incrementing score/evidence_count
+// across multiple ticks.  TTL covers the 24h observation query window with margin.
+const SEEN_EVIDENCE_TTL_MS = 25 * 3600 * 1000;   // 25 h
+const SEEN_EVIDENCE_MAX_ENTRIES = 500;             // LRU cap
+
+// Saturation detection & re-optimization (P0-E)
+// EMA formula mirrors autoresearch train.py ema_beta=0.9 (karpathy/autoresearch).
+// Fast-fail tier: analogous to autoresearch "if isnan(loss): exit(1)".
+// Re-optimization (partial reset + diversity mode) is original design.
+const EMA_BETA = 0.9;
+const EMA_SATURATION_THRESHOLD = 0.3;   // ema_scored below this → saturation_ticks++
+const SATURATION_TICKS = 5;             // consecutive EMA-saturated ticks → reopt
+const FAST_FAIL_TICKS = 2;              // all-dedup consecutive ticks → immediate reopt
+const REOPT_WINDOW_MS = 12 * 3600 * 1000;  // partial reset: remove seen_evidence older than 12h
+const DIVERSITY_BOOST_TICKS = 10;       // ticks of diversity mode after each reopt
+const DIVERSITY_LOOKBACK_TICKS = 5;    // history window for underrepresented category detection
+
 const KNOWN_CATEGORIES = new Set([
   "routine-candidate",
   "release-freshness",
@@ -32,14 +50,24 @@ function emptyCheckpoint() {
     cursors: {},
     candidates: {},
     suppressions: {},
+    seen_evidence: {},   // evidence_key -> { seen_at, occurrences } (legacy ISO string accepted)
     recommendations: [],
     last_tick_at: null,
+    // P0-E saturation tracking
+    ema_scored: 0,
+    saturation_ticks: 0,
+    fast_fail_ticks: 0,
+    reopt_count: 0,
+    diversity_mode_ticks_remaining: 0,
+    last_reopt_at: null,
     stats: {
       ticks: 0,
       observations_seen: 0,
       agent_escalations: 0,
       recommendations_today: 0,
       recommendation_day: null,
+      category_scored: {},
+      category_scored_history: [],   // [{cat: count, ...}, ...] last DIVERSITY_LOOKBACK_TICKS entries
     },
   };
 }
@@ -51,7 +79,18 @@ function loadCheckpoint(raw) {
   const cp = Object.assign(emptyCheckpoint(), raw);
   cp.candidates = raw.candidates || {};
   cp.suppressions = raw.suppressions || {};
+  cp.seen_evidence = raw.seen_evidence || {};
   cp.stats = Object.assign(emptyCheckpoint().stats, raw.stats || {});
+  cp.stats.category_scored = (raw.stats && raw.stats.category_scored) ? raw.stats.category_scored : {};
+  cp.stats.category_scored_history = (raw.stats && Array.isArray(raw.stats.category_scored_history))
+    ? raw.stats.category_scored_history : [];
+  // P0-E backward-compat defaults
+  if (typeof cp.ema_scored !== "number") cp.ema_scored = 0;
+  if (typeof cp.saturation_ticks !== "number") cp.saturation_ticks = 0;
+  if (typeof cp.fast_fail_ticks !== "number") cp.fast_fail_ticks = 0;
+  if (typeof cp.reopt_count !== "number") cp.reopt_count = 0;
+  if (typeof cp.diversity_mode_ticks_remaining !== "number") cp.diversity_mode_ticks_remaining = 0;
+  if (cp.last_reopt_at === undefined) cp.last_reopt_at = null;
   return cp;
 }
 
@@ -76,6 +115,144 @@ function simpleHash(str) {
   return (h >>> 0).toString(16);
 }
 
+// --- seen_evidence dedup helpers ---
+
+function seenEvidenceTimestamp(entry) {
+  if (typeof entry === "string") return entry;
+  if (entry && typeof entry === "object") {
+    return entry.seen_at || entry.first_seen_at || null;
+  }
+  return null;
+}
+
+function seenEvidenceOccurrences(entry) {
+  if (!entry || typeof entry !== "object") return 0;
+  const value = Number(entry.occurrences || 0);
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+}
+
+function isSeenEvidenceFresh(entry, nowStr) {
+  const ts = seenEvidenceTimestamp(entry);
+  if (!ts) return false;
+  return new Date(nowStr).getTime() - new Date(ts).getTime() < SEEN_EVIDENCE_TTL_MS;
+}
+
+function evidenceKey(obs) {
+  if (obs.evidence_ref) return obs.evidence_ref;
+  return `${obs.source || ""}|${obs.category || ""}|${obs.signature || ""}|${simpleHash(String(obs.summary || ""))}`;
+}
+
+function seenOccurrences(cp, key, nowStr) {
+  const entry = cp.seen_evidence[key];
+  if (!isSeenEvidenceFresh(entry, nowStr)) return 0;
+  return seenEvidenceOccurrences(entry);
+}
+
+function isEvidenceFullySeen(cp, key, nowStr, occurrences) {
+  const entry = cp.seen_evidence[key];
+  if (!isSeenEvidenceFresh(entry, nowStr)) return false;
+  if (typeof entry === "string") return true;
+  return seenEvidenceOccurrences(entry) >= occurrences;
+}
+
+function markEvidenceSeen(cp, key, nowStr, occurrences) {
+  const value = Number(occurrences || 0);
+  cp.seen_evidence[key] = {
+    seen_at: nowStr,
+    occurrences: Number.isFinite(value) && value > 0 ? Math.floor(value) : 0,
+  };
+}
+
+function pruneSeenEvidence(cp, nowStr) {
+  const cutoffMs = new Date(nowStr).getTime() - SEEN_EVIDENCE_TTL_MS;
+  // Expire TTL-exceeded entries
+  for (const key of Object.keys(cp.seen_evidence)) {
+    const seenAt = seenEvidenceTimestamp(cp.seen_evidence[key]);
+    if (!seenAt || new Date(seenAt).getTime() < cutoffMs) {
+      delete cp.seen_evidence[key];
+    }
+  }
+  // LRU eviction: drop oldest entries if still over cap
+  const keys = Object.keys(cp.seen_evidence);
+  if (keys.length > SEEN_EVIDENCE_MAX_ENTRIES) {
+    keys.sort((a, b) =>
+      new Date(seenEvidenceTimestamp(cp.seen_evidence[a])).getTime() -
+      new Date(seenEvidenceTimestamp(cp.seen_evidence[b])).getTime()
+    );
+    for (const key of keys.slice(0, keys.length - SEEN_EVIDENCE_MAX_ENTRIES)) {
+      delete cp.seen_evidence[key];
+    }
+  }
+}
+
+// --- P0-E: Saturation detection & re-optimization helpers ---
+
+function updateEmaScored(cp, scoredThisTick) {
+  cp.ema_scored = EMA_BETA * cp.ema_scored + (1 - EMA_BETA) * scoredThisTick;
+}
+
+function updateFastFailTicks(cp, scoringReport, obsCount) {
+  // Fast-fail: all observations were deduped (no new scoring signal at all)
+  const allDeduped =
+    scoringReport.scored === 0 &&
+    scoringReport.deduped > 0 &&
+    scoringReport.deduped === obsCount;
+  if (allDeduped) {
+    cp.fast_fail_ticks++;
+  } else {
+    cp.fast_fail_ticks = 0;
+  }
+}
+
+function updateSaturationTicks(cp) {
+  if (cp.ema_scored < EMA_SATURATION_THRESHOLD) {
+    cp.saturation_ticks++;
+  } else {
+    cp.saturation_ticks = 0;
+  }
+}
+
+function shouldTriggerReopt(cp) {
+  if (cp.fast_fail_ticks >= FAST_FAIL_TICKS) return { trigger: true, reason: "fast_fail" };
+  if (cp.saturation_ticks >= SATURATION_TICKS) return { trigger: true, reason: "ema_saturation" };
+  return { trigger: false, reason: null };
+}
+
+function partialResetSeenEvidence(cp, nowStr) {
+  const cutoff = new Date(new Date(nowStr).getTime() - REOPT_WINDOW_MS).getTime();
+  for (const [key, entry] of Object.entries(cp.seen_evidence)) {
+    const seenAt = seenEvidenceTimestamp(entry);
+    if (!seenAt || new Date(seenAt).getTime() < cutoff) {
+      delete cp.seen_evidence[key];
+    }
+  }
+}
+
+function triggerReopt(cp, nowStr) {
+  partialResetSeenEvidence(cp, nowStr);
+  cp.diversity_mode_ticks_remaining = DIVERSITY_BOOST_TICKS;
+  cp.reopt_count++;
+  cp.saturation_ticks = 0;
+  cp.fast_fail_ticks = 0;
+  cp.last_reopt_at = nowStr;
+}
+
+// Returns Set of underrepresented categories using last DIVERSITY_LOOKBACK_TICKS tick history.
+// A category is underrepresented when its summed scored count is below the per-category average.
+function underrepresentedCatsFromHistory(cp) {
+  const totals = {};
+  for (const cat of KNOWN_CATEGORIES) totals[cat] = 0;
+  for (const snapshot of cp.stats.category_scored_history || []) {
+    for (const [cat, n] of Object.entries(snapshot)) {
+      totals[cat] = (totals[cat] || 0) + n;
+    }
+  }
+  const vals = Object.values(totals);
+  const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+  return new Set(Object.entries(totals).filter(([, n]) => n < avg).map(([c]) => c));
+}
+
 function normalizeCategory(value) {
   if (typeof value === "string" && KNOWN_CATEGORIES.has(value)) {
     return value;
@@ -89,6 +266,19 @@ function observationOccurrences(obs) {
     return 1;
   }
   return Math.min(50, Math.floor(value));
+}
+
+function observationKey(obs) {
+  if (typeof obs.key === "string") return obs.key;
+  if (typeof obs.evidence_ref === "string") {
+    if (obs.evidence_ref.startsWith("kv_meta:routine_observation:")) {
+      return obs.evidence_ref.slice("kv_meta:".length);
+    }
+    if (obs.evidence_ref.startsWith("routine_observation:")) {
+      return obs.evidence_ref;
+    }
+  }
+  return "";
 }
 
 function compactText(value, maxChars) {
@@ -224,7 +414,7 @@ function hasDurableAcceptance(entry) {
   return Boolean(entry && (entry.automation_ref || entry.source_ref));
 }
 
-function buildSuppressedSet(cp, inventory) {
+function buildSuppressedSet(cp, inventory, observations) {
   const exact = new Map();
   const prefixes = [];
 
@@ -276,6 +466,15 @@ function buildSuppressedSet(cp, inventory) {
       s === "rejected"
     ) {
       addPattern(patternId, `후보 상태=${s}`);
+    }
+  }
+
+  // candidate_dispatched:* kv_meta observations → suppress re-recommendation (REQ-P1-004)
+  for (const obs of observations || []) {
+    const key = observationKey(obs);
+    if (key.startsWith("routine_observation:candidate_dispatched:")) {
+      const signature = key.replace("routine_observation:candidate_dispatched:", "");
+      if (signature) addPattern(signature, "dispatched kv_meta 존재 (재추천 차단)");
     }
   }
 
@@ -348,12 +547,17 @@ function expireStaleCandidates(cp, nowStr) {
 
 // --- Score observations into candidates ---
 
-function scoreObservations(cp, observations, suppressedSet, nowStr) {
+function scoreObservations(cp, observations, suppressedSet, nowStr, diversityMode) {
   const thirtyMinAgo = new Date(new Date(nowStr).getTime() - 30 * 60 * 1000).toISOString();
   const report = {
     scored: 0,
+    deduped: 0,
     suppressed: [],
+    category_scored_this_tick: {},
   };
+
+  // Diversity mode: underrepresented categories from last DIVERSITY_LOOKBACK_TICKS tick history
+  const underrepresentedCats = diversityMode ? underrepresentedCatsFromHistory(cp) : null;
 
   for (const candidate of Object.values(cp.candidates || {})) {
     candidate.score_delta_last_tick = 0;
@@ -373,6 +577,19 @@ function scoreObservations(cp, observations, suppressedSet, nowStr) {
       });
       continue;
     }
+
+    // Cross-tick dedup: skip evidence already scored in a previous tick, but
+    // score only the newly increased occurrence count for rolling grouped sources.
+    const eKey = evidenceKey(obs);
+    const totalOccurrences = observationOccurrences(obs);
+    if (isEvidenceFullySeen(cp, eKey, nowStr, totalOccurrences)) {
+      markEvidenceSeen(cp, eKey, nowStr, totalOccurrences);
+      report.deduped++;
+      continue;
+    }
+    const priorOccurrences = seenOccurrences(cp, eKey, nowStr);
+    const occurrences = Math.max(1, totalOccurrences - priorOccurrences);
+    markEvidenceSeen(cp, eKey, nowStr, totalOccurrences);
 
     const category = normalizeCategory(obs.category);
     let candidate = cp.candidates[patternId];
@@ -409,7 +626,6 @@ function scoreObservations(cp, observations, suppressedSet, nowStr) {
       continue;
     }
 
-    const occurrences = observationOccurrences(obs);
     candidate.evidence_count += occurrences;
     candidate.last_seen_at = obs.timestamp || nowStr;
 
@@ -427,14 +643,22 @@ function scoreObservations(cp, observations, suppressedSet, nowStr) {
       delta += recencyBonus;
     }
 
+    // Diversity mode: 1.5× boost for underrepresented categories
+    const diversityBoost = (underrepresentedCats && underrepresentedCats.has(category)) ? 1.5 : 1;
+    delta = delta * diversityBoost;
+
     candidate.score = Math.min(100, candidate.score + delta);
     candidate.score_delta_last_tick = (candidate.score_delta_last_tick || 0) + delta;
     candidate.scored_observations_last_tick =
       (candidate.scored_observations_last_tick || 0) + 1;
     candidate.last_score_reason =
-      `weight=${weight}, occurrences=${occurrences}, recency_bonus=${recencyBonus}`;
+      `weight=${weight}, occurrences=${occurrences}, recency_bonus=${recencyBonus}${diversityBoost > 1 ? ", diversity_boost=1.5" : ""}`;
     candidate.last_scored_at = nowStr;
     report.scored++;
+
+    // Track per-category scoring stats (cumulative + per-tick for diversity history)
+    cp.stats.category_scored[category] = (cp.stats.category_scored[category] || 0) + 1;
+    report.category_scored_this_tick[category] = (report.category_scored_this_tick[category] || 0) + 1;
 
     // Keep up to 3 examples
     if (candidate.examples.length < MAX_EXAMPLES_PER_CANDIDATE) {
@@ -829,11 +1053,30 @@ agentdesk.routines.register({
 
     resetDailyCapIfNeeded(cp, nowStr);
     pruneExpiredSuppressions(cp, nowStr);
+    pruneSeenEvidence(cp, nowStr);
     expireStaleCandidates(cp, nowStr);
 
-    const suppressedSet = buildSuppressedSet(cp, inventory);
+    const suppressedSet = buildSuppressedSet(cp, inventory, observations);
     const droppedCandidates = dropSuppressedCandidates(cp, suppressedSet);
-    const scoringReport = scoreObservations(cp, observations, suppressedSet, nowStr);
+    const diversityMode = cp.diversity_mode_ticks_remaining > 0;
+    const scoringReport = scoreObservations(cp, observations, suppressedSet, nowStr, diversityMode);
+
+    // Update category scored history for diversity mode (keep last DIVERSITY_LOOKBACK_TICKS entries)
+    cp.stats.category_scored_history.push(scoringReport.category_scored_this_tick);
+    if (cp.stats.category_scored_history.length > DIVERSITY_LOOKBACK_TICKS) {
+      cp.stats.category_scored_history.shift();
+    }
+
+    // P0-E: saturation detection & re-optimization
+    updateEmaScored(cp, scoringReport.scored);
+    updateFastFailTicks(cp, scoringReport, observations.length);
+    updateSaturationTicks(cp);
+    const reoptCheck = shouldTriggerReopt(cp);
+    if (reoptCheck.trigger) {
+      triggerReopt(cp, nowStr);
+    } else if (cp.diversity_mode_ticks_remaining > 0) {
+      cp.diversity_mode_ticks_remaining--;
+    }
 
     cp.stats.ticks++;
     cp.last_tick_at = nowStr;
@@ -849,7 +1092,17 @@ agentdesk.routines.register({
       const decisionSummary = noEscalationReason(cp, nowStr);
       const topEvidenceSummary = topCandidateEvidenceSummary(cp);
       const suppressedSummary = suppressionSummary(scoringReport.suppressed, droppedCandidates);
-      const scoringSummary = `scored=${scoringReport.scored}, suppressed=${scoringReport.suppressed.length + droppedCandidates.length}`;
+      const scoringSummary = [
+        `scored=${scoringReport.scored}`,
+        `deduped=${scoringReport.deduped}`,
+        `suppressed=${scoringReport.suppressed.length + droppedCandidates.length}`,
+        `ema_scored=${cp.ema_scored.toFixed(3)}`,
+        `saturation_ticks=${cp.saturation_ticks}`,
+        `fast_fail_ticks=${cp.fast_fail_ticks}`,
+        `reopt_count=${cp.reopt_count}`,
+        diversityMode ? `diversity_mode_remaining=${cp.diversity_mode_ticks_remaining}` : null,
+        reoptCheck.trigger ? `reopt_triggered=${reoptCheck.reason}` : null,
+      ].filter(Boolean).join(", ");
       return {
         action: "complete",
         result: {
@@ -863,6 +1116,7 @@ agentdesk.routines.register({
           observation_count: observations.length,
           active_candidate_count: activeCandidates,
           recommendations_today: cp.stats.recommendations_today,
+          reopt_count: cp.reopt_count,
         },
         checkpoint: guardCheckpointSize(cp),
         lastResult: outcomeSummary,

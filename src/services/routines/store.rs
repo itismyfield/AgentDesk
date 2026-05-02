@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -59,6 +59,66 @@ fn json_count(value: &Value) -> u64 {
         .clamp(1, 50)
 }
 
+fn insert_bounded_json_string(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    if let Some(value) = json_str(payload, key) {
+        target.insert(key.to_owned(), Value::String(truncate_chars(value, 512)));
+    }
+}
+
+fn insert_json_number(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    if let Some(value) = payload.get(key).filter(|value| value.is_number()) {
+        target.insert(key.to_owned(), value.clone());
+    }
+}
+
+fn insert_bounded_string_array(target: &mut Map<String, Value>, payload: &Value, key: &str) {
+    let Some(items) = payload.get(key).and_then(Value::as_array) else {
+        return;
+    };
+    let values = items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| Value::String(truncate_chars(item, 80)))
+        .take(3)
+        .collect::<Vec<_>>();
+    if !values.is_empty() {
+        target.insert(key.to_owned(), Value::Array(values));
+    }
+}
+
+fn bounded_observation_value(payload: &Value) -> Value {
+    let mut value = Map::new();
+    for key in [
+        "topic",
+        "category",
+        "source",
+        "signature",
+        "timestamp",
+        "last_seen_at",
+        "approved_at",
+        "dispatched_at",
+        "suggested_automation",
+        "outcome_summary",
+    ] {
+        insert_bounded_json_string(&mut value, payload, key);
+    }
+    for key in [
+        "count",
+        "occurrences",
+        "weight",
+        "score",
+        "evidence_count",
+        "evidence_age_ms",
+    ] {
+        insert_json_number(&mut value, payload, key);
+    }
+    insert_bounded_string_array(&mut value, payload, "latest_examples");
+    insert_bounded_string_array(&mut value, payload, "examples");
+    Value::Object(value)
+}
+
 fn default_observation_category(source_kind: &str) -> &'static str {
     match source_kind {
         "memento_digest" => "memento-hygiene",
@@ -75,6 +135,43 @@ fn default_observation_source(source_kind: &str) -> &'static str {
     }
 }
 
+/// Build one observation item from a `kv_meta` precomputed digest row.
+///
+/// # kv_meta digest ingestion surface contract
+///
+/// **Key format**: `routine_observation:{source_kind}:{topic}`
+///   - `source_kind` maps to a human-readable `source` label (e.g. `memento_digest`,
+///     `release_freshness`). Unknown kinds fall back to `precomputed_digest`.
+///   - `topic` becomes the observation `signature` base when no explicit `signature` field
+///     is present in the payload.
+///
+/// **TTL / expiry**: rows with `expires_at IS NOT NULL AND expires_at <= NOW()` are
+/// excluded by the SQL query in `fetch_recent_run_observations`. Callers must set
+/// `expires_at` in `kv_meta` to control observation lifetime. There is no default TTL —
+/// omitting `expires_at` keeps the row permanently eligible.
+///
+/// **Dedup policy**: `evidence_ref` is set to `kv_meta:{key}`. Because `key` is unique
+/// in `kv_meta`, two rows with the same logical key cannot produce duplicate observations.
+/// The recommender's cross-tick `seen_evidence` map will further prevent re-scoring the
+/// same key within the 25-hour dedup window.
+///
+/// **Payload fields** (all optional, sensible defaults apply):
+/// - `topic` — display name / signature base
+/// - `count` — occurrence count; drives `occurrences` and `weight` (≥5 → weight=2)
+/// - `category` — overrides the source_kind default category
+/// - `source` — overrides the source_kind default source label
+/// - `signature` — explicit signature; defaults to `{category}:{topic}`
+/// - `timestamp` — ISO8601; defaults to now
+/// - `weight` — 1 or 2; auto-set from count if absent
+/// - `latest_examples` / `examples` — string array, up to 3 items kept, each ≤80 chars
+///
+/// The returned observation also carries the original `key` and a bounded,
+/// allowlisted `value` projection so JS routines can match
+/// candidate_review/candidate_approved markers without reverse-parsing
+/// `evidence_ref` or receiving raw kv_meta payloads.
+///
+/// **Role**: this is an internal precomputed digest surface. It is NOT a JS injection
+/// endpoint. Callers must write to `kv_meta` directly (Rust service / maintenance job).
 fn precomputed_observation_from_kv(
     key: &str,
     raw_value: Option<&str>,
@@ -126,8 +223,11 @@ fn precomputed_observation_from_kv(
         &format!("{topic}: {count} digest signal(s){example_suffix}"),
         240,
     );
+    let value = bounded_observation_value(&payload);
 
     Some(serde_json::json!({
+        "key": key,
+        "value": value,
         "timestamp": timestamp,
         "source": source,
         "category": category,
@@ -640,22 +740,37 @@ impl RoutineStore {
             return Ok(Vec::new());
         }
 
-        let limit = (max_items as i64).min(100);
-        let mut observations = Vec::with_capacity(max_items.min(100));
-        let mut total_bytes: usize = 0;
+        // Per-source hard caps for fair merge so no single source monopolises the
+        // ctx.observations slot budget (total 100 items / 64 KB).
+        const CAP_KV_META: i64 = 20;
+        const CAP_API_FRICTION: i64 = 15;
+        const CAP_OUTBOX: i64 = 10;
+        const CAP_ROUTINE_RUNS: i64 = 25;
+        const CAP_KANBAN: i64 = 10;
+        const CAP_DISPATCHES: i64 = 10;
+        const CAP_SESSION: i64 = 10;
+
         let now = Utc::now();
 
+        // --- Source 1: kv_meta precomputed digests (cap 20) ---
         let digest_rows = match sqlx::query(
             r#"
             SELECT key, value
             FROM kv_meta
             WHERE key LIKE 'routine_observation:%'
               AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY key ASC
+            ORDER BY COALESCE(
+                       NULLIF(substring(value FROM '"timestamp"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"last_seen_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"approved_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"dispatched_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       ''
+                     ) DESC,
+                     key ASC
             LIMIT $1
             "#,
         )
-        .bind(limit.min(50))
+        .bind(CAP_KV_META)
         .fetch_all(&*self.pool)
         .await
         {
@@ -669,23 +784,16 @@ impl RoutineStore {
             }
         };
 
+        let mut kv_obs: Vec<serde_json::Value> = Vec::new();
         for row in &digest_rows {
             let key: String = row.try_get("key").unwrap_or_default();
             let value: Option<String> = row.try_get("value").ok().flatten();
-            let Some(obs) = precomputed_observation_from_kv(&key, value.as_deref(), now) else {
-                continue;
-            };
-            if !bounded_observation_push(
-                &mut observations,
-                &mut total_bytes,
-                max_items,
-                max_payload_bytes,
-                obs,
-            ) {
-                return Ok(observations);
+            if let Some(obs) = precomputed_observation_from_kv(&key, value.as_deref(), now) {
+                kv_obs.push(obs);
             }
         }
 
+        // --- Source 2: api_friction_issues (cap 20) ---
         let api_rows = match sqlx::query(
             r#"
             SELECT fingerprint,
@@ -702,7 +810,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(limit.min(20))
+        .bind(CAP_API_FRICTION)
         .fetch_all(&*self.pool)
         .await
         {
@@ -713,6 +821,7 @@ impl RoutineStore {
             }
         };
 
+        let mut friction_obs: Vec<serde_json::Value> = Vec::new();
         for row in &api_rows {
             let fingerprint: String = row.try_get("fingerprint").unwrap_or_default();
             let endpoint: String = row.try_get("endpoint").unwrap_or_default();
@@ -734,7 +843,7 @@ impl RoutineStore {
                 ),
                 240,
             );
-            let obs = serde_json::json!({
+            friction_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "api_friction",
                 "category": "api-friction",
@@ -743,18 +852,10 @@ impl RoutineStore {
                 "weight": 2,
                 "occurrences": event_count.max(1).min(50),
                 "evidence_ref": format!("api_friction_issues:{fingerprint}"),
-            });
-            if !bounded_observation_push(
-                &mut observations,
-                &mut total_bytes,
-                max_items,
-                max_payload_bytes,
-                obs,
-            ) {
-                return Ok(observations);
-            }
+            }));
         }
 
+        // --- Source 3: message_outbox grouped failures (cap 20) ---
         let outbox_rows = match sqlx::query(
             r#"
             SELECT COALESCE(NULLIF(source, ''), 'message_outbox') AS source,
@@ -762,7 +863,7 @@ impl RoutineStore {
                    status,
                    COUNT(*)::BIGINT AS occurrence_count,
                    MAX(created_at) AS last_seen_at,
-                   MAX(error) FILTER (WHERE error IS NOT NULL) AS last_error
+                   (ARRAY_AGG(error ORDER BY created_at DESC) FILTER (WHERE error IS NOT NULL))[1] AS last_error
             FROM message_outbox
             WHERE created_at > NOW() - INTERVAL '24 hours'
               AND (status IN ('failed', 'error') OR error IS NOT NULL)
@@ -771,7 +872,7 @@ impl RoutineStore {
             LIMIT $1
             "#,
         )
-        .bind(limit.min(20))
+        .bind(CAP_OUTBOX)
         .fetch_all(&*self.pool)
         .await
         {
@@ -782,6 +883,7 @@ impl RoutineStore {
             }
         };
 
+        let mut outbox_obs: Vec<serde_json::Value> = Vec::new();
         for row in &outbox_rows {
             let source: String = row
                 .try_get("source")
@@ -801,7 +903,7 @@ impl RoutineStore {
                 } else {
                     format!("{source} outbox {status} for {reason_code}")
                 };
-            let obs = serde_json::json!({
+            outbox_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "message_outbox",
                 "category": "outbox-delivery",
@@ -810,39 +912,55 @@ impl RoutineStore {
                 "weight": 2,
                 "occurrences": occurrence_count.max(1).min(50),
                 "evidence_ref": format!("message_outbox:{source}:{reason_code}:{status}"),
-            });
-            if !bounded_observation_push(
-                &mut observations,
-                &mut total_bytes,
-                max_items,
-                max_payload_bytes,
-                obs,
-            ) {
-                return Ok(observations);
-            }
+            }));
         }
 
-        let rows = match sqlx::query(
+        // --- Source 4: routine_runs grouped by (script_ref, action, status) (cap 40) ---
+        // Grouped so that repeated failures from the same routine emit one observation with
+        // a stable evidence_ref instead of one raw row per UUID run.  The raw UUID approach
+        // caused evidence_count to inflate ~N/tick and saturated score=100 after one tick.
+        let run_rows = match sqlx::query(
             r#"
-            SELECT rr.id,
-                   r.script_ref,
-                   r.name,
-                   rr.action,
-                   rr.status,
-                   rr.result_json,
-                   rr.error,
-                   rr.started_at
-            FROM routine_runs rr
-            JOIN routines r ON r.id = rr.routine_id
-            WHERE rr.status IN ('succeeded', 'failed', 'skipped', 'error')
-              AND rr.started_at > NOW() - INTERVAL '24 hours'
-              AND ($1::text IS NULL OR r.script_ref <> $1)
-            ORDER BY rr.started_at DESC
-            LIMIT $2
+            WITH grouped_runs AS (
+                SELECT r.script_ref,
+                       (ARRAY_AGG(r.name ORDER BY rr.started_at DESC, rr.id DESC))[1] AS name,
+                       COALESCE(rr.action, 'run') AS action,
+                       rr.status,
+                       COUNT(*)::BIGINT AS occurrence_count,
+                       MAX(rr.started_at) AS latest_at,
+                       (ARRAY_AGG(rr.error ORDER BY rr.started_at DESC, rr.id DESC)
+                           FILTER (WHERE rr.error IS NOT NULL))[1] AS last_error
+                FROM routine_runs rr
+                JOIN routines r ON r.id = rr.routine_id
+                WHERE rr.status IN ('succeeded', 'failed', 'skipped', 'error')
+                  AND rr.started_at > NOW() - INTERVAL '24 hours'
+                  AND ($1::text IS NULL OR r.script_ref <> $1)
+                GROUP BY r.script_ref, COALESCE(rr.action, 'run'), rr.status
+                ORDER BY MAX(rr.started_at) DESC
+                LIMIT $2
+            )
+            SELECT grouped_runs.*,
+                   sample.sample_ids
+            FROM grouped_runs
+            LEFT JOIN LATERAL (
+                SELECT ARRAY(
+                    SELECT rr_sample.id::text
+                    FROM routine_runs rr_sample
+                    JOIN routines r_sample ON r_sample.id = rr_sample.routine_id
+                    WHERE r_sample.script_ref = grouped_runs.script_ref
+                      AND COALESCE(rr_sample.action, 'run') = grouped_runs.action
+                      AND rr_sample.status = grouped_runs.status
+                      AND rr_sample.started_at > NOW() - INTERVAL '24 hours'
+                      AND ($1::text IS NULL OR r_sample.script_ref <> $1)
+                    ORDER BY rr_sample.started_at DESC
+                    LIMIT 3
+                ) AS sample_ids
+            ) sample ON TRUE
+            ORDER BY grouped_runs.latest_at DESC
             "#,
         )
         .bind(current_script_ref)
-        .bind(limit)
+        .bind(CAP_ROUTINE_RUNS)
         .fetch_all(&*self.pool)
         .await
         {
@@ -853,47 +971,288 @@ impl RoutineStore {
             }
         };
 
-        for row in &rows {
-            let id: String = row.try_get("id").unwrap_or_default();
+        let mut run_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &run_rows {
             let script_ref: String = row.try_get("script_ref").unwrap_or_default();
             let name: String = row.try_get("name").unwrap_or_default();
-            let action: Option<String> = row.try_get("action").ok().flatten();
+            let action: String = row.try_get("action").unwrap_or_else(|_| "run".into());
             let status: String = row.try_get("status").unwrap_or_default();
-            let error: Option<String> = row.try_get("error").ok().flatten();
-            let started_at: DateTime<Utc> =
-                row.try_get("started_at").unwrap_or_else(|_| Utc::now());
+            let occurrence_count: i64 = row.try_get("occurrence_count").unwrap_or(1);
+            let latest_at: DateTime<Utc> = row.try_get("latest_at").unwrap_or_else(|_| Utc::now());
+            let last_error: Option<String> = row.try_get("last_error").ok().flatten();
+            let sample_ids: Vec<String> = row.try_get("sample_ids").unwrap_or_default();
 
-            let action_str = action.as_deref().unwrap_or("run");
             let weight: u8 = if status == "failed" || status == "error" {
                 2
             } else {
                 1
             };
-            let summary = if let Some(ref err) = error {
-                let short_err = truncate_chars(err, 120);
-                format!("{name} {action_str} {status}: {short_err}")
+            let summary = if let Some(ref err) = last_error {
+                format!(
+                    "{name} {action} {status}×{occurrence_count}: {}",
+                    truncate_chars(err, 120)
+                )
             } else {
-                format!("{name} {action_str} {status}")
+                format!("{name} {action} {status}×{occurrence_count}")
             };
+            let sample_refs: Vec<serde_json::Value> = sample_ids
+                .iter()
+                .take(3)
+                .map(|id| serde_json::Value::String(format!("routine_run:{id}")))
+                .collect();
 
-            let obs = serde_json::json!({
-                "timestamp": started_at.to_rfc3339(),
+            run_obs.push(serde_json::json!({
+                "timestamp": latest_at.to_rfc3339(),
                 "source": "routine_result",
                 "category": "routine-candidate",
-                "signature": format!("{script_ref}:{action_str}"),
-                "summary": summary,
+                "signature": format!("{script_ref}:{action}:{status}"),
+                "summary": truncate_chars(&summary, 240),
                 "weight": weight,
-                "evidence_ref": format!("routine_run:{id}"),
-            });
+                "occurrences": (occurrence_count as u32).clamp(1, 50),
+                // Stable across ticks: does not contain a per-run UUID.
+                "evidence_ref": format!("routine_runs:{script_ref}:{action}:{status}"),
+                "sample_evidence_refs": sample_refs,
+            }));
+        }
 
-            if !bounded_observation_push(
-                &mut observations,
-                &mut total_bytes,
-                max_items,
-                max_payload_bytes,
-                obs,
-            ) {
-                return Ok(observations);
+        // --- Source 5: kanban_cards stale or blocked (cap 10) ---
+        let kanban_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   status,
+                   COALESCE(assigned_agent_id, '') AS assigned_agent_id,
+                   blocked_reason,
+                   GREATEST(updated_at, created_at) AS last_seen_at,
+                   EXTRACT(EPOCH FROM (NOW() - GREATEST(updated_at, created_at))) / 3600.0
+                       AS stuck_hours
+            FROM kanban_cards
+            WHERE status NOT IN ('done', 'cancelled', 'archived', 'detached')
+              AND GREATEST(updated_at, created_at) < NOW() - INTERVAL '24 hours'
+              AND (
+                    blocked_reason IS NOT NULL
+                    OR GREATEST(updated_at, created_at) < NOW() - INTERVAL '48 hours'
+                  )
+            ORDER BY GREATEST(updated_at, created_at) ASC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_KANBAN)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping kanban stale observation source");
+                Vec::new()
+            }
+        };
+
+        let mut kanban_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &kanban_rows {
+            let card_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+            let assigned: String = row.try_get("assigned_agent_id").unwrap_or_default();
+            let blocked_reason: Option<String> = row.try_get("blocked_reason").ok().flatten();
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let stuck_hours: f64 = row.try_get("stuck_hours").unwrap_or(0.0);
+            let stuck_days = (stuck_hours / 24.0).round() as u32;
+            let summary = if let Some(ref reason) = blocked_reason {
+                format!(
+                    "kanban blocked: {} ({}d, agent={}) — {}",
+                    truncate_chars(&title, 80),
+                    stuck_days,
+                    assigned,
+                    truncate_chars(reason, 80)
+                )
+            } else {
+                format!(
+                    "kanban stale: {} ({}d stuck in {}, agent={})",
+                    truncate_chars(&title, 80),
+                    stuck_days,
+                    status,
+                    assigned
+                )
+            };
+            let weight: u8 = if blocked_reason.is_some() { 2 } else { 1 };
+            // Group by status so multiple stale cards accumulate under one candidate
+            // (per-card signature would never reach evidence_count >= 5 gate)
+            let sig_group = if blocked_reason.is_some() { "blocked" } else { &status };
+            kanban_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "kanban_stale",
+                "category": "routine-candidate",
+                "signature": format!("kanban-stale:{sig_group}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": weight,
+                "occurrences": stuck_days.clamp(1, 50),
+                "evidence_ref": format!("kanban_cards:{card_id}"),
+            }));
+        }
+
+        // --- Source 6: task_dispatches high-retry (cap 10) ---
+        let dispatch_rows = match sqlx::query(
+            r#"
+            SELECT id,
+                   COALESCE(NULLIF(TRIM(title), ''), id) AS title,
+                   from_agent_id,
+                   to_agent_id,
+                   status,
+                   retry_count,
+                   GREATEST(updated_at, created_at) AS last_seen_at
+            FROM task_dispatches
+            WHERE retry_count >= 2
+              AND status IN ('failed', 'error', 'pending', 'in_progress')
+              AND GREATEST(updated_at, created_at) > NOW() - INTERVAL '24 hours'
+            ORDER BY retry_count DESC, GREATEST(updated_at, created_at) DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_DISPATCHES)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping dispatch retry observation source");
+                Vec::new()
+            }
+        };
+
+        let mut dispatch_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &dispatch_rows {
+            let dispatch_id: String = row.try_get("id").unwrap_or_default();
+            let title: String = row.try_get("title").unwrap_or_default();
+            let from_agent: String = row.try_get("from_agent_id").unwrap_or_default();
+            let to_agent: String = row.try_get("to_agent_id").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+            let retry_count: i64 = row.try_get("retry_count").unwrap_or(0);
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let summary = format!(
+                "dispatch {status} ×{retry_count} retries: {} ({from_agent}→{to_agent})",
+                truncate_chars(&title, 100)
+            );
+            dispatch_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "dispatch_retry",
+                "category": "routine-candidate",
+                "signature": format!("dispatch-retry:{from_agent}:{to_agent}:{status}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": 2,
+                "occurrences": (retry_count as u64).clamp(1, 50),
+                "evidence_ref": format!("task_dispatches:{dispatch_id}"),
+            }));
+        }
+
+        // --- Source 7: session_transcripts repeated error patterns per agent (cap 10) ---
+        let session_rows = match sqlx::query(
+            r#"
+            SELECT agent_id,
+                   COUNT(*) FILTER (
+                       WHERE user_message ILIKE '%error%'
+                          OR user_message ILIKE '%fail%'
+                          OR user_message ILIKE '%오류%'
+                          OR user_message ILIKE '%실패%'
+                          OR user_message ILIKE '%에러%'
+                          OR user_message ILIKE '%안됨%'
+                          OR user_message ILIKE '%안 됨%'
+                   )::BIGINT AS error_mention_count,
+                   COUNT(*)::BIGINT AS total_turns,
+                   MAX(created_at) AS last_seen_at,
+                   (ARRAY_AGG(user_message ORDER BY created_at DESC)
+                    FILTER (WHERE user_message IS NOT NULL AND LENGTH(TRIM(user_message)) > 0)
+                   )[1] AS latest_message
+            FROM session_transcripts
+            WHERE created_at > NOW() - INTERVAL '24 hours'
+            GROUP BY agent_id
+            HAVING COUNT(*) FILTER (
+                       WHERE user_message ILIKE '%error%'
+                          OR user_message ILIKE '%fail%'
+                          OR user_message ILIKE '%오류%'
+                          OR user_message ILIKE '%실패%'
+                          OR user_message ILIKE '%에러%'
+                          OR user_message ILIKE '%안됨%'
+                          OR user_message ILIKE '%안 됨%'
+                   ) >= 3
+            ORDER BY error_mention_count DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(CAP_SESSION)
+        .fetch_all(&*self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "skipping session pattern observation source");
+                Vec::new()
+            }
+        };
+
+        let mut session_obs: Vec<serde_json::Value> = Vec::new();
+        for row in &session_rows {
+            let agent_id: String = row.try_get("agent_id").unwrap_or_default();
+            let error_count: i64 = row.try_get("error_mention_count").unwrap_or(0);
+            let total_turns: i64 = row.try_get("total_turns").unwrap_or(0);
+            let last_seen_at: DateTime<Utc> =
+                row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
+            let latest_msg: Option<String> = row.try_get("latest_message").ok().flatten();
+            let summary = if let Some(ref msg) = latest_msg {
+                format!(
+                    "session error pattern: agent={agent_id} error_mentions={error_count}/{total_turns} turns; latest: {}",
+                    truncate_chars(msg, 120)
+                )
+            } else {
+                format!(
+                    "session error pattern: agent={agent_id} error_mentions={error_count}/{total_turns} turns"
+                )
+            };
+            session_obs.push(serde_json::json!({
+                "timestamp": last_seen_at.to_rfc3339(),
+                "source": "session_pattern",
+                "category": "routine-candidate",
+                "signature": format!("session-pattern:{agent_id}"),
+                "summary": truncate_chars(&summary, 240),
+                "weight": 2,
+                "occurrences": (error_count as u32).clamp(1, 50),
+                "evidence_ref": format!("session_transcripts:{agent_id}"),
+            }));
+        }
+
+        // --- Fair merge: round-robin across all sources so no single source starves others ---
+        use std::collections::VecDeque;
+        let mut sources: Vec<VecDeque<serde_json::Value>> = vec![
+            kv_obs.into(),
+            friction_obs.into(),
+            outbox_obs.into(),
+            run_obs.into(),
+            kanban_obs.into(),
+            dispatch_obs.into(),
+            session_obs.into(),
+        ];
+        let mut observations = Vec::with_capacity(max_items.min(100));
+        let mut total_bytes: usize = 0;
+        'merge: loop {
+            let mut any = false;
+            for src in &mut sources {
+                if let Some(obs) = src.pop_front() {
+                    any = true;
+                    if !bounded_observation_push(
+                        &mut observations,
+                        &mut total_bytes,
+                        max_items,
+                        max_payload_bytes,
+                        obs,
+                    ) {
+                        break 'merge;
+                    }
+                }
+            }
+            if !any {
+                break;
             }
         }
 
@@ -2170,9 +2529,223 @@ mod tests {
             Some("memento-hygiene")
         );
         assert_eq!(obs.get("occurrences").and_then(Value::as_u64), Some(7));
+        assert_eq!(
+            obs.get("key").and_then(Value::as_str),
+            Some("routine_observation:memento_digest:api-friction")
+        );
+        assert_eq!(
+            obs.pointer("/value/topic").and_then(Value::as_str),
+            Some("api friction repeats")
+        );
+        assert!(
+            obs.pointer("/value/raw_memory_body").is_none(),
+            "raw kv_meta payload fields must not be forwarded"
+        );
         let summary = obs.get("summary").and_then(Value::as_str).unwrap();
         assert!(summary.contains("api friction repeats"));
         assert!(summary.contains("GET /api/docs before retry"));
         assert!(!summary.contains("SECRET_RAW_MEMORY_BODY"));
+    }
+
+    #[test]
+    fn candidate_marker_observation_keeps_only_bounded_value_fields() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let raw = serde_json::json!({
+            "signature": "candidate-a",
+            "score": 91,
+            "evidence_count": 8,
+            "category": "routine-candidate",
+            "suggested_automation": "x".repeat(600),
+            "outcome_summary": "safe summary",
+            "last_seen_at": "2026-05-02T09:59:00Z",
+            "raw_memory_body": "SECRET_RAW_MEMORY_BODY_SHOULD_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_review:candidate-a",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate review observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-a")
+        );
+        assert_eq!(
+            obs.pointer("/value/score").and_then(Value::as_u64),
+            Some(91)
+        );
+        assert_eq!(
+            obs.pointer("/value/evidence_count").and_then(Value::as_u64),
+            Some(8)
+        );
+        assert_eq!(
+            obs.pointer("/value/last_seen_at").and_then(Value::as_str),
+            Some("2026-05-02T09:59:00Z"),
+            "last_seen_at must pass through bounded projection"
+        );
+        assert!(
+            obs.pointer("/value/suggested_automation")
+                .and_then(Value::as_str)
+                .unwrap()
+                .chars()
+                .count()
+                <= 515
+        );
+        assert!(obs.pointer("/value/raw_memory_body").is_none());
+    }
+
+    #[test]
+    fn candidate_approved_observation_forwards_approved_at() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let approved_at = "2026-05-02T09:55:00Z";
+        let raw = serde_json::json!({
+            "signature": "candidate-b",
+            "score": 87,
+            "category": "routine-candidate",
+            "approved_at": approved_at,
+            "suggested_automation": "자동화 제안",
+            "outcome_summary": "결과 요약",
+            "secret_field": "MUST_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_approved:candidate-b",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate approved observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-b")
+        );
+        assert_eq!(
+            obs.pointer("/value/approved_at").and_then(Value::as_str),
+            Some(approved_at),
+            "approved_at must pass through bounded projection so executor can read it"
+        );
+        assert_eq!(
+            obs.pointer("/value/score").and_then(Value::as_u64),
+            Some(87)
+        );
+        assert!(obs.pointer("/value/secret_field").is_none());
+        // source defaults to "precomputed_digest" for unknown source_kinds;
+        // the key itself is the authoritative route for JS to identify the marker type.
+        assert_eq!(
+            obs.get("key").and_then(Value::as_str),
+            Some("routine_observation:candidate_approved:candidate-b")
+        );
+    }
+
+    #[test]
+    fn candidate_dispatched_observation_forwards_dispatched_at() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap();
+        let dispatched_at = "2026-05-02T08:00:00Z";
+        let raw = serde_json::json!({
+            "signature": "candidate-c",
+            "dispatched_at": dispatched_at,
+            "category": "routine-candidate",
+            "internal_state": "MUST_NOT_LEAK"
+        })
+        .to_string();
+
+        let obs = precomputed_observation_from_kv(
+            "routine_observation:candidate_dispatched:candidate-c",
+            Some(&raw),
+            now,
+        )
+        .expect("candidate dispatched observation");
+
+        assert_eq!(
+            obs.pointer("/value/signature").and_then(Value::as_str),
+            Some("candidate-c")
+        );
+        assert_eq!(
+            obs.pointer("/value/dispatched_at").and_then(Value::as_str),
+            Some(dispatched_at),
+            "dispatched_at must pass through so executor and recommender can read actual dispatch time"
+        );
+        assert!(obs.pointer("/value/internal_state").is_none());
+        // source defaults to "precomputed_digest" for unknown source_kinds;
+        // the key itself is the authoritative route for JS to identify the marker type.
+        assert_eq!(
+            obs.get("key").and_then(Value::as_str),
+            Some("routine_observation:candidate_dispatched:candidate-c")
+        );
+    }
+
+    #[test]
+    fn bounded_push_enforces_item_cap() {
+        use super::bounded_observation_push;
+        let mut obs: Vec<Value> = Vec::new();
+        let mut total_bytes = 0usize;
+        let item = serde_json::json!({"x": "y"});
+        assert!(bounded_observation_push(
+            &mut obs,
+            &mut total_bytes,
+            2,
+            usize::MAX,
+            item.clone()
+        ));
+        assert!(bounded_observation_push(
+            &mut obs,
+            &mut total_bytes,
+            2,
+            usize::MAX,
+            item.clone()
+        ));
+        assert!(!bounded_observation_push(
+            &mut obs,
+            &mut total_bytes,
+            2,
+            usize::MAX,
+            item.clone()
+        ));
+        assert_eq!(obs.len(), 2);
+    }
+
+    #[test]
+    fn bounded_push_enforces_byte_cap() {
+        use super::bounded_observation_push;
+        let mut obs: Vec<Value> = Vec::new();
+        let mut total_bytes = 0usize;
+        let item = serde_json::json!({"summary": "aaaa"});
+        let item_size = item.to_string().len();
+        let cap = item_size + 1; // only room for 1 item
+        assert!(bounded_observation_push(
+            &mut obs,
+            &mut total_bytes,
+            usize::MAX,
+            cap,
+            item.clone()
+        ));
+        assert!(!bounded_observation_push(
+            &mut obs,
+            &mut total_bytes,
+            usize::MAX,
+            cap,
+            item.clone()
+        ));
+        assert_eq!(obs.len(), 1);
+    }
+
+    #[test]
+    fn routine_runs_evidence_ref_format_is_stable() {
+        let script_ref = "monitoring/my-script.js";
+        let action = "run";
+        let status = "failed";
+        let evidence_ref = format!("routine_runs:{script_ref}:{action}:{status}");
+        assert_eq!(
+            evidence_ref,
+            "routine_runs:monitoring/my-script.js:run:failed"
+        );
+        assert!(
+            evidence_ref.starts_with("routine_runs:"),
+            "evidence_ref must be prefixed with 'routine_runs:'"
+        );
     }
 }
