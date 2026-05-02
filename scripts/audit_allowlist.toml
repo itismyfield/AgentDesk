@@ -87,16 +87,6 @@ limit_clamp_duplication = [
 
 # Git subprocess callsites tolerated outside services::git.
 git_subprocess_callsites = [
-  "src/services/discord/recovery_engine.rs:317",
-  "src/services/discord/recovery_engine.rs:4465",
-  "src/services/discord/router/message_handler.rs:6636",
-  "src/services/discord/router/message_handler.rs:6641",
-  "src/services/discord/router/message_handler.rs:6646",
-  "src/services/discord/router/message_handler.rs:6651",
-  "src/services/discord/session_runtime.rs:1147",
-  "src/services/discord/session_runtime.rs:1162",
-  "src/services/discord/turn_bridge/completion_guard.rs:808",
-  "src/services/discord/turn_bridge/completion_guard.rs:1570",
 ]
 
 # Legacy SQLite references: cli/migrate, compat, and db/legacy_sqlite are

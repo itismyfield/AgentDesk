@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::services::git::GitCommand;
 use crate::utils::format::safe_suffix;
 use sqlx::Row;
 
@@ -805,12 +806,11 @@ fn extract_commit_sha_from_output(output: &str, cwd: &str) -> Option<String> {
     }
     let short_sha = last_short_sha?;
     // Resolve short SHA to full SHA
-    std::process::Command::new("git")
+    GitCommand::new()
         .args(["rev-parse", short_sha])
-        .current_dir(cwd)
-        .output()
+        .repo(cwd)
+        .run_output()
         .ok()
-        .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
@@ -1323,9 +1323,17 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         );
         let repo_dirs = completion_repo_dirs(adk_cwd, &hints);
         if explicit_work_outcome != Some("noop") {
-            if let Some((repo_dir, output_commit)) = turn_output
-                .and_then(|output| extract_output_commit_from_repo_dirs(output, &repo_dirs))
-            {
+            let turn_output = turn_output.map(str::to_string);
+            let repo_dirs_for_lookup = repo_dirs.clone();
+            let output_commit = tokio::task::spawn_blocking(move || {
+                turn_output.as_deref().and_then(|output| {
+                    extract_output_commit_from_repo_dirs(output, &repo_dirs_for_lookup)
+                })
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some((repo_dir, output_commit)) = output_commit {
                 hints.output_commit_repo_dir = Some(repo_dir);
                 hints.output_commit = Some(output_commit);
             }
@@ -1563,21 +1571,14 @@ mod tests {
     use super::*;
     use std::io::{self, Write};
     use std::path::Path;
-    use std::process::Command;
     use std::sync::{Arc, Mutex};
 
     fn run_git(repo_dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = GitCommand::new()
             .args(args)
-            .current_dir(repo_dir)
-            .output()
+            .repo(repo_dir)
+            .run_output()
             .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 

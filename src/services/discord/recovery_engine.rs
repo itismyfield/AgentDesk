@@ -7,6 +7,7 @@ use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::git::GitCommand;
 #[cfg(unix)]
 use crate::services::platform::binary_resolver;
 #[cfg(unix)]
@@ -314,14 +315,11 @@ fn recovery_requires_worktree_context(state: &inflight::InflightTurnState) -> bo
 }
 
 fn recovery_git_stdout(repo_path: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["-C", repo_path])
+    let output = GitCommand::new()
+        .repo(repo_path)
         .args(args)
-        .output()
+        .run_output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
@@ -4462,17 +4460,11 @@ mod tests {
     #[test]
     fn recovery_restores_worktree_identity_into_session_state() {
         fn run_git(repo_path: &std::path::Path, args: &[&str]) -> String {
-            let output = std::process::Command::new("git")
-                .args(["-C", repo_path.to_str().unwrap()])
+            let output = GitCommand::new()
+                .repo(repo_path)
                 .args(args)
-                .output()
+                .run_output()
                 .unwrap_or_else(|error| panic!("git {:?} failed to spawn: {error}", args));
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         }
 
