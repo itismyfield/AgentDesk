@@ -53,7 +53,9 @@ src/
 │   ├── agents.rs
 │   ├── auto_queue.rs
 │   ├── cancel_tombstones.rs
+│   ├── dispatched_sessions.rs
 │   ├── kanban.rs
+│   ├── kanban_cards.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
@@ -122,6 +124,9 @@ src/
 │   ├── paths.rs
 │   └── skill_sync.rs
 ├── server/
+│   ├── dto/
+│   │   ├── kanban.rs
+│   │   └── mod.rs
 │   ├── routes/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
@@ -406,15 +411,19 @@ src/
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
+│   ├── dispatched_sessions.rs
 │   ├── dispatches.rs
 │   ├── dispatches_followup.rs
 │   ├── gemini.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
+│   ├── kanban_cards.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
 │   ├── opencode.rs
+│   ├── pipeline_override.rs
+│   ├── pipeline_routes.rs
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_exec.rs
