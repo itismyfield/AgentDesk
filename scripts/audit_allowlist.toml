@@ -23,9 +23,10 @@ route_srp_violations = [
 # extraction. Entries are path:line so new callsites in the same file still
 # fail the hard gate. Line numbers for tmux.rs / turn_bridge / mod.rs /
 # health.rs were refreshed in #1440 after the #1435 tmux watcher-lifecycle
-# extraction shifted callsites; #1450/#1472/#1467/#1476/#1477/#1480 refresh
-# the remaining drift detected by CI with no logical regressions. The upstream
-# routine port refreshes line-only drift after the durable routine modules land.
+# extraction shifted callsites; #1450/#1472/#1467/#1476/#1477/#1480/#1560
+# refresh the remaining drift detected by CI with no logical regressions. The
+# upstream routine port refreshes line-only drift after the durable routine
+# modules land.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs:60",
   "src/services/discord/commands/skill.rs:278",
@@ -40,8 +41,8 @@ direct_discord_sends = [
   "src/services/discord/gateway.rs:212",
   "src/services/discord/gateway.rs:236",
   "src/services/discord/gateway.rs:263",
-  "src/services/discord/health.rs:2891",
-  "src/services/discord/health.rs:2959",
+  "src/services/discord/health.rs:2906",
+  "src/services/discord/health.rs:2974",
   "src/services/discord/meeting_orchestrator.rs:654",
   "src/services/discord/meeting_orchestrator.rs:678",
   "src/services/discord/mod.rs:2330",
@@ -63,17 +64,17 @@ direct_discord_sends = [
   "src/services/discord/tmux.rs:3844",
   "src/services/discord/tmux.rs:3978",
   "src/services/discord/tmux.rs:4271",
-  "src/services/discord/turn_bridge/mod.rs:1325",
-  "src/services/discord/turn_bridge/mod.rs:1358",
-  "src/services/discord/turn_bridge/mod.rs:1764",
-  "src/services/discord/turn_bridge/mod.rs:2392",
-  "src/services/discord/turn_bridge/mod.rs:2440",
-  "src/services/discord/turn_bridge/mod.rs:2443",
-  "src/services/discord/turn_bridge/mod.rs:2524",
-  "src/services/discord/turn_bridge/mod.rs:2567",
-  "src/services/discord/turn_bridge/mod.rs:2989",
-  "src/services/discord/turn_bridge/mod.rs:3227",
-  "src/services/discord/turn_bridge/mod.rs:3508",
+  "src/services/discord/turn_bridge/mod.rs:1459",
+  "src/services/discord/turn_bridge/mod.rs:1503",
+  "src/services/discord/turn_bridge/mod.rs:1909",
+  "src/services/discord/turn_bridge/mod.rs:2576",
+  "src/services/discord/turn_bridge/mod.rs:2624",
+  "src/services/discord/turn_bridge/mod.rs:2627",
+  "src/services/discord/turn_bridge/mod.rs:2708",
+  "src/services/discord/turn_bridge/mod.rs:2751",
+  "src/services/discord/turn_bridge/mod.rs:3173",
+  "src/services/discord/turn_bridge/mod.rs:3411",
+  "src/services/discord/turn_bridge/mod.rs:3692",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
@@ -103,7 +104,7 @@ git_subprocess_callsites = [
   "src/dispatch/dispatch_context.rs:551",
   "src/dispatch/dispatch_context.rs:569",
   "src/dispatch/dispatch_context.rs:1920",
-  "src/dispatch/dispatch_context.rs:2713",
+  "src/dispatch/dispatch_context.rs:2758",
   "src/dispatch/mod.rs:1058",
   "src/dispatch/mod.rs:3723",
   "src/dispatch/mod.rs:3811",
@@ -113,11 +114,11 @@ git_subprocess_callsites = [
   "src/server/routes/dispatches/outbox.rs:1073",
   "src/server/routes/dispatches/outbox.rs:1143",
   "src/services/discord/recovery_engine.rs:317",
-  "src/services/discord/recovery_engine.rs:4446",
-  "src/services/discord/router/message_handler.rs:6362",
-  "src/services/discord/router/message_handler.rs:6367",
-  "src/services/discord/router/message_handler.rs:6372",
-  "src/services/discord/router/message_handler.rs:6377",
+  "src/services/discord/recovery_engine.rs:4449",
+  "src/services/discord/router/message_handler.rs:6426",
+  "src/services/discord/router/message_handler.rs:6431",
+  "src/services/discord/router/message_handler.rs:6436",
+  "src/services/discord/router/message_handler.rs:6441",
   "src/services/discord/session_runtime.rs:1147",
   "src/services/discord/session_runtime.rs:1162",
   "src/services/discord/turn_bridge/completion_guard.rs:808",
