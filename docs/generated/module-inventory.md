@@ -266,7 +266,7 @@
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 389 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1277 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 558 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3263 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3255 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 5924 | giant-file |
