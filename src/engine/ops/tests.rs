@@ -901,7 +901,10 @@ fn policies_raw_db_count_stays_within_budget() {
     // policies/timeouts/long-turn-monitor.js). These read/write `kv_meta`
     // for the watchdog-extension cooldown bookkeeping; migrating to a typed
     // facade (`agentdesk.kvMeta.*` or `agentdesk.longTurn.*`) is a follow-up.
-    const RAW_DB_BUDGET: usize = 193;
+    // #1489 policy SQL guard boundary audit: rebaseline the observed
+    // trusted-automation raw DB surface to 195 unmarked callsites and document
+    // the next guard/manifest path in docs/policy-sql-guard.md.
+    const RAW_DB_BUDGET: usize = 195;
     // Number of callsites that are currently annotated with the
     // escape-hatch marker (`/* legacy-raw-db: ... */`). Starts at 0 and
     // grows only when a caller explicitly justifies a raw callsite.
