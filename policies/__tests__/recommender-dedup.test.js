@@ -96,6 +96,42 @@ test("rolling grouped evidence scores only newly increased occurrences", () => {
   assert.equal(result2.checkpoint.candidates["rolling-pattern"].evidence_count, 5);
 });
 
+test("rolling grouped evidence tracks the latest observed count after a window drop", () => {
+  const { tick } = loadRoutine(ROUTINE_PATH);
+  const evidenceRef = "routine_runs:sliding.js:run:failed";
+
+  const result1 = tick({
+    now: new Date("2026-05-02T10:00:00Z"),
+    checkpoint: null,
+    observations: [makeObs("sliding-pattern", evidenceRef, { occurrences: 10 })],
+    automationInventory: [],
+  });
+  assert.equal(parseScoringLine(result1).scored, 1, "first aggregate should score");
+
+  const result2 = tick({
+    now: new Date("2026-05-02T10:05:00Z"),
+    checkpoint: result1.checkpoint,
+    observations: [makeObs("sliding-pattern", evidenceRef, { occurrences: 4 })],
+    automationInventory: [],
+  });
+  const s2 = parseScoringLine(result2);
+  assert.equal(s2.scored, 0, "smaller rolling window count should not rescore");
+  assert.equal(s2.deduped, 1, "smaller rolling window count should be treated as already seen");
+  assert.equal(result2.checkpoint.seen_evidence[evidenceRef].occurrences, 4);
+
+  const result3 = tick({
+    now: new Date("2026-05-02T10:10:00Z"),
+    checkpoint: result2.checkpoint,
+    observations: [makeObs("sliding-pattern", evidenceRef, { occurrences: 6 })],
+    automationInventory: [],
+  });
+  const s3 = parseScoringLine(result3);
+  assert.equal(s3.scored, 1, "increase after the window drop should score the fresh delta");
+  assert.equal(s3.deduped, 0, "increase after the window drop should not be pinned to the old peak");
+  assert.equal(result3.checkpoint.candidates["sliding-pattern"].evidence_count, 12);
+  assert.equal(result3.checkpoint.seen_evidence[evidenceRef].occurrences, 6);
+});
+
 test("evidence is re-scored after 25h TTL expires", () => {
   const { tick } = loadRoutine(ROUTINE_PATH);
   const obs = [makeObs("stale-pattern", "routine_runs:stale.js:run:failed")];

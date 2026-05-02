@@ -157,10 +157,10 @@ function isEvidenceFullySeen(cp, key, nowStr, occurrences) {
 }
 
 function markEvidenceSeen(cp, key, nowStr, occurrences) {
-  const previous = seenEvidenceOccurrences(cp.seen_evidence[key]);
+  const value = Number(occurrences || 0);
   cp.seen_evidence[key] = {
     seen_at: nowStr,
-    occurrences: Math.max(previous, occurrences || 0),
+    occurrences: Number.isFinite(value) && value > 0 ? Math.floor(value) : 0,
   };
 }
 
