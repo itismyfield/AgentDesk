@@ -11,7 +11,7 @@ Hard-gating is **enabled** for 5 checks: `giant_files`, `direct_discord_sends`, 
 | Rule | Hits | Hard gate |
 |---|---:|:--:|
 | `giant_files` | 0 | YES |
-| `route_srp_violations` | 22 | no |
+| `route_srp_violations` | 20 | no |
 | `direct_discord_sends` | 0 | YES |
 | `manual_json_row_mapping` | 0 | no |
 | `limit_clamp_duplication` | 5 | no |
@@ -32,26 +32,24 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 | Severity | File | Line | Message |
 |---|---|---:|---|
 | warn | `src/server/routes/agents.rs` |  | route file mixes SQL (32), json!() (80), and crate::services calls (12) |
-| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (73), and crate::services calls (5) |
+| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (73), and crate::services calls (6) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
 | warn | `src/server/routes/analytics.rs` |  | route file mixes SQL (32), json!() (61), and crate::services calls (30) |
 | warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
-| warn | `src/server/routes/dispatched_sessions.rs` |  | route file mixes SQL (219), json!() (58), and crate::services calls (9) |
 | warn | `src/server/routes/dispatches/discord_delivery.rs` |  | route file mixes SQL (164), json!() (25), and crate::services calls (18) |
-| warn | `src/server/routes/dispatches/outbox.rs` |  | route file mixes SQL (129), json!() (12), and crate::services calls (12) |
+| warn | `src/server/routes/dispatches/outbox.rs` |  | route file mixes SQL (129), json!() (12), and crate::services calls (13) |
 | warn | `src/server/routes/dispatches/thread_reuse.rs` |  | route file mixes SQL (36), json!() (19), and crate::services calls (1) |
 | warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (42), json!() (35), and crate::services calls (3) |
 | warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (27), and crate::services calls (5) |
 | warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (20), json!() (64), and crate::services calls (6) |
-| warn | `src/server/routes/kanban.rs` |  | route file mixes SQL (131), json!() (185), and crate::services calls (4) |
 | warn | `src/server/routes/meetings.rs` |  | route file mixes SQL (68), json!() (70), and crate::services calls (3) |
 | warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (8), json!() (15), and crate::services calls (8) |
-| warn | `src/server/routes/onboarding.rs` |  | route file mixes SQL (53), json!() (131), and crate::services calls (8) |
+| warn | `src/server/routes/pipeline.rs` |  | route file mixes SQL (8), json!() (19), and crate::services calls (4) |
 | warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (5), json!() (12), and crate::services calls (30) |
 | warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (16), and crate::services calls (6) |
 | warn | `src/server/routes/review_verdict/decision_route.rs` |  | route file mixes SQL (44), json!() (22), and crate::services calls (1) |
 | warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (19), and crate::services calls (4) |
-| warn | `src/server/routes/settings.rs` |  | route file mixes SQL (60), json!() (85), and crate::services calls (2) |
+| warn | `src/server/routes/settings.rs` |  | route file mixes SQL (39), json!() (66), and crate::services calls (1) |
 | warn | `src/server/routes/stats.rs` |  | route file mixes SQL (32), json!() (9), and crate::services calls (1) |
 
 ## Direct Discord send/edit (`direct_discord_sends`)
@@ -73,8 +71,8 @@ Identical limit/days clamp expressions appearing in 3+ source files. Candidate f
 | Severity | File | Line | Message |
 |---|---|---:|---|
 | info | `src/server/routes/agents.rs` | 1795 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
-| info | `src/server/routes/pipeline.rs` | 1029 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 | info | `src/services/api_friction.rs` | 855 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
+| info | `src/services/pipeline_routes.rs` | 541 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 | info | `src/services/routines/store.rs` | 444 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 | info | `src/services/routines/store.rs` | 586 | duplicated clamp `limit::1, 100`: `limit.clamp(1, 100)` |
 

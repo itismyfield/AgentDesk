@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +45,43 @@ pub struct ContextCompactionDetails {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStrategyDetails {
+    pub reason: String,
+    pub provider_session_id: Option<String>,
+    pub fingerprint: Option<String>,
+}
+
+impl SessionStrategyDetails {
+    pub fn fresh(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            provider_session_id: None,
+            fingerprint: None,
+        }
+    }
+
+    pub fn resumed(reason: impl Into<String>, provider_session_id: &str) -> Self {
+        Self {
+            reason: reason.into(),
+            provider_session_id: Some(provider_session_id.to_string()),
+            fingerprint: Some(provider_session_fingerprint(provider_session_id)),
+        }
+    }
+}
+
+pub fn provider_session_fingerprint(provider_session_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(provider_session_id.as_bytes());
+    let digest = hasher.finalize();
+    format!("{digest:x}").chars().take(16).collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEvent {
-    SessionFresh,
-    SessionResumed,
+    SessionFresh(SessionStrategyDetails),
+    SessionResumed(SessionStrategyDetails),
     SessionResumeFailedWithRecovery(RecoveryDetails),
     ContextCompacted(ContextCompactionDetails),
 }
@@ -89,8 +123,8 @@ impl TurnEvent {
 
     pub const fn meta(&self) -> TurnEventMeta {
         match self {
-            Self::SessionFresh => Self::SESSION_FRESH_META,
-            Self::SessionResumed => Self::SESSION_RESUMED_META,
+            Self::SessionFresh(_) => Self::SESSION_FRESH_META,
+            Self::SessionResumed(_) => Self::SESSION_RESUMED_META,
             Self::SessionResumeFailedWithRecovery(_) => {
                 Self::SESSION_RESUME_FAILED_WITH_RECOVERY_META
             }
@@ -114,14 +148,16 @@ impl TurnEvent {
             Self::ContextCompacted(details) => {
                 serde_json::to_value(details).unwrap_or_else(|_| json!({}))
             }
-            Self::SessionFresh | Self::SessionResumed => json!({}),
+            Self::SessionFresh(details) | Self::SessionResumed(details) => {
+                serde_json::to_value(details).unwrap_or_else(|_| json!({}))
+            }
         }
     }
 
     pub const fn notification_reason_code(&self) -> Option<&'static str> {
         match self {
-            Self::SessionFresh => Some("lifecycle.session_fresh"),
-            Self::SessionResumed => None,
+            Self::SessionFresh(_) => Some("lifecycle.session_fresh"),
+            Self::SessionResumed(_) => None,
             Self::SessionResumeFailedWithRecovery(_) => Some("lifecycle.session_resume_failed"),
             Self::ContextCompacted(_) => Some("lifecycle.context_compacted"),
         }
@@ -129,11 +165,11 @@ impl TurnEvent {
 
     pub fn notification_content(&self) -> Option<String> {
         match self {
-            Self::SessionFresh => Some(
+            Self::SessionFresh(_) => Some(
                 "🆕 새 세션 시작\n이전 대화 컨텍스트 없음. 필요한 정보는 다시 알려주세요."
                     .to_string(),
             ),
-            Self::SessionResumed => None,
+            Self::SessionResumed(_) => None,
             Self::SessionResumeFailedWithRecovery(details) => {
                 let reason = non_empty_or(&details.reason, "provider 응답 요약 없음");
                 let recovery = non_empty_or(&details.recovery_action, "복구 없음");
@@ -460,7 +496,7 @@ mod tests {
 
     #[test]
     fn turn_event_notification_policy_and_copy_match_lifecycle_contract() {
-        let fresh = TurnEvent::SessionFresh;
+        let fresh = TurnEvent::SessionFresh(SessionStrategyDetails::fresh("first_turn"));
         assert_eq!(
             fresh.notification_reason_code(),
             Some("lifecycle.session_fresh")
@@ -469,10 +505,21 @@ mod tests {
             fresh.notification_content().as_deref(),
             Some("🆕 새 세션 시작\n이전 대화 컨텍스트 없음. 필요한 정보는 다시 알려주세요.")
         );
+        assert_eq!(fresh.details_json()["reason"], "first_turn");
 
-        let resumed = TurnEvent::SessionResumed;
+        let resumed = TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
+            "db_provider_session_restored",
+            "provider-session-123",
+        ));
         assert_eq!(resumed.notification_reason_code(), None);
         assert_eq!(resumed.notification_content(), None);
+        let resumed_details = resumed.details_json();
+        assert_eq!(resumed_details["reason"], "db_provider_session_restored");
+        assert_eq!(resumed_details["providerSessionId"], "provider-session-123");
+        assert_eq!(
+            resumed_details["fingerprint"],
+            provider_session_fingerprint("provider-session-123")
+        );
 
         let recovery = TurnEvent::SessionResumeFailedWithRecovery(RecoveryDetails {
             reason: "provider rejected resume token".to_string(),
@@ -615,7 +662,7 @@ mod tests {
             TurnLifecycleEmit::new(
                 "discord:77:1",
                 "77",
-                TurnEvent::SessionFresh,
+                TurnEvent::SessionFresh(SessionStrategyDetails::fresh("first_turn")),
                 "fresh session",
             )
             .session_key("session-a"),
@@ -629,7 +676,9 @@ mod tests {
             TurnLifecycleEmit::new(
                 "discord:77:2",
                 "77",
-                TurnEvent::SessionFresh,
+                TurnEvent::SessionFresh(SessionStrategyDetails::fresh(
+                    "no_cached_provider_session",
+                )),
                 "fresh session again",
             )
             .session_key("session-b"),
@@ -643,7 +692,10 @@ mod tests {
             TurnLifecycleEmit::new(
                 "discord:77:3",
                 "77",
-                TurnEvent::SessionResumed,
+                TurnEvent::SessionResumed(SessionStrategyDetails::resumed(
+                    "runtime_cached_provider_session",
+                    "provider-session-123",
+                )),
                 "session resumed",
             )
             .session_key("session-b"),
