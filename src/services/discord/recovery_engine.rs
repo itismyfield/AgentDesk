@@ -765,6 +765,19 @@ fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
     Some(elapsed.num_milliseconds().max(0))
 }
 
+async fn lookup_turn_finished_dispatch_kind(dispatch_id: Option<&str>) -> Option<String> {
+    let dispatch_id = dispatch_id?;
+    let body = super::internal_api::lookup_dispatch_info(dispatch_id)
+        .await
+        .ok()?;
+    super::turn_bridge::classify_turn_finished_dispatch_kind(
+        body.get("dispatch_context")
+            .and_then(|value| value.as_str()),
+        body.get("dispatch_type").and_then(|value| value.as_str()),
+    )
+    .map(str::to_string)
+}
+
 async fn persist_recovered_transcript(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -2689,6 +2702,8 @@ pub(super) async fn restore_inflight_turns(
 
         let recovery_dispatch_id = parse_dispatch_id(&state.user_text)
             .or(lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get()).await);
+        let recovery_dispatch_kind =
+            lookup_turn_finished_dispatch_kind(recovery_dispatch_id.as_deref()).await;
         // Backfill session_key/dispatch_id on inflight state for long-turn detection ([L]).
         let mut state = state;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
@@ -2715,6 +2730,7 @@ pub(super) async fn restore_inflight_turns(
                 adk_session_info: Some(adk_session_info),
                 adk_cwd: recovery_adk_cwd.clone(),
                 dispatch_id: recovery_dispatch_id,
+                dispatch_kind: recovery_dispatch_kind,
                 memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 context_window_tokens: provider.default_context_window(),
                 context_compact_percent: super::adk_session::ContextThresholds::default()

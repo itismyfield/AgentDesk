@@ -34,6 +34,24 @@ pub const AVG_TURN_LATENCY_MAX_MS: f64 = 60_000.0;
 /// Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset.
 pub const FALLBACK_ALERT_CHANNEL: &str = "1479671298497183835";
 const ALERT_CHANNEL_ENV: &str = "ADK_SLO_ALERT_CHANNEL";
+const AUTO_QUEUE_CONTEXT_RE: &str = r#""auto_queue"\s*:\s*true"#;
+
+// task_dispatches.id and observability_events.dispatch_id are both TEXT in the
+// Postgres schema; the join backfills dispatch classification for older events
+// emitted before turn_finished.payload.dispatch_kind existed.
+const AVG_LATENCY_SQL: &str = r#"
+SELECT COUNT(*)::bigint AS n,
+       COALESCE(AVG((e.payload_json->>'duration_ms')::double precision), 0.0) AS avg_ms
+FROM observability_events e
+LEFT JOIN task_dispatches d ON d.id = e.dispatch_id
+WHERE e.event_type = 'turn_finished'
+  AND e.payload_json ? 'duration_ms'
+  AND COALESCE(e.payload_json->>'dispatch_kind', '') NOT IN ('auto_queue', 'review_decision')
+  AND COALESCE(d.dispatch_type, '') <> 'review-decision'
+  AND COALESCE(d.context, '') !~ $3
+  AND e.created_at >= to_timestamp($1::bigint / 1000.0)
+  AND e.created_at <  to_timestamp($2::bigint / 1000.0)
+"#;
 
 /// The 3 SLO metrics tracked in this slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -269,19 +287,12 @@ pub async fn compute_avg_latency_pg(
     pool: &PgPool,
     window: SloWindow,
 ) -> Result<SloWindowAggregate> {
-    let row = sqlx::query(
-        "SELECT COUNT(*)::bigint AS n,
-                COALESCE(AVG((payload_json->>'duration_ms')::double precision), 0.0) AS avg_ms
-         FROM observability_events
-         WHERE event_type = 'turn_finished'
-           AND payload_json ? 'duration_ms'
-           AND created_at >= to_timestamp($1::bigint / 1000.0)
-           AND created_at <  to_timestamp($2::bigint / 1000.0)",
-    )
-    .bind(window.window_start_ms)
-    .bind(window.window_end_ms)
-    .fetch_one(pool)
-    .await?;
+    let row = sqlx::query(AVG_LATENCY_SQL)
+        .bind(window.window_start_ms)
+        .bind(window.window_end_ms)
+        .bind(AUTO_QUEUE_CONTEXT_RE)
+        .fetch_one(pool)
+        .await?;
     let n: i64 = row.try_get("n").unwrap_or(0);
     let avg_ms: f64 = row.try_get("avg_ms").unwrap_or(0.0);
     Ok(SloWindowAggregate {
@@ -470,6 +481,22 @@ pub async fn run_aggregation_tick(
 // Tests — keep pure threshold/formatting coverage here. Storage and tick
 // coverage depends on Postgres fixtures after #868.
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod avg_latency_tests {
+    use super::*;
+
+    #[test]
+    fn avg_latency_query_excludes_dispatch_noise_sources() {
+        assert!(AVG_LATENCY_SQL.contains("LEFT JOIN task_dispatches"));
+        assert!(AVG_LATENCY_SQL.contains("payload_json->>'dispatch_kind'"));
+        assert!(AVG_LATENCY_SQL.contains("'auto_queue'"));
+        assert!(AVG_LATENCY_SQL.contains("'review_decision'"));
+        assert!(AVG_LATENCY_SQL.contains("d.dispatch_type"));
+        assert!(AVG_LATENCY_SQL.contains("d.context"));
+        assert_eq!(AUTO_QUEUE_CONTEXT_RE, r#""auto_queue"\s*:\s*true"#);
+    }
+}
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {

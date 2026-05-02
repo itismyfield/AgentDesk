@@ -1786,6 +1786,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
             adk_session_info: Some(adk_session_info),
             adk_cwd: Some(current_path),
             dispatch_id: None,
+            dispatch_kind: None,
             memory_recall_usage: memory_recall.token_usage,
             context_window_tokens: model_context_window,
             context_compact_percent: compact_percent,
@@ -4286,6 +4287,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             adk_session_info: Some(adk_session_info),
             adk_cwd: Some(current_path.clone()),
             dispatch_id,
+            dispatch_kind: super::super::turn_bridge::classify_turn_finished_dispatch_kind(
+                active_dispatch_info
+                    .as_ref()
+                    .and_then(|info| info.context.as_deref()),
+                dispatch_type_str.as_deref(),
+            )
+            .map(str::to_string),
             memory_recall_usage: memory_recall.token_usage,
             context_window_tokens: model_context_window,
             context_compact_percent: compact_percent,

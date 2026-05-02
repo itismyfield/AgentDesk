@@ -51,6 +51,94 @@ pub(super) use tmux_runtime::interrupt_provider_cli_turn;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
 
+pub(super) fn classify_turn_finished_dispatch_kind(
+    dispatch_context: Option<&str>,
+    dispatch_type: Option<&str>,
+) -> Option<&'static str> {
+    let parsed =
+        dispatch_context.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    if parsed
+        .as_ref()
+        .is_some_and(|value| json_has_bool_key(value, "auto_queue", true))
+    {
+        return Some("auto_queue");
+    }
+    match dispatch_type {
+        Some("review-decision") => Some("review_decision"),
+        _ => None,
+    }
+}
+
+fn json_has_bool_key(value: &serde_json::Value, key: &str, expected: bool) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get(key).and_then(|value| value.as_bool()) == Some(expected)
+                || map
+                    .values()
+                    .any(|value| json_has_bool_key(value, key, expected))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_has_bool_key(value, key, expected)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod dispatch_kind_tests {
+    use super::classify_turn_finished_dispatch_kind;
+
+    #[test]
+    fn marks_auto_queue_context() {
+        assert_eq!(
+            classify_turn_finished_dispatch_kind(
+                Some(r#"{"auto_queue":true,"worktree_path":"/tmp/wt"}"#),
+                Some("implementation"),
+            ),
+            Some("auto_queue")
+        );
+    }
+
+    #[test]
+    fn marks_nested_auto_queue_context_to_match_slo_sql_filter() {
+        assert_eq!(
+            classify_turn_finished_dispatch_kind(
+                Some(r#"{"phase_gate":{"auto_queue":true}}"#),
+                Some("implementation"),
+            ),
+            Some("auto_queue")
+        );
+    }
+
+    #[test]
+    fn marks_review_decision_type() {
+        assert_eq!(
+            classify_turn_finished_dispatch_kind(None, Some("review-decision")),
+            Some("review_decision")
+        );
+    }
+
+    #[test]
+    fn auto_queue_takes_precedence_over_review_decision_type() {
+        assert_eq!(
+            classify_turn_finished_dispatch_kind(
+                Some(r#"{"auto_queue":true}"#),
+                Some("review-decision"),
+            ),
+            Some("auto_queue")
+        );
+    }
+
+    #[test]
+    fn keeps_interactive_unclassified() {
+        assert_eq!(classify_turn_finished_dispatch_kind(None, None), None);
+        assert_eq!(
+            classify_turn_finished_dispatch_kind(Some(r#"{"auto_queue":false}"#), Some("review")),
+            None
+        );
+    }
+}
+
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
@@ -463,6 +551,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) adk_session_info: Option<String>,
     pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
+    pub(super) dispatch_kind: Option<String>,
     pub(super) memory_recall_usage: TokenUsage,
     pub(super) context_window_tokens: u64,
     pub(super) context_compact_percent: u64,
@@ -1314,6 +1403,7 @@ pub(super) fn spawn_turn_bridge(
         let adk_session_info = bridge.adk_session_info.clone();
         let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
+        let dispatch_kind = bridge.dispatch_kind.clone();
         let context_window_tokens = bridge.context_window_tokens;
         let context_compact_percent = bridge.context_compact_percent;
 
@@ -3994,7 +4084,7 @@ pub(super) fn spawn_turn_bridge(
         } else {
             "completed"
         };
-        crate::services::observability::emit_turn_finished(
+        crate::services::observability::emit_turn_finished_with_dispatch_kind(
             provider.as_str(),
             channel_id.get(),
             dispatch_id.as_deref(),
@@ -4003,6 +4093,7 @@ pub(super) fn spawn_turn_bridge(
             turn_outcome,
             turn_duration_ms(turn_start),
             rx_disconnected && tmux_handed_off && full_response.is_empty(),
+            dispatch_kind.as_deref(),
         );
         let turn_quality_event_type = if matches!(
             turn_outcome,
