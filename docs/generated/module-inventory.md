@@ -71,7 +71,7 @@
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 339 |  |
 | `db::agents` | `src/db/agents.rs` | 1125 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 4533 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 4555 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1200 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 1 |  |
@@ -87,7 +87,7 @@
 | `db::turns` | `src/db/turns.rs` | 166 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 5115 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3943 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3988 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2777 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1875 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
