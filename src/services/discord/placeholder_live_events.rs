@@ -5,6 +5,7 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
 use super::formatting::{canonical_tool_name, format_tool_input, redact_sensitive_for_placeholder};
+use crate::db::prompt_manifests::PromptManifest;
 use crate::services::agent_protocol::{StatusEvent, StatusTodoItem, StatusTodoStatus};
 use crate::services::provider::ProviderKind;
 
@@ -17,6 +18,7 @@ const STATUS_PANEL_TODO_LIMIT: usize = 8;
 const STATUS_PANEL_SUBAGENT_LIMIT: usize = 6;
 const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
+const PROMPT_PANEL_LINE_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecentPlaceholderEvent {
@@ -215,6 +217,34 @@ impl PlaceholderLiveEvents {
         true
     }
 
+    pub(super) fn set_prompt_manifest(
+        &self,
+        channel_id: ChannelId,
+        manifest: &PromptManifest,
+    ) -> bool {
+        let snapshot = PromptPanelSnapshot::from_manifest(manifest);
+        self.set_prompt_panel_snapshot(channel_id, Some(snapshot))
+    }
+
+    fn set_prompt_panel_snapshot(
+        &self,
+        channel_id: ChannelId,
+        snapshot: Option<PromptPanelSnapshot>,
+    ) -> bool {
+        let entry = self
+            .status_by_channel
+            .entry(channel_id)
+            .or_insert_with(|| Mutex::new(StatusPanelState::default()));
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.prompt == snapshot {
+            return false;
+        }
+        guard.prompt = snapshot;
+        true
+    }
+
     pub(super) fn render_status_panel(
         &self,
         channel_id: ChannelId,
@@ -342,6 +372,42 @@ impl ContextPanelSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptPanelSnapshot {
+    profile: Option<String>,
+    enabled_layer_count: i64,
+    layer_count: i64,
+    skipped_layer_count: i64,
+    total_input_tokens_est: i64,
+}
+
+impl PromptPanelSnapshot {
+    fn from_manifest(manifest: &PromptManifest) -> Self {
+        let layer_count = manifest
+            .layer_count
+            .max(i64::try_from(manifest.layers.len()).unwrap_or(i64::MAX))
+            .max(0);
+        let enabled_layer_count = manifest.layers.iter().filter(|layer| layer.enabled).count();
+        let enabled_layer_count = i64::try_from(enabled_layer_count)
+            .unwrap_or(i64::MAX)
+            .min(layer_count)
+            .max(0);
+        let skipped_layer_count = layer_count.saturating_sub(enabled_layer_count);
+        Self {
+            profile: manifest
+                .profile
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            enabled_layer_count,
+            layer_count,
+            skipped_layer_count,
+            total_input_tokens_est: manifest.total_input_tokens_est.max(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DerivedStatus {
     Running,
     MonitorWait,
@@ -366,6 +432,7 @@ struct StatusPanelState {
     status: DerivedStatus,
     session: Option<SessionPanelSnapshot>,
     context: Option<ContextPanelSnapshot>,
+    prompt: Option<PromptPanelSnapshot>,
     todos: Vec<StatusTodoItem>,
     subagents: Vec<SubagentSlot>,
 }
@@ -491,6 +558,10 @@ fn render_status_panel(
         sections.push(context_line);
     }
 
+    if let Some(prompt) = snapshot.prompt.as_ref() {
+        sections.push(render_prompt_panel_line(prompt));
+    }
+
     if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
         let lines = snapshot
             .todos
@@ -569,6 +640,59 @@ fn render_context_panel_line(context: &ContextPanelSnapshot) -> Option<String> {
         line.push_str(" (임박)");
     }
     Some(truncate_chars(&line, CONTEXT_PANEL_LINE_MAX_CHARS))
+}
+
+fn render_prompt_panel_line(prompt: &PromptPanelSnapshot) -> String {
+    let parts = [
+        render_prompt_profile_label(prompt.profile.as_deref()),
+        render_prompt_layer_count(prompt),
+        render_prompt_tokens(prompt.total_input_tokens_est),
+    ];
+    truncate_chars(
+        &format!("Prompt   {}", parts.join(" · ")),
+        PROMPT_PANEL_LINE_MAX_CHARS,
+    )
+}
+
+fn render_prompt_profile_label(profile: Option<&str>) -> String {
+    let Some(profile) = profile.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "Unknown profile".to_string();
+    };
+    match profile.to_ascii_lowercase().as_str() {
+        "full" => "Full profile".to_string(),
+        "lite" => "Lite profile".to_string(),
+        "review_lite" | "review-lite" => "Review lite profile".to_string(),
+        other => {
+            let label = other.replace(['_', '-'], " ");
+            let mut chars = label.chars();
+            let mut rendered = match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Unknown".to_string(),
+            };
+            if !rendered.to_ascii_lowercase().ends_with(" profile") {
+                rendered.push_str(" profile");
+            }
+            rendered
+        }
+    }
+}
+
+fn render_prompt_layer_count(prompt: &PromptPanelSnapshot) -> String {
+    let mut rendered = format!(
+        "{}/{} layers",
+        prompt.enabled_layer_count, prompt.layer_count
+    );
+    if prompt.skipped_layer_count > 0 {
+        rendered.push_str(&format!(" — {} skipped", prompt.skipped_layer_count));
+    }
+    rendered
+}
+
+fn render_prompt_tokens(total_input_tokens_est: i64) -> String {
+    format!(
+        "~{:.1}k input tokens",
+        (total_input_tokens_est.max(0) as f64) / 1000.0
+    )
 }
 
 fn render_provider_session_label(provider: &ProviderKind, session_id: &str) -> String {
@@ -1545,6 +1669,67 @@ mod tests {
         let critical =
             events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
         assert!(critical.contains("Context  ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
+    }
+
+    #[test]
+    fn status_panel_renders_prompt_manifest_line() {
+        fn layer(name: &str, enabled: bool) -> crate::db::prompt_manifests::PromptManifestLayer {
+            crate::db::prompt_manifests::PromptManifestLayer {
+                id: None,
+                manifest_id: None,
+                layer_name: name.to_string(),
+                enabled,
+                source: Some("test".to_string()),
+                reason: None,
+                chars: 0,
+                tokens_est: 0,
+                content_sha256: "0".repeat(64),
+                content_visibility:
+                    crate::db::prompt_manifests::PromptContentVisibility::AdkProvided,
+                full_content: Some(String::new()),
+                redacted_preview: None,
+            }
+        }
+
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(185);
+        let manifest = PromptManifest {
+            id: None,
+            created_at: None,
+            turn_id: "turn-185".to_string(),
+            channel_id: channel_id.get().to_string(),
+            dispatch_id: None,
+            profile: Some("full".to_string()),
+            total_input_tokens_est: 21_400,
+            layer_count: 9,
+            layers: vec![
+                layer("base", true),
+                layer("discord", true),
+                layer("memory", true),
+                layer("skills", true),
+                layer("policy", true),
+                layer("repo", true),
+                layer("task", true),
+                layer("user", true),
+                layer("optional", false),
+            ],
+        };
+
+        assert!(events.set_prompt_manifest(channel_id, &manifest));
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(
+            rendered
+                .contains("Prompt   Full profile · 8/9 layers — 1 skipped · ~21.4k input tokens")
+        );
+    }
+
+    #[test]
+    fn status_panel_omits_prompt_line_when_manifest_is_absent() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(186);
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(!rendered.contains("Prompt   "));
     }
 
     #[test]

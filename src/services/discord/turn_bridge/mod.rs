@@ -228,6 +228,31 @@ async fn refresh_session_panel_line_from_lifecycle(
     }
 }
 
+async fn refresh_prompt_panel_line_from_manifest(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    turn_id: &str,
+) -> bool {
+    let Some(pg_pool) = shared.pg_pool.as_ref() else {
+        return false;
+    };
+    match crate::db::prompt_manifests::fetch_prompt_manifest(Some(pg_pool), turn_id).await {
+        Ok(Some(manifest)) => shared
+            .placeholder_live_events
+            .set_prompt_manifest(channel_id, &manifest),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::debug!(
+                "[turn_bridge] failed to load prompt manifest line for turn {} in channel {}: {}",
+                turn_id,
+                channel_id,
+                error
+            );
+            false
+        }
+    }
+}
+
 async fn close_all_tracked_background_children(
     pg_pool: Option<&sqlx::PgPool>,
     child_session_ids: &mut Vec<i64>,
@@ -1349,6 +1374,7 @@ pub(super) fn spawn_turn_bridge(
         let status_interval = super::status_update_interval();
         let mut last_session_panel_lifecycle_refresh =
             tokio::time::Instant::now() - status_interval;
+        let mut last_prompt_panel_manifest_refresh = tokio::time::Instant::now() - status_interval;
         let mut status_panel_msg_id = status_panel_message_id_for_turn(
             &mut inflight_state,
             bridge.reuse_status_panel_message,
@@ -2433,6 +2459,18 @@ pub(super) fn spawn_turn_bridge(
             {
                 last_session_panel_lifecycle_refresh = tokio::time::Instant::now();
                 status_panel_dirty |= refresh_session_panel_line_from_lifecycle(
+                    shared_owned.as_ref(),
+                    channel_id,
+                    turn_id.as_str(),
+                )
+                .await;
+            }
+
+            if shared_owned.status_panel_v2_enabled
+                && last_prompt_panel_manifest_refresh.elapsed() >= status_interval
+            {
+                last_prompt_panel_manifest_refresh = tokio::time::Instant::now();
+                status_panel_dirty |= refresh_prompt_panel_line_from_manifest(
                     shared_owned.as_ref(),
                     channel_id,
                     turn_id.as_str(),
