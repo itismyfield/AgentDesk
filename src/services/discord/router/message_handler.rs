@@ -1364,6 +1364,11 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
+    let memory_recall_manifest = super::super::prompt_builder::MemoryRecallManifestInput {
+        should_recall: memento_recall_gate.should_recall,
+        gate_reason: memento_recall_gate.reason,
+        external_recall: memory_recall.external_recall.as_deref(),
+    };
     let recovery_context_for_manifest =
         session_retry_context
             .as_ref()
@@ -1387,6 +1392,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         Some(&memory_settings),
         memento_mcp_available,
         recovery_context_for_manifest.as_ref(),
+        Some(&memory_recall_manifest),
         Some(&turn_id),
     );
     let system_prompt_owned = built_system_prompt.system_prompt;
@@ -3784,6 +3790,11 @@ pub(in crate::services::discord) async fn handle_text_message(
     });
     let memento_mcp_available = crate::services::mcp_config::provider_has_memento_mcp(&provider);
     let channel_participants = shared.channel_roster(channel_id, request_owner, request_owner_name);
+    let memory_recall_manifest = super::super::prompt_builder::MemoryRecallManifestInput {
+        should_recall: memento_recall_gate.should_recall,
+        gate_reason: memento_recall_gate.reason,
+        external_recall: memory_recall.external_recall.as_deref(),
+    };
 
     let recovery_context_for_manifest =
         session_retry_context
@@ -3808,6 +3819,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         Some(&memory_settings),
         memento_mcp_available,
         recovery_context_for_manifest.as_ref(),
+        Some(&memory_recall_manifest),
         Some(&turn_id),
     );
     let system_prompt_owned = built_system_prompt.system_prompt;
