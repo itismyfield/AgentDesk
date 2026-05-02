@@ -325,7 +325,7 @@
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 392 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 119 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 10221 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 10291 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
