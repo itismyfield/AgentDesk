@@ -781,6 +781,30 @@ export async function patchKanbanDeferDod(
   return res.card;
 }
 
+export interface AssignmentResult {
+  ok: boolean;
+  agent_id?: string;
+}
+
+export interface AssignmentTransitionResult {
+  attempted: boolean;
+  ok: boolean;
+  from?: string;
+  to?: string;
+  target?: string;
+  steps?: string[];
+  completed_steps?: Array<{ from?: string; to?: string; changed?: boolean }>;
+  failed_step?: string;
+  error?: string;
+}
+
+export interface AssignKanbanIssueResponse {
+  card: KanbanCard;
+  deduplicated?: boolean;
+  assignment?: AssignmentResult;
+  transition?: AssignmentTransitionResult;
+}
+
 export async function assignKanbanIssue(payload: {
   github_repo: string;
   github_issue_number: number;
@@ -788,15 +812,14 @@ export async function assignKanbanIssue(payload: {
   title: string;
   description?: string | null;
   assignee_agent_id: string;
-}): Promise<KanbanCard> {
-  const res = await request<{ card: KanbanCard }>(
+}): Promise<AssignKanbanIssueResponse> {
+  return request<AssignKanbanIssueResponse>(
     "/api/kanban-cards/assign-issue",
     {
       method: "POST",
       body: JSON.stringify(payload),
     },
   );
-  return res.card;
 }
 
 export async function getStalledCards(): Promise<KanbanCard[]> {

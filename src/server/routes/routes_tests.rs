@@ -6189,6 +6189,13 @@ async fn kanban_assign_card_pg_only_without_sqlite_mirror() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["card"]["status"], "requested");
     assert_eq!(json["card"]["assigned_agent_id"], "ch-td");
+    assert_eq!(json["assignment"]["ok"], true);
+    assert_eq!(json["assignment"]["agent_id"], "ch-td");
+    assert_eq!(json["transition"]["attempted"], true);
+    assert_eq!(json["transition"]["ok"], true);
+    assert_eq!(json["transition"]["from"], "backlog");
+    assert_eq!(json["transition"]["to"], "requested");
+    assert_eq!(json["transition"]["target"], "requested");
 
     let sqlite_card_count: i64 = db
         .lock()
@@ -6214,6 +6221,101 @@ async fn kanban_assign_card_pg_only_without_sqlite_mirror() {
     .await
     .unwrap();
     assert_eq!(row.try_get::<String, _>("status").unwrap(), "requested");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("assigned_agent_id")
+            .unwrap(),
+        Some("ch-td".to_string())
+    );
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kanban_assign_card_reports_transition_failure_in_response() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_alt)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind("ch-td")
+    .bind("Agent TD")
+    .bind("claude")
+    .bind("111")
+    .bind("222")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())",
+    )
+    .bind("c1-pg-transition-fail")
+    .bind("Card with terminal status")
+    .bind("done")
+    .bind("medium")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/c1-pg-transition-fail/assign")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent_id":"ch-td"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["card"]["status"], "done");
+    assert_eq!(json["card"]["assigned_agent_id"], "ch-td");
+    assert_eq!(json["assignment"]["ok"], true);
+    assert_eq!(json["transition"]["attempted"], true);
+    assert_eq!(json["transition"]["ok"], false);
+    assert_eq!(json["transition"]["from"], "done");
+    assert_eq!(json["transition"]["to"], "done");
+    assert_eq!(json["transition"]["target"], "requested");
+    assert_eq!(json["transition"]["steps"], json!(["requested"]));
+    assert_eq!(json["transition"]["failed_step"], "requested");
+    assert!(
+        json["transition"]["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "transition failure must be visible in the response body"
+    );
+
+    let row = sqlx::query(
+        "SELECT status, assigned_agent_id
+         FROM kanban_cards
+         WHERE id = $1",
+    )
+    .bind("c1-pg-transition-fail")
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<String, _>("status").unwrap(), "done");
     assert_eq!(
         row.try_get::<Option<String>, _>("assigned_agent_id")
             .unwrap(),
@@ -6279,6 +6381,10 @@ async fn kanban_assign_issue_pg_upserts_without_duplicates() {
     assert_eq!(first_json["card"]["assigned_agent_id"], "agent-issue");
     assert_eq!(first_json["card"]["github_issue_number"], 77);
     assert_eq!(first_json["card"]["status"], "requested");
+    assert_eq!(first_json["assignment"]["ok"], true);
+    assert_eq!(first_json["assignment"]["agent_id"], "agent-issue");
+    assert_eq!(first_json["transition"]["attempted"], true);
+    assert_eq!(first_json["transition"]["ok"], true);
     let first_card_id = first_json["card"]["id"].as_str().unwrap().to_string();
 
     let second_response = app
@@ -6299,6 +6405,9 @@ async fn kanban_assign_issue_pg_upserts_without_duplicates() {
     let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
     assert_eq!(second_json["deduplicated"], true);
     assert_eq!(second_json["card"]["id"], first_card_id);
+    assert_eq!(second_json["assignment"]["ok"], true);
+    assert_eq!(second_json["transition"]["attempted"], false);
+    assert_eq!(second_json["transition"]["ok"], true);
 
     let row = sqlx::query(
         "SELECT COUNT(*)::BIGINT AS card_count, MIN(id) AS card_id, MIN(status) AS status
