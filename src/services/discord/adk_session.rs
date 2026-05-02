@@ -4,9 +4,14 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use super::SharedData;
+use crate::services::observability::turn_lifecycle::{
+    ContextCompactionDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
+};
 use crate::services::provider::ProviderKind;
 
 const SESSION_INFO_MAX_CHARS: usize = 60;
+pub(super) const CONTEXT_COMPACTION_PRESERVED_SECTIONS: [&str; 5] =
+    ["Goal", "Progress", "Decisions", "Files", "Next"];
 
 /// Parse `DISPATCH:<uuid> - <title>` format and return the dispatch_id (uuid part).
 pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
@@ -246,6 +251,81 @@ pub(super) async fn save_provider_session_id(
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!("  [{ts}] ⚠ save_provider_session_id failed: {err}");
+    }
+}
+
+pub(super) fn context_usage_percent(tokens: u64, context_window: u64) -> u64 {
+    if context_window == 0 {
+        return 0;
+    }
+    ((u128::from(tokens) * 100) / u128::from(context_window)) as u64
+}
+
+pub(super) fn context_compaction_details(
+    before_pct: u64,
+    after_pct: Option<u64>,
+) -> ContextCompactionDetails {
+    ContextCompactionDetails {
+        before_pct,
+        after_pct,
+        preserved_sections: CONTEXT_COMPACTION_PRESERVED_SECTIONS
+            .iter()
+            .map(|section| (*section).to_string())
+            .collect(),
+    }
+}
+
+pub(super) async fn emit_context_compacted_lifecycle_for_inflight(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    before_pct: u64,
+    after_pct: Option<u64>,
+) -> bool {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return false;
+    };
+    let Some(inflight) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        return false;
+    };
+    if inflight.rebind_origin || inflight.user_msg_id == 0 {
+        return false;
+    }
+
+    let turn_id = format!("discord:{}:{}", channel_id.get(), inflight.user_msg_id);
+    let mut emit = TurnLifecycleEmit::new(
+        turn_id.clone(),
+        channel_id.get().to_string(),
+        TurnEvent::ContextCompacted(context_compaction_details(before_pct, after_pct)),
+        "automatic context compaction completed",
+    );
+    if let Some(session_key) = inflight
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        emit = emit.session_key(session_key.to_string());
+    }
+    if let Some(dispatch_id) = inflight
+        .dispatch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        emit = emit.dispatch_id(dispatch_id.to_string());
+    }
+
+    match emit_turn_lifecycle(pool, emit).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                "failed to emit context compacted lifecycle event for turn {}: {error}",
+                turn_id
+            );
+            false
+        }
     }
 }
 
@@ -511,7 +591,10 @@ fn clean_nonempty(value: &str) -> Option<&str> {
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests {
-    use super::{derive_adk_session_info, parse_thread_channel_id_from_name};
+    use super::{
+        CONTEXT_COMPACTION_PRESERVED_SECTIONS, context_compaction_details, context_usage_percent,
+        derive_adk_session_info, parse_thread_channel_id_from_name,
+    };
 
     #[test]
     fn derive_uses_user_text_when_human_readable() {
@@ -656,6 +739,27 @@ mod tests {
         assert_eq!(payload["session_id"], "raw-session-123");
         assert_eq!(payload["claude_session_id"], "session-123");
         assert_eq!(payload["provider"], "codex");
+    }
+
+    #[test]
+    fn test_context_usage_percent_uses_context_window() {
+        assert_eq!(context_usage_percent(850, 1_000), 85);
+        assert_eq!(context_usage_percent(1, 0), 0);
+    }
+
+    #[test]
+    fn test_context_compaction_details_include_preserved_sections() {
+        let details = context_compaction_details(91, Some(37));
+
+        assert_eq!(details.before_pct, 91);
+        assert_eq!(details.after_pct, Some(37));
+        assert_eq!(
+            details.preserved_sections,
+            CONTEXT_COMPACTION_PRESERVED_SECTIONS
+                .iter()
+                .map(|section| (*section).to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }
 

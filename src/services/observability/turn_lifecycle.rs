@@ -50,7 +50,8 @@ pub struct RecoveryDetails {
 #[serde(rename_all = "camelCase")]
 pub struct ContextCompactionDetails {
     pub before_pct: u64,
-    pub after_pct: u64,
+    pub after_pct: Option<u64>,
+    pub preserved_sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,9 +155,11 @@ impl TurnEvent {
             Self::SessionResumeFailedWithRecovery(details) => {
                 serde_json::to_value(details).unwrap_or_else(|_| json!({}))
             }
-            Self::ContextCompacted(details) => {
-                serde_json::to_value(details).unwrap_or_else(|_| json!({}))
-            }
+            Self::ContextCompacted(details) => json!({
+                "before_pct": details.before_pct,
+                "after_pct": details.after_pct,
+                "preserved_sections": details.preserved_sections,
+            }),
             Self::SessionFresh(details) | Self::SessionResumed(details) => {
                 serde_json::to_value(details).unwrap_or_else(|_| json!({}))
             }
@@ -186,10 +189,16 @@ impl TurnEvent {
                     "♻️ 이전 대화 이어가기 실패\n사유: {reason}\n복구: {recovery}"
                 ))
             }
-            Self::ContextCompacted(details) => Some(format!(
-                "📦 컨텍스트 자동 압축\n이전 {}% → 이후 {}%\n보존: Goal / Progress / Decisions / Files / Next",
-                details.before_pct, details.after_pct
-            )),
+            Self::ContextCompacted(details) => {
+                let after = details
+                    .after_pct
+                    .map(|value| format!("{value}%"))
+                    .unwrap_or_else(|| "확인 중".to_string());
+                Some(format!(
+                    "📦 컨텍스트 자동 압축\n이전 {}% → 이후 {}\n보존: Goal / Progress / Decisions / Files / Next",
+                    details.before_pct, after
+                ))
+            }
         }
     }
 }
@@ -556,8 +565,22 @@ mod tests {
 
         let compacted = TurnEvent::ContextCompacted(ContextCompactionDetails {
             before_pct: 91,
-            after_pct: 37,
+            after_pct: Some(37),
+            preserved_sections: vec![
+                "Goal".to_string(),
+                "Progress".to_string(),
+                "Decisions".to_string(),
+                "Files".to_string(),
+                "Next".to_string(),
+            ],
         });
+        let compacted_details = compacted.details_json();
+        assert_eq!(compacted_details["before_pct"], 91);
+        assert_eq!(compacted_details["after_pct"], 37);
+        assert_eq!(
+            compacted_details["preserved_sections"],
+            json!(["Goal", "Progress", "Decisions", "Files", "Next"])
+        );
         assert_eq!(
             compacted.notification_reason_code(),
             Some("lifecycle.context_compacted")
@@ -566,6 +589,27 @@ mod tests {
             compacted.notification_content().as_deref(),
             Some(
                 "📦 컨텍스트 자동 압축\n이전 91% → 이후 37%\n보존: Goal / Progress / Decisions / Files / Next"
+            )
+        );
+
+        let compacted_unknown_after = TurnEvent::ContextCompacted(ContextCompactionDetails {
+            before_pct: 91,
+            after_pct: None,
+            preserved_sections: vec![
+                "Goal".to_string(),
+                "Progress".to_string(),
+                "Decisions".to_string(),
+                "Files".to_string(),
+                "Next".to_string(),
+            ],
+        });
+        let unknown_details = compacted_unknown_after.details_json();
+        assert_eq!(unknown_details["before_pct"], 91);
+        assert!(unknown_details["after_pct"].is_null());
+        assert_eq!(
+            compacted_unknown_after.notification_content().as_deref(),
+            Some(
+                "📦 컨텍스트 자동 압축\n이전 91% → 이후 확인 중\n보존: Goal / Progress / Decisions / Files / Next"
             )
         );
     }
@@ -736,7 +780,14 @@ mod tests {
                 "77",
                 TurnEvent::ContextCompacted(ContextCompactionDetails {
                     before_pct: 88,
-                    after_pct: 41,
+                    after_pct: Some(41),
+                    preserved_sections: vec![
+                        "Goal".to_string(),
+                        "Progress".to_string(),
+                        "Decisions".to_string(),
+                        "Files".to_string(),
+                        "Next".to_string(),
+                    ],
                 }),
                 "context compacted",
             )

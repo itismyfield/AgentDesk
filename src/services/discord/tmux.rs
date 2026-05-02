@@ -9,8 +9,10 @@ use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEv
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
 use crate::services::message_outbox::{
-    OutboxMessage, enqueue_lifecycle_notification_best_effort, enqueue_outbox_best_effort,
+    LIFECYCLE_NOTIFIER_SOURCE, OutboxMessage, enqueue_lifecycle_notification_best_effort,
+    enqueue_outbox_best_effort,
 };
+use crate::services::observability::turn_lifecycle::TurnEvent;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_backend::{
     StreamLineState, classify_task_notification_kind, observe_stream_context,
@@ -733,6 +735,54 @@ fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsa
         || usage.cache_read_tokens > 0
         || usage.output_tokens > 0)
         .then_some(usage)
+}
+
+async fn emit_context_compacted_lifecycle_from_watcher(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    model: Option<&str>,
+    usage: Option<TurnTokenUsage>,
+) -> bool {
+    let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    // Provider auto-compaction output does not expose the exact pre-compaction
+    // token total, so record the configured trigger threshold as the lower-bound
+    // before percentage.
+    let before_pct = ctx_cfg.compact_pct_for(provider);
+    let context_window = provider.resolve_context_window(model);
+    let after_pct = usage.and_then(|usage| {
+        let pct =
+            super::adk_session::context_usage_percent(usage.total_input_tokens(), context_window)
+                .min(before_pct);
+        (pct > 0).then_some(pct)
+    });
+    let emitted = super::adk_session::emit_context_compacted_lifecycle_for_inflight(
+        shared, channel_id, provider, before_pct, after_pct,
+    )
+    .await;
+
+    if !emitted {
+        let target = format!("channel:{}", channel_id.get());
+        let details = super::adk_session::context_compaction_details(before_pct, after_pct);
+        let content = TurnEvent::ContextCompacted(details)
+            .notification_content()
+            .unwrap_or_else(|| "📦 컨텍스트 자동 압축".to_string());
+        enqueue_lifecycle_notification_best_effort(
+            sqlite_runtime_db(shared.as_ref()),
+            shared.pg_pool.as_ref(),
+            target.as_str(),
+            None,
+            "lifecycle.context_compacted",
+            content.as_str(),
+        );
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            source = LIFECYCLE_NOTIFIER_SOURCE,
+            "context compacted lifecycle emit skipped; enqueued fallback notification"
+        );
+    }
+
+    true
 }
 
 fn watcher_ready_for_input_turn_completed(
@@ -3009,9 +3059,20 @@ pub(super) async fn tmux_output_watcher_with_restore(
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
         let mut stale_resume_detected = initial_outcome.stale_resume_detected;
+        let mut auto_compaction_lifecycle_attempted = false;
         let mut task_notification_kind = stream_seed.task_notification_kind;
         if let Some(kind) = initial_outcome.task_notification_kind {
             task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
+        }
+        if initial_outcome.auto_compacted {
+            auto_compaction_lifecycle_attempted = emit_context_compacted_lifecycle_from_watcher(
+                &shared,
+                channel_id,
+                &watcher_provider,
+                state.last_model.as_deref(),
+                stream_line_state_token_usage(&state),
+            )
+            .await;
         }
         let post_terminal_success_continuation_flush =
             should_flush_post_terminal_success_continuation(
@@ -3201,22 +3262,16 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         if provider_overload_message.is_none() {
                             provider_overload_message = outcome.provider_overload_message;
                         }
-                        // Notify when auto-compaction is detected in output
-                        if outcome.auto_compacted {
-                            let target = format!("channel:{}", channel_id.get());
-                            let _ = enqueue_outbox_best_effort(
-                                shared.pg_pool.as_ref(),
-                                sqlite_runtime_db(shared.as_ref()),
-                                OutboxMessage {
-                                    target: target.as_str(),
-                                    content: "🗜️ 자동 컨텍스트 압축 감지",
-                                    bot: "notify",
-                                    source: "system",
-                                    reason_code: None,
-                                    session_key: None,
-                                },
-                            )
-                            .await;
+                        if outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
+                            auto_compaction_lifecycle_attempted =
+                                emit_context_compacted_lifecycle_from_watcher(
+                                    &shared,
+                                    channel_id,
+                                    &watcher_provider,
+                                    state.last_model.as_deref(),
+                                    stream_line_state_token_usage(&state),
+                                )
+                                .await;
                         }
                     }
                     Ok(Ok(Ok((_, off)))) => {
