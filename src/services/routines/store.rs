@@ -757,10 +757,10 @@ impl RoutineStore {
             WHERE key LIKE 'routine_observation:%'
               AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY COALESCE(
-                       NULLIF(value::jsonb ->> 'timestamp', ''),
-                       NULLIF(value::jsonb ->> 'last_seen_at', ''),
-                       NULLIF(value::jsonb ->> 'approved_at', ''),
-                       NULLIF(value::jsonb ->> 'dispatched_at', ''),
+                       NULLIF(substring(value FROM '"timestamp"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"last_seen_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"approved_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
+                       NULLIF(substring(value FROM '"dispatched_at"[[:space:]]*:[[:space:]]*"([^"]+)"'), ''),
                        ''
                      ) DESC,
                      key ASC
