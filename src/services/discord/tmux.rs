@@ -4470,6 +4470,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         {
                             Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
                                 direct_send_delivered = true;
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 👁 ✓ relayed terminal response (edit) channel {} msg {} ({} chars)",
+                                    channel_id.get(),
+                                    msg_id.get(),
+                                    relay_text.len()
+                                );
                                 record_placeholder_cleanup(
                                     &shared,
                                     &watcher_provider,
@@ -4485,6 +4492,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                 edit_error,
                             }) => {
                                 direct_send_delivered = true;
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 👁 ✓ relayed terminal response (fallback send after edit failure) channel {} msg {} ({} chars, edit_error={edit_error})",
+                                    channel_id.get(),
+                                    msg_id.get(),
+                                    relay_text.len()
+                                );
                                 record_placeholder_cleanup(
                                     &shared,
                                     &watcher_provider,
@@ -4545,6 +4559,12 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         match send_long_message_raw(&http, channel_id, &relay_text, &shared).await {
                             Ok(_) => {
                                 direct_send_delivered = true;
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::info!(
+                                    "  [{ts}] 👁 ✓ relayed terminal response (new message) channel {} ({} chars)",
+                                    channel_id.get(),
+                                    relay_text.len()
+                                );
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
