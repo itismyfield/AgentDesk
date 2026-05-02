@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{ConnectInfo, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
 use poise::serenity_prelude::ChannelId;
@@ -48,7 +48,7 @@ struct RelayRecoveryRequest {
     apply: bool,
 }
 
-fn discord_control_endpoints_allowed(
+fn local_or_configured_control_endpoint_allowed(
     config: &crate::config::Config,
     peer_addr: Option<SocketAddr>,
 ) -> bool {
@@ -67,6 +67,33 @@ fn discord_control_endpoints_allowed(
     }
 
     matches!(config.server.host.trim(), "127.0.0.1" | "localhost" | "::1")
+}
+
+fn bearer_token_matches(config: &crate::config::Config, headers: &HeaderMap) -> bool {
+    let Some(expected_token) = config.server.auth_token.as_deref() else {
+        return false;
+    };
+    if expected_token.is_empty() {
+        return false;
+    }
+
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected_token)
+}
+
+fn discord_control_endpoints_allowed(
+    config: &crate::config::Config,
+    peer_addr: Option<SocketAddr>,
+    headers: &HeaderMap,
+) -> bool {
+    if peer_addr.is_some_and(|addr| addr.ip().is_loopback()) {
+        return true;
+    }
+
+    bearer_token_matches(config, headers)
 }
 
 /// Build combined DB + Discord provider health.
@@ -463,7 +490,7 @@ pub async fn health_detail_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -478,7 +505,7 @@ pub async fn startup_doctor_latest_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -495,7 +522,7 @@ pub async fn stale_mailbox_repair_handler(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -717,7 +744,7 @@ pub async fn relay_recovery_handler(
     Path(channel_id): Path<String>,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !local_or_configured_control_endpoint_allowed(&state.config, Some(peer_addr)) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -780,15 +807,16 @@ pub async fn relay_recovery_handler(
 /// Requires `ConnectInfo<SocketAddr>` injected by the server bootstrap
 /// (see `boot.rs::run_with_state` and `mod.rs::launch_*` which both call
 /// `into_make_service_with_connect_info::<SocketAddr>`). The
-/// `discord_control_endpoints_allowed` helper supports `peer_addr: None`
-/// for internal callers / unit tests where the connection info isn't
-/// available; in production HTTP traffic the extractor is always present.
+/// Non-loopback callers must present an explicit bearer token even though the
+/// route is also in the protected API domain; that keeps control traffic out
+/// of the same-origin dashboard bypass used by ordinary dashboard routes.
 pub async fn send_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -826,9 +854,10 @@ pub async fn send_handler(
 pub async fn rebind_inflight_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -859,9 +888,10 @@ pub async fn rebind_inflight_handler(
 pub async fn send_to_agent_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -893,9 +923,10 @@ pub async fn send_to_agent_handler(
 pub async fn senddm_handler(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr)) {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
@@ -919,12 +950,32 @@ pub async fn senddm_handler(
     (status, Json(json)).into_response()
 }
 
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+#[cfg(test)]
 mod tests {
     use super::{
         discord_control_endpoints_allowed, public_health_json, stale_mailbox_repair_applied,
     };
+    use axum::{
+        body::Body,
+        http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
+    };
     use serde_json::json;
+    use tower::ServiceExt;
+
+    fn empty_headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("valid bearer header"),
+        );
+        headers
+    }
 
     #[test]
     fn discord_control_endpoints_allow_loopback_peer_without_auth_token() {
@@ -934,11 +985,13 @@ mod tests {
 
         assert!(discord_control_endpoints_allowed(
             &config,
-            Some("127.0.0.1:8791".parse().unwrap())
+            Some("127.0.0.1:8791".parse().unwrap()),
+            &empty_headers()
         ));
         assert!(discord_control_endpoints_allowed(
             &config,
-            Some("[::1]:8791".parse().unwrap())
+            Some("[::1]:8791".parse().unwrap()),
+            &empty_headers()
         ));
     }
 
@@ -950,9 +1003,128 @@ mod tests {
 
         assert!(!discord_control_endpoints_allowed(
             &config,
-            Some("10.0.0.5:8791".parse().unwrap())
+            Some("10.0.0.5:8791".parse().unwrap()),
+            &empty_headers()
         ));
-        assert!(!discord_control_endpoints_allowed(&config, None));
+        assert!(!discord_control_endpoints_allowed(
+            &config,
+            None,
+            &empty_headers()
+        ));
+    }
+
+    #[test]
+    fn discord_control_endpoints_require_bearer_for_non_loopback_when_auth_token_is_set() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = Some("secret".to_string());
+
+        assert!(!discord_control_endpoints_allowed(
+            &config,
+            Some("10.0.0.5:8791".parse().unwrap()),
+            &empty_headers()
+        ));
+        assert!(discord_control_endpoints_allowed(
+            &config,
+            Some("10.0.0.5:8791".parse().unwrap()),
+            &bearer_headers("secret")
+        ));
+        assert!(!discord_control_endpoints_allowed(
+            &config,
+            Some("10.0.0.5:8791".parse().unwrap()),
+            &bearer_headers("wrong")
+        ));
+    }
+
+    fn test_api_router_with_config(config: crate::config::Config) -> axum::Router {
+        let mut engine_config = crate::config::Config::default();
+        engine_config.policies.hot_reload = false;
+        let engine = crate::engine::PolicyEngine::new(&engine_config).unwrap();
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        crate::server::routes::api_router_with_pg(engine, config, tx, buf, None, None)
+    }
+
+    fn control_request(peer: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/discord/send")
+            .body(Body::from(r#"{"content":"hello"}"#))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        request
+    }
+
+    #[tokio::test]
+    async fn discord_control_router_rejects_non_loopback_auth_token_without_bearer() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = Some("secret".to_string());
+        let app = test_api_router_with_config(config);
+
+        let response = app.oneshot(control_request("10.0.0.5:8791")).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn discord_control_router_rejects_same_origin_bypass_without_bearer() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = Some("secret".to_string());
+        let app = test_api_router_with_config(config);
+
+        let mut request = control_request("10.0.0.5:8791");
+        request.headers_mut().insert(
+            "origin",
+            "http://localhost:8791".parse().expect("valid origin"),
+        );
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn discord_control_router_allows_non_loopback_with_bearer() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = Some("secret".to_string());
+        let app = test_api_router_with_config(config);
+
+        let mut request = control_request("10.0.0.5:8791");
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, "Bearer secret".parse().unwrap());
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn discord_control_router_keeps_loopback_dev_flow_without_auth_token() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let app = test_api_router_with_config(config);
+
+        let response = app
+            .oneshot(control_request("127.0.0.1:8791"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn discord_control_router_rejects_non_loopback_without_auth_token() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let app = test_api_router_with_config(config);
+
+        let response = app.oneshot(control_request("10.0.0.5:8791")).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

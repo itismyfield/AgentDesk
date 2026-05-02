@@ -23,6 +23,16 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/doctor/startup/latest",
                 get(health_api::startup_doctor_latest_handler),
             )
+            .route("/discord/send", post(health_api::send_handler))
+            .route(
+                "/discord/send-to-agent",
+                post(health_api::send_to_agent_handler),
+            )
+            .route("/discord/send-dm", post(health_api::senddm_handler))
+            .route(
+                "/inflight/rebind",
+                post(health_api::rebind_inflight_handler),
+            )
             .route("/cluster/nodes", get(cluster::list_nodes))
             .route(
                 "/cluster/routing-diagnostics",
