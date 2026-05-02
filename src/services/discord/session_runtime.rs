@@ -1141,35 +1141,27 @@ pub(super) async fn resolve_thread_parent(
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::process::Command;
 
     fn run_git(repo_dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = GitCommand::new()
             .args(args)
-            .current_dir(repo_dir)
-            .output()
+            .repo(repo_dir)
+            .run_output()
             .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {}", args, e));
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn branch_exists(repo_dir: &Path, branch: &str) -> bool {
-        Command::new("git")
+        GitCommand::new()
             .args([
                 "show-ref",
                 "--verify",
                 "--quiet",
                 &format!("refs/heads/{branch}"),
             ])
-            .current_dir(repo_dir)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+            .repo(repo_dir)
+            .run_output()
+            .is_ok()
     }
 
     fn setup_git_repo_with_origin() -> (tempfile::TempDir, tempfile::TempDir) {

@@ -2,6 +2,8 @@ use super::super::gateway::{
     DiscordGateway, HeadlessGateway, LiveDiscordTurnContext, send_intake_placeholder,
 };
 use super::super::*;
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use crate::services::git::GitCommand;
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
     note_recall_context_size, resolve_memory_role_id, resolve_memory_session_id,
@@ -6633,25 +6635,25 @@ mod tests {
         // is a valid git worktree.
         let external = tempfile::tempdir().unwrap();
         let external_dir = external.path().to_str().unwrap();
-        std::process::Command::new("git")
+        GitCommand::new()
             .args(["init", "-b", "main"])
-            .current_dir(external_dir)
-            .output()
+            .repo(external_dir)
+            .run_output()
             .unwrap();
-        std::process::Command::new("git")
+        GitCommand::new()
             .args(["config", "user.email", "test@test.com"])
-            .current_dir(external_dir)
-            .output()
+            .repo(external_dir)
+            .run_output()
             .unwrap();
-        std::process::Command::new("git")
+        GitCommand::new()
             .args(["config", "user.name", "Test"])
-            .current_dir(external_dir)
-            .output()
+            .repo(external_dir)
+            .run_output()
             .unwrap();
-        std::process::Command::new("git")
+        GitCommand::new()
             .args(["commit", "--allow-empty", "-m", "initial"])
-            .current_dir(external_dir)
-            .output()
+            .repo(external_dir)
+            .run_output()
             .unwrap();
 
         let raw = serde_json::json!({
