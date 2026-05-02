@@ -1278,12 +1278,7 @@ pub async fn clear_provider_channel_runtime(
 
     #[cfg(unix)]
     if let Some(name) = tmux_name {
-        if provider == ProviderKind::Claude {
-            let _ = tokio::task::spawn_blocking(move || {
-                crate::services::platform::tmux::send_keys(&name, &["/clear", "Enter"])
-            })
-            .await;
-        } else if provider.uses_managed_tmux_backend() {
+        if provider.uses_managed_tmux_backend() {
             super::commands::reset_managed_process_session(&name);
         }
     }
