@@ -364,9 +364,6 @@ fn default_agent_prompt(role_id: &str) -> String {
 // ── Launchd plist ──────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-const AGENTDESK_DEV_LAUNCHD_LABEL: &str = "com.agentdesk.dev";
-
-#[cfg(target_os = "macos")]
 fn launchd_path_env(home: &Path) -> String {
     let home_str = home.display();
     format!(
@@ -378,7 +375,6 @@ fn launchd_path_env(home: &Path) -> String {
 fn launchd_label(flavor: LaunchdPlistFlavorArg) -> &'static str {
     match flavor {
         LaunchdPlistFlavorArg::Release => dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL,
-        LaunchdPlistFlavorArg::Dev => AGENTDESK_DEV_LAUNCHD_LABEL,
     }
 }
 
@@ -393,7 +389,6 @@ fn default_launchd_root_dir(home: &Path, flavor: LaunchdPlistFlavorArg) -> PathB
         LaunchdPlistFlavorArg::Release => {
             dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"))
         }
-        LaunchdPlistFlavorArg::Dev => home.join(".adk").join("dev"),
     }
 }
 
@@ -1232,28 +1227,6 @@ mod tests {
             "<string>{}</string>",
             root_dir.join("logs").join("dcserver.stdout.log").display()
         )));
-        assert_plist_xml_valid(&plist);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn generate_launchd_plist_dev_uses_dev_label_and_root() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let home = temp_dir.path().join("home");
-        let root_dir = home.join(".adk").join("dev");
-        let plist = generate_launchd_plist_for_flavor_with_root(
-            LaunchdPlistFlavorArg::Dev,
-            &home,
-            &root_dir.join("bin").join("agentdesk"),
-            &root_dir,
-        );
-
-        assert!(plist.contains("<string>com.agentdesk.dev</string>"));
-        assert!(plist.contains(&format!(
-            "<string>{}</string>",
-            root_dir.join("bin").join("agentdesk").display()
-        )));
-        assert!(plist.contains(&format!("<string>{}</string>", root_dir.display())));
         assert_plist_xml_valid(&plist);
     }
 

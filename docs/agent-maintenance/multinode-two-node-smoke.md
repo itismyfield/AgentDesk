@@ -33,8 +33,8 @@ node --test policies/__tests__/merge-automation.test.js
 
 ## Physical Smoke
 
-Use this only against a dev runtime and shared dev PostgreSQL. Do not stop
-`AgentDesk-*` tmux work sessions unless the operator explicitly asks.
+Run this only against a release runtime against the shared PostgreSQL instance.
+Do not stop `AgentDesk-*` tmux work sessions unless the operator explicitly asks.
 
 1. Start Mac mini as leader-capable:
 
@@ -42,7 +42,7 @@ Use this only against a dev runtime and shared dev PostgreSQL. Do not stop
 AGENTDESK_CLUSTER_ENABLED=true \
 AGENTDESK_CLUSTER_INSTANCE_ID=mac-mini-release \
 AGENTDESK_CLUSTER_ROLE=auto \
-scripts/deploy-dev.sh
+scripts/deploy-release.sh
 ```
 
 2. Start MacBook as worker:
@@ -51,7 +51,7 @@ scripts/deploy-dev.sh
 AGENTDESK_CLUSTER_ENABLED=true \
 AGENTDESK_CLUSTER_INSTANCE_ID=mac-book-release \
 AGENTDESK_CLUSTER_ROLE=worker \
-scripts/deploy-dev.sh
+scripts/deploy-release.sh
 ```
 
 3. Verify node registry and role split:

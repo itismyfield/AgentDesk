@@ -74,7 +74,7 @@ if dupes > 0 {
 
 ## 배포 프리컨디션 (Zero-inflight gate)
 
-`scripts/deploy-dev.sh` / `scripts/deploy-release.sh` 시작부:
+`scripts/deploy-release.sh` 시작부:
 
 ```bash
 if ! curl -sf --max-time 3 "http://127.0.0.1:$DEV_PORT/api/health" > /dev/null 2>&1; then
