@@ -920,7 +920,7 @@ impl RoutineStore {
             r#"
             WITH grouped_runs AS (
                 SELECT r.script_ref,
-                       r.name,
+                       (ARRAY_AGG(r.name ORDER BY rr.started_at DESC, rr.id DESC))[1] AS name,
                        COALESCE(rr.action, 'run') AS action,
                        rr.status,
                        COUNT(*)::BIGINT AS occurrence_count,
@@ -932,7 +932,7 @@ impl RoutineStore {
                 WHERE rr.status IN ('succeeded', 'failed', 'skipped', 'error')
                   AND rr.started_at > NOW() - INTERVAL '24 hours'
                   AND ($1::text IS NULL OR r.script_ref <> $1)
-                GROUP BY r.script_ref, r.name, COALESCE(rr.action, 'run'), rr.status
+                GROUP BY r.script_ref, COALESCE(rr.action, 'run'), rr.status
                 ORDER BY MAX(rr.started_at) DESC
                 LIMIT $2
             )
