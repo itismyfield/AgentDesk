@@ -1077,11 +1077,14 @@ impl RoutineStore {
                 )
             };
             let weight: u8 = if blocked_reason.is_some() { 2 } else { 1 };
+            // Group by status so multiple stale cards accumulate under one candidate
+            // (per-card signature would never reach evidence_count >= 5 gate)
+            let sig_group = if blocked_reason.is_some() { "blocked" } else { &status };
             kanban_obs.push(serde_json::json!({
                 "timestamp": last_seen_at.to_rfc3339(),
                 "source": "kanban_stale",
                 "category": "routine-candidate",
-                "signature": format!("kanban-stale:{card_id}"),
+                "signature": format!("kanban-stale:{sig_group}"),
                 "summary": truncate_chars(&summary, 240),
                 "weight": weight,
                 "occurrences": stuck_days.clamp(1, 50),
@@ -1125,7 +1128,7 @@ impl RoutineStore {
             let from_agent: String = row.try_get("from_agent_id").unwrap_or_default();
             let to_agent: String = row.try_get("to_agent_id").unwrap_or_default();
             let status: String = row.try_get("status").unwrap_or_default();
-            let retry_count: i32 = row.try_get("retry_count").unwrap_or(0);
+            let retry_count: i64 = row.try_get("retry_count").unwrap_or(0);
             let last_seen_at: DateTime<Utc> =
                 row.try_get("last_seen_at").unwrap_or_else(|_| Utc::now());
             let summary = format!(
@@ -1139,7 +1142,7 @@ impl RoutineStore {
                 "signature": format!("dispatch-retry:{from_agent}:{to_agent}:{status}"),
                 "summary": truncate_chars(&summary, 240),
                 "weight": 2,
-                "occurrences": (retry_count as u32).clamp(1, 50),
+                "occurrences": (retry_count as u64).clamp(1, 50),
                 "evidence_ref": format!("task_dispatches:{dispatch_id}"),
             }));
         }
@@ -1153,6 +1156,9 @@ impl RoutineStore {
                           OR user_message ILIKE '%fail%'
                           OR user_message ILIKE '%오류%'
                           OR user_message ILIKE '%실패%'
+                          OR user_message ILIKE '%에러%'
+                          OR user_message ILIKE '%안됨%'
+                          OR user_message ILIKE '%안 됨%'
                    )::BIGINT AS error_mention_count,
                    COUNT(*)::BIGINT AS total_turns,
                    MAX(created_at) AS last_seen_at,
@@ -1167,6 +1173,9 @@ impl RoutineStore {
                           OR user_message ILIKE '%fail%'
                           OR user_message ILIKE '%오류%'
                           OR user_message ILIKE '%실패%'
+                          OR user_message ILIKE '%에러%'
+                          OR user_message ILIKE '%안됨%'
+                          OR user_message ILIKE '%안 됨%'
                    ) >= 3
             ORDER BY error_mention_count DESC
             LIMIT $1
