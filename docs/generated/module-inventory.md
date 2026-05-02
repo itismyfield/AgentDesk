@@ -71,7 +71,7 @@
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 339 |  |
 | `db::agents` | `src/db/agents.rs` | 1125 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 4533 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 4555 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1200 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 1 |  |
