@@ -3,7 +3,10 @@ use super::settings::{
     load_role_prompt, render_peer_agent_guidance,
 };
 use super::*;
-use crate::db::prompt_manifests as db_prompt_manifests;
+use crate::db::prompt_manifests::{
+    PromptContentVisibility, PromptManifest, PromptManifestBuilder, PromptManifestLayer,
+    estimate_tokens_from_chars,
+};
 use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
@@ -42,86 +45,12 @@ const CURRENT_TASK_REDACTED_PREVIEW_MAX_BYTES: usize = 2_000;
 const RECOVERY_CONTEXT_LAYER_NAME: &str = "recovery_context";
 const RECOVERY_CONTEXT_LAYER_SOURCE: &str = "Discord recent N messages";
 const RECOVERY_CONTEXT_LAYER_REASON: &str = "provider-native resume failed";
+const ROLE_PROMPT_LAYER_NAME: &str = "role_prompt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BuiltSystemPrompt {
     pub(super) system_prompt: String,
-    pub(super) manifest: PromptManifest,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub(super) struct PromptManifest {
-    pub(super) layers: Vec<PromptManifestLayer>,
-}
-
-impl PromptManifest {
-    pub(in crate::services::discord) fn to_db_prompt_manifest(
-        &self,
-        turn_id: &str,
-        channel_id: ChannelId,
-        dispatch_id: Option<&str>,
-        profile: Option<&str>,
-    ) -> Result<db_prompt_manifests::PromptManifest, String> {
-        let mut builder =
-            db_prompt_manifests::PromptManifestBuilder::new(turn_id, channel_id.get().to_string());
-        if let Some(dispatch_id) = dispatch_id.map(str::trim).filter(|value| !value.is_empty()) {
-            builder = builder.dispatch_id(dispatch_id);
-        }
-        if let Some(profile) = profile.map(str::trim).filter(|value| !value.is_empty()) {
-            builder = builder.profile(profile);
-        }
-        for layer in &self.layers {
-            builder = builder.layer(layer.to_db_prompt_manifest_layer());
-        }
-        builder.build().map_err(|error| error.to_string())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(super) struct PromptManifestLayer {
-    pub(super) layer: String,
-    pub(super) enabled: bool,
-    pub(super) source: String,
-    pub(super) reason: String,
-    pub(super) chars: i64,
-    pub(super) tokens_est: i64,
-    pub(super) content_visibility: PromptContentVisibility,
-    pub(super) content_sha256: String,
-    pub(super) redacted_preview: Option<String>,
-    pub(super) full_content: Option<String>,
-}
-
-impl PromptManifestLayer {
-    fn to_db_prompt_manifest_layer(&self) -> db_prompt_manifests::PromptManifestLayer {
-        db_prompt_manifests::PromptManifestLayer {
-            id: None,
-            manifest_id: None,
-            layer_name: self.layer.clone(),
-            enabled: self.enabled,
-            source: Some(self.source.clone()),
-            reason: Some(self.reason.clone()),
-            chars: self.chars,
-            tokens_est: self.tokens_est,
-            content_sha256: self.content_sha256.clone(),
-            content_visibility: match self.content_visibility {
-                PromptContentVisibility::AdkProvided => {
-                    db_prompt_manifests::PromptContentVisibility::AdkProvided
-                }
-                PromptContentVisibility::UserDerived => {
-                    db_prompt_manifests::PromptContentVisibility::UserDerived
-                }
-            },
-            full_content: self.full_content.clone(),
-            redacted_preview: self.redacted_preview.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum PromptContentVisibility {
-    AdkProvided,
-    UserDerived,
+    pub(super) manifest: Option<PromptManifest>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -642,18 +571,20 @@ fn current_task_manifest_layer(
     };
     let (chars, tokens_est, content_sha256) = prompt_manifest_content_stats(rendered_section);
 
-    PromptManifestLayer {
-        layer: CURRENT_TASK_LAYER_NAME.to_string(),
-        enabled: true,
-        source,
-        reason,
-        chars,
-        tokens_est,
-        content_visibility: PromptContentVisibility::UserDerived,
-        content_sha256,
-        redacted_preview: Some(redacted_prompt_manifest_preview(rendered_section)),
-        full_content: None,
-    }
+    let mut layer = PromptManifestLayer::from_content(
+        CURRENT_TASK_LAYER_NAME,
+        true,
+        Some(source),
+        Some(reason),
+        PromptContentVisibility::UserDerived,
+        rendered_section.to_string(),
+    );
+    layer.chars = chars;
+    layer.tokens_est = tokens_est;
+    layer.content_sha256 = content_sha256;
+    layer.redacted_preview = Some(redacted_prompt_manifest_preview(rendered_section));
+    layer.full_content = None;
+    layer
 }
 
 fn dispatch_contract_manifest_layer(
@@ -668,18 +599,20 @@ fn dispatch_contract_manifest_layer(
     let (chars, tokens_est, content_sha256) =
         prompt_manifest_content_stats(full_content.as_deref().unwrap_or(""));
 
-    PromptManifestLayer {
-        layer: DISPATCH_CONTRACT_LAYER_NAME.to_string(),
-        enabled: full_content.is_some(),
-        source: DISPATCH_CONTRACT_LAYER_SOURCE.to_string(),
-        reason: format!("dispatch_type={dispatch_type_reason}"),
-        chars,
-        tokens_est,
-        content_visibility: PromptContentVisibility::AdkProvided,
-        content_sha256,
-        redacted_preview: None,
-        full_content,
-    }
+    let mut layer = PromptManifestLayer::from_content(
+        DISPATCH_CONTRACT_LAYER_NAME,
+        full_content.is_some(),
+        Some(DISPATCH_CONTRACT_LAYER_SOURCE),
+        Some(format!("dispatch_type={dispatch_type_reason}")),
+        PromptContentVisibility::AdkProvided,
+        full_content.clone().unwrap_or_default(),
+    );
+    layer.chars = chars;
+    layer.tokens_est = tokens_est;
+    layer.content_sha256 = content_sha256;
+    layer.redacted_preview = None;
+    layer.full_content = full_content;
+    layer
 }
 
 fn recovery_context_manifest_layer(
@@ -690,18 +623,20 @@ fn recovery_context_manifest_layer(
         .filter(|value| !value.is_empty());
     let Some(raw_context) = raw_context else {
         let (chars, tokens_est, content_sha256) = prompt_manifest_content_stats("");
-        return Ok(PromptManifestLayer {
-            layer: RECOVERY_CONTEXT_LAYER_NAME.to_string(),
-            enabled: false,
-            source: RECOVERY_CONTEXT_LAYER_SOURCE.to_string(),
-            reason: RECOVERY_CONTEXT_LAYER_REASON.to_string(),
-            chars,
-            tokens_est,
-            content_visibility: PromptContentVisibility::UserDerived,
-            content_sha256,
-            redacted_preview: None,
-            full_content: None,
-        });
+        let mut layer = PromptManifestLayer::from_content(
+            RECOVERY_CONTEXT_LAYER_NAME,
+            false,
+            Some(RECOVERY_CONTEXT_LAYER_SOURCE),
+            Some(RECOVERY_CONTEXT_LAYER_REASON),
+            PromptContentVisibility::UserDerived,
+            "",
+        );
+        layer.chars = chars;
+        layer.tokens_est = tokens_est;
+        layer.content_sha256 = content_sha256;
+        layer.redacted_preview = None;
+        layer.full_content = None;
+        return Ok(layer);
     };
 
     let (chars, tokens_est, _) = prompt_manifest_content_stats(raw_context);
@@ -720,18 +655,20 @@ fn recovery_context_manifest_layer(
         .map(|record| record.redacted_preview.clone())
         .unwrap_or_else(|| redacted_prompt_manifest_preview(raw_context));
 
-    Ok(PromptManifestLayer {
-        layer: RECOVERY_CONTEXT_LAYER_NAME.to_string(),
-        enabled: true,
-        source: RECOVERY_CONTEXT_LAYER_SOURCE.to_string(),
-        reason: RECOVERY_CONTEXT_LAYER_REASON.to_string(),
-        chars,
-        tokens_est,
-        content_visibility: PromptContentVisibility::UserDerived,
-        content_sha256,
-        redacted_preview: Some(redacted_preview),
-        full_content: None,
-    })
+    let mut layer = PromptManifestLayer::from_content(
+        RECOVERY_CONTEXT_LAYER_NAME,
+        true,
+        Some(RECOVERY_CONTEXT_LAYER_SOURCE),
+        Some(RECOVERY_CONTEXT_LAYER_REASON),
+        PromptContentVisibility::UserDerived,
+        raw_context.to_string(),
+    );
+    layer.chars = chars;
+    layer.tokens_est = tokens_est;
+    layer.content_sha256 = content_sha256;
+    layer.redacted_preview = Some(redacted_preview);
+    layer.full_content = None;
+    Ok(layer)
 }
 
 fn prompt_manifest_content_stats(content: &str) -> (i64, i64, String) {
@@ -743,7 +680,7 @@ fn prompt_manifest_content_stats(content: &str) -> (i64, i64, String) {
     };
     (
         chars,
-        db_prompt_manifests::estimate_tokens_from_chars(char_count),
+        estimate_tokens_from_chars(char_count),
         prompt_manifest_content_sha256(content),
     )
 }
@@ -780,6 +717,66 @@ fn truncate_prompt_manifest_preview(input: &str, max_bytes: usize) -> String {
     let mut truncated = input[..boundary].trim_end().to_string();
     truncated.push_str("\n[... truncated]");
     truncated
+}
+
+fn role_prompt_manifest_layer(
+    binding: &RoleBinding,
+    enabled: bool,
+    full_content: Option<String>,
+) -> PromptManifestLayer {
+    let content = full_content.unwrap_or_default();
+    let mut layer = PromptManifestLayer::from_content(
+        ROLE_PROMPT_LAYER_NAME,
+        enabled,
+        Some(format!("agents/{}.prompt.md", binding.role_id)),
+        Some(format!("agent_id={}", binding.role_id)),
+        PromptContentVisibility::AdkProvided,
+        content,
+    );
+    if !enabled {
+        layer.full_content = None;
+    }
+    layer
+}
+
+fn prompt_manifest_profile(profile: DispatchProfile) -> &'static str {
+    match profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::Lite => "lite",
+        DispatchProfile::ReviewLite => "review_lite",
+    }
+}
+
+fn build_prompt_manifest(
+    turn_id: Option<&str>,
+    channel_id: ChannelId,
+    profile: DispatchProfile,
+    current_task: Option<&CurrentTaskContext<'_>>,
+    layers: Vec<PromptManifestLayer>,
+) -> Option<PromptManifest> {
+    if layers.is_empty() {
+        return None;
+    }
+    let Some(turn_id) = turn_id else {
+        return None;
+    };
+
+    let mut builder = PromptManifestBuilder::new(turn_id, channel_id.get().to_string())
+        .profile(prompt_manifest_profile(profile));
+    if let Some(dispatch_id) = current_task.and_then(|task| task.dispatch_id) {
+        builder = builder.dispatch_id(dispatch_id);
+    }
+    for layer in layers {
+        builder = builder.layer(layer);
+    }
+
+    match builder.build() {
+        Ok(manifest) => Some(manifest),
+        Err(error) => {
+            tracing::warn!("[prompt-manifest] build failed: {error}");
+            None
+        }
+    }
 }
 
 fn proactive_memory_guidance(
@@ -1050,6 +1047,7 @@ pub(super) fn build_system_prompt(
         memory_settings,
         memento_mcp_available,
         None,
+        None,
     )
     .system_prompt
 }
@@ -1070,8 +1068,9 @@ pub(super) fn build_system_prompt_with_manifest(
     memory_settings: Option<&ResolvedMemorySettings>,
     memento_mcp_available: bool,
     recovery_context: Option<&RecoveryContextManifestInput<'_>>,
+    turn_id: Option<&str>,
 ) -> BuiltSystemPrompt {
-    let mut prompt_manifest = PromptManifest::default();
+    let mut prompt_manifest_layers = Vec::new();
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
          {}\n\
@@ -1156,6 +1155,11 @@ pub(super) fn build_system_prompt_with_manifest(
         if profile != DispatchProfile::Lite {
             match load_role_prompt(binding) {
                 Some(role_prompt) => {
+                    prompt_manifest_layers.push(role_prompt_manifest_layer(
+                        binding,
+                        true,
+                        Some(role_prompt.clone()),
+                    ));
                     system_prompt_owned.push_str(
                         "\n\n[Channel Role Binding]\n\
                          The following role definition is authoritative for this Discord channel.\n\
@@ -1171,6 +1175,7 @@ pub(super) fn build_system_prompt_with_manifest(
                     );
                 }
                 None => {
+                    prompt_manifest_layers.push(role_prompt_manifest_layer(binding, false, None));
                     tracing::warn!(
                         "  [role-map] Failed to load prompt file '{}' for role '{}' (channel {})",
                         binding.prompt_file,
@@ -1179,6 +1184,8 @@ pub(super) fn build_system_prompt_with_manifest(
                     );
                 }
             }
+        } else {
+            prompt_manifest_layers.push(role_prompt_manifest_layer(binding, false, None));
         }
 
         // SAK before LTM: placed here for cache prefix stability — SAK and
@@ -1245,38 +1252,23 @@ pub(super) fn build_system_prompt_with_manifest(
     if let Some((task, current_task_section)) = current_task.and_then(|task| {
         render_current_task_section(task, dispatch_type).map(|section| (task, section))
     }) {
-        prompt_manifest
-            .layers
-            .push(current_task_manifest_layer(task, &current_task_section));
+        prompt_manifest_layers.push(current_task_manifest_layer(task, &current_task_section));
         system_prompt_owned.push_str("\n\n");
         system_prompt_owned.push_str(&current_task_section);
     }
-    prompt_manifest
-        .layers
-        .push(dispatch_contract_manifest_layer(
-            dispatch_type,
-            current_task,
-        ));
+    prompt_manifest_layers.push(dispatch_contract_manifest_layer(
+        dispatch_type,
+        current_task,
+    ));
     match recovery_context_manifest_layer(recovery_context) {
-        Ok(layer) => prompt_manifest.layers.push(layer),
+        Ok(layer) => prompt_manifest_layers.push(layer),
         Err(error) => {
             tracing::warn!(
                 target: "agentdesk.prompt_manifest",
                 "failed to record recovery_context prompt manifest layer: {error}"
             );
-            prompt_manifest
-                .layers
+            prompt_manifest_layers
                 .push(recovery_context_manifest_layer(None).expect("disabled recovery layer"));
-        }
-    }
-
-    if !prompt_manifest.layers.is_empty() {
-        if let Ok(manifest_json) = serde_json::to_string(&prompt_manifest) {
-            tracing::info!(
-                target: "agentdesk.prompt_manifest",
-                prompt_manifest = %manifest_json,
-                "recorded prompt manifest"
-            );
         }
     }
 
@@ -1290,9 +1282,26 @@ pub(super) fn build_system_prompt_with_manifest(
         );
     }
 
+    let manifest = build_prompt_manifest(
+        turn_id,
+        channel_id,
+        profile,
+        current_task,
+        prompt_manifest_layers,
+    );
+    if let Some(prompt_manifest) = manifest.as_ref() {
+        if let Ok(manifest_json) = serde_json::to_string(prompt_manifest) {
+            tracing::info!(
+                target: "agentdesk.prompt_manifest",
+                prompt_manifest = %manifest_json,
+                "recorded prompt manifest"
+            );
+        }
+    }
+
     BuiltSystemPrompt {
         system_prompt: system_prompt_owned,
-        manifest: prompt_manifest,
+        manifest,
     }
 }
 
@@ -1327,6 +1336,7 @@ mod dispatch_contract_tests {
             None,
             false,
             None,
+            Some("turn-current-task-test"),
         )
     }
 
@@ -1344,12 +1354,17 @@ mod dispatch_contract_tests {
         let built = build_prompt_with_manifest_for(&current_task, Some("implementation"));
 
         assert!(built.system_prompt.contains("[Current Task]"));
-        assert_eq!(built.manifest.layers.len(), 3);
-        let layer = &built.manifest.layers[0];
-        assert_eq!(layer.layer, "current_task");
+        let manifest = built.manifest.expect("prompt manifest");
+        assert_eq!(manifest.layers.len(), 3);
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.layer_name == "current_task")
+            .expect("current_task layer");
         assert!(layer.enabled);
-        assert_eq!(layer.source, "task_dispatches.context");
-        assert_eq!(layer.reason, "dispatch_id=dispatch-1534");
+        assert_eq!(layer.layer_name, "current_task");
+        assert_eq!(layer.source.as_deref(), Some("task_dispatches.context"));
+        assert_eq!(layer.reason.as_deref(), Some("dispatch_id=dispatch-1534"));
         assert_eq!(
             layer.content_visibility,
             PromptContentVisibility::UserDerived
@@ -1376,11 +1391,16 @@ mod dispatch_contract_tests {
 
         let built = build_prompt_with_manifest_for(&current_task, None);
 
-        assert_eq!(built.manifest.layers.len(), 3);
-        let layer = &built.manifest.layers[0];
+        let manifest = built.manifest.expect("prompt manifest");
+        assert_eq!(manifest.layers.len(), 3);
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.layer_name == "current_task")
+            .expect("current_task layer");
         assert!(layer.enabled);
-        assert_eq!(layer.source, "discord_message");
-        assert_eq!(layer.reason, "freeform");
+        assert_eq!(layer.source.as_deref(), Some("discord_message"));
+        assert_eq!(layer.reason.as_deref(), Some("freeform"));
         assert!(layer.full_content.is_none());
         assert!(
             layer
@@ -1400,16 +1420,22 @@ mod dispatch_contract_tests {
         };
 
         let built = build_prompt_with_manifest_for(&current_task, Some("implementation"));
-        let layer = built
-            .manifest
+        let manifest = built.manifest.expect("prompt manifest");
+        let layer = manifest
             .layers
             .iter()
-            .find(|layer| layer.layer == "dispatch_contract")
+            .find(|layer| layer.layer_name == "dispatch_contract")
             .expect("dispatch_contract manifest layer");
 
         assert!(layer.enabled);
-        assert_eq!(layer.source, "prompt_builder.render_dispatch_contract");
-        assert_eq!(layer.reason, "dispatch_type=implementation");
+        assert_eq!(
+            layer.source.as_deref(),
+            Some("prompt_builder.render_dispatch_contract")
+        );
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("dispatch_type=implementation")
+        );
         assert!(layer.chars > 0);
         assert!(layer.tokens_est > 0);
         assert_eq!(
@@ -1429,27 +1455,6 @@ mod dispatch_contract_tests {
         assert!(full_content.contains("[Dispatch Contract]"));
         assert!(full_content.contains("`OUTCOME: noop`"));
         assert!(full_content.contains("PATCH /api/dispatches/dispatch-1537"));
-
-        let db_manifest = built
-            .manifest
-            .to_db_prompt_manifest(
-                "discord:1:2",
-                ChannelId::new(1),
-                Some("dispatch-1537"),
-                Some("full"),
-            )
-            .expect("db prompt manifest");
-        let db_layer = db_manifest
-            .layers
-            .iter()
-            .find(|layer| layer.layer_name == "dispatch_contract")
-            .expect("db dispatch_contract layer");
-        assert_eq!(
-            db_layer.content_visibility,
-            db_prompt_manifests::PromptContentVisibility::AdkProvided
-        );
-        assert_eq!(db_layer.full_content.as_deref(), Some(full_content));
-        assert!(db_layer.redacted_preview.is_none());
     }
 
     #[test]
@@ -1457,15 +1462,18 @@ mod dispatch_contract_tests {
         let built = build_prompt_with_optional_manifest_for(None, None);
 
         assert!(!built.system_prompt.contains("[Dispatch Contract]"));
-        let layer = built
-            .manifest
+        let manifest = built.manifest.expect("prompt manifest");
+        let layer = manifest
             .layers
             .iter()
-            .find(|layer| layer.layer == "dispatch_contract")
+            .find(|layer| layer.layer_name == "dispatch_contract")
             .expect("dispatch_contract manifest layer");
         assert!(!layer.enabled);
-        assert_eq!(layer.source, "prompt_builder.render_dispatch_contract");
-        assert_eq!(layer.reason, "dispatch_type=none");
+        assert_eq!(
+            layer.source.as_deref(),
+            Some("prompt_builder.render_dispatch_contract")
+        );
+        assert_eq!(layer.reason.as_deref(), Some("dispatch_type=none"));
         assert_eq!(layer.chars, 0);
         assert_eq!(layer.tokens_est, 0);
         assert_eq!(layer.content_sha256, prompt_manifest_content_sha256(""));
@@ -1500,10 +1508,13 @@ mod dispatch_contract_tests {
         }))
         .expect("recovery layer");
 
-        assert_eq!(layer.layer, "recovery_context");
+        assert_eq!(layer.layer_name, "recovery_context");
         assert!(layer.enabled);
-        assert_eq!(layer.source, "Discord recent N messages");
-        assert_eq!(layer.reason, "provider-native resume failed");
+        assert_eq!(layer.source.as_deref(), Some("Discord recent N messages"));
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("provider-native resume failed")
+        );
         assert_eq!(
             layer.content_visibility,
             PromptContentVisibility::UserDerived
@@ -1577,13 +1588,14 @@ mod dispatch_contract_tests {
                 raw_context,
                 audit_record: None,
             }),
+            Some("turn-recovery-context-test"),
         );
 
-        let layer = built
-            .manifest
+        let manifest = built.manifest.expect("prompt manifest");
+        let layer = manifest
             .layers
             .iter()
-            .find(|layer| layer.layer == "recovery_context")
+            .find(|layer| layer.layer_name == "recovery_context")
             .expect("recovery_context layer");
         assert!(layer.enabled);
         let expected_sha = recovery_context_sha256(raw_context);
@@ -1604,37 +1616,23 @@ mod dispatch_contract_tests {
                 .contains("secret-value")
         );
 
-        let db_manifest = built
-            .manifest
-            .to_db_prompt_manifest(
-                "discord:1:2",
-                ChannelId::new(1),
-                Some("dispatch-1"),
-                Some("full"),
-            )
-            .expect("db prompt manifest");
-        let db_layer = db_manifest
-            .layers
-            .iter()
-            .find(|layer| layer.layer_name == "recovery_context")
-            .expect("db recovery_context layer");
-        assert_eq!(db_layer.content_sha256, expected_sha);
         assert_eq!(
-            db_layer.content_visibility,
-            db_prompt_manifests::PromptContentVisibility::UserDerived
+            layer.content_visibility,
+            PromptContentVisibility::UserDerived
         );
-        assert!(db_layer.full_content.is_none());
-        assert!(db_layer.redacted_preview.is_some());
     }
 
     #[test]
     fn recovery_context_layer_disabled_when_absent() {
         let layer = recovery_context_manifest_layer(None).expect("disabled recovery layer");
 
-        assert_eq!(layer.layer, "recovery_context");
+        assert_eq!(layer.layer_name, "recovery_context");
         assert!(!layer.enabled);
-        assert_eq!(layer.source, "Discord recent N messages");
-        assert_eq!(layer.reason, "provider-native resume failed");
+        assert_eq!(layer.source.as_deref(), Some("Discord recent N messages"));
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("provider-native resume failed")
+        );
         assert_eq!(layer.chars, 0);
         assert_eq!(layer.tokens_est, 0);
         assert_eq!(layer.content_sha256, prompt_manifest_content_sha256(""));
@@ -2040,6 +2038,75 @@ mod tests {
 
         assert!(prompt.contains("[Tool Output Efficiency]"));
         assert!(prompt.contains("Prefer targeted queries over exhaustive dumps"));
+    }
+
+    #[test]
+    fn test_role_prompt_layer_records_adk_provided_full_content_and_sha() {
+        use super::super::settings::RoleBinding;
+        use sha2::{Digest, Sha256};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt_path = temp.path().join("project-agentdesk.prompt.md");
+        let role_prompt = "# AgentDesk\n\nFollow project rules.\n";
+        std::fs::write(&prompt_path, role_prompt).expect("write role prompt");
+        let binding = RoleBinding {
+            role_id: "project-agentdesk".to_string(),
+            prompt_file: prompt_path.display().to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            quality_feedback_injection_enabled: true,
+            memory: Default::default(),
+        };
+
+        let built = build_system_prompt_with_manifest(
+            "ctx",
+            &[],
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some("turn-1"),
+        );
+
+        assert!(built.system_prompt.contains(role_prompt));
+        let manifest = built.manifest.expect("prompt manifest");
+        assert_eq!(manifest.turn_id, "turn-1");
+        assert_eq!(manifest.channel_id, "1");
+        assert_eq!(manifest.profile.as_deref(), Some("full"));
+        assert_eq!(manifest.layer_count, 3);
+        let layer = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.layer_name == ROLE_PROMPT_LAYER_NAME)
+            .expect("role prompt layer");
+        assert!(layer.enabled);
+        assert_eq!(
+            layer.source.as_deref(),
+            Some("agents/project-agentdesk.prompt.md")
+        );
+        assert_eq!(layer.reason.as_deref(), Some("agent_id=project-agentdesk"));
+        assert_eq!(
+            layer.content_visibility,
+            PromptContentVisibility::AdkProvided
+        );
+        assert_eq!(layer.full_content.as_deref(), Some(role_prompt));
+        assert_eq!(layer.redacted_preview, None);
+        assert_eq!(
+            layer.content_sha256,
+            hex::encode(Sha256::digest(role_prompt.as_bytes()))
+        );
+        assert_eq!(layer.chars, role_prompt.chars().count() as i64);
     }
 
     #[test]

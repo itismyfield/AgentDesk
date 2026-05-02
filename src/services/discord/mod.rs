@@ -114,9 +114,7 @@ use formatting::{
 use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 pub(crate) use inflight::clear_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
-use prompt_builder::{
-    RecoveryContextManifestInput, build_system_prompt, build_system_prompt_with_manifest,
-};
+use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::handle_event;

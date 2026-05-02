@@ -694,8 +694,12 @@ pub(crate) struct HeadlessTurnReservation {
 
 impl HeadlessTurnReservation {
     pub(in crate::services::discord) fn turn_id(&self, channel_id: ChannelId) -> String {
-        format!("discord:{}:{}", channel_id.get(), self.user_msg_id.get())
+        discord_turn_id(channel_id, self.user_msg_id)
     }
+}
+
+fn discord_turn_id(channel_id: ChannelId, user_msg_id: MessageId) -> String {
+    format!("discord:{}:{}", channel_id.get(), user_msg_id.get())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1258,27 +1262,12 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         Some(&memory_settings),
         memento_mcp_available,
         recovery_context_for_manifest.as_ref(),
+        Some(&turn_id),
     );
-    match built_system_prompt.manifest.to_db_prompt_manifest(
-        &turn_id,
-        channel_id,
-        None,
-        Some(dispatch_profile_label(dispatch_profile)),
-    ) {
-        Ok(manifest) => {
-            crate::db::prompt_manifests::spawn_save_prompt_manifest(
-                shared.pg_pool.clone(),
-                manifest,
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "agentdesk.prompt_manifest",
-                "failed to build prompt manifest for turn {turn_id}: {error}"
-            );
-        }
-    }
     let system_prompt_owned = built_system_prompt.system_prompt;
+    if let Some(manifest) = built_system_prompt.manifest {
+        crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);
+    }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
     let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
@@ -3656,27 +3645,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         Some(&memory_settings),
         memento_mcp_available,
         recovery_context_for_manifest.as_ref(),
+        Some(&turn_id),
     );
-    match built_system_prompt.manifest.to_db_prompt_manifest(
-        &turn_id,
-        channel_id,
-        active_dispatch_id_for_prompt.as_deref(),
-        Some(dispatch_profile_label(dispatch_profile)),
-    ) {
-        Ok(manifest) => {
-            crate::db::prompt_manifests::spawn_save_prompt_manifest(
-                shared.pg_pool.clone(),
-                manifest,
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "agentdesk.prompt_manifest",
-                "failed to build prompt manifest for turn {turn_id}: {error}"
-            );
-        }
-    }
     let system_prompt_owned = built_system_prompt.system_prompt;
+    if let Some(manifest) = built_system_prompt.manifest {
+        crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);
+    }
     if sak_for_system.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
