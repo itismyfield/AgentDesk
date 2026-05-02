@@ -86,9 +86,9 @@
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 877 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
 | `db::turns` | `src/db/turns.rs` | 166 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 5115 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 5108 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
-| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3988 | giant-file |
+| `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3987 | giant-file |
 | `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2777 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1875 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
@@ -155,7 +155,7 @@
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 276 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2351 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1836 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1852 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1973 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 89 |  |
@@ -168,7 +168,7 @@
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 444 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5564 | giant-file |
-| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3294 | giant-file |
+| `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3291 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1255 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 4632 | giant-file |
