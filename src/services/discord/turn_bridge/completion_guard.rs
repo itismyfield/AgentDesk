@@ -511,13 +511,56 @@ fn runtime_pg_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
     .unwrap_or(false)
 }
 
-fn runtime_pg_fail_dispatch_with_result(dispatch_id: &str, error_msg: &str) -> bool {
+fn runtime_pg_fail_linked_auto_queue_entries(dispatch_id: &str) -> bool {
     let dispatch_id = dispatch_id.to_string();
-    let fallback_result = serde_json::json!({
-        "error": error_msg.chars().take(500).collect::<String>(),
-        "fallback": true,
+    with_runtime_postgres_result(move |pool| {
+        Box::pin(async move {
+            let changed = sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET status = 'failed',
+                     dispatch_id = NULL,
+                     slot_index = NULL,
+                     dispatched_at = NULL,
+                     completed_at = NOW()
+                 WHERE dispatch_id = $1
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                format!("mark postgres auto_queue_entries failed for {dispatch_id}: {error}")
+            })?
+            .rows_affected();
+            Ok(changed > 0)
+        })
     })
-    .to_string();
+    .unwrap_or(false)
+}
+
+fn dispatch_failure_result(error_msg: &str, error_code: Option<&str>) -> serde_json::Value {
+    let message = error_msg.chars().take(500).collect::<String>();
+    match error_code {
+        Some(code) => serde_json::json!({
+            "error": code,
+            "message": message,
+        }),
+        None => serde_json::json!({
+            "error": message,
+        }),
+    }
+}
+
+fn runtime_pg_fail_dispatch_with_result(
+    dispatch_id: &str,
+    error_msg: &str,
+    error_code: Option<&str>,
+    reset_auto_queue_entries: bool,
+) -> bool {
+    let dispatch_id = dispatch_id.to_string();
+    let mut fallback_result = dispatch_failure_result(error_msg, error_code);
+    fallback_result["fallback"] = serde_json::json!(true);
+    let fallback_result = fallback_result.to_string();
     with_runtime_postgres_result(move |pool| {
         Box::pin(async move {
             let mut tx = pool
@@ -595,20 +638,37 @@ fn runtime_pg_fail_dispatch_with_result(dispatch_id: &str, error_msg: &str) -> b
             .await
             .map_err(|error| format!("record postgres dispatch failure event for {dispatch_id}: {error}"))?;
 
-            sqlx::query(
-                "UPDATE auto_queue_entries
-                 SET status = 'pending',
-                     dispatch_id = NULL,
-                     slot_index = NULL,
-                     dispatched_at = NULL,
-                     completed_at = NULL
-                 WHERE dispatch_id = $1
-                   AND status IN ('pending', 'dispatched')",
-            )
-            .bind(&dispatch_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("reset postgres auto_queue_entries for failed dispatch {dispatch_id}: {error}"))?;
+            if reset_auto_queue_entries {
+                sqlx::query(
+                    "UPDATE auto_queue_entries
+                     SET status = 'pending',
+                         dispatch_id = NULL,
+                         slot_index = NULL,
+                         dispatched_at = NULL,
+                         completed_at = NULL
+                     WHERE dispatch_id = $1
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&dispatch_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("reset postgres auto_queue_entries for failed dispatch {dispatch_id}: {error}"))?;
+            } else {
+                sqlx::query(
+                    "UPDATE auto_queue_entries
+                     SET status = 'failed',
+                         dispatch_id = NULL,
+                         slot_index = NULL,
+                         dispatched_at = NULL,
+                         completed_at = NOW()
+                     WHERE dispatch_id = $1
+                       AND status IN ('pending', 'dispatched')",
+                )
+                .bind(&dispatch_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("mark postgres auto_queue_entries failed for dispatch {dispatch_id}: {error}"))?;
+            }
 
             sqlx::query(
                 "INSERT INTO kv_meta (key, value)
@@ -1216,26 +1276,53 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
+    fail_dispatch_with_policy(dispatch_id, error_msg, None, true).await;
+}
+
+pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
+    _api_port: u16,
+    dispatch_id: Option<&str>,
+    error_msg: &str,
+) {
+    fail_dispatch_with_policy(dispatch_id, error_msg, Some("auth_token_expired"), false).await;
+}
+
+async fn fail_dispatch_with_policy(
+    dispatch_id: Option<&str>,
+    error_msg: &str,
+    error_code: Option<&str>,
+    reset_auto_queue_entries: bool,
+) {
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
-    let dispatch_span =
-        crate::logging::dispatch_span("fail_dispatch_with_retry", Some(dispatch_id), None, None);
+    let span_name = if reset_auto_queue_entries {
+        "fail_dispatch_with_retry"
+    } else {
+        "fail_dispatch_terminal"
+    };
+    let dispatch_span = crate::logging::dispatch_span(span_name, Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
     let payload = crate::server::routes::dispatches::UpdateDispatchBody {
         status: Some("failed".to_string()),
-        result: Some(serde_json::json!({
-            "error": error_msg.chars().take(500).collect::<String>()
-        })),
+        result: Some(dispatch_failure_result(error_msg, error_code)),
     };
     for attempt in 1..=3 {
         match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload.clone())
             .await
         {
             Ok(_) => {
-                tracing::warn!("marked dispatch as failed after transport error");
-                if !runtime_pg_reset_linked_auto_queue_entries(dispatch_id) {
-                    tracing::warn!("failed dispatch auto-queue reset skipped or affected no rows");
+                tracing::warn!("marked dispatch as failed");
+                if reset_auto_queue_entries {
+                    if !runtime_pg_reset_linked_auto_queue_entries(dispatch_id) {
+                        tracing::warn!(
+                            "failed dispatch auto-queue retry reset skipped or affected no rows"
+                        );
+                    }
+                } else if !runtime_pg_fail_linked_auto_queue_entries(dispatch_id) {
+                    tracing::warn!(
+                        "failed dispatch auto-queue terminal update skipped or affected no rows"
+                    );
                 }
                 return;
             }
@@ -1249,7 +1336,12 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     // Fallback: direct DB update to prevent orphan dispatch.
     // Also leave a reconciliation marker so onTick can run the hook chain later.
     tracing::error!("dispatch PATCH failed after retries; falling back to direct DB");
-    if !runtime_pg_fail_dispatch_with_result(dispatch_id, error_msg) {
+    if !runtime_pg_fail_dispatch_with_result(
+        dispatch_id,
+        error_msg,
+        error_code,
+        reset_auto_queue_entries,
+    ) {
         tracing::warn!("postgres failure fallback skipped or affected no rows");
     }
 }
@@ -1563,6 +1655,33 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         } else {
             tracing::error!("all completion paths exhausted; dispatch stranded");
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_result_tests {
+    use super::dispatch_failure_result;
+
+    #[test]
+    fn dispatch_failure_result_preserves_legacy_error_shape() {
+        let result = dispatch_failure_result("plain transport failure", None);
+
+        assert_eq!(result["error"], "plain transport failure");
+        assert!(result.get("message").is_none());
+    }
+
+    #[test]
+    fn dispatch_failure_result_uses_auth_token_expired_code() {
+        let result = dispatch_failure_result(
+            "authentication expired; re-authentication required",
+            Some("auth_token_expired"),
+        );
+
+        assert_eq!(result["error"], "auth_token_expired");
+        assert_eq!(
+            result["message"],
+            "authentication expired; re-authentication required"
+        );
     }
 }
 
