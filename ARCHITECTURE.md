@@ -348,6 +348,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── remote.rs
 │   │   ├── repo_resolver.rs
+│   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── maintenance/
 │   │   ├── jobs/
@@ -421,6 +422,7 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── onboarding.rs
 │   ├── opencode.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
