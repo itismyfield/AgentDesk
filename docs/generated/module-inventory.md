@@ -252,7 +252,7 @@
 | `services::codex` | `src/services/codex.rs` | 1713 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 734 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5895 | giant-file |
-| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 723 |  |
+| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 827 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1166 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 99 |  |
@@ -331,7 +331,7 @@
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 392 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 119 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 10291 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 10346 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 309 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |
 | `services::discord::tmux_overload_retry` | `src/services/discord/tmux_overload_retry.rs` | 271 |  |
@@ -386,7 +386,7 @@
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 528 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |
-| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 793 |  |
+| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 844 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5279 | giant-file |
 | `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
