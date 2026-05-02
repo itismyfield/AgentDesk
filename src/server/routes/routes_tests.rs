@@ -12436,7 +12436,7 @@ async fn pipeline_config_repo_invalid_override_rejected() {
 }
 
 #[tokio::test]
-async fn pipeline_config_pg_repo_broken_merge_rejected() {
+async fn pipeline_config_pg_invalid_merge_without_override_keeps_null() {
     crate::pipeline::ensure_loaded();
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -12485,6 +12485,139 @@ async fn pipeline_config_pg_repo_broken_merge_rejected() {
         "expected merged validation error, got: {}",
         body
     );
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
+    )
+    .bind("owner/repo-merge")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.is_none(),
+        "invalid override without existing config must keep NULL, got: {stored:?}"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn pipeline_config_pg_repo_invalid_merge_preserves_existing_override() {
+    crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let valid_override = json!({
+        "hooks": {
+            "review": {
+                "on_enter": ["ExistingRepoHook"],
+                "on_exit": []
+            }
+        }
+    });
+    sqlx::query(
+        "INSERT INTO github_repos (id, display_name, pipeline_config)
+         VALUES ($1, $1, $2::jsonb)",
+    )
+    .bind("owner/repo-preserve")
+    .bind(valid_override.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/config/repo/owner/repo-preserve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"config":{"timeouts":{"nonexistent_state":{"duration":"1h","clock":"no_such_clock"}}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
+    )
+    .bind("owner/repo-preserve")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored_json: serde_json::Value = serde_json::from_str(stored.as_deref().unwrap()).unwrap();
+    assert_eq!(stored_json, valid_override);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn pipeline_config_pg_agent_invalid_merge_preserves_existing_override() {
+    crate::pipeline::ensure_loaded();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let db = test_db();
+    let engine = test_engine_with_pg(&db, pool.clone());
+    let valid_override = json!({
+        "timeouts": {
+            "in_progress": {
+                "duration": "4h",
+                "clock": "started_at"
+            }
+        }
+    });
+    sqlx::query(
+        "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt, pipeline_config)
+         VALUES ($1, $1, '111', '222', $2::jsonb)",
+    )
+    .bind("agent-preserve")
+    .bind(valid_override.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = test_api_router_with_pg(
+        db,
+        engine,
+        crate::config::Config::default(),
+        None,
+        pool.clone(),
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/config/agent/agent-preserve")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"config":{"timeouts":{"nonexistent_state":{"duration":"1h","clock":"no_such_clock"}}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
+    )
+    .bind("agent-preserve")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored_json: serde_json::Value = serde_json::from_str(stored.as_deref().unwrap()).unwrap();
+    assert_eq!(stored_json, valid_override);
 
     pool.close().await;
     pg_db.drop().await;
