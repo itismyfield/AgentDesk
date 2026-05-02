@@ -1055,18 +1055,11 @@ mod tests {
     }
 
     fn run_git(repo_dir: &str, args: &[&str]) -> std::process::Output {
-        let output = GitCommand::new()
+        GitCommand::new()
             .repo(repo_dir)
             .args(args)
             .run_output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"))
     }
 
     fn init_test_repo() -> tempfile::TempDir {

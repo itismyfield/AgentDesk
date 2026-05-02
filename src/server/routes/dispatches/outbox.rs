@@ -1141,6 +1141,8 @@ fn compute_dispatch_merge_status(
             .run_output()
         {
             Ok(_) => DispatchMergeStatus::Merged,
+            // Exit 1 is git merge-base's ordinary "not an ancestor" result,
+            // which means the dispatch has not reached the upstream base yet.
             Err(error) if error.status_code() == Some(1) => DispatchMergeStatus::Pending,
             _ => DispatchMergeStatus::Unknown,
         };

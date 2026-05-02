@@ -2760,13 +2760,11 @@ mod tests {
     }
 
     fn run_git(dir: &str, args: &[&str]) {
-        let output = GitCommand::new().repo(dir).args(args).run_output().unwrap();
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        GitCommand::new()
+            .repo(dir)
+            .args(args)
+            .run_output()
+            .unwrap_or_else(|err| panic!("git {args:?} failed: {err}"));
     }
 
     fn init_test_repo() -> tempfile::TempDir {
