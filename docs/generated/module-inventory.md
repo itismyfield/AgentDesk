@@ -44,7 +44,7 @@
 | --- | --- | ---: | --- |
 | `bootstrap` | `src/bootstrap.rs` | 56 |  |
 | `cli` | `src/cli/mod.rs` | 20 |  |
-| `cli::args` | `src/cli/args.rs` | 985 |  |
+| `cli::args` | `src/cli/args.rs` | 939 |  |
 | `cli::client` | `src/cli/client.rs` | 1656 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1516 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1569 | giant-file |
@@ -55,7 +55,7 @@
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4324 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 357 |  |
-| `cli::init` | `src/cli/init.rs` | 1600 | giant-file |
+| `cli::init` | `src/cli/init.rs` | 1573 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3142 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | giant-file |
@@ -66,7 +66,7 @@
 | `cli::utils` | `src/cli/utils.rs` | 277 |  |
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 2551 | giant-file |
+| `config` | `src/config.rs` | 2601 | giant-file |
 | `crate` | `src/main.rs` | 45 |  |
 | `credential` | `src/credential.rs` | 24 |  |
 | `db` | `src/db/mod.rs` | 337 |  |
@@ -266,7 +266,7 @@
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 389 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1277 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 558 |  |
-| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3253 | giant-file |
+| `services::discord::formatting` | `src/services/discord/formatting.rs` | 3263 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 5924 | giant-file |
@@ -292,7 +292,7 @@
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 309 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 456 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1237 | giant-file |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events.rs` | 1203 | giant-file |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events.rs` | 1225 | giant-file |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 554 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 2114 | giant-file |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 570 |  |
