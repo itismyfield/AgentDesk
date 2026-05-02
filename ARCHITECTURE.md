@@ -348,6 +348,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── remote.rs
 │   │   ├── repo_resolver.rs
+│   │   ├── runner.rs
 │   │   └── worktree_resolver.rs
 │   ├── maintenance/
 │   │   ├── jobs/
@@ -411,6 +412,7 @@ src/
 │   ├── discord_config_audit.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
+│   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches.rs
 │   ├── dispatches_followup.rs
@@ -421,6 +423,7 @@ src/
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs
+│   ├── onboarding.rs
 │   ├── opencode.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
