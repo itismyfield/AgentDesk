@@ -254,6 +254,12 @@ The remaining giant-file modules under `src/services/` not covered above:
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior.
+- `src/services/onboarding.rs` (5279) — onboarding domain service extracted
+  from the route layer in #1518. Treat as giant-file territory; future behavior
+  should move into focused onboarding helper modules before adding breadth.
+- `src/services/settings.rs` (1015) — settings domain service extracted from
+  the route layer in #1519. Keep follow-up changes bugfix-only unless the file
+  is split further.
 - `src/services/routines/loader.rs` (1753),
   `src/services/routines/store.rs` (2178), and
   `src/services/routines/discord_log.rs` (1056); routine loader/store and
