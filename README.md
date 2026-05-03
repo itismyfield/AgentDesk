@@ -413,8 +413,6 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
 | `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
-| `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT` | Cap on how many times a single turn watchdog deadline can be extended |
-| `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS` | Cap on cumulative turn-watchdog extension seconds |
 | `AGENTDESK_GH_PATH` / `AGENTDESK_CODEX_PATH` / `AGENTDESK_GEMINI_PATH` | Override resolved provider/CLI binary paths |
 | `RUST_LOG` | Standard tracing filter (default: `agentdesk=info`) |
 

@@ -252,10 +252,8 @@ fn default_extend_secs() -> u64 {
 
 /// Extend the watchdog timeout for an active turn in a channel.
 ///
-/// The per-turn deadline moves with accepted operator extensions. Extension
-/// caps are disabled by default; setting `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT`
-/// or `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS` to a positive value restores
-/// that bounded policy.
+/// The per-turn deadline moves with accepted operator extensions. Extensions are
+/// intentionally uncapped so productive long-running turns can continue.
 pub async fn extend_turn_timeout(
     Path(channel_id): Path<String>,
     Json(body): Json<ExtendTimeoutBody>,
@@ -297,30 +295,15 @@ pub async fn extend_turn_timeout(
                 })),
             )
         }
-        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable) => (
+        Err(
+            crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::MailboxUnavailable,
+        ) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "no mailbox for channel", "channel_id": channel_id})),
         ),
         Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::NoActiveTurn) => (
             StatusCode::CONFLICT,
             Json(json!({"error": "no active turn for channel", "channel_id": channel_id})),
-        ),
-        Err(crate::services::turn_orchestrator::WatchdogDeadlineExtensionError::ExtensionLimitReached {
-            extension_count,
-            extension_count_limit,
-            extension_total_secs,
-            extension_total_secs_limit,
-        }) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "error": "watchdog extension limit reached",
-                "channel_id": channel_id,
-                "extension_count": extension_count,
-                "extension_count_limit": extension_count_limit,
-                "extension_total_secs": extension_total_secs,
-                "extension_total_secs_limit": extension_total_secs_limit,
-                "clamped": true,
-            })),
         ),
     }
 }

@@ -958,56 +958,6 @@ pub(crate) struct WatchdogDeadlineExtension {
 pub(crate) enum WatchdogDeadlineExtensionError {
     MailboxUnavailable,
     NoActiveTurn,
-    ExtensionLimitReached {
-        extension_count: u32,
-        extension_count_limit: u32,
-        extension_total_secs: u64,
-        extension_total_secs_limit: u64,
-    },
-}
-
-fn watchdog_extension_count_limit() -> u32 {
-    static CACHED: LazyLock<u32> = LazyLock::new(|| {
-        std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(u32::MAX)
-    });
-    *CACHED
-}
-
-fn watchdog_extension_total_secs_limit() -> u64 {
-    static CACHED: LazyLock<u64> = LazyLock::new(|| {
-        std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(u64::MAX)
-    });
-    *CACHED
-}
-
-#[cfg(test)]
-mod watchdog_extension_limit_tests {
-    use super::*;
-
-    #[test]
-    fn watchdog_extension_limits_default_to_unlimited_unless_env_sets_positive_cap() {
-        let expected_count = std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(u32::MAX);
-        let expected_total = std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(u64::MAX);
-
-        assert_eq!(watchdog_extension_count_limit(), expected_count);
-        assert_eq!(watchdog_extension_total_secs_limit(), expected_total);
-    }
 }
 
 #[derive(Clone, Default)]
@@ -1238,29 +1188,9 @@ fn extend_active_watchdog_deadline(
         return Err(WatchdogDeadlineExtensionError::NoActiveTurn);
     };
 
-    let count_limit = watchdog_extension_count_limit();
-    let total_secs_limit = watchdog_extension_total_secs_limit();
-    if state.watchdog_extension_count >= count_limit
-        || state.watchdog_extension_total_secs >= total_secs_limit
-    {
-        return Err(WatchdogDeadlineExtensionError::ExtensionLimitReached {
-            extension_count: state.watchdog_extension_count,
-            extension_count_limit: count_limit,
-            extension_total_secs: state.watchdog_extension_total_secs,
-            extension_total_secs_limit: total_secs_limit,
-        });
-    }
-
-    let remaining_total_secs = total_secs_limit.saturating_sub(state.watchdog_extension_total_secs);
-    let applied_extend_secs = requested_extend_secs.min(remaining_total_secs);
-    if applied_extend_secs == 0 {
-        return Err(WatchdogDeadlineExtensionError::ExtensionLimitReached {
-            extension_count: state.watchdog_extension_count,
-            extension_count_limit: count_limit,
-            extension_total_secs: state.watchdog_extension_total_secs,
-            extension_total_secs_limit: total_secs_limit,
-        });
-    }
+    let count_limit = u32::MAX;
+    let total_secs_limit = u64::MAX;
+    let applied_extend_secs = requested_extend_secs;
 
     let now_ms = Utc::now().timestamp_millis();
     let current_deadline = cancel_token.watchdog_deadline_ms.load(Ordering::Relaxed);
@@ -1305,7 +1235,7 @@ fn extend_active_watchdog_deadline(
         extension_count_limit: count_limit,
         extension_total_secs: state.watchdog_extension_total_secs,
         extension_total_secs_limit: total_secs_limit,
-        clamped: applied_extend_secs < requested_extend_secs,
+        clamped: false,
     };
     state.watchdog_deadline_override = Some(extension);
     Ok(extension)
