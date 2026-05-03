@@ -1,30 +1,27 @@
 name: Regen inventory docs
 
 on:
-  pull_request_target:
-    types:
-      - opened
-      - synchronize
-      - reopened
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 concurrency:
-  group: regen-docs-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: regen-docs-main
+  cancel-in-progress: false
 
 permissions:
   contents: write
   pull-requests: write
-  statuses: write
 
 jobs:
   regen:
-    name: Regen inventory docs
+    name: Regen inventory docs (post-merge)
     runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.fork == false
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: main
           fetch-depth: 0
 
       - name: Configure git identity
@@ -32,201 +29,50 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check for bot regen commit
-        id: guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          subject=$(git log -1 --pretty=%s)
-          author=$(git log -1 --pretty=%an)
-          if [[ "$subject" == *"[skip regen]"* || "$author" == "github-actions[bot]" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Skipping inventory regen for bot commit: $subject"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Generate inventory docs
-        if: steps.guard.outputs.skip != 'true'
         run: python3 scripts/generate_inventory_docs.py
 
-      - name: Commit regenerated docs
-        id: commit
-        if: steps.guard.outputs.skip != 'true'
+      - name: Detect drift
+        id: drift
         shell: bash
-        env:
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           if git diff --quiet -- ARCHITECTURE.md docs/generated; then
-            echo "No inventory docs drift detected."
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "has_drift=false" >> "$GITHUB_OUTPUT"
+            echo "Inventory docs are up to date."
+          else
+            echo "has_drift=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open maintenance PR with regenerated docs
+        if: steps.drift.outputs.has_drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.sha }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${BASE_SHA:0:7}"
+          branch="regen-docs/${short_sha}"
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch $branch already exists on remote; another regen run handled it."
             exit 0
           fi
 
+          git checkout -b "$branch"
           git add ARCHITECTURE.md docs/generated
-          git commit -m "chore: regenerate inventory docs [skip regen]"
-          git push origin "HEAD:${PR_HEAD_REF}"
-          echo "pushed=true" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git commit -m "chore: regenerate inventory docs after ${short_sha}"
+          git push -u origin "$branch"
 
-      - name: Mirror required checks from pre-regen SHA
-        if: steps.commit.outputs.pushed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          STATUS_SHA: ${{ steps.commit.outputs.sha }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          MIRROR_TIMEOUT_SECONDS: "1800"
-          MIRROR_POLL_INTERVAL_SECONDS: "30"
-          # Keep this list in sync with main branch protection required checks.
-          # Source: gh api repos/itismyfield/AgentDesk/branches/main/protection
-          MIRROR_CONTEXTS: |
-            Lint
-            Script checks
-            Fast check (ubuntu-latest)
-            High-risk recovery
-            Dashboard (Node 22)
-            Fast targeted tests (ubuntu-latest)
-        run: |
-          set -euo pipefail
+          pr_url=$(gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore: regenerate inventory docs after ${short_sha}" \
+            --body "Automated maintenance PR. Inventory drift detected after [\`${short_sha}\`](${SERVER_URL}/${REPOSITORY}/commit/${BASE_SHA}). Auto-merges once required checks pass.")
 
-          declare -A wanted
-          while IFS= read -r ctx; do
-            ctx="${ctx#"${ctx%%[![:space:]]*}"}"
-            ctx="${ctx%"${ctx##*[![:space:]]}"}"
-            [[ -z "$ctx" ]] && continue
-            wanted["$ctx"]=1
-          done <<< "$MIRROR_CONTEXTS"
-
-          declare -A mirrored
-
-          publish_status() {
-            local ctx="$1" state="$2" url="$3"
-            gh api \
-              --method POST \
-              "/repos/${REPOSITORY}/statuses/${STATUS_SHA}" \
-              -f state="$state" \
-              -f context="$ctx" \
-              -f description="Mirrored from pre-regen SHA ${SOURCE_SHA:0:7}" \
-              -f target_url="${url:-$TARGET_URL}" \
-              --silent
-          }
-
-          collect_and_mirror() {
-            # found_pending tracks ANY in-progress activity on the source SHA, not just
-            # contexts in our wanted set. Aggregator jobs (e.g. "Fast check (ubuntu-latest)"
-            # via `needs: check_fast`) only register a check-run after their dependencies
-            # complete, so we must keep polling whenever any other check-run is still
-            # running on the source SHA.
-            local found_pending=0
-
-            local cr_data
-            cr_data=$(gh api --paginate \
-              "/repos/${REPOSITORY}/commits/${SOURCE_SHA}/check-runs?per_page=100" \
-              --jq '.check_runs[] | [.name, (.conclusion // ""), .status, (.html_url // "")] | @tsv')
-
-            while IFS=$'\t' read -r name conclusion status url; do
-              [[ -z "$name" ]] && continue
-              if [[ "$status" != "completed" ]]; then
-                found_pending=1
-              fi
-
-              [[ -z "${wanted[$name]:-}" ]] && continue
-              [[ -n "${mirrored[$name]:-}" ]] && continue
-              [[ "$status" != "completed" ]] && continue
-
-              case "$conclusion" in
-                success|skipped|neutral)
-                  publish_status "$name" success "$url"
-                  mirrored["$name"]=1
-                  echo "Mirrored check-run: $name ($conclusion)"
-                  ;;
-                failure|cancelled|timed_out|action_required|stale)
-                  publish_status "$name" failure "$url"
-                  mirrored["$name"]=1
-                  echo "Mirrored check-run: $name ($conclusion -> failure)"
-                  ;;
-              esac
-            done <<< "$cr_data"
-
-            while IFS=$'\t' read -r ctx state url; do
-              [[ -z "$ctx" ]] && continue
-              if [[ "$state" == "pending" ]]; then
-                found_pending=1
-              fi
-
-              [[ -z "${wanted[$ctx]:-}" ]] && continue
-              [[ -n "${mirrored[$ctx]:-}" ]] && continue
-
-              case "$state" in
-                success)
-                  publish_status "$ctx" success "$url"
-                  mirrored["$ctx"]=1
-                  echo "Mirrored status: $ctx (success)"
-                  ;;
-                failure|error)
-                  publish_status "$ctx" failure "$url"
-                  mirrored["$ctx"]=1
-                  echo "Mirrored status: $ctx ($state -> failure)"
-                  ;;
-              esac
-            done < <(gh api "/repos/${REPOSITORY}/commits/${SOURCE_SHA}/status" \
-              --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv')
-
-            local all_mirrored=1
-            for ctx in "${!wanted[@]}"; do
-              if [[ -z "${mirrored[$ctx]:-}" ]]; then
-                all_mirrored=0
-                break
-              fi
-            done
-
-            if [[ "$all_mirrored" == "1" ]]; then
-              echo "All required contexts mirrored to ${STATUS_SHA}."
-              return 0
-            fi
-
-            if [[ "$found_pending" == "0" ]]; then
-              echo "::warning::Source SHA ${SOURCE_SHA} has settled but required contexts are absent. Missing:"
-              for ctx in "${!wanted[@]}"; do
-                if [[ -z "${mirrored[$ctx]:-}" ]]; then
-                  echo "::warning::  - $ctx"
-                fi
-              done
-              return 0
-            fi
-
-            return 1
-          }
-
-          deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECONDS ))
-          while ! collect_and_mirror; do
-            now=$(date +%s)
-            if (( now >= deadline )); then
-              echo "::warning::Mirror polling timed out after ${MIRROR_TIMEOUT_SECONDS}s. Some required checks may be missing on ${STATUS_SHA}; an empty commit may still be needed."
-              break
-            fi
-            echo "Pending checks remain on source SHA ${SOURCE_SHA}; sleeping ${MIRROR_POLL_INTERVAL_SECONDS}s..."
-            sleep "$MIRROR_POLL_INTERVAL_SECONDS"
-          done
-
-      - name: Publish post-regen commit status
-        if: steps.commit.outputs.pushed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          STATUS_CONTEXT: regen-docs
-          STATUS_SHA: ${{ steps.commit.outputs.sha }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          gh api \
-            --method POST \
-            "/repos/${REPOSITORY}/statuses/${STATUS_SHA}" \
-            -f state=success \
-            -f context="${STATUS_CONTEXT}" \
-            -f description="Inventory docs regenerated and pushed" \
-            -f target_url="${TARGET_URL}" \
-            --silent
+          echo "Opened ${pr_url}"
+          gh pr merge "${pr_url}" --auto --squash --delete-branch
+          echo "Auto-merge enabled on ${pr_url}."
