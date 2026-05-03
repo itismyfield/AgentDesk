@@ -1,4 +1,192 @@
 use super::super::*;
+use crate::services::memory::{RecallMode, RecallResponse};
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct MemoryInjectionPlan<'a> {
+    pub(super) shared_knowledge_for_context: Option<&'a str>,
+    pub(super) shared_knowledge_for_system_prompt: Option<&'a str>,
+    pub(super) external_recall_for_context: Option<&'a str>,
+    pub(super) longterm_catalog_for_system_prompt: Option<&'a str>,
+}
+
+/// #1083: Memento recall gate decision.
+///
+/// Trigger conditions for full memento context injection:
+/// 1. The user prompt contains a "previous-context" keyword.
+/// 2. The user prompt contains an "error/failure" keyword.
+/// 3. The user prompt contains a "settings change" keyword.
+/// 4. The user prompt is an explicit recall command.
+///
+/// Non-memento backends always recall in `Full` mode for backwards
+/// compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MementoRecallGateDecision {
+    pub(super) should_recall: bool,
+    pub(super) mode: RecallMode,
+    pub(super) reason: &'static str,
+}
+
+pub(super) fn build_memory_injection_plan<'a>(
+    provider: &ProviderKind,
+    has_session_id: bool,
+    dispatch_profile: DispatchProfile,
+    memory_recall: &'a RecallResponse,
+) -> MemoryInjectionPlan<'a> {
+    let should_inject_shared_knowledge =
+        dispatch_profile == DispatchProfile::Full && !has_session_id;
+    let shared_knowledge_for_context =
+        if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let shared_knowledge_for_system_prompt =
+        if dispatch_profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let external_recall_for_context = if dispatch_profile != DispatchProfile::ReviewLite {
+        memory_recall.external_recall.as_deref()
+    } else {
+        None
+    };
+    let longterm_catalog_for_system_prompt = if dispatch_profile == DispatchProfile::Full {
+        memory_recall.longterm_catalog.as_deref()
+    } else {
+        None
+    };
+
+    MemoryInjectionPlan {
+        shared_knowledge_for_context,
+        shared_knowledge_for_system_prompt,
+        external_recall_for_context,
+        longterm_catalog_for_system_prompt,
+    }
+}
+
+pub(super) fn memento_recall_gate_decision(
+    memory_settings: &settings::ResolvedMemorySettings,
+    memento_context_loaded: bool,
+    user_text: &str,
+    dispatch_profile: DispatchProfile,
+) -> MementoRecallGateDecision {
+    if memory_settings.backend != settings::MemoryBackendKind::Memento {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::Full,
+            reason: "non_memento_backend",
+        };
+    }
+
+    if dispatch_profile == DispatchProfile::ReviewLite {
+        return MementoRecallGateDecision {
+            should_recall: false,
+            mode: RecallMode::Full,
+            reason: "review_lite_profile",
+        };
+    }
+
+    let normalized = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_lowercase();
+    let text = lower.as_str();
+
+    if ["이전에", "저번에", "전에"]
+        .iter()
+        .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::Full,
+            reason: "previous_context_signal",
+        };
+    }
+
+    if ["에러", "실패", "오류", "안 됨", "안됨"]
+        .iter()
+        .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::Full,
+            reason: "error_context_signal",
+        };
+    }
+
+    if [
+        "설정 변경",
+        "설정 바",
+        "설정 업데이트",
+        "config change",
+        "configuration change",
+        "settings change",
+    ]
+    .iter()
+    .any(|keyword| text.contains(keyword))
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::Full,
+            reason: "setting_change_signal",
+        };
+    }
+
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("/recall")
+        || trimmed.starts_with("/memento")
+        || trimmed.starts_with("/memory-read")
+        || text.contains("[memento:recall]")
+        || text.contains("<memento:recall>")
+        || text.contains("memento_recall")
+        || text.contains("@memento recall")
+    {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::Full,
+            reason: "explicit_recall_signal",
+        };
+    }
+
+    if !memento_context_loaded {
+        return MementoRecallGateDecision {
+            should_recall: true,
+            mode: RecallMode::IdentityOnly,
+            reason: if dispatch_profile == DispatchProfile::Lite {
+                "lite_identity_only"
+            } else {
+                "identity_only_session_start"
+            },
+        };
+    }
+
+    MementoRecallGateDecision {
+        should_recall: false,
+        mode: RecallMode::Full,
+        reason: if dispatch_profile == DispatchProfile::Lite {
+            "lite_no_turn_signal"
+        } else {
+            "no_turn_signal"
+        },
+    }
+}
+
+pub(super) fn dispatch_profile_label(dispatch_profile: DispatchProfile) -> &'static str {
+    match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::Lite => "lite",
+        DispatchProfile::ReviewLite => "review_lite",
+    }
+}
+
+pub(super) fn should_note_memento_context_loaded(
+    memory_settings: &settings::ResolvedMemorySettings,
+    memento_context_loaded: bool,
+    memory_recall: &RecallResponse,
+) -> bool {
+    memory_settings.backend == settings::MemoryBackendKind::Memento
+        && !memento_context_loaded
+        && memory_recall.memento_context_loaded
+}
 
 pub(super) fn format_session_retry_context(raw_context: &str) -> Option<String> {
     let raw_context = raw_context.trim();
