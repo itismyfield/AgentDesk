@@ -2929,7 +2929,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
-        if let Some(tokens) = result_usage.map(|usage| usage.total_input_tokens()) {
+        if let Some(tokens) = result_usage.map(|usage| usage.context_occupancy_input_tokens()) {
             let provider = shared.settings.read().await.provider.clone();
             let session_key = crate::services::discord::adk_session::build_adk_session_key(
                 &shared, channel_id, &provider,
