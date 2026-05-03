@@ -54,6 +54,7 @@ pub mod tmux_diagnostics;
 #[cfg(unix)]
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
+pub mod turn_cancel_finalizer;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 

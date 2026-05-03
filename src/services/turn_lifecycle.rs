@@ -194,22 +194,19 @@ async fn stop_turn_with_policy(
     };
 
     if should_emit_cancel_observability(target, &result) {
-        crate::services::observability::emit_turn_cancelled(
-            target.provider.as_ref().map(ProviderKind::as_str),
-            target.channel_id.map(|channel_id| channel_id.get()),
-            None,
-            None,
-            None,
-            crate::services::observability::turn_lifecycle::TurnCancellationDetails::new(
+        crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
+                crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
+                    provider: target.provider.clone(),
+                    channel_id: target.channel_id,
+                    dispatch_id: None,
+                    session_key: None,
+                    turn_id: None,
+                },
                 reason,
                 cleanup_policy_observability_surface(cleanup_policy),
-                result.lifecycle_path,
-                result.tmux_killed,
-                result.inflight_cleared,
-                result.queue_depth,
-                result.queue_preserved,
-                result.termination_recorded,
-            ),
+                &result,
+            )
         );
     }
 
