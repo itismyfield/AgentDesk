@@ -355,7 +355,7 @@
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 202 |  |
 | `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1016 | giant-file |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 150 |  |
-| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1969 | giant-file |
+| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1942 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 261 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1352 | giant-file |
 | `services::discord_delivery` | `src/services/discord_delivery.rs` | 292 |  |
@@ -363,7 +363,7 @@
 | `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 207 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatch_watchdog` | `src/services/dispatch_watchdog.rs` | 86 |  |
-| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2954 | giant-file |
+| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2922 | giant-file |
 | `services::dispatches` | `src/services/dispatches.rs` | 451 |  |
 | `services::dispatches_followup` | `src/services/dispatches_followup.rs` | 143 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2565 | giant-file |
