@@ -67,6 +67,10 @@ pub struct StartAgentTurnBody {
     /// Takes precedence over `provider` when both are set.
     #[serde(default)]
     pub channel_id: Option<String>,
+    /// Optional Discord user id. When set, the turn is bound to the
+    /// agent's primary bot DM with that user instead of a guild channel.
+    #[serde(default)]
+    pub dm_user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1323,6 +1327,37 @@ pub async fn start_agent_turn(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let dm_user_id = body
+        .dm_user_id
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let dm_user_id_num = if let Some(dm_user_id) = dm_user_id.as_deref() {
+        if channel_override.is_some() || provider_override.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "error": "dm_user_id cannot be combined with provider or channel_id overrides",
+                })),
+            );
+        }
+        match dm_user_id.parse::<u64>().ok().filter(|id| *id > 0) {
+            Some(id) => Some(id),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "ok": false,
+                        "error": "dm_user_id must be a Discord snowflake string",
+                    })),
+                );
+            }
+        }
+    } else {
+        None
+    };
 
     let Some(pool) = state.pg_pool_ref() else {
         return (
@@ -1455,17 +1490,32 @@ pub async fn start_agent_turn(
         .then_some(None)
         .unwrap_or_else(|| Some(primary_channel.clone()));
 
-    match crate::services::discord::health::start_headless_agent_turn(
-        registry,
-        poise::serenity_prelude::ChannelId::new(channel_id_num),
-        provider,
-        prompt.to_string(),
-        body.source,
-        body.metadata,
-        channel_name_hint,
-    )
-    .await
-    {
+    let start_result = if let Some(dm_user_id_num) = dm_user_id_num {
+        let metadata = metadata_with_parent_channel_id(body.metadata, channel_id_num);
+        crate::services::discord::health::start_headless_agent_turn_in_dm(
+            registry,
+            poise::serenity_prelude::ChannelId::new(channel_id_num),
+            dm_user_id_num,
+            provider,
+            prompt.to_string(),
+            body.source,
+            metadata,
+        )
+        .await
+    } else {
+        crate::services::discord::health::start_headless_agent_turn(
+            registry,
+            poise::serenity_prelude::ChannelId::new(channel_id_num),
+            provider,
+            prompt.to_string(),
+            body.source,
+            body.metadata,
+            channel_name_hint,
+        )
+        .await
+    };
+
+    match start_result {
         Ok(outcome) => (
             StatusCode::OK,
             Json(json!({
@@ -1489,6 +1539,28 @@ pub async fn start_agent_turn(
                 "error": error,
             })),
         ),
+    }
+}
+
+fn metadata_with_parent_channel_id(
+    metadata: Option<serde_json::Value>,
+    parent_channel_id: u64,
+) -> Option<serde_json::Value> {
+    let parent_channel_id = parent_channel_id.to_string();
+    match metadata {
+        Some(serde_json::Value::Object(mut object)) => {
+            object
+                .entry("parent_channel_id")
+                .or_insert_with(|| serde_json::Value::String(parent_channel_id));
+            Some(serde_json::Value::Object(object))
+        }
+        Some(value) => Some(json!({
+            "trigger_metadata": value,
+            "parent_channel_id": parent_channel_id,
+        })),
+        None => Some(json!({
+            "parent_channel_id": parent_channel_id,
+        })),
     }
 }
 
@@ -1957,6 +2029,28 @@ mod tests {
         assert_eq!(value["reason"], serde_json::Value::Null);
         assert_eq!(value["repeat_count"], 0);
         assert_eq!(value["tool"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn metadata_with_parent_channel_id_adds_parent_for_dm_turns() {
+        let metadata = metadata_with_parent_channel_id(
+            Some(json!({"trigger_source": "test", "target_key": "obujang"})),
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(metadata["trigger_source"], "test");
+        assert_eq!(metadata["target_key"], "obujang");
+        assert_eq!(metadata["parent_channel_id"], "123");
+    }
+
+    #[test]
+    fn metadata_with_parent_channel_id_preserves_existing_parent() {
+        let metadata =
+            metadata_with_parent_channel_id(Some(json!({"parent_channel_id": "456"})), 123)
+                .unwrap();
+
+        assert_eq!(metadata["parent_channel_id"], "456");
     }
 
     #[test]

@@ -2361,6 +2361,87 @@ pub async fn start_reserved_headless_agent_turn(
         .await
         .map_err(super::router::HeadlessTurnStartError::Internal)?;
 
+    start_reserved_headless_agent_turn_with_shared(
+        shared,
+        channel_id,
+        owner_provider,
+        prompt,
+        source,
+        metadata,
+        channel_name_hint,
+        None,
+        reservation,
+        expected_turn_id,
+    )
+    .await
+}
+
+pub async fn start_headless_agent_turn_in_dm(
+    registry: &HealthRegistry,
+    owner_channel_id: ChannelId,
+    dm_user_id: u64,
+    owner_provider: ProviderKind,
+    prompt: String,
+    source: Option<String>,
+    metadata: Option<serde_json::Value>,
+) -> Result<super::router::HeadlessTurnStartOutcome, super::router::HeadlessTurnStartError> {
+    let (_, shared) = resolve_direct_meeting_runtime(registry, owner_channel_id, &owner_provider)
+        .await
+        .map_err(super::router::HeadlessTurnStartError::Internal)?;
+    let ctx = shared.cached_serenity_ctx.get().cloned().ok_or_else(|| {
+        super::router::HeadlessTurnStartError::Internal(format!(
+            "provider runtime is not ready for channel {}",
+            owner_channel_id.get()
+        ))
+    })?;
+    let dm_channel = serenity::UserId::new(dm_user_id)
+        .create_dm_channel(&ctx.http)
+        .await
+        .map_err(|error| {
+            super::router::HeadlessTurnStartError::Internal(format!(
+                "DM channel creation failed for user {dm_user_id}: {error}"
+            ))
+        })?;
+    let dm_channel_id = dm_channel.id;
+    let reservation = reserve_headless_agent_turn(dm_channel_id);
+    let expected_turn_id = reservation.turn_id.clone();
+    let channel_name_hint = Some(format!("dm-{dm_user_id}"));
+
+    start_reserved_headless_agent_turn_with_shared(
+        shared,
+        dm_channel_id,
+        owner_provider,
+        prompt,
+        source,
+        metadata,
+        channel_name_hint,
+        Some(true),
+        reservation,
+        expected_turn_id,
+    )
+    .await
+}
+
+async fn start_reserved_headless_agent_turn_with_shared(
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+    _owner_provider: ProviderKind,
+    prompt: String,
+    source: Option<String>,
+    metadata: Option<serde_json::Value>,
+    channel_name_hint: Option<String>,
+    is_dm_hint: Option<bool>,
+    reservation: HeadlessAgentTurnReservation,
+    expected_turn_id: String,
+) -> Result<super::router::HeadlessTurnStartOutcome, super::router::HeadlessTurnStartError> {
+    if reservation.channel_id != channel_id {
+        return Err(super::router::HeadlessTurnStartError::Internal(format!(
+            "headless turn reservation channel mismatch: reserved {} but starting {}",
+            reservation.channel_id.get(),
+            channel_id.get()
+        )));
+    }
+
     if shared.mailbox(channel_id).has_active_turn().await {
         return Err(super::router::HeadlessTurnStartError::Conflict(format!(
             "agent mailbox is busy for channel {}",
@@ -2396,6 +2477,7 @@ pub async fn start_reserved_headless_agent_turn(
         source.as_deref(),
         metadata,
         channel_name_hint,
+        is_dm_hint,
         reservation.inner,
     )
     .await?;

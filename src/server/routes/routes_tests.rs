@@ -8369,6 +8369,7 @@ async fn api_docs_category_exposes_agents_turn_start_contract() {
     assert_eq!(turn_start["params"]["prompt"]["required"], true);
     assert_eq!(turn_start["params"]["metadata"]["type"], "object");
     assert_eq!(turn_start["params"]["source"]["type"], "string");
+    assert_eq!(turn_start["params"]["dm_user_id"]["type"], "string");
     assert_eq!(
         turn_start["example"]["response"]["status"],
         serde_json::json!("started")

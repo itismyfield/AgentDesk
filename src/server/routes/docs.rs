@@ -1445,6 +1445,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "Optional trigger source label (for example system or pipeline)",
                 ),
             ),
+            (
+                "dm_user_id",
+                body_param(
+                    "string",
+                    false,
+                    "Optional Discord user id. When set, the turn is bound to that user's DM channel with the agent's primary bot.",
+                ),
+            ),
         ])
         .with_example(
             json!({
@@ -1469,7 +1477,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "family-counsel"}, "body": {"prompt": "do it"}}),
             json!({"error": "turn already active for this agent mailbox", "active_turn_id": "discord:1473922824350601297:9000000000000000000"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"343742347365974026\"}'"),
         ep(
             "POST",
             "/api/agents/{id}/turn/stop",

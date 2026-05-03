@@ -471,6 +471,7 @@ pub(in crate::services::discord) async fn start_headless_turn(
         source,
         metadata,
         channel_name_hint,
+        None,
         reserve_headless_turn(),
     )
     .await
@@ -486,6 +487,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     source: Option<&str>,
     metadata: Option<serde_json::Value>,
     channel_name_hint: Option<String>,
+    is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
     let prompt = prompt.trim();
@@ -496,7 +498,12 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     }
 
     let request_owner = UserId::new(1);
-    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, false);
+    shared.record_channel_speaker(
+        channel_id,
+        request_owner,
+        request_owner_name,
+        is_dm_hint.unwrap_or(false),
+    );
     let user_msg_id = reservation.user_msg_id;
     let placeholder_msg_id = reservation.placeholder_msg_id;
     let mut session_reset_reason = None;
