@@ -1330,17 +1330,11 @@ async fn edit_placeholder_with_operation(
     source: &'static str,
 ) -> PlaceholderCleanupOutcome {
     rate_limit_wait(shared, channel_id).await;
-    let outcome = match channel_id
-        .edit_message(
-            http,
-            message_id,
-            serenity::EditMessage::new().content(content),
-        )
-        .await
-    {
-        Ok(_) => PlaceholderCleanupOutcome::Succeeded,
-        Err(error) => PlaceholderCleanupOutcome::failed(error.to_string()),
-    };
+    let outcome =
+        match super::http::edit_channel_message(http, channel_id, message_id, content).await {
+            Ok(_) => PlaceholderCleanupOutcome::Succeeded,
+            Err(error) => PlaceholderCleanupOutcome::failed(error.to_string()),
+        };
     record_placeholder_cleanup(
         shared,
         provider,
@@ -3399,13 +3393,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         );
                         if panel_text != last_status_panel_text {
                             rate_limit_wait(&shared, channel_id).await;
-                            match channel_id
-                                .edit_message(
-                                    &http,
-                                    status_msg_id,
-                                    serenity::EditMessage::new().content(&panel_text),
-                                )
-                                .await
+                            match super::http::edit_channel_message(
+                                &http,
+                                channel_id,
+                                status_msg_id,
+                                &panel_text,
+                            )
+                            .await
                             {
                                 Ok(_) => {
                                     last_status_panel_text = panel_text;
@@ -3498,22 +3492,22 @@ pub(super) async fn tmux_output_watcher_with_restore(
                         };
 
                         rate_limit_wait(&shared, channel_id).await;
-                        match channel_id
-                            .edit_message(
-                                &http,
-                                msg_id,
-                                serenity::EditMessage::new().content(&plan.frozen_chunk),
-                            )
-                            .await
+                        match super::http::edit_channel_message(
+                            &http,
+                            channel_id,
+                            msg_id,
+                            &plan.frozen_chunk,
+                        )
+                        .await
                         {
                             Ok(_) => {
                                 rate_limit_wait(&shared, channel_id).await;
-                                match channel_id
-                                    .send_message(
-                                        &http,
-                                        serenity::CreateMessage::new().content(&status_block),
-                                    )
-                                    .await
+                                match super::http::send_channel_message(
+                                    &http,
+                                    channel_id,
+                                    &status_block,
+                                )
+                                .await
                                 {
                                     Ok(message) => {
                                         placeholder_msg_id = Some(message.id);
@@ -3539,14 +3533,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                                             error
                                         );
                                         rate_limit_wait(&shared, channel_id).await;
-                                        let _ = channel_id
-                                            .edit_message(
-                                                &http,
-                                                msg_id,
-                                                serenity::EditMessage::new()
-                                                    .content(&plan.display_snapshot),
-                                            )
-                                            .await;
+                                        let _ = super::http::edit_channel_message(
+                                            &http,
+                                            channel_id,
+                                            msg_id,
+                                            &plan.display_snapshot,
+                                        )
+                                        .await;
                                         last_edit_text = plan.display_snapshot;
                                         break;
                                     }
@@ -3582,17 +3575,23 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             Some(msg_id) => {
                                 // Edit existing placeholder
                                 rate_limit_wait(&shared, channel_id).await;
-                                let _ = channel_id
-                                    .edit_message(
-                                        &http,
-                                        msg_id,
-                                        serenity::EditMessage::new().content(&display_text),
-                                    )
-                                    .await;
+                                let _ = super::http::edit_channel_message(
+                                    &http,
+                                    channel_id,
+                                    msg_id,
+                                    &display_text,
+                                )
+                                .await;
                             }
                             None => {
                                 // Create new placeholder
-                                if let Ok(msg) = channel_id.say(&http, &display_text).await {
+                                if let Ok(msg) = super::http::send_channel_message(
+                                    &http,
+                                    channel_id,
+                                    &display_text,
+                                )
+                                .await
+                                {
                                     placeholder_msg_id = Some(msg.id);
                                 }
                             }
@@ -3636,16 +3635,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
                 let notice_ok = match placeholder_msg_id {
                     Some(msg_id) => {
                         rate_limit_wait(&shared, channel_id).await;
-                        channel_id
-                            .edit_message(
-                                &http,
-                                msg_id,
-                                serenity::EditMessage::new().content(&notice),
-                            )
+                        super::http::edit_channel_message(&http, channel_id, msg_id, &notice)
                             .await
                             .is_ok()
                     }
-                    None => channel_id.say(&http, &notice).await.is_ok(),
+                    None => super::http::send_channel_message(&http, channel_id, &notice)
+                        .await
+                        .is_ok(),
                 };
                 if !notice_ok {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3723,16 +3719,21 @@ pub(super) async fn tmux_output_watcher_with_restore(
                             match placeholder_msg_id {
                                 Some(msg_id) => {
                                     rate_limit_wait(&shared, channel_id).await;
-                                    let _ = channel_id
-                                        .edit_message(
-                                            &http,
-                                            msg_id,
-                                            serenity::EditMessage::new().content(&failure_notice),
-                                        )
-                                        .await;
+                                    let _ = super::http::edit_channel_message(
+                                        &http,
+                                        channel_id,
+                                        msg_id,
+                                        &failure_notice,
+                                    )
+                                    .await;
                                 }
                                 None => {
-                                    let _ = channel_id.say(&http, &failure_notice).await;
+                                    let _ = super::http::send_channel_message(
+                                        &http,
+                                        channel_id,
+                                        &failure_notice,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -3817,12 +3818,11 @@ pub(super) async fn tmux_output_watcher_with_restore(
             match placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;
-                    let _ = channel_id
-                        .edit_message(&http, msg_id, serenity::EditMessage::new().content(notice))
-                        .await;
+                    let _ =
+                        super::http::edit_channel_message(&http, channel_id, msg_id, notice).await;
                 }
                 None => {
-                    let _ = channel_id.say(&http, notice).await;
+                    let _ = super::http::send_channel_message(&http, channel_id, notice).await;
                 }
             }
             // Don't break — let the watcher exit naturally when session-alive check fails
@@ -3895,12 +3895,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
             let notice_ok = match placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;
-                    channel_id
-                        .edit_message(&http, msg_id, serenity::EditMessage::new().content(&notice))
+                    super::http::edit_channel_message(&http, channel_id, msg_id, &notice)
                         .await
                         .is_ok()
                 }
-                None => channel_id.say(&http, &notice).await.is_ok(),
+                None => super::http::send_channel_message(&http, channel_id, &notice)
+                    .await
+                    .is_ok(),
             };
             if !notice_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4029,16 +4030,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
             let notice_ok = match placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;
-                    channel_id
-                        .edit_message(
-                            &http,
-                            msg_id,
-                            serenity::EditMessage::new().content(&retry_notice),
-                        )
+                    super::http::edit_channel_message(&http, channel_id, msg_id, &retry_notice)
                         .await
                         .is_ok()
                 }
-                None => channel_id.say(&http, &retry_notice).await.is_ok(),
+                None => super::http::send_channel_message(&http, channel_id, &retry_notice)
+                    .await
+                    .is_ok(),
             };
             if !notice_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4322,14 +4320,13 @@ pub(super) async fn tmux_output_watcher_with_restore(
             );
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id
-                    .edit_message(
-                        &http,
-                        msg_id,
-                        serenity::EditMessage::new()
-                            .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
-                    )
-                    .await;
+                let _ = super::http::edit_channel_message(
+                    &http,
+                    channel_id,
+                    msg_id,
+                    "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
+                )
+                .await;
             }
             // Auto-retry: persist Discord history for LLM injection, then queue the
             // original user message as an internal follow-up instead of self-routing

@@ -259,7 +259,8 @@ pub(super) fn context_usage_percent(tokens: u64, context_window: u64) -> u64 {
     if context_window == 0 {
         return 0;
     }
-    ((u128::from(tokens) * 100) / u128::from(context_window)) as u64
+    let percent = ((u128::from(tokens) * 100) / u128::from(context_window)) as u64;
+    percent.min(100)
 }
 
 pub(super) fn context_compaction_details(
@@ -807,6 +808,7 @@ mod tests {
     #[test]
     fn test_context_usage_percent_uses_context_window() {
         assert_eq!(context_usage_percent(850, 1_000), 85);
+        assert_eq!(context_usage_percent(1_780, 1_000), 100);
         assert_eq!(context_usage_percent(1, 0), 0);
     }
 
@@ -823,6 +825,18 @@ mod tests {
                 .map(|section| (*section).to_string())
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod context_usage_tests {
+    use super::context_usage_percent;
+
+    #[test]
+    fn context_usage_percent_is_bounded_to_window() {
+        assert_eq!(context_usage_percent(850, 1_000), 85);
+        assert_eq!(context_usage_percent(1_780, 1_000), 100);
+        assert_eq!(context_usage_percent(1, 0), 0);
     }
 }
 
