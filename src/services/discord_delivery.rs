@@ -1,5 +1,7 @@
 use sqlx::PgPool;
 
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewFollowupKind {
     Pass,
@@ -132,6 +134,153 @@ pub(crate) fn dispatch_delivery_correlation_id(dispatch_id: &str) -> String {
 
 pub(crate) fn dispatch_delivery_semantic_event_id(dispatch_id: &str) -> String {
     format!("dispatch:{dispatch_id}:notify")
+}
+
+pub(crate) fn discord_api_base_url() -> String {
+    std::env::var("AGENTDESK_DISCORD_API_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DISCORD_API_BASE.to_string())
+}
+
+pub(crate) fn discord_api_url(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+pub(crate) fn is_discord_length_error(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    body.contains("BASE_TYPE_MAX_LENGTH")
+        || lowered.contains("2000 or fewer in length")
+        || lowered.contains("100 or fewer in length")
+        || lowered.contains("string value is too long")
+        || (body.contains("50035") && lowered.contains("length"))
+}
+
+/// Pure POST helper with no pre-truncation. The shared outbound layer owns
+/// length policy and fallback decisions.
+pub(crate) async fn post_raw_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message: &str,
+) -> Result<String, DispatchMessagePostError> {
+    let message_url = discord_api_url(base_url, &format!("/channels/{channel_id}/messages"));
+    let response = client
+        .post(&message_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to post dispatch message to {channel_id}: {error}"),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let kind = if is_discord_length_error(status, &body) {
+            DispatchMessagePostErrorKind::MessageTooLong
+        } else {
+            DispatchMessagePostErrorKind::Other
+        };
+        return Err(DispatchMessagePostError::new(
+            kind,
+            format!("failed to post dispatch message to {channel_id}: {status} {body}"),
+        ));
+    }
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to parse dispatch message response for {channel_id}: {error}"),
+            )
+        })?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("dispatch message response for {channel_id} omitted message id"),
+            )
+        })
+}
+
+/// Pure PATCH helper used by the unified outbound API for edit operations.
+pub(crate) async fn edit_raw_message_once(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    channel_id: &str,
+    message_id: &str,
+    content: &str,
+) -> Result<String, DispatchMessagePostError> {
+    let url = discord_api_url(
+        base_url,
+        &format!("/channels/{channel_id}/messages/{message_id}"),
+    );
+    let response = client
+        .patch(url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({ "content": content }))
+        .send()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to edit dispatch message {message_id}: {error}"),
+            )
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let kind = if is_discord_length_error(status, &body) {
+            DispatchMessagePostErrorKind::MessageTooLong
+        } else {
+            DispatchMessagePostErrorKind::Other
+        };
+        return Err(DispatchMessagePostError::new(
+            kind,
+            format!("Discord edit failed for message {message_id}: {status} {body}"),
+        ));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("failed to parse dispatch edit response for {message_id}: {error}"),
+            )
+        })?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .ok_or_else(|| {
+            DispatchMessagePostError::new(
+                DispatchMessagePostErrorKind::Other,
+                format!("dispatch edit response for {message_id} omitted message id"),
+            )
+        })
 }
 
 /// Discord delivery side-effects boundary.

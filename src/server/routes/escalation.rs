@@ -1749,6 +1749,7 @@ mod manual_decision_gate_tests {
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
+            cluster_instance_id: None,
         };
         state.config = std::sync::Arc::new(config);
 

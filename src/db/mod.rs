@@ -2,6 +2,7 @@ pub mod agents;
 pub mod auto_queue;
 pub mod cancel_tombstones;
 pub mod dispatched_sessions;
+pub mod dispatches;
 pub mod kanban;
 pub mod kanban_cards;
 pub mod memento_feedback_stats;
