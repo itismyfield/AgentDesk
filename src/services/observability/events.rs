@@ -143,7 +143,7 @@ impl EventLog {
         }
     }
 
-    #[cfg(all(test, feature = "legacy-sqlite-tests"))]
+    #[cfg(test)]
     pub fn clear(&self) {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.clear();
