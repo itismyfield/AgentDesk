@@ -7,16 +7,18 @@ use super::thread_reuse::{
     clear_thread_for_channel_pg, get_thread_for_channel_pg, set_thread_for_channel_pg,
     try_reuse_thread,
 };
-use crate::db::agents::{
-    resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg,
-    resolve_agent_primary_channel_pg,
-};
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use crate::dispatch::dispatch_destination_provider_override;
 pub(crate) use crate::services::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind, DispatchMessagePostOutcome,
     DispatchNotifyDeliveryResult, DispatchTransport, ReviewFollowupKind,
     dispatch_delivery_correlation_id, dispatch_delivery_semantic_event_id,
     send_dispatch_with_delivery_guard,
+};
+use crate::services::discord_delivery_metadata::{
+    CardIssueInfo, DispatchDeliveryMetadata, dispatch_context_value, load_card_issue_info,
+    load_dispatch_delivery_metadata, parse_pg_dispatch_context,
+    resolve_dispatch_delivery_channel_pg, resolve_review_followup_channel_pg,
 };
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use sqlite_test::OptionalExtension;
@@ -62,53 +64,6 @@ fn resolve_dispatch_thread_owner_user_id(
 ) -> Option<u64> {
     let config = crate::config::load_graceful();
     crate::server::routes::escalation::effective_owner_user_id_with_backends(db, pg_pool, &config)
-}
-
-fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
-    dispatch_context.and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
-}
-
-fn json_value_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
-
-fn parse_pg_dispatch_context(
-    dispatch_id: &str,
-    raw_context: Option<&str>,
-    warn_reason: &'static str,
-) -> Option<serde_json::Value> {
-    let raw_context = raw_context
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let value = match serde_json::from_str::<serde_json::Value>(raw_context) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(
-                dispatch_id,
-                %error,
-                warn_reason,
-                "[dispatch] invalid postgres dispatch context JSON"
-            );
-            return None;
-        }
-    };
-    if !value.is_object() {
-        tracing::warn!(
-            dispatch_id,
-            json_type = json_value_kind(&value),
-            warn_reason,
-            "[dispatch] postgres dispatch context is not an object"
-        );
-        return None;
-    }
-    Some(value)
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {
@@ -1724,57 +1679,6 @@ async fn build_slot_thread_name_pg(
         .collect())
 }
 
-async fn latest_completed_review_provider_pg(
-    pool: &PgPool,
-    card_id: &str,
-) -> Result<Option<String>, String> {
-    let rows = sqlx::query(
-        "SELECT id, context
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type = 'review'
-           AND status = 'completed'
-         ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC
-         LIMIT 1",
-    )
-    .bind(card_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("load postgres review provider for {card_id}: {error}"))?;
-
-    for row in rows {
-        let dispatch_id: String = row
-            .try_get("id")
-            .map_err(|error| format!("read postgres review dispatch id for {card_id}: {error}"))?;
-        let context: Option<String> = match row.try_get("context") {
-            Ok(context) => context,
-            Err(error) => {
-                tracing::warn!(
-                    dispatch_id,
-                    card_id,
-                    %error,
-                    "[dispatch] failed to decode postgres review context while loading provider"
-                );
-                continue;
-            }
-        };
-        if let Some(provider) = parse_pg_dispatch_context(
-            &dispatch_id,
-            context.as_deref(),
-            "latest_completed_review_provider_pg",
-        )
-        .and_then(|ctx| {
-            ctx.get("from_provider")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        }) {
-            return Ok(Some(provider));
-        }
-    }
-
-    Ok(None)
-}
-
 async fn latest_work_dispatch_thread_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1853,28 +1757,6 @@ async fn latest_work_dispatch_thread_pg(
     Ok(None)
 }
 
-async fn resolve_agent_channel_with_provider_override_pg(
-    pool: &PgPool,
-    agent_id: &str,
-    dispatch_type: Option<&str>,
-    provider_override: Option<&str>,
-) -> Result<Option<String>, String> {
-    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
-        if let Some(channel) = resolve_agent_channel_for_provider_pg(pool, agent_id, Some(provider))
-            .await
-            .map_err(|error| {
-                format!("resolve postgres provider channel for {agent_id} ({provider}): {error}")
-            })?
-        {
-            return Ok(Some(channel));
-        }
-    }
-
-    resolve_agent_dispatch_channel_pg(pool, agent_id, dispatch_type)
-        .await
-        .map_err(|error| format!("resolve postgres dispatch channel for {agent_id}: {error}"))
-}
-
 #[cfg(not(feature = "legacy-sqlite-tests"))]
 pub(super) fn resolve_dispatch_delivery_channel_on_conn<T>(
     _conn: &T,
@@ -1947,42 +1829,6 @@ fn latest_completed_review_provider_on_conn(
             .and_then(|value| value.as_str())
             .map(str::to_string)
     }))
-}
-
-async fn resolve_dispatch_delivery_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-    card_id: &str,
-    dispatch_type: Option<&str>,
-    dispatch_context: Option<&str>,
-) -> Result<Option<String>, String> {
-    let provider_override = if dispatch_type == Some("review") {
-        dispatch_destination_provider_override(dispatch_type, dispatch_context)
-    } else if dispatch_type == Some("review-decision") {
-        match dispatch_destination_provider_override(dispatch_type, dispatch_context) {
-            Some(provider) => Some(provider),
-            None => latest_completed_review_provider_pg(pool, card_id).await?,
-        }
-    } else {
-        None
-    };
-
-    resolve_agent_channel_with_provider_override_pg(
-        pool,
-        agent_id,
-        dispatch_type,
-        provider_override.as_deref(),
-    )
-    .await
-}
-
-async fn resolve_review_followup_channel_pg(
-    pool: &PgPool,
-    agent_id: &str,
-) -> Result<Option<String>, String> {
-    resolve_agent_primary_channel_pg(pool, agent_id)
-        .await
-        .map_err(|error| format!("resolve postgres primary review channel for {agent_id}: {error}"))
 }
 
 async fn add_thread_member_to_dispatch_thread(
@@ -2081,67 +1927,6 @@ async fn maybe_add_owner_to_dispatch_thread(
             err
         );
     }
-}
-
-async fn load_dispatch_delivery_metadata(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-) -> Result<(Option<String>, Option<String>, Option<String>), String> {
-    let pool =
-        pg_pool.ok_or_else(|| "dispatch metadata lookup requires postgres pool".to_string())?;
-    let row = sqlx::query(
-        "SELECT dispatch_type, status, context
-         FROM task_dispatches
-         WHERE id = $1",
-    )
-    .bind(dispatch_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres dispatch metadata for {dispatch_id}: {error}"))?;
-    row.map(|row| {
-        Ok::<(Option<String>, Option<String>, Option<String>), String>((
-            row.try_get("dispatch_type").map_err(|error| {
-                format!("read postgres dispatch_type for {dispatch_id}: {error}")
-            })?,
-            row.try_get("status")
-                .map_err(|error| format!("read postgres status for {dispatch_id}: {error}"))?,
-            row.try_get("context")
-                .map_err(|error| format!("read postgres context for {dispatch_id}: {error}"))?,
-        ))
-    })
-    .transpose()?
-    .ok_or_else(|| format!("dispatch {dispatch_id} not found"))
-}
-
-async fn load_card_issue_info(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    card_id: &str,
-) -> Result<(Option<String>, Option<i64>), String> {
-    let pool = pg_pool.ok_or_else(|| "issue lookup requires postgres pool".to_string())?;
-    let row = sqlx::query(
-        "SELECT github_issue_url, github_issue_number
-         FROM kanban_cards
-         WHERE id = $1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres card issue info for {card_id}: {error}"))?;
-    row.map(|row| {
-        Ok((
-            row.try_get("github_issue_url").map_err(|error| {
-                format!("read postgres github_issue_url for {card_id}: {error}")
-            })?,
-            row.try_get::<Option<i64>, _>("github_issue_number")
-                .map_err(|error| {
-                    format!("read postgres github_issue_number for {card_id}: {error}")
-                })?,
-        ))
-    })
-    .transpose()
-    .map(|value| value.unwrap_or_default())
 }
 
 /// Send a dispatch notification to the target agent's Discord channel.
@@ -2269,8 +2054,11 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     pg_pool: Option<&PgPool>,
 ) -> Result<DispatchNotifyDeliveryResult, String> {
     // Determine dispatch type + status before attempting Discord delivery.
-    let (dispatch_type, dispatch_status, dispatch_context) =
-        load_dispatch_delivery_metadata(db, pg_pool, dispatch_id).await?;
+    let DispatchDeliveryMetadata {
+        dispatch_type,
+        status: dispatch_status,
+        context: dispatch_context,
+    } = load_dispatch_delivery_metadata(db, pg_pool, dispatch_id).await?;
 
     if !matches!(
         dispatch_status.as_deref(),
@@ -2329,7 +2117,10 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     };
 
     // Look up the issue URL and number for context
-    let (issue_url, issue_number) = load_card_issue_info(db, pg_pool, card_id).await?;
+    let CardIssueInfo {
+        issue_url,
+        issue_number,
+    } = load_card_issue_info(db, pg_pool, card_id).await?;
 
     let dispatch_context_json = dispatch_context_value(dispatch_context.as_deref());
 
