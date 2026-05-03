@@ -181,7 +181,7 @@
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 |  |
 | `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 290 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 32 |  |
-| `server::routes::escalation` | `src/server/routes/escalation.rs` | 2110 | giant-file |
+| `server::routes::escalation` | `src/server/routes/escalation.rs` | 2390 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 612 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 1242 | giant-file |
