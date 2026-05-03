@@ -33,7 +33,7 @@
 | `runtime` | 1 |
 | `runtime_layout` | 5 |
 | `server` | 76 |
-| `services` | 220 |
+| `services` | 221 |
 | `supervisor` | 1 |
 | `ui` | 2 |
 | `utils` | 6 |
@@ -167,7 +167,7 @@
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 122 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 101 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 444 |  |
-| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5956 | giant-file |
+| `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 5714 | giant-file |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3291 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1255 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
@@ -220,7 +220,7 @@
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 728 |  |
 | `server::ws` | `src/server/ws.rs` | 236 |  |
-| `services` | `src/services/mod.rs` | 59 |  |
+| `services` | `src/services/mod.rs` | 60 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 269 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 24 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 616 |  |
@@ -350,6 +350,7 @@
 | `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 1969 | giant-file |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 261 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1352 | giant-file |
+| `services::discord_delivery` | `src/services/discord_delivery.rs` | 292 |  |
 | `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 207 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatch_watchdog` | `src/services/dispatch_watchdog.rs` | 86 |  |
