@@ -2526,144 +2526,26 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
 
         let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
-            let dispatch_type = crate::services::discord::internal_api::lookup_dispatch_type(did)
-                .await
-                .ok()
-                .flatten();
-
-            match dispatch_type.as_deref() {
-                Some("implementation") | Some("rework") => {
-                    if !has_assistant_response {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
-                        );
-                        false
-                    } else if let (Some(db), Some(engine)) =
-                        (None::<&crate::db::Db>, &shared.engine)
-                    {
-                        let mut work_completion_context =
-                            crate::services::discord::turn_bridge::build_work_dispatch_completion_result(
-                                None::<&crate::db::Db>,
-                                shared.pg_pool.as_ref(),
-                                did,
-                                "watcher_completed",
-                                false,
-                                current_worktree_path.as_deref(),
-                                Some(&full_response),
-                            );
-                        if let Some(obj) = work_completion_context.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
-                        match crate::dispatch::finalize_dispatch(
-                            db,
-                            engine,
-                            did,
-                            "watcher_completed",
-                            Some(&work_completion_context),
-                        ) {
-                            Ok(_) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!(
-                                    "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
-                                );
-                                let _ = crate::services::discord::turn_bridge::queue_dispatch_followup_with_handles(
-                                    Some(db),
-                                    shared.pg_pool.as_ref(),
-                                    did,
-                                    "watcher_completed",
-                                )
-                                .await;
-                                true
-                            }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::warn!(
-                                    "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
-                                );
-                                let mut fallback_result =
-                                    crate::services::discord::turn_bridge::build_work_dispatch_completion_result(
-                                        None::<&crate::db::Db>,
-                                        shared.pg_pool.as_ref(),
-                                        did,
-                                        "watcher_db_fallback",
-                                        true,
-                                        current_worktree_path.as_deref(),
-                                        Some(&full_response),
-                                    );
-                                if let Some(obj) = fallback_result.as_object_mut() {
-                                    obj.insert(
-                                        "agent_response_present".to_string(),
-                                        serde_json::Value::Bool(true),
-                                    );
-                                }
-                                let completed =
-                                    crate::services::discord::turn_bridge::runtime_db_fallback_complete_with_result(
-                                        did,
-                                        &fallback_result,
-                                    );
-                                if completed {
-                                    let _ =
-                                        crate::services::discord::turn_bridge::queue_dispatch_followup_with_handles(
-                                            None::<&crate::db::Db>,
-                                            shared.pg_pool.as_ref(),
-                                            did,
-                                            "watcher_completed_fallback",
-                                        )
-                                        .await;
-                                }
-                                completed
-                            }
-                        }
-                    } else {
-                        let mut fallback_result =
-                            crate::services::discord::turn_bridge::build_work_dispatch_completion_result(
-                                None::<&crate::db::Db>,
-                                shared.pg_pool.as_ref(),
-                                did,
-                                "watcher_db_fallback",
-                                true,
-                                current_worktree_path.as_deref(),
-                                Some(&full_response),
-                            );
-                        if let Some(obj) = fallback_result.as_object_mut() {
-                            obj.insert(
-                                "agent_response_present".to_string(),
-                                serde_json::Value::Bool(true),
-                            );
-                        }
-                        let completed =
-                            crate::services::discord::turn_bridge::runtime_db_fallback_complete_with_result(
-                                did,
-                                &fallback_result,
-                            );
-                        if completed {
-                            let _ = crate::services::discord::turn_bridge::queue_dispatch_followup_with_handles(
-                                None::<&crate::db::Db>,
-                                shared.pg_pool.as_ref(),
-                                did,
-                                "watcher_completed_runtime_fallback",
-                            )
-                            .await;
-                        }
-                        completed
-                    }
-                }
-                Some(_) => {
-                    // Non-work dispatches — leave for their own completion flow
-                    true
-                }
-                None => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ watcher: cannot determine dispatch type for {did} — preserving state"
-                    );
-                    false
-                }
+            let finalization =
+                crate::services::discord::streaming_finalizer::finalize_watcher_streaming_dispatch(
+                    crate::services::discord::streaming_finalizer::WatcherStreamingFinalRequest {
+                        pg_pool: shared.pg_pool.as_ref(),
+                        dispatch_id: did,
+                        adk_cwd: current_worktree_path.as_deref(),
+                        full_response: &full_response,
+                        has_assistant_response,
+                    },
+                )
+                .await;
+            if !finalization.completed {
+                tracing::debug!(
+                    disposition = ?finalization.disposition,
+                    dispatch_type = ?finalization.dispatch_type,
+                    error = ?finalization.error,
+                    "watcher streaming finalizer preserved dispatch state"
+                );
             }
+            finalization.completed
         } else {
             true
         };

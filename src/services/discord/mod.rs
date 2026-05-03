@@ -53,6 +53,7 @@ mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 mod stall_recovery;
+pub(in crate::services::discord) mod streaming_finalizer;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]

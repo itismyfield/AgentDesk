@@ -345,6 +345,7 @@ src/
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── stall_recovery.rs
+│   │   ├── streaming_finalizer.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs
