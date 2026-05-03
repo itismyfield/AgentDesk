@@ -104,7 +104,11 @@ pub async fn cancel_dispatch(
     State(state): State<AppState>,
     Path(dispatch_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.queue_service().cancel_dispatch(&dispatch_id).await {
+    match state
+        .queue_service()
+        .cancel_dispatch(state.health_registry.as_ref(), &dispatch_id)
+        .await
+    {
         Ok(body) => (StatusCode::OK, Json(body)),
         Err(error) => error.into_json_response(),
     }

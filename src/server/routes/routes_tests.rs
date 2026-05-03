@@ -4401,6 +4401,172 @@ async fn queue_cancel_dispatch_pg_only_without_sqlite_mirror() {
     pg_db.drop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_cancel_dispatch_cancels_matching_active_turn_pg() {
+    let db = test_db();
+    let pg_db = TestPostgresDb::create().await;
+    let pg_pool = pg_db.connect_and_migrate().await;
+    let engine = test_engine_with_pg(&db, pg_pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
+        crate::services::provider::ProviderKind::Codex,
+    )
+    .await;
+    let channel_id = "1485506232256168022";
+    let channel_num = channel_id.parse::<u64>().unwrap();
+    let tmux_name = "AgentDesk-codex-dispatch-cancel-1552";
+    let session_key = format!("mac-mini:{tmux_name}");
+
+    sqlx::query(
+        "INSERT INTO agents (
+            id, name, provider, discord_channel_cdx, created_at, updated_at
+         ) VALUES (
+            $1, $2, 'codex', $3, NOW(), NOW()
+         )",
+    )
+    .bind("agent-dispatch-cancel-turn")
+    .bind("Agent Dispatch Cancel Turn")
+    .bind(channel_id)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (
+            id, title, status, assigned_agent_id, created_at, updated_at
+         ) VALUES (
+            $1, $2, 'in_progress', $3, NOW(), NOW()
+         )",
+    )
+    .bind("card-dispatch-cancel-turn")
+    .bind("Dispatch Cancel Turn")
+    .bind("agent-dispatch-cancel-turn")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+         ) VALUES (
+            $1, $2, $3, 'implementation', 'dispatched', $4, NOW(), NOW()
+         )",
+    )
+    .bind("dispatch-cancel-turn-1552")
+    .bind("card-dispatch-cancel-turn")
+    .bind("agent-dispatch-cancel-turn")
+    .bind("Cancel active turn too")
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO sessions (
+            session_key, agent_id, provider, status, active_dispatch_id,
+            thread_channel_id, last_heartbeat, created_at
+         ) VALUES (
+            $1, $2, 'codex', 'turn_active', $3, $4, NOW(), NOW()
+         )",
+    )
+    .bind(&session_key)
+    .bind("agent-dispatch-cancel-turn")
+    .bind("dispatch-cancel-turn-1552")
+    .bind(channel_id)
+    .execute(&pg_pool)
+    .await
+    .unwrap();
+
+    harness
+        .seed_channel_session(
+            channel_num,
+            "dispatch-cancel-1552",
+            Some("session-dispatch-cancel-1552"),
+        )
+        .await;
+    let token = harness
+        .start_active_turn(channel_num, 15, 1552, Some(tmux_name))
+        .await;
+    harness
+        .seed_queue(channel_num, &[(2_552, "preserve dispatch cancel queue")])
+        .await;
+
+    let app = test_api_router_with_pg(
+        db.clone(),
+        engine,
+        crate::config::Config::default(),
+        Some(harness.registry()),
+        pg_pool.clone(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatches/dispatch-cancel-turn-1552/cancel")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "queue_cancel_dispatch_cancels_matching_active_turn_pg status={} body={}",
+        status,
+        body_text
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["dispatch_id"], "dispatch-cancel-turn-1552");
+    assert_eq!(json["active_turn_cancelled"], true);
+    assert_eq!(json["turn_session_key"], session_key);
+    assert_eq!(json["turn_tmux_session"], tmux_name);
+    assert_eq!(json["turn_channel_id"], channel_id);
+    assert_eq!(json["turn_agent_id"], "agent-dispatch-cancel-turn");
+    assert_eq!(json["turn_lifecycle_path"], "runtime-fallback");
+    assert_eq!(json["turn_tmux_killed"], false);
+    assert_eq!(json["turn_queue_preserved"], true);
+    assert_eq!(json["turn_inflight_cleared"], false);
+    assert_eq!(json["turn_queued_remaining"], 1);
+
+    assert!(
+        token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "dispatch cancel must signal the active turn token"
+    );
+    let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
+    assert!(!has_active_turn);
+    assert_eq!(queue_depth, 1);
+    assert_eq!(session_id, None);
+
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind("dispatch-cancel-turn-1552")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let (session_status, active_dispatch_id): (String, Option<String>) = sqlx::query_as(
+        "SELECT status, active_dispatch_id
+         FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind(&session_key)
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+    assert_eq!(session_status, "disconnected");
+    assert_eq!(active_dispatch_id, None);
+
+    pg_pool.close().await;
+    pg_db.drop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn link_dispatch_thread_pg_preserves_concurrent_channel_thread_updates() {
     let db = test_db();

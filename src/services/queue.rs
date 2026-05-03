@@ -32,12 +32,24 @@ struct CancelTurnChannelTarget {
     requested_provider: Option<String>,
 }
 
+#[derive(Debug)]
+struct CancelDispatchTurnInfo {
+    session_key: String,
+    provider_name: Option<String>,
+    agent_id: Option<String>,
+    channel_id: Option<String>,
+}
+
 impl QueueService {
     pub fn new(pg_pool: Option<PgPool>) -> Self {
         Self { pg_pool }
     }
 
-    pub async fn cancel_dispatch(&self, dispatch_id: &str) -> ServiceResult<Value> {
+    pub async fn cancel_dispatch(
+        &self,
+        health_registry: Option<&Arc<HealthRegistry>>,
+        dispatch_id: &str,
+    ) -> ServiceResult<Value> {
         let Some(pool) = self.pg_pool.as_ref() else {
             return Err(ServiceError::internal(
                 "postgres pool unavailable for queue.cancel_dispatch",
@@ -46,10 +58,16 @@ impl QueueService {
             .with_operation("cancel_dispatch.no_pool")
             .with_context("dispatch_id", dispatch_id));
         };
-        self.cancel_dispatch_pg(pool, dispatch_id).await
+        self.cancel_dispatch_pg(pool, health_registry, dispatch_id)
+            .await
     }
 
-    async fn cancel_dispatch_pg(&self, pool: &PgPool, dispatch_id: &str) -> ServiceResult<Value> {
+    async fn cancel_dispatch_pg(
+        &self,
+        pool: &PgPool,
+        health_registry: Option<&Arc<HealthRegistry>>,
+        dispatch_id: &str,
+    ) -> ServiceResult<Value> {
         let current_status =
             sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
                 .bind(dispatch_id)
@@ -75,6 +93,77 @@ impl QueueService {
                 .with_context("dispatch_id", dispatch_id))
             }
             Some(_) => {
+                let active_turn = self
+                    .load_cancel_dispatch_turn_session(pool, dispatch_id)
+                    .await?;
+                let mut turn_cancelled = false;
+                let mut turn_session_key = None;
+                let mut turn_tmux_name = None;
+                let mut turn_channel_id = None;
+                let mut turn_agent_id = None;
+                let mut turn_lifecycle_path = None;
+                let mut turn_tmux_killed = None;
+                let mut turn_queue_preserved = None;
+                let mut turn_inflight_cleared = None;
+                let mut turn_queued_remaining = None;
+
+                if let Some(active_turn) = active_turn.as_ref() {
+                    let provider_kind = active_turn
+                        .provider_name
+                        .as_deref()
+                        .and_then(ProviderKind::from_str);
+                    let parsed_channel_id = active_turn
+                        .channel_id
+                        .as_deref()
+                        .and_then(|channel_id| channel_id.parse::<u64>().ok())
+                        .map(ChannelId::new);
+                    let tmux_name = active_turn
+                        .session_key
+                        .split(':')
+                        .next_back()
+                        .unwrap_or_default()
+                        .to_string();
+                    let target = TurnLifecycleTarget {
+                        provider: provider_kind,
+                        channel_id: parsed_channel_id,
+                        tmux_name: tmux_name.clone(),
+                    };
+                    let lifecycle = stop_turn_preserving_queue(
+                        health_registry.map(Arc::as_ref),
+                        &target,
+                        "queue-api cancel_dispatch (preserve)",
+                    )
+                    .await;
+
+                    if let Err(error) = sqlx::query(
+                        "UPDATE sessions
+                         SET status = 'disconnected',
+                             active_dispatch_id = NULL,
+                             claude_session_id = NULL
+                         WHERE session_key = $1",
+                    )
+                    .bind(&active_turn.session_key)
+                    .execute(pool)
+                    .await
+                    {
+                        tracing::warn!(
+                            session_key = active_turn.session_key,
+                            "failed to mark postgres session disconnected during cancel_dispatch: {error}"
+                        );
+                    }
+
+                    turn_cancelled = true;
+                    turn_session_key = Some(active_turn.session_key.clone());
+                    turn_tmux_name = Some(tmux_name);
+                    turn_channel_id = active_turn.channel_id.clone();
+                    turn_agent_id = active_turn.agent_id.clone();
+                    turn_lifecycle_path = Some(lifecycle.lifecycle_path);
+                    turn_tmux_killed = Some(lifecycle.tmux_killed);
+                    turn_queue_preserved = Some(lifecycle.queue_preserved);
+                    turn_inflight_cleared = Some(lifecycle.inflight_cleared);
+                    turn_queued_remaining = lifecycle.queue_depth;
+                }
+
                 crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
                     pool,
                     dispatch_id,
@@ -102,7 +191,20 @@ impl QueueService {
                     })?;
 
                 tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
-                Ok(json!({"ok": true, "dispatch_id": dispatch_id}))
+                Ok(json!({
+                    "ok": true,
+                    "dispatch_id": dispatch_id,
+                    "active_turn_cancelled": turn_cancelled,
+                    "turn_session_key": turn_session_key,
+                    "turn_tmux_session": turn_tmux_name,
+                    "turn_channel_id": turn_channel_id,
+                    "turn_agent_id": turn_agent_id,
+                    "turn_lifecycle_path": turn_lifecycle_path,
+                    "turn_tmux_killed": turn_tmux_killed,
+                    "turn_queue_preserved": turn_queue_preserved,
+                    "turn_inflight_cleared": turn_inflight_cleared,
+                    "turn_queued_remaining": turn_queued_remaining,
+                }))
             }
         }
     }
@@ -467,6 +569,51 @@ impl QueueService {
                 .with_code(ErrorCode::Database)
                 .with_operation("cancel_turn.query_active_session_pg")
                 .with_context("channel_id", channel_id)
+        })
+    }
+
+    async fn load_cancel_dispatch_turn_session(
+        &self,
+        pool: &PgPool,
+        dispatch_id: &str,
+    ) -> ServiceResult<Option<CancelDispatchTurnInfo>> {
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT s.session_key,
+                    COALESCE(s.provider, a.provider) AS provider_name,
+                    s.agent_id,
+                    COALESCE(
+                      NULLIF(s.thread_channel_id, ''),
+                      CASE COALESCE(s.provider, a.provider, '')
+                        WHEN 'claude' THEN COALESCE(NULLIF(a.discord_channel_cc, ''), NULLIF(a.discord_channel_id, ''))
+                        WHEN 'codex' THEN COALESCE(NULLIF(a.discord_channel_cdx, ''), NULLIF(a.discord_channel_alt, ''), NULLIF(a.discord_channel_id, ''))
+                        ELSE COALESCE(NULLIF(a.discord_channel_id, ''), NULLIF(a.discord_channel_cc, ''), NULLIF(a.discord_channel_cdx, ''), NULLIF(a.discord_channel_alt, ''))
+                      END
+                    ) AS channel_id
+             FROM sessions s
+             LEFT JOIN agents a ON a.id = s.agent_id
+             WHERE s.active_dispatch_id = $1
+               AND s.status IN ('turn_active', 'working')
+             ORDER BY s.last_heartbeat DESC
+             LIMIT 1",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(pool)
+        .await
+        .map(|row| {
+            row.map(
+                |(session_key, provider_name, agent_id, channel_id)| CancelDispatchTurnInfo {
+                    session_key,
+                    provider_name,
+                    agent_id,
+                    channel_id,
+                },
+            )
+        })
+        .map_err(|error| {
+            ServiceError::internal(format!("load postgres active dispatch turn: {error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("cancel_dispatch.query_active_session_pg")
+                .with_context("dispatch_id", dispatch_id)
         })
     }
 }
