@@ -568,7 +568,8 @@ if [ ! -s "$DOCTOR_JSON_TMP" ]; then
     rm -f "$DOCTOR_JSON_TMP"
     exit 1
 fi
-if ! python3 - "$DOCTOR_JSON_TMP" <<'PY'
+if command -v python3 >/dev/null 2>&1; then
+    if ! python3 - "$DOCTOR_JSON_TMP" <<'PY'
 import json
 import sys
 
@@ -592,6 +593,28 @@ print(f"✗ Doctor postgres preflight failed: status={status}, detail={detail}, 
 raise SystemExit(1)
 PY
 then
+    rm -f "$DOCTOR_JSON_TMP"
+    exit 1
+fi
+elif command -v jq >/dev/null 2>&1; then
+    postgres_status=$(jq -r '.checks[] | select(.id=="postgres_connection").status // empty' "$DOCTOR_JSON_TMP")
+    if [ -z "$postgres_status" ]; then
+        echo "✗ Doctor preflight missing postgres_connection check."
+        rm -f "$DOCTOR_JSON_TMP"
+        exit 1
+    fi
+
+    postgres_status="$(printf '%s' "$postgres_status" | tr '[:upper:]' '[:lower:]')"
+    if [ "$postgres_status" != "pass" ] && [ "$postgres_status" != "ok" ] && [ "$postgres_status" != "info" ]; then
+        postgres_detail=$(jq -r '.checks[] | select(.id=="postgres_connection").detail // "no detail"' "$DOCTOR_JSON_TMP")
+        postgres_actual=$(jq -r '.checks[] | select(.id=="postgres_connection").actual // "unknown"' "$DOCTOR_JSON_TMP")
+        echo "✗ Doctor postgres preflight failed: status=$postgres_status, detail=$postgres_detail, actual=$postgres_actual"
+        rm -f "$DOCTOR_JSON_TMP"
+        exit 1
+    fi
+else
+    echo "✗ Neither python3 nor jq found for doctor JSON parsing."
+    echo "  Please install one of: python3, jq."
     rm -f "$DOCTOR_JSON_TMP"
     exit 1
 fi
