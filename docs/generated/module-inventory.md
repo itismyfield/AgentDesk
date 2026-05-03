@@ -53,7 +53,7 @@
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
 | `cli::doctor::health` | `src/cli/doctor/health.rs` | 164 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 256 |  |
-| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4324 | giant-file |
+| `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4367 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 357 |  |
 | `cli::init` | `src/cli/init.rs` | 1573 | giant-file |
 | `cli::migrate` | `src/cli/migrate.rs` | 348 |  |
@@ -78,7 +78,7 @@
 | `db::kanban` | `src/db/kanban.rs` | 1 |  |
 | `db::kanban_cards` | `src/db/kanban_cards.rs` | 1903 | giant-file |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 265 |  |
-| `db::postgres` | `src/db/postgres.rs` | 1536 | giant-file |
+| `db::postgres` | `src/db/postgres.rs` | 1570 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests.rs` | 642 |  |
 | `db::schema` | `src/db/schema.rs` | 3195 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 492 |  |
@@ -172,7 +172,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3291 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1255 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 4843 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 4850 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 89 |  |
@@ -428,7 +428,7 @@
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 929 |  |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 505 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
-| `services::queue` | `src/services/queue.rs` | 648 |  |
+| `services::queue` | `src/services/queue.rs` | 673 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2459 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1194 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
