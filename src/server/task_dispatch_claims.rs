@@ -61,12 +61,8 @@ pub async fn claim_task_dispatches(
         .clamp(1, 50);
     let to_agent_id = clean_optional(request.to_agent_id.as_deref());
     let dispatch_type = clean_optional(request.dispatch_type.as_deref());
-    let owner_node = crate::server::cluster::worker_node_snapshot_by_instance(
-        pool,
-        &claim_owner,
-        request.lease_ttl_secs.unwrap_or(60),
-    )
-    .await?;
+    let lease_ttl_secs = request.lease_ttl_secs.unwrap_or(60);
+    let worker_nodes = crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await?;
 
     let mut tx = pool
         .begin()
@@ -108,23 +104,51 @@ pub async fn claim_task_dispatches(
             .flatten();
 
         if !required_capabilities_empty(required_capabilities.as_ref()) {
-            let decision = owner_node
-                .as_ref()
-                .map(|node| {
-                    crate::server::cluster::explain_capability_match(
-                        node,
-                        required_capabilities.as_ref().expect("checked above"),
-                    )
+            let required = required_capabilities.as_ref().expect("checked above");
+            let candidates =
+                crate::server::cluster::select_capability_route(&worker_nodes, required);
+            let selected = candidates
+                .first()
+                .and_then(|candidate| candidate.decision.instance_id.as_deref());
+            let mut owner_decision = candidates
+                .iter()
+                .find(|candidate| candidate.decision.instance_id.as_deref() == Some(&claim_owner))
+                .map(|candidate| candidate.decision.clone())
+                .or_else(|| {
+                    worker_nodes
+                        .iter()
+                        .find(|node| {
+                            node.get("instance_id").and_then(|value| value.as_str())
+                                == Some(claim_owner.as_str())
+                        })
+                        .map(|node| {
+                            crate::server::cluster::explain_capability_match(node, required)
+                        })
                 })
                 .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
                     instance_id: Some(claim_owner.clone()),
                     eligible: false,
-                    reasons: vec!["claim owner is not registered in worker_nodes".to_string()],
+                    reasons: if candidates.is_empty() {
+                        vec!["no online worker node satisfies required capabilities".to_string()]
+                    } else {
+                        vec![format!(
+                            "claim owner is not preferred route owner; selected {}",
+                            selected.unwrap_or("unknown")
+                        )]
+                    },
                 });
-            if !decision.eligible {
+            if selected != Some(claim_owner.as_str()) {
+                if owner_decision.eligible && owner_decision.reasons.is_empty() {
+                    owner_decision.reasons.push(format!(
+                        "claim owner is not preferred route owner; selected {}",
+                        selected.unwrap_or("unknown")
+                    ));
+                }
                 let diagnostics = json!({
                     "claim_owner": claim_owner,
-                    "decision": decision,
+                    "decision": owner_decision,
+                    "selected": candidates.first(),
+                    "candidates": candidates,
                     "required_capabilities": required_capabilities,
                     "checked_at": Utc::now(),
                 });
@@ -141,7 +165,7 @@ pub async fn claim_task_dispatches(
                 .map_err(|error| format!("record task dispatch routing diagnostics: {error}"))?;
                 skipped.push(TaskDispatchClaimSkip {
                     id,
-                    reasons: decision.reasons,
+                    reasons: owner_decision.reasons,
                     required_capabilities,
                 });
                 continue;

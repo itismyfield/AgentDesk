@@ -53,6 +53,13 @@ pub(crate) struct CapabilityRouteDecision {
     pub(crate) reasons: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct CapabilityRouteCandidate {
+    pub(crate) decision: CapabilityRouteDecision,
+    pub(crate) score: i64,
+    pub(crate) last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 impl ClusterRuntime {
     pub(crate) fn single_node() -> Self {
         Self {
@@ -475,7 +482,8 @@ pub(crate) fn explain_capability_match(
         .map(str::to_string);
     let mut reasons = Vec::new();
 
-    if !required_capabilities.is_object() {
+    let hard_required = hard_required_capabilities(required_capabilities);
+    if !hard_required.is_object() {
         return CapabilityRouteDecision {
             instance_id,
             eligible: true,
@@ -492,7 +500,7 @@ pub(crate) fn explain_capability_match(
         .iter()
         .filter_map(|value| value.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    if let Some(required_labels) = required_capabilities
+    if let Some(required_labels) = hard_required
         .get("labels")
         .and_then(|value| value.as_array())
     {
@@ -513,7 +521,7 @@ pub(crate) fn explain_capability_match(
         .iter()
         .filter_map(|value| value.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    if let Some(required_providers) = required_capabilities
+    if let Some(required_providers) = hard_required
         .get("providers")
         .and_then(|value| value.as_array())
     {
@@ -524,7 +532,7 @@ pub(crate) fn explain_capability_match(
         }
     }
 
-    if let Some(required_mcp) = required_capabilities.get("mcp") {
+    if let Some(required_mcp) = hard_required.get("mcp") {
         match required_mcp {
             Value::Array(names) => {
                 for endpoint in names.iter().filter_map(|value| value.as_str()) {
@@ -570,9 +578,147 @@ pub(crate) fn explain_capability_match(
     }
 }
 
+pub(crate) fn select_capability_route(
+    nodes: &[Value],
+    required_capabilities: &Value,
+) -> Vec<CapabilityRouteCandidate> {
+    let preferred = preferred_capabilities(required_capabilities);
+    let mut candidates = nodes
+        .iter()
+        .filter(|node| node.get("status").and_then(|value| value.as_str()) == Some("online"))
+        .map(|node| {
+            let decision = explain_capability_match(node, required_capabilities);
+            let score = if decision.eligible {
+                capability_preference_score(node, preferred)
+            } else {
+                0
+            };
+            CapabilityRouteCandidate {
+                decision,
+                score,
+                last_heartbeat_at: parse_last_heartbeat(node),
+            }
+        })
+        .filter(|candidate| candidate.decision.eligible)
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.last_heartbeat_at.cmp(&left.last_heartbeat_at))
+            .then_with(|| left.decision.instance_id.cmp(&right.decision.instance_id))
+    });
+    candidates
+}
+
+fn hard_required_capabilities(capabilities: &Value) -> &Value {
+    capabilities
+        .get("required")
+        .filter(|value| value.is_object())
+        .unwrap_or(capabilities)
+}
+
+fn preferred_capabilities(capabilities: &Value) -> Option<&Value> {
+    capabilities
+        .get("preferred")
+        .filter(|value| value.is_object())
+}
+
+fn capability_preference_score(node: &Value, preferred: Option<&Value>) -> i64 {
+    let Some(preferred) = preferred else {
+        return 0;
+    };
+    let mut score = 0;
+
+    let labels = string_set(node.get("labels"));
+    if let Some(preferred_labels) = preferred.get("labels").and_then(|value| value.as_array()) {
+        score += preferred_labels
+            .iter()
+            .filter_map(|value| value.as_str())
+            .filter(|label| labels.contains(label))
+            .count() as i64;
+    }
+
+    let capabilities = node.get("capabilities").unwrap_or(&Value::Null);
+    let providers = string_set(capabilities.get("providers"));
+    if let Some(preferred_providers) = preferred
+        .get("providers")
+        .and_then(|value| value.as_array())
+    {
+        score += preferred_providers
+            .iter()
+            .filter_map(|value| value.as_str())
+            .filter(|provider| providers.contains(provider))
+            .count() as i64;
+    }
+
+    if let Some(preferred_mcp) = preferred.get("mcp") {
+        match preferred_mcp {
+            Value::Array(names) => {
+                score += names
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .filter(|endpoint| {
+                        capabilities
+                            .get("mcp")
+                            .and_then(|mcp| mcp.get(*endpoint))
+                            .is_some()
+                    })
+                    .count() as i64;
+            }
+            Value::Object(map) => {
+                for (endpoint, preference) in map {
+                    let actual = capabilities.get("mcp").and_then(|mcp| mcp.get(endpoint));
+                    let Some(actual) = actual else {
+                        continue;
+                    };
+                    let prefers_healthy = preference
+                        .get("healthy")
+                        .and_then(|value| value.as_bool())
+                        .or_else(|| preference.as_bool())
+                        .unwrap_or(false);
+                    let actual_healthy = actual
+                        .get("healthy")
+                        .and_then(|value| value.as_bool())
+                        .or_else(|| actual.as_bool())
+                        .unwrap_or(false);
+                    if !prefers_healthy || actual_healthy {
+                        score += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    score
+}
+
+fn string_set(value: Option<&Value>) -> std::collections::BTreeSet<&str> {
+    value
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .collect()
+}
+
+fn parse_last_heartbeat(node: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    node.get("last_heartbeat_at")
+        .and_then(|value| value.as_str())
+        .and_then(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|value| value.with_timezone(&chrono::Utc))
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ClusterRole, explain_capability_match, resolve_instance_id};
+    use super::{
+        ClusterRole, explain_capability_match, resolve_instance_id, select_capability_route,
+    };
     use crate::config::ClusterConfig;
     use serde_json::json;
 
@@ -653,6 +799,102 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason.contains("unreal"))
+        );
+    }
+
+    #[test]
+    fn required_namespace_remains_hard_and_preferred_namespace_is_soft() {
+        let mac_mini = json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:00Z"
+        });
+        let mac_book = json!({
+            "instance_id": "mac-book-release",
+            "status": "online",
+            "labels": ["mac-book"],
+            "capabilities": {"providers": ["claude"]},
+            "last_heartbeat_at": "2026-05-03T00:00:01Z"
+        });
+        let route = json!({
+            "required": {"providers": ["codex"]},
+            "preferred": {"labels": ["mac-book"]}
+        });
+
+        let candidates = select_capability_route(&[mac_mini, mac_book], &route);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].decision.instance_id.as_deref(),
+            Some("mac-mini-release")
+        );
+        assert_eq!(candidates[0].score, 0);
+    }
+
+    #[test]
+    fn preferred_label_ranks_online_match_but_falls_back_to_online_candidate() {
+        let offline_preferred = json!({
+            "instance_id": "mac-book-release",
+            "status": "offline",
+            "labels": ["mac-book"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:02Z"
+        });
+        let fallback = json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac-mini"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:01Z"
+        });
+        let preferred_online = json!({
+            "instance_id": "mac-book-release",
+            "status": "online",
+            "labels": ["mac-book"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:02Z"
+        });
+        let route = json!({"preferred": {"labels": ["mac-book"]}});
+
+        let fallback_candidates =
+            select_capability_route(&[offline_preferred, fallback.clone()], &route);
+        assert_eq!(
+            fallback_candidates[0].decision.instance_id.as_deref(),
+            Some("mac-mini-release")
+        );
+        assert_eq!(fallback_candidates[0].score, 0);
+
+        let preferred_candidates = select_capability_route(&[fallback, preferred_online], &route);
+        assert_eq!(
+            preferred_candidates[0].decision.instance_id.as_deref(),
+            Some("mac-book-release")
+        );
+        assert_eq!(preferred_candidates[0].score, 1);
+    }
+
+    #[test]
+    fn equally_preferred_candidates_tie_break_by_latest_heartbeat() {
+        let stale = json!({
+            "instance_id": "mac-mini-release",
+            "status": "online",
+            "labels": ["mac"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:01Z"
+        });
+        let fresh = json!({
+            "instance_id": "mac-book-release",
+            "status": "online",
+            "labels": ["mac"],
+            "capabilities": {"providers": ["codex"]},
+            "last_heartbeat_at": "2026-05-03T00:00:02Z"
+        });
+        let route = json!({"preferred": {"labels": ["mac"]}});
+
+        let candidates = select_capability_route(&[stale, fresh], &route);
+        assert_eq!(
+            candidates[0].decision.instance_id.as_deref(),
+            Some("mac-book-release")
         );
     }
 }

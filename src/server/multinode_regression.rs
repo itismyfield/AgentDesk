@@ -155,6 +155,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multinode_dispatch_claims_prefer_label_but_fallback_when_preferred_node_offline() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO kanban_cards (id, title) VALUES ('card-1', 'Card 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, role, effective_role, status, labels, capabilities,
+                last_heartbeat_at, started_at, updated_at
+             )
+             VALUES
+                ('mac-book-release', 'mac-book', 'worker', 'worker', 'online',
+                 '[\"mac-book\"]'::jsonb, '{\"providers\":[\"codex\"]}'::jsonb,
+                 NOW() - INTERVAL '2 minutes', NOW(), NOW()),
+                ('mac-mini-release', 'mac-mini', 'worker', 'worker', 'online',
+                 '[\"mac-mini\"]'::jsonb, '{\"providers\":[\"codex\"]}'::jsonb,
+                 NOW(), NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                required_capabilities, created_at, updated_at
+             )
+             VALUES (
+                'dispatch-preferred-fallback', 'card-1', 'agent-1', 'implementation',
+                'pending', 'Preferred fallback',
+                '{\"preferred\":{\"labels\":[\"mac-book\"]}}'::jsonb,
+                NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let fallback = claim_task_dispatches(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-mini-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fallback.claimed.len(), 1);
+        assert_eq!(fallback.claimed[0].id, "dispatch-preferred-fallback");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO kanban_cards (id, title) VALUES ('card-1', 'Card 1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                instance_id, hostname, role, effective_role, status, labels, capabilities,
+                last_heartbeat_at, started_at, updated_at
+             )
+             VALUES
+                ('mac-mini-release', 'mac-mini', 'worker', 'worker', 'online',
+                 '[\"mac-mini\"]'::jsonb, '{\"providers\":[\"codex\"]}'::jsonb,
+                 NOW(), NOW(), NOW()),
+                ('mac-book-release', 'mac-book', 'worker', 'worker', 'online',
+                 '[\"mac-book\"]'::jsonb, '{\"providers\":[\"codex\"]}'::jsonb,
+                 NOW() - INTERVAL '1 second', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                required_capabilities, created_at, updated_at
+             )
+             VALUES (
+                'dispatch-mixed-routing', 'card-1', 'agent-1', 'implementation',
+                'pending', 'Mixed routing',
+                '{\"required\":{\"providers\":[\"codex\"]},\"preferred\":{\"labels\":[\"mac-book\"]}}'::jsonb,
+                NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let non_preferred = claim_task_dispatches(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-mini-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(non_preferred.claimed.len(), 0);
+        assert_eq!(non_preferred.skipped.len(), 1);
+        assert!(
+            non_preferred.skipped[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("not preferred route owner"))
+        );
+
+        let preferred = claim_task_dispatches(
+            &pool,
+            &TaskDispatchClaimRequest {
+                claim_owner: "mac-book-release".to_string(),
+                ttl_secs: Some(60),
+                limit: Some(10),
+                to_agent_id: None,
+                dispatch_type: None,
+                lease_ttl_secs: Some(60),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(preferred.claimed.len(), 1);
+        assert_eq!(preferred.claimed[0].id, "dispatch-mixed-routing");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn multinode_unreal_resource_lock_is_exclusive() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
