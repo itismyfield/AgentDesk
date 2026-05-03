@@ -1,15 +1,20 @@
+mod authorization;
 mod control_intent;
+mod dispatch_trigger;
 mod intake_gate;
 mod message_handler;
+mod response_format;
 mod thread_binding;
+mod turn_start;
 
+pub(super) use authorization::TurnKind;
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
-pub(crate) use message_handler::{
-    HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
-};
 pub(super) use message_handler::{
-    TurnKind, handle_text_message, reserve_headless_turn, start_headless_turn,
-    start_reserved_headless_turn,
+    handle_text_message, start_headless_turn, start_reserved_headless_turn,
+};
+pub(super) use turn_start::reserve_headless_turn;
+pub(crate) use turn_start::{
+    HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
 };
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
