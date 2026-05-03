@@ -145,13 +145,13 @@
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
 | `server` | `src/server/mod.rs` | 3394 | giant-file |
-| `server::cluster` | `src/server/cluster.rs` | 658 |  |
+| `server::cluster` | `src/server/cluster.rs` | 900 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::dto` | `src/server/dto/mod.rs` | 1 |  |
 | `server::dto::kanban` | `src/server/dto/kanban.rs` | 219 |  |
 | `server::issue_specs` | `src/server/issue_specs.rs` | 396 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 916 |  |
-| `server::multinode_regression` | `src/server/multinode_regression.rs` | 267 |  |
+| `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 276 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2337 | giant-file |
@@ -216,7 +216,7 @@
 | `server::routes::termination_events` | `src/server/routes/termination_events.rs` | 303 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1856 | giant-file |
 | `server::state` | `src/server/state.rs` | 235 |  |
-| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 370 |  |
+| `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 394 |  |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 728 |  |
 | `server::ws` | `src/server/ws.rs` | 236 |  |
