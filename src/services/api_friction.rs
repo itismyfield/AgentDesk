@@ -7,6 +7,7 @@ use crate::services::discord::settings::{
     MemoryBackendKind, ResolvedMemorySettings, resolve_memory_settings,
 };
 use crate::services::memory::{MementoBackend, MementoRememberRequest, TokenUsage};
+use crate::utils::api::clamp_api_limit;
 
 const DEFAULT_API_FRICTION_REPO: &str = "itismyfield/AgentDesk";
 const API_FRICTION_MIN_REPEAT_COUNT: usize = 2;
@@ -852,7 +853,7 @@ async fn load_pattern_candidates_pg(
     limit: usize,
 ) -> Result<Vec<ApiFrictionPattern>, String> {
     let min_events = min_events.max(API_FRICTION_MIN_REPEAT_COUNT) as i64;
-    let limit = limit.clamp(1, 100) as i64;
+    let limit = clamp_api_limit(Some(limit)) as i64;
     let rows = sqlx::query_as::<
         _,
         (
