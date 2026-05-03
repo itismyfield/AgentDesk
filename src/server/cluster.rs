@@ -8,6 +8,9 @@ use sqlx::{PgPool, Row};
 
 use crate::config::{ClusterConfig, Config};
 use crate::db::postgres::AdvisoryLockLease;
+use crate::server::cluster_session_routing::{
+    cluster_capabilities_with_worker_api, worker_api_base_url_from_capabilities,
+};
 
 pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
 
@@ -149,7 +152,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
             .map(|label| serde_json::Value::String(label.clone()))
             .collect(),
     );
-    let capabilities = serde_json::Value::Object(config.cluster.capabilities.clone());
+    let capabilities = cluster_capabilities_with_worker_api(&config.cluster);
     let pid = std::process::id() as i32;
 
     if let Err(error) = upsert_worker_node(
@@ -436,6 +439,13 @@ pub(crate) async fn list_worker_nodes(
     Ok(rows
         .into_iter()
         .map(|row| {
+            let capabilities = row
+                .try_get::<Option<serde_json::Value>, _>("capabilities")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let api_base_url = worker_api_base_url_from_capabilities(&capabilities);
+            let session_api_routable = api_base_url.is_some();
             serde_json::json!({
                 "instance_id": row.try_get::<String, _>("instance_id").ok(),
                 "hostname": row.try_get::<Option<String>, _>("hostname").ok().flatten(),
@@ -448,11 +458,9 @@ pub(crate) async fn list_worker_nodes(
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| serde_json::json!([])),
-                "capabilities": row
-                    .try_get::<Option<serde_json::Value>, _>("capabilities")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| serde_json::json!({})),
+                "capabilities": capabilities,
+                "api_base_url": api_base_url,
+                "session_api_routable": session_api_routable,
                 "last_heartbeat_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_heartbeat_at").ok().flatten(),
                 "started_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("started_at").ok().flatten(),
                 "updated_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("updated_at").ok().flatten(),
