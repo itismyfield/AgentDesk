@@ -2185,27 +2185,37 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/dispatches/{id}",
             "dispatches",
-            "Update dispatch",
+            "Update dispatch lifecycle state or result. Allowed status values are pending, dispatched, completed, cancelled, and failed. status=completed uses the dispatch completion finalizer; review dispatches require a verdict and callers should use POST /api/reviews/verdict. Non-completed status changes and result-only updates refresh updated_at. Completed responses include result_summary and completed_at; legacy completed rows without completed_at mirror updated_at in the response.",
         )
         .with_params([
             ("id", path_param("Dispatch ID")),
             (
                 "status",
-                body_param("string", false, "New dispatch status"),
+                body_param("string", false, "New dispatch status").with_enum(&[
+                    "pending",
+                    "dispatched",
+                    "completed",
+                    "cancelled",
+                    "failed",
+                ]),
             ),
             (
                 "result",
-                body_param("object", false, "Structured dispatch result payload"),
+                body_param(
+                    "object",
+                    false,
+                    "Structured dispatch result payload; response derives result_summary from result/context",
+                ),
             ),
         ])
         .with_example(
             json!({"path": {"id": "dispatch-1"}, "body": {"status": "completed", "result": {"summary": "done"}}}),
-            json!({"dispatch": {"id": "dispatch-1", "status": "completed", "result": {"summary": "done"}}}),
+            json!({"dispatch": {"id": "dispatch-1", "status": "completed", "result": {"summary": "done"}, "result_summary": "done", "updated_at": "2026-05-03 01:23:45+00", "completed_at": "2026-05-03 01:23:45+00"}}),
         )
         .with_error_example(
-            404,
-            json!({"path": {"id": "dispatch-ghost"}, "body": {"status": "completed"}}),
-            json!({"error": "dispatch not found: dispatch-ghost"}),
+            400,
+            json!({"path": {"id": "dispatch-1"}, "body": {"status": "done"}}),
+            json!({"error": "invalid dispatch status 'done' — allowed values: pending, dispatched, completed, cancelled, failed"}),
         )
         .with_curl("curl -X PATCH http://localhost:8787/api/dispatches/dispatch-1 -H 'Content-Type: application/json' -d '{\"status\":\"completed\"}'"),
         ep(
@@ -3685,9 +3695,20 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep(
             "POST",
             "/api/dispatches/{id}/cancel",
-            "queue",
-            "Cancel a queued dispatch // TODO: example",
-        ),
+            "dispatches",
+            "Cancel a pending or dispatched dispatch, reset linked auto-queue bookkeeping, and remove the dispatch notify guard. Terminal dispatches return 409 Conflict.",
+        )
+        .with_params([("id", path_param("Dispatch ID"))])
+        .with_example(
+            json!({"path": {"id": "dispatch-1"}}),
+            json!({"ok": true, "dispatch_id": "dispatch-1"}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"id": "dispatch-1"}}),
+            json!({"error": "dispatch already in terminal state: completed", "code": "dispatch"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/dispatches/dispatch-1/cancel"),
         ep(
             "POST",
             "/api/dispatches/cancel-all",
@@ -4247,14 +4268,26 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
 pub(crate) const CARD_LIFECYCLE_OPS_LAST_REFRESHED: &str =
     "Last refreshed: 2026-04-30 against main @ f74cad35 (post #1442/#1444/#1446/#1448)";
 
+/// #1549 — marker contract guide for structured API-friction reporting.
+pub(crate) const API_FRICTION_MARKERS_LAST_REFRESHED: &str =
+    "Last refreshed: 2026-05-03 against main @ 91bc116a (#1549)";
+
 /// #1443 list of long-form guide pages exposed under `/api/docs/...`.
 fn guide_index() -> Vec<Value> {
-    vec![json!({
-        "name": "card-lifecycle-ops",
-        "title": "Card Lifecycle Ops Guide",
-        "path": "/api/docs/card-lifecycle-ops",
-        "summary": "Decision tree + endpoint reference for /redispatch, /retry, /transition, /queue/generate, /dispatch-next. Read this BEFORE chaining card-lifecycle calls.",
-    })]
+    vec![
+        json!({
+            "name": "card-lifecycle-ops",
+            "title": "Card Lifecycle Ops Guide",
+            "path": "/api/docs/card-lifecycle-ops",
+            "summary": "Decision tree + endpoint reference for /redispatch, /retry, /transition, /queue/generate, /dispatch-next. Read this BEFORE chaining card-lifecycle calls.",
+        }),
+        json!({
+            "name": "api-friction-markers",
+            "title": "API Friction Marker Guide",
+            "path": "/api/docs/api-friction-markers",
+            "summary": "Marker schema and collection path for API_FRICTION reports emitted when /api docs are missing or misleading.",
+        }),
+    ]
 }
 
 /// GET /api/docs/card-lifecycle-ops — #1443.
@@ -4434,6 +4467,66 @@ fn card_lifecycle_ops_body() -> Value {
     })
 }
 
+/// GET /api/docs/api-friction-markers — #1549.
+///
+/// Long-form marker contract for agents that discover an API docs gap while
+/// working. The runtime already extracts these markers from turn output,
+/// removes valid markers before user-facing delivery, persists them to
+/// Postgres, optionally stores Memento memory, and aggregates repeated
+/// fingerprints into GitHub issues from the policy tick.
+#[allow(dead_code)]
+pub async fn api_docs_api_friction_markers() -> (StatusCode, Json<Value>) {
+    (StatusCode::OK, Json(api_friction_markers_body()))
+}
+
+fn api_friction_markers_body() -> Value {
+    json!({
+        "title": "API Friction Marker Guide",
+        "path": "/api/docs/api-friction-markers",
+        "last_refreshed": API_FRICTION_MARKERS_LAST_REFRESHED,
+        "purpose": "Capture structured reports when an agent had to infer, trial-and-error, or bypass a missing/misleading /api docs contract. The marker is for docs/API friction only; it is not a replacement for normal task output.",
+        "marker_prefix": "API_FRICTION:",
+        "schema": {
+            "required": {
+                "endpoint": "HTTP endpoint or API surface, for example PATCH /api/dispatches/{id}",
+                "friction_type": "Short category such as missing-docs, wrong-schema, or docs-bypass",
+                "summary": "One-sentence friction summary"
+            },
+            "optional": {
+                "workaround": "What the agent had to do instead",
+                "suggested_fix": "Concrete docs/API improvement",
+                "docs_category": "Fine-grained docs category such as dispatches or queue",
+                "keywords": ["Extra grouping/search terms"]
+            },
+            "aliases": {
+                "surface": "endpoint",
+                "type": "friction_type",
+                "frictionType": "friction_type",
+                "workaround_method": "workaround",
+                "suggestedFix": "suggested_fix",
+                "docsCategory": "docs_category"
+            }
+        },
+        "example": "API_FRICTION: {\"endpoint\":\"PATCH /api/dispatches/{id}\",\"friction_type\":\"missing-docs\",\"summary\":\"dispatch completion docs omitted PATCH semantics\",\"workaround\":\"read source and called PATCH manually\",\"suggested_fix\":\"document status/result response fields in /api/docs/dispatches\",\"docs_category\":\"dispatches\"}",
+        "collection_flow": [
+            "Turn bridge scans final and late turn output for lines beginning with API_FRICTION:.",
+            "Valid JSON markers are stripped from the delivered response, normalized, fingerprinted by endpoint + friction_type, and inserted into api_friction_events.",
+            "When Memento is configured, the same event is stored under topic api-friction with workspace-scoped context.",
+            "The policy tick aggregates repeated fingerprints and creates one GitHub issue per unreported pattern."
+        ],
+        "operator_queries": [
+            "SELECT endpoint, friction_type, COUNT(*) FROM api_friction_events GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+            "SELECT fingerprint, issue_url, last_error FROM api_friction_issues ORDER BY updated_at DESC;"
+        ],
+        "constraints": [
+            "Emit at most one marker per distinct docs/API gap in a turn.",
+            "Do not include secrets, tokens, private prompt content, or full transcripts.",
+            "Do not use DB direct writes as the workaround unless the task explicitly required DB repair; prefer canonical /api endpoints first."
+        ],
+        "source_of_truth": "docs/source-of-truth.md#api_friction-markers"
+    })
+}
+
 /// Core logic for the single-segment docs route, shared between the HTTP
 /// handler and the in-process CLI helper. Returns `(status, headers, body)`.
 fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Value) {
@@ -4445,6 +4538,14 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
     if segment == "card-lifecycle-ops" {
         let _ = flat;
         return (StatusCode::OK, HeaderMap::new(), card_lifecycle_ops_body());
+    }
+    if segment == "api-friction-markers" {
+        let _ = flat;
+        return (
+            StatusCode::OK,
+            HeaderMap::new(),
+            api_friction_markers_body(),
+        );
     }
 
     let endpoints = all_endpoints();
@@ -4629,4 +4730,106 @@ pub async fn api_docs_group_category(
             "endpoints": matching,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_docs_include_patch_lifecycle_and_cancel_contract() {
+        let endpoints = all_endpoints();
+
+        let patch = endpoints
+            .iter()
+            .find(|endpoint| endpoint.method == "PATCH" && endpoint.path == "/api/dispatches/{id}")
+            .expect("PATCH /api/dispatches/{id} must be documented");
+        assert!(
+            patch.description.contains("Allowed status values")
+                && patch.description.contains("result_summary")
+                && patch.description.contains("completed_at"),
+            "PATCH dispatch docs must describe lifecycle response semantics: {}",
+            patch.description
+        );
+        let status = patch
+            .params
+            .get("status")
+            .expect("PATCH dispatch docs must include status body param");
+        assert_eq!(status.location, "body");
+        assert_eq!(
+            status.enum_values.as_deref(),
+            Some(&["pending", "dispatched", "completed", "cancelled", "failed"][..])
+        );
+        let response = &patch
+            .example
+            .as_ref()
+            .expect("PATCH dispatch docs must include a response example")
+            .response;
+        assert_eq!(response["dispatch"]["result_summary"], "done");
+        assert!(response["dispatch"]["updated_at"].is_string());
+        assert!(response["dispatch"]["completed_at"].is_string());
+        assert_eq!(
+            patch
+                .error_example
+                .as_ref()
+                .and_then(|example| example.status),
+            Some(400)
+        );
+
+        let cancel = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "POST" && endpoint.path == "/api/dispatches/{id}/cancel"
+            })
+            .expect("POST /api/dispatches/{id}/cancel must be documented");
+        assert_eq!(effective_category(cancel), "dispatches");
+        assert!(
+            cancel.description.contains("pending or dispatched")
+                && cancel
+                    .description
+                    .contains("Terminal dispatches return 409"),
+            "cancel dispatch docs must describe active/terminal lifecycle semantics: {}",
+            cancel.description
+        );
+        assert_eq!(
+            cancel
+                .example
+                .as_ref()
+                .expect("cancel dispatch docs must include example")
+                .response["ok"],
+            true
+        );
+        assert_eq!(
+            cancel
+                .error_example
+                .as_ref()
+                .and_then(|example| example.status),
+            Some(409)
+        );
+    }
+
+    #[test]
+    fn api_friction_marker_guide_is_indexed_and_describes_collection() {
+        let guides = guide_index();
+        assert!(guides.iter().any(|guide| {
+            guide["name"] == "api-friction-markers"
+                && guide["path"] == "/api/docs/api-friction-markers"
+        }));
+
+        let body = api_friction_markers_body();
+        assert_eq!(body["marker_prefix"], "API_FRICTION:");
+        assert_eq!(
+            body["schema"]["required"]["endpoint"],
+            "HTTP endpoint or API surface, for example PATCH /api/dispatches/{id}"
+        );
+        let body_text = body.to_string();
+        assert!(body_text.contains("api_friction_events"));
+        assert!(body_text.contains("api_friction_issues"));
+        assert!(body_text.contains("Memento"));
+        assert!(body_text.contains("API_FRICTION:"));
+
+        let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
 }

@@ -7952,6 +7952,58 @@ async fn api_docs_category_exposes_dispatch_params_and_examples() {
         dispatch_post["example"]["response"]["dispatch"]["status"],
         "pending"
     );
+
+    let dispatch_patch = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "PATCH" && ep["path"] == "/api/dispatches/{id}")
+        .expect("dispatch update endpoint must be present in detail view");
+    let patch_description = dispatch_patch["description"]
+        .as_str()
+        .expect("PATCH dispatch docs description must be a string");
+    assert!(
+        patch_description.contains("Allowed status values")
+            && patch_description.contains("result_summary")
+            && patch_description.contains("completed_at"),
+        "PATCH dispatch docs must spell out status/result lifecycle semantics: {patch_description}"
+    );
+    let status_enum = dispatch_patch["params"]["status"]["enum"]
+        .as_array()
+        .expect("PATCH dispatch status param must expose allowed enum values");
+    for expected in ["pending", "dispatched", "completed", "cancelled", "failed"] {
+        assert!(
+            status_enum.iter().any(|value| value == expected),
+            "PATCH dispatch docs must include allowed status {expected}"
+        );
+    }
+    assert_eq!(
+        dispatch_patch["example"]["response"]["dispatch"]["result_summary"],
+        "done"
+    );
+    assert!(
+        dispatch_patch["example"]["response"]["dispatch"]["updated_at"].is_string(),
+        "PATCH dispatch example must expose updated_at"
+    );
+    assert!(
+        dispatch_patch["example"]["response"]["dispatch"]["completed_at"].is_string(),
+        "PATCH dispatch example must expose completed_at"
+    );
+    assert_eq!(dispatch_patch["error_example"]["status"], 400);
+
+    let dispatch_cancel = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/dispatches/{id}/cancel")
+        .expect("dispatch cancel endpoint must be present in dispatches detail view");
+    assert_eq!(dispatch_cancel["params"]["id"]["location"], "path");
+    let cancel_description = dispatch_cancel["description"]
+        .as_str()
+        .expect("cancel dispatch docs description must be a string");
+    assert!(
+        cancel_description.contains("pending or dispatched")
+            && cancel_description.contains("Terminal dispatches return 409"),
+        "cancel dispatch docs must describe lifecycle scope and terminal conflict: {cancel_description}"
+    );
+    assert_eq!(dispatch_cancel["example"]["response"]["ok"], true);
+    assert_eq!(dispatch_cancel["error_example"]["status"], 409);
 }
 
 #[tokio::test]
@@ -10247,6 +10299,65 @@ async fn api_docs_card_lifecycle_ops_guide_is_reachable_and_complete() {
             && guide_text.contains("/api/kanban-cards/{id}/redispatch")
             && guide_text.contains("/api/kanban-cards/{id}/transition"),
         "guide must enumerate the five lifecycle endpoints by exact path"
+    );
+}
+
+#[tokio::test]
+async fn api_docs_api_friction_markers_guide_is_reachable_and_complete() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let index_response = app
+        .clone()
+        .oneshot(Request::builder().uri("/docs").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(index_response.status(), StatusCode::OK);
+    let index_bytes = axum::body::to_bytes(index_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let index_json: serde_json::Value = serde_json::from_slice(&index_bytes).unwrap();
+    let guides = index_json["guides"]
+        .as_array()
+        .expect("/docs index must list long-form guides under 'guides'");
+    let friction_entry = guides
+        .iter()
+        .find(|guide| guide["name"] == "api-friction-markers")
+        .expect("/docs index must surface the API friction marker guide");
+    assert_eq!(
+        friction_entry["path"], "/api/docs/api-friction-markers",
+        "API friction marker guide path must be /api/docs/api-friction-markers"
+    );
+
+    let guide_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/api-friction-markers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(guide_response.status(), StatusCode::OK);
+    let guide_bytes = axum::body::to_bytes(guide_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let guide_text = String::from_utf8(guide_bytes.to_vec()).unwrap();
+    let guide_json: serde_json::Value = serde_json::from_str(&guide_text).unwrap();
+
+    assert_eq!(guide_json["title"], "API Friction Marker Guide");
+    assert_eq!(guide_json["marker_prefix"], "API_FRICTION:");
+    assert_eq!(
+        guide_json["schema"]["required"]["endpoint"],
+        "HTTP endpoint or API surface, for example PATCH /api/dispatches/{id}"
+    );
+    assert!(
+        guide_text.contains("api_friction_events")
+            && guide_text.contains("api_friction_issues")
+            && guide_text.contains("Memento")
+            && guide_text.contains("API_FRICTION:"),
+        "API friction guide must describe marker collection, persistence, and example"
     );
 }
 

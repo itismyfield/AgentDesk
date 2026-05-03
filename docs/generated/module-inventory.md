@@ -171,7 +171,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3291 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1255 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 4632 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 4835 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 89 |  |
