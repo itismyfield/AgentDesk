@@ -90,6 +90,12 @@ four checks:
 `route_srp_violations`, `manual_json_row_mapping`, and
 `limit_clamp_duplication` intentionally remain warning-only.
 
+For new tuple-style JSON route handlers, prefer the light helpers in
+`crate::utils::api` for common simple responses and API query bounds:
+`bad_request`, `internal_error`, `not_found`, and `clamp_api_limit`. Keep using
+`AppError` for routes that already return `AppResult` or need structured
+`code/context` fields.
+
 Allowlist format lives in `scripts/audit_allowlist.toml`. Entries are
 repo-relative POSIX paths or `path:line` findings under the matching check key.
 New exclusions for hard-gated checks must include a nearby comment that

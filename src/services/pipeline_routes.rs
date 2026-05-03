@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 
 use crate::db::table_metadata;
+use crate::utils::api::clamp_api_limit;
 
 /// #1082 -- accepted `on_failure` policy values.
 /// Kept in sync with `crate::pipeline::OnFailurePolicy`.
@@ -538,7 +539,7 @@ async fn list_card_transcripts_pg(
     card_id: &str,
     limit: usize,
 ) -> Result<Vec<Value>, String> {
-    let limit = limit.clamp(1, 100) as i64;
+    let limit = clamp_api_limit(Some(limit)) as i64;
     let rows = sqlx::query(
         "SELECT st.id::BIGINT AS id,
                 st.turn_id,

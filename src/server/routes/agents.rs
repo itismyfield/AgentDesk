@@ -17,6 +17,7 @@ use crate::services::observability::session_inventory::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
+use crate::utils::api::{bad_request, clamp_api_limit, internal_error, not_found};
 
 // ── Query types ──────────────────────────────────────────────
 
@@ -104,10 +105,7 @@ pub async fn agent_quality(
     .await
     {
         Ok(summary) => (StatusCode::OK, Json(json!(summary))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query agent quality summary: {error}")})),
-        ),
+        Err(error) => internal_error(format!("query agent quality summary: {error}")),
     }
 }
 
@@ -130,10 +128,7 @@ pub async fn agents_quality_ranking(
     .await
     {
         Ok(ranking) => (StatusCode::OK, Json(json!(ranking))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query agent quality ranking: {error}")})),
-        ),
+        Err(error) => internal_error(format!("query agent quality ranking: {error}")),
     }
 }
 
@@ -720,16 +715,10 @@ pub async fn agent_diag(
     let session = match find_diag_session_pg(pool, &identifier).await {
         Ok(Some(session)) => session,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent/channel session not found"})),
-            );
+            return not_found("agent/channel session not found");
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query diag session: {error}")})),
-            );
+            return internal_error(format!("query diag session: {error}"));
         }
     };
 
@@ -1792,7 +1781,7 @@ async fn list_agent_transcripts_pg_json(
          LIMIT $2",
     )
     .bind(agent_id)
-    .bind(limit.clamp(1, 100) as i64)
+    .bind(clamp_api_limit(Some(limit)) as i64)
     .fetch_all(pool)
     .await?;
 
@@ -1838,10 +1827,7 @@ pub async fn agent_signal(
     let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
     if signal != "blocked" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("unknown signal: {signal}. supported: blocked")})),
-        );
+        return bad_request(format!("unknown signal: {signal}. supported: blocked"));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
