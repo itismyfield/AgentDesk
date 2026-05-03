@@ -660,6 +660,8 @@ pub struct ClusterConfig {
     pub heartbeat_interval_secs: u64,
     #[serde(default = "default_cluster_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -679,6 +681,7 @@ impl Default for ClusterConfig {
             role: default_cluster_role(),
             heartbeat_interval_secs: default_cluster_heartbeat_interval_secs(),
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
+            api_base_url: None,
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),

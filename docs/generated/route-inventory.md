@@ -176,7 +176,7 @@
 | `GET` | `/api/pipeline/stages` | `pipeline::get_stages` | `src/server/routes/pipeline.rs:104` | `src/server/routes/domains/ops.rs:104` |
 | `PUT` | `/api/pipeline/stages` | `pipeline::put_stages` | `src/server/routes/pipeline.rs:124` | `src/server/routes/domains/ops.rs:104` |
 | `POST` | `/api/pm-decision` | `kanban::pm_decision` | `src/server/routes/kanban.rs:1485` | `src/server/routes/domains/kanban.rs:58` |
-| `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1838` | `src/server/routes/domains/agents.rs:50` |
+| `GET` | `/api/policies` | `agents_crud::list_policies` | `src/server/routes/agents_crud.rs:1856` | `src/server/routes/domains/agents.rs:50` |
 | `GET` | `/api/provider-cli` | `provider_cli_api::get_provider_cli_status` | `src/server/routes/provider_cli_api.rs:28` | `src/server/routes/domains/ops.rs:280` |
 | `PATCH` | `/api/provider-cli/{provider}` | `provider_cli_api::patch_provider_cli` | `src/server/routes/provider_cli_api.rs:96` | `src/server/routes/domains/ops.rs:284` |
 | `GET` | `/api/quality/events` | `analytics::quality_events` | `src/server/routes/analytics.rs:374` | `src/server/routes/domains/admin.rs:72` |
@@ -248,4 +248,4 @@
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:249` | `src/server/routes/domains/admin.rs:80` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:166` | `src/server/routes/domains/ops.rs:268` |
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:261` | `src/server/routes/domains/ops.rs:269` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:265` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:266` |

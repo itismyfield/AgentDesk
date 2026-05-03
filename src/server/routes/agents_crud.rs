@@ -1814,7 +1814,20 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
         Ok(rows) => rows,
         Err(error) => return Json(json!({ "error": format!("query failed: {error}") })),
     };
-    let sessions: Vec<_> = rows
+    let worker_nodes = match crate::server::cluster::list_worker_nodes(
+        pool,
+        state.config.cluster.lease_ttl_secs.max(1),
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!("failed to list worker nodes for session owner routing: {error}");
+            Vec::new()
+        }
+    };
+    let local_instance_id = state.cluster_instance_id.as_deref();
+    let mut sessions: Vec<_> = rows
         .iter()
         .map(|row| {
             json!({
@@ -1832,6 +1845,11 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
             })
         })
         .collect();
+    crate::server::cluster_session_routing::enrich_session_owner_routing(
+        &mut sessions,
+        local_instance_id,
+        &worker_nodes,
+    );
 
     Json(json!({ "sessions": sessions }))
 }
