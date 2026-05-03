@@ -944,6 +944,10 @@ fn build_pm_message(
     )
 }
 
+fn summary_manual_decision_is_superseded(summary: &CardEscalationSummary) -> bool {
+    matches!(summary.status.trim(), "backlog" | "done")
+}
+
 async fn discord_get(
     client: &reqwest::Client,
     base_url: &str,
@@ -1143,6 +1147,22 @@ async fn emit_escalation_with_base_url(
         } else {
             return pg_unavailable();
         };
+
+    if summary_manual_decision_is_superseded(&summary) {
+        let card_status = summary.status.clone();
+        let review_status = summary.review_status.clone();
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "state": "superseded",
+                "card_id": card_id,
+                "card_status": card_status,
+                "review_status": review_status,
+                "error": "manual decision no longer required for this card",
+            })),
+        );
+    }
 
     let client = reqwest::Client::new();
     let requested_mode = settings.mode.clone();
@@ -1495,6 +1515,266 @@ pub async fn emit_escalation(
     Json(body): Json<EmitEscalationBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     emit_escalation_with_base_url(&state, body, DISCORD_API_BASE).await
+}
+
+#[cfg(all(test, not(feature = "legacy-sqlite-tests")))]
+mod manual_decision_gate_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        response::IntoResponse,
+        routing::post,
+    };
+    use std::{
+        ffi::OsString,
+        path::Path as FsPath,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &FsPath) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn write_test_bot_tokens(root: &FsPath) {
+        let credential_dir = crate::runtime_layout::credential_dir(root);
+        std::fs::create_dir_all(&credential_dir).unwrap();
+        std::fs::write(
+            crate::runtime_layout::credential_token_path(root, "announce"),
+            "announce-token\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::runtime_layout::credential_token_path(root, "notify"),
+            "notify-token\n",
+        )
+        .unwrap();
+    }
+
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    struct EscalationPgDatabase {
+        _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl EscalationPgDatabase {
+        async fn create() -> Self {
+            let lifecycle = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = pg_test_admin_database_url();
+            let database_name = format!("agentdesk_escalation_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!("{}/{}", pg_test_base_database_url(), database_name);
+            crate::db::postgres::create_test_database(
+                &admin_url,
+                &database_name,
+                "escalation handler pg",
+            )
+            .await
+            .expect("create escalation postgres test db");
+
+            Self {
+                _lifecycle: lifecycle,
+                admin_url,
+                database_name,
+                database_url,
+            }
+        }
+
+        async fn migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(
+                &self.database_url,
+                "escalation handler pg",
+            )
+            .await
+            .expect("connect + migrate escalation postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                "escalation handler pg",
+            )
+            .await
+            .expect("drop escalation postgres test db");
+        }
+    }
+
+    fn pg_test_base_database_url() -> String {
+        if let Ok(base) = std::env::var("POSTGRES_TEST_DATABASE_URL_BASE") {
+            let trimmed = base.trim();
+            if !trimmed.is_empty() {
+                return trimmed.trim_end_matches('/').to_string();
+            }
+        }
+        let user = std::env::var("PGUSER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| std::env::var("USER").ok().filter(|v| !v.trim().is_empty()))
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = std::env::var("PGPASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let host = std::env::var("PGHOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        let port = std::env::var("PGPORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "5432".to_string());
+        match password {
+            Some(password) => format!("postgresql://{user}:{password}@{host}:{port}"),
+            None => format!("postgresql://{user}@{host}:{port}"),
+        }
+    }
+
+    fn pg_test_admin_database_url() -> String {
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        format!("{}/{}", pg_test_base_database_url(), admin_db)
+    }
+
+    #[tokio::test]
+    async fn emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send() {
+        let _env_lock = env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        write_test_bot_tokens(runtime_root.path());
+
+        #[derive(Clone, Default)]
+        struct MockDiscord {
+            sent_messages: Arc<Mutex<Vec<String>>>,
+        }
+
+        async fn send_message(
+            State(mock): State<MockDiscord>,
+            Path(channel_id): Path<String>,
+            Json(body): Json<serde_json::Value>,
+        ) -> impl IntoResponse {
+            mock.sent_messages.lock().unwrap().push(format!(
+                "{channel_id}:{}",
+                body["content"].as_str().unwrap_or("")
+            ));
+            (
+                StatusCode::OK,
+                Json(json!({"channel_id": channel_id, "content": body["content"]})),
+            )
+        }
+
+        let mock = MockDiscord::default();
+        let app = Router::new()
+            .route("/channels/{channel_id}/messages", post(send_message))
+            .with_state(mock.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let pg_db = EscalationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+
+        for (card_id, status, review_status, blocked_reason) in [
+            (
+                "card-done-stale",
+                "done",
+                Some("dilemma_pending"),
+                Some("stale manual marker"),
+            ),
+            (
+                "card-backlog-stale",
+                "backlog",
+                Some("dilemma_pending"),
+                Some("stale manual marker"),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO kanban_cards (
+                    id, title, status, priority, review_status, blocked_reason, created_at, updated_at
+                 )
+                 VALUES ($1, $2, $3, 'medium', $4, $5, NOW(), NOW())",
+            )
+            .bind(card_id)
+            .bind(format!("Superseded {card_id}"))
+            .bind(status)
+            .bind(review_status)
+            .bind(blocked_reason)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut config = crate::config::Config::default();
+        config.escalation.mode = EscalationMode::Pm;
+        config.escalation.pm_channel_id = Some("222".to_string());
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        let mut state = AppState {
+            pg_pool: Some(pool.clone()),
+            engine: test_engine_with_pg(pool.clone()),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+        };
+        state.config = std::sync::Arc::new(config);
+
+        for card_id in ["card-done-stale", "card-backlog-stale"] {
+            let (status, Json(body)) = emit_escalation_with_base_url(
+                &state,
+                EmitEscalationBody {
+                    card_id: card_id.to_string(),
+                    reasons: vec!["stale escalation retry".to_string()],
+                },
+                &format!("http://{addr}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{card_id}");
+            assert_eq!(body["state"], json!("superseded"), "{card_id}");
+        }
+
+        assert!(
+            mock.sent_messages.lock().unwrap().is_empty(),
+            "superseded escalation attempts must not send Discord messages"
+        );
+
+        server.abort();
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
