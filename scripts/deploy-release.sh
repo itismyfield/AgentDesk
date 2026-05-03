@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ADK_REL="$HOME/.adk/release"
 PLIST_REL="com.agentdesk.release"
+REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
     REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -551,6 +552,11 @@ fi
 
 _assert_release_binary_runtime_surface
 
+if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
+    echo "▸ Applying release launchd env for doctor preflight..."
+    _apply_launchd_env_file_to_shell "$REL_LAUNCHD_ENV_FILE"
+fi
+
 echo "▸ Preflight PostgreSQL migration integrity via doctor..."
 DOCTOR_JSON_TMP=$(mktemp "${TMPDIR:-/tmp}/agentdesk-doctor.XXXXXX.json")
 set +e
@@ -685,7 +691,6 @@ echo "▸ Ensuring global agentdesk CLI..."
 
 # Postgres database is operator-managed; SQLite copy removed after #461 cutover.
 
-REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
 if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
     echo "▸ Syncing release launchd env..."
     sync_launchd_plist_environment_from_file "$HOME/Library/LaunchAgents/$PLIST_REL.plist" "$REL_LAUNCHD_ENV_FILE"

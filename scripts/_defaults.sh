@@ -122,6 +122,20 @@ sync_launchd_plist_environment_from_file() {
   done < "$env_file"
 }
 
+_apply_launchd_env_file_to_shell() {
+  local env_file="$1"
+  local raw_line parsed key value
+
+  [ -f "$env_file" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    parsed=$(_parse_launchd_env_line "$raw_line") || continue
+    key="${parsed%%$'\t'*}"
+    value="${parsed#*$'\t'}"
+    export "$key=$value"
+  done < "$env_file"
+}
+
 _launchd_job_state() {
   local label="$1"
   launchctl print "gui/$(id -u)/$label" 2>/dev/null \
