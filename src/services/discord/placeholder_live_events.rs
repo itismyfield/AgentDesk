@@ -1425,7 +1425,11 @@ fn render_events<'a>(
 ) -> Option<String> {
     let mut lines = Vec::new();
     let mut used = 0usize;
-    let inner_limit = EVENT_BLOCK_MAX_CHARS;
+    // Reserve room for the surrounding ```text``` fence so the total block
+    // (fence + content) stays under EVENT_BLOCK_MAX_CHARS. Inner backticks
+    // are already stripped by `sanitize_for_code_fence` so the fence is
+    // safe to apply.
+    let inner_limit = EVENT_BLOCK_MAX_CHARS.saturating_sub("```text\n\n```".len());
     for line in events
         .rev()
         .take(EVENT_RENDER_LIMIT)
@@ -1443,7 +1447,7 @@ fn render_events<'a>(
         return None;
     }
     lines.reverse();
-    Some(lines.join("\n"))
+    Some(format!("```text\n{}\n```", lines.join("\n")))
 }
 
 fn escape_status_panel_markdown(raw: &str) -> String {
@@ -1548,7 +1552,8 @@ mod tests {
         }
 
         let block = events.render_block(channel_id).unwrap();
-        assert!(!block.contains("```"));
+        assert!(block.starts_with("```text\n"));
+        assert!(block.ends_with("\n```"));
         assert!(block.chars().count() <= EVENT_BLOCK_MAX_CHARS);
         let live_lines = block
             .lines()
@@ -1659,7 +1664,7 @@ mod tests {
             rendered.len()
         );
         assert!(rendered.contains("[Bash]"));
-        assert!(!rendered.contains("```"));
+        assert!(rendered.contains("```text"));
     }
 
     #[test]
