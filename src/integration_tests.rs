@@ -1946,6 +1946,7 @@ mod tests {
             axum::Json(
                 crate::server::routes::dispatched_sessions::HookSessionBody {
                     session_key: "test-session".to_string(),
+                    instance_id: None,
                     agent_id: None,
                     status: Some("idle".to_string()),
                     provider: Some("claude".to_string()),

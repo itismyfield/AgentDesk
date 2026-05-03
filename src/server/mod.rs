@@ -188,6 +188,7 @@ pub(crate) async fn run(
     }
     crate::services::observability::init_observability(pg_pool.clone());
     let cluster_runtime = cluster::bootstrap(&config, pg_pool.clone()).await;
+    let cluster_instance_id = cluster_runtime.instance_id().to_string();
     if let Some(pool) = pg_pool.clone() {
         crate::services::dispatch_watchdog::spawn(pool);
     }
@@ -264,13 +265,14 @@ pub(crate) async fn run(
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
             "/api",
-            routes::api_router_with_pg(
+            routes::api_router_with_pg_and_cluster(
                 engine.clone(),
                 config.clone(),
                 broadcast_tx.clone(),
                 batch_buffer,
                 health_registry,
                 pg_pool,
+                Some(cluster_instance_id),
             ),
         )
         .fallback_service(dashboard_service);

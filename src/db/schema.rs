@@ -104,6 +104,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN raw_provider_session_id TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN instance_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
     ensure_turns_schema(conn)?;
     ensure_observability_schema(conn)?;

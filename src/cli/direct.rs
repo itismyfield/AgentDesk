@@ -238,6 +238,7 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
         broadcast_tx,
         batch_buffer,
         health_registry,
+        cluster_instance_id: None,
     })
 }
 

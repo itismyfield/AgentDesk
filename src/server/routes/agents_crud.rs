@@ -1802,7 +1802,7 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
         return Json(json!({ "error": "postgres pool unavailable" }));
     };
     let rows = match sqlx::query(
-        "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
+        "SELECT id, session_key, instance_id, agent_id, provider, status, active_dispatch_id,
                 model, tokens, cwd, to_char(last_heartbeat, 'YYYY-MM-DD HH24:MI:SS') AS last_heartbeat
          FROM sessions
          WHERE status IN ('connected', 'turn_active', 'awaiting_bg', 'awaiting_user', 'idle', 'working')
@@ -1820,6 +1820,7 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
             json!({
                 "id": row.try_get::<i64, _>("id").unwrap_or(0),
                 "session_key": row.try_get::<Option<String>, _>("session_key").ok().flatten(),
+                "instance_id": row.try_get::<Option<String>, _>("instance_id").ok().flatten(),
                 "agent_id": row.try_get::<Option<String>, _>("agent_id").ok().flatten(),
                 "provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
                 "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
