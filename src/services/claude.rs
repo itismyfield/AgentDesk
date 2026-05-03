@@ -27,6 +27,9 @@ use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
 };
+
+#[cfg(unix)]
+const CLAUDE_WATCHER_OWNED_COLD_START_ENV: &str = "AGENTDESK_CLAUDE_WATCHER_OWNED_COLD_START";
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
     crate::services::platform::resolve_provider_binary("claude").resolved_path
@@ -1301,6 +1304,21 @@ fn classify_local_tmux_startup_plan(
     }
 }
 
+#[cfg(unix)]
+fn parse_feature_flag_bool(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "enabled"
+    )
+}
+
+#[cfg(unix)]
+fn watcher_owned_cold_start_enabled() -> bool {
+    std::env::var(CLAUDE_WATCHER_OWNED_COLD_START_ENV)
+        .ok()
+        .is_some_and(|raw| parse_feature_flag_bool(&raw))
+}
+
 /// Execute Claude inside a local tmux session with bidirectional input.
 ///
 /// If a tmux session with this name already exists, sends the prompt as a
@@ -1595,6 +1613,26 @@ fn execute_streaming_local_tmux(
     // Store tmux session name in cancel token
     if let Some(ref token) = cancel_token {
         *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
+    }
+
+    if watcher_owned_cold_start_enabled() {
+        let _ = sender.send(StreamMessage::TmuxReady {
+            output_path: output_path.clone(),
+            input_fifo_path: input_fifo_path.clone(),
+            tmux_session_name: tmux_session_name.to_string(),
+            last_offset: 0,
+        });
+        log_producer_exit(
+            "fresh_session_watcher_owned_handoff",
+            None,
+            report_channel_id,
+            0,
+            serde_json::json!({
+                "tmux_session_name": tmux_session_name,
+                "env": CLAUDE_WATCHER_OWNED_COLD_START_ENV,
+            }),
+        );
+        return Ok(());
     }
 
     // Read output file from beginning (new session), with retry on session death
@@ -2147,6 +2185,22 @@ mod local_tmux_lifecycle_tests {
             LocalTmuxStartupPlan::ColdStart,
             "impossible live-pane evidence without session_exists stays on the safe cold path"
         );
+    }
+
+    #[test]
+    fn watcher_owned_cold_start_flag_accepts_only_explicit_truthy_values() {
+        for truthy in ["1", "true", "TRUE", "yes", "on", "enabled"] {
+            assert!(
+                parse_feature_flag_bool(truthy),
+                "{truthy:?} should enable watcher-owned cold start"
+            );
+        }
+        for falsey in ["", "0", "false", "off", "disabled", "random"] {
+            assert!(
+                !parse_feature_flag_bool(falsey),
+                "{falsey:?} should leave watcher-owned cold start disabled"
+            );
+        }
     }
 }
 
