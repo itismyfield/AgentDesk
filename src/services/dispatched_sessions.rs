@@ -53,6 +53,12 @@ async fn hook_session_pg(
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
+    let instance_id = body
+        .instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(state.cluster_instance_id.as_deref());
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
     let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
 
@@ -71,6 +77,7 @@ async fn hook_session_pg(
         pool,
         dispatched_sessions_db::HookSessionUpsert {
             session_key: &body.session_key,
+            instance_id,
             agent_id: agent_id.as_deref(),
             provider,
             status,
@@ -97,6 +104,7 @@ async fn hook_session_pg(
                 "OnSessionStatusChange",
                 json!({
                     "session_key": body.session_key,
+                    "instance_id": instance_id,
                     "status": status,
                     "agent_id": agent_id,
                     "dispatch_id": dispatch_id,
@@ -224,6 +232,7 @@ pub struct UpdateDispatchedSessionBody {
 #[allow(dead_code)]
 pub struct HookSessionBody {
     pub session_key: String,
+    pub instance_id: Option<String>,
     pub agent_id: Option<String>,
     pub status: Option<String>,
     pub provider: Option<String>,
@@ -331,6 +340,12 @@ async fn hook_session_sqlite_for_tests(
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
+    let instance_id = body
+        .instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(state.cluster_instance_id.as_deref());
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
     let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
 
@@ -338,6 +353,7 @@ async fn hook_session_sqlite_for_tests(
         &conn,
         dispatched_sessions_db::HookSessionUpsert {
             session_key: &body.session_key,
+            instance_id,
             agent_id: agent_id.as_deref(),
             provider,
             status,
@@ -364,6 +380,7 @@ async fn hook_session_sqlite_for_tests(
                 "OnSessionStatusChange",
                 json!({
                     "session_key": body.session_key,
+                    "instance_id": instance_id,
                     "status": status,
                     "agent_id": agent_id,
                     "dispatch_id": dispatch_id,
@@ -1623,6 +1640,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-1".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
@@ -1644,6 +1662,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-1".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("claude".to_string()),
@@ -1735,6 +1754,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-rework".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
@@ -1756,6 +1776,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-rework".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("claude".to_string()),
@@ -1844,6 +1865,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-review".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -1865,6 +1887,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-review".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("codex".to_string()),
@@ -1942,6 +1965,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-sticky".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -1963,6 +1987,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-sticky".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -1983,6 +2008,7 @@ mod tests {
             State(state.clone()),
             Json(HookSessionBody {
                 session_key: "session-sticky".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("codex".to_string()),
@@ -2004,6 +2030,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-sticky".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("idle".to_string()),
                 provider: Some("codex".to_string()),
@@ -2060,6 +2087,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-cleared".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2114,6 +2142,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "session-heartbeat".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2251,6 +2280,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796".to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("claude".to_string()),
@@ -2303,6 +2333,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2373,6 +2404,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2434,6 +2466,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2487,6 +2520,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                instance_id: None,
                 agent_id: Some("project-spoofed".to_string()),
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2559,6 +2593,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.clone(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2611,6 +2646,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),
@@ -2663,6 +2699,7 @@ mod tests {
             State(state),
             Json(HookSessionBody {
                 session_key: session_key.to_string(),
+                instance_id: None,
                 agent_id: None,
                 status: Some("working".to_string()),
                 provider: Some("codex".to_string()),

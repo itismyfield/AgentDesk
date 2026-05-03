@@ -757,6 +757,7 @@ export type DispatchedSessionStatus =
 export interface DispatchedSession {
   id: string;
   session_key: string;
+  instance_id?: string | null;
   name: string | null;
   department_id: string | null;
   linked_agent_id: string | null;

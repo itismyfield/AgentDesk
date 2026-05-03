@@ -47,7 +47,7 @@
 | `cli::args` | `src/cli/args.rs` | 939 |  |
 | `cli::client` | `src/cli/client.rs` | 1648 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1526 | giant-file |
-| `cli::direct` | `src/cli/direct.rs` | 1568 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1569 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 123 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 |  |
@@ -73,13 +73,13 @@
 | `db::agents` | `src/db/agents.rs` | 1125 | giant-file |
 | `db::auto_queue` | `src/db/auto_queue.rs` | 4770 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
-| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1200 | giant-file |
+| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1217 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 1 |  |
 | `db::kanban_cards` | `src/db/kanban_cards.rs` | 1903 | giant-file |
 | `db::memento_feedback_stats` | `src/db/memento_feedback_stats.rs` | 265 |  |
 | `db::postgres` | `src/db/postgres.rs` | 1536 | giant-file |
 | `db::prompt_manifests` | `src/db/prompt_manifests.rs` | 642 |  |
-| `db::schema` | `src/db/schema.rs` | 3194 | giant-file |
+| `db::schema` | `src/db/schema.rs` | 3195 | giant-file |
 | `db::session_agent_resolution` | `src/db/session_agent_resolution.rs` | 492 |  |
 | `db::session_observability` | `src/db/session_observability.rs` | 459 |  |
 | `db::session_status` | `src/db/session_status.rs` | 78 |  |
@@ -144,7 +144,7 @@
 | `runtime_layout::legacy_migration` | `src/runtime_layout/legacy_migration.rs` | 396 |  |
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 134 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 685 |  |
-| `server` | `src/server/mod.rs` | 3394 | giant-file |
+| `server` | `src/server/mod.rs` | 3396 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 900 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 92 |  |
 | `server::dto` | `src/server/dto/mod.rs` | 1 |  |
@@ -153,9 +153,9 @@
 | `server::maintenance` | `src/server/maintenance.rs` | 916 |  |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
-| `server::routes` | `src/server/routes/mod.rs` | 276 |  |
+| `server::routes` | `src/server/routes/mod.rs` | 301 |  |
 | `server::routes::agents` | `src/server/routes/agents.rs` | 2337 | giant-file |
-| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1852 | giant-file |
+| `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1853 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1973 | giant-file |
 | `server::routes::auth` | `src/server/routes/auth.rs` | 89 |  |
@@ -252,7 +252,7 @@
 | `services::codex` | `src/services/codex.rs` | 1713 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 734 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5895 | giant-file |
-| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 904 |  |
+| `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 906 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 413 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1166 | giant-file |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 99 |  |
@@ -363,7 +363,7 @@
 | `services::discord_dm_reply_store` | `src/services/discord_dm_reply_store.rs` | 207 |  |
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 351 |  |
 | `services::dispatch_watchdog` | `src/services/dispatch_watchdog.rs` | 86 |  |
-| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2922 | giant-file |
+| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2959 | giant-file |
 | `services::dispatches` | `src/services/dispatches.rs` | 451 |  |
 | `services::dispatches_followup` | `src/services/dispatches_followup.rs` | 143 |  |
 | `services::gemini` | `src/services/gemini.rs` | 2565 | giant-file |

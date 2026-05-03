@@ -72,6 +72,7 @@ pub struct AppState {
     pub broadcast_tx: crate::server::ws::BroadcastTx,
     pub batch_buffer: crate::server::ws::BatchBuffer,
     pub health_registry: Option<Arc<HealthRegistry>>,
+    pub cluster_instance_id: Option<String>,
 }
 
 impl AppState {
@@ -131,6 +132,7 @@ impl AppState {
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
+            cluster_instance_id: None,
         }
     }
 
@@ -148,6 +150,7 @@ impl AppState {
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
+            cluster_instance_id: None,
         }
     }
 }
@@ -180,6 +183,26 @@ pub fn api_router_with_pg(
     health_registry: Option<Arc<HealthRegistry>>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Router {
+    api_router_with_pg_and_cluster(
+        engine,
+        config,
+        broadcast_tx,
+        batch_buffer,
+        health_registry,
+        pg_pool,
+        None,
+    )
+}
+
+pub fn api_router_with_pg_and_cluster(
+    engine: PolicyEngine,
+    config: crate::config::Config,
+    broadcast_tx: crate::server::ws::BroadcastTx,
+    batch_buffer: crate::server::ws::BatchBuffer,
+    health_registry: Option<Arc<HealthRegistry>>,
+    pg_pool: Option<sqlx::PgPool>,
+    cluster_instance_id: Option<String>,
+) -> Router {
     let state = AppState {
         #[cfg(all(test, feature = "legacy-sqlite-tests"))]
         legacy_db_override: None,
@@ -189,6 +212,7 @@ pub fn api_router_with_pg(
         broadcast_tx,
         batch_buffer,
         health_registry,
+        cluster_instance_id,
     };
 
     #[cfg(not(feature = "legacy-sqlite-tests"))]
@@ -218,6 +242,7 @@ pub fn api_router_with_pg_for_tests(
         broadcast_tx,
         batch_buffer,
         health_registry,
+        cluster_instance_id: None,
     };
 
     compose_api_router(state.clone()).with_state(state)

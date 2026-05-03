@@ -177,6 +177,7 @@ pub(super) async fn post_adk_session_status(
 
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
+        instance_id: None,
         agent_id: agent_id.map(str::to_string),
         status: Some(status.to_string()),
         provider: Some(provider.as_str().to_string()),
@@ -236,6 +237,7 @@ pub(super) async fn save_provider_session_id(
 ) {
     let body = crate::server::routes::dispatched_sessions::HookSessionBody {
         session_key: session_key.to_string(),
+        instance_id: None,
         agent_id: None,
         status: None,
         provider: Some(provider.as_str().to_string()),

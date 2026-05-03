@@ -319,6 +319,7 @@ pub(crate) async fn list_dispatched_sessions_pg(
         "SELECT
             s.id,
             s.session_key,
+            s.instance_id,
             s.agent_id,
             s.provider,
             s.status,
@@ -344,6 +345,7 @@ pub(crate) async fn list_dispatched_sessions_pg(
         "SELECT
             s.id,
             s.session_key,
+            s.instance_id,
             s.agent_id,
             s.provider,
             s.status,
@@ -383,6 +385,9 @@ pub(crate) async fn list_dispatched_sessions_pg(
         let session_key: Option<String> = row
             .try_get("session_key")
             .map_err(|error| format!("decode postgres session_key for session {id}: {error}"))?;
+        let instance_id: Option<String> = row
+            .try_get("instance_id")
+            .map_err(|error| format!("decode postgres instance_id for session {id}: {error}"))?;
         let agent_id: Option<String> = row
             .try_get("agent_id")
             .map_err(|error| format!("decode postgres agent_id for session {id}: {error}"))?;
@@ -457,6 +462,7 @@ pub(crate) async fn list_dispatched_sessions_pg(
         sessions.push(json!({
             "id": id.to_string(),
             "session_key": session_key,
+            "instance_id": instance_id,
             "agent_id": agent_id,
             "provider": provider,
             "status": effective.status,
@@ -492,6 +498,7 @@ pub(crate) async fn load_session_event_payload_pg(
         "SELECT
             s.id,
             s.session_key,
+            s.instance_id,
             s.agent_id,
             s.provider,
             s.status,
@@ -537,6 +544,7 @@ pub(crate) async fn load_session_event_payload_pg(
     Ok(Some(json!({
         "id": id.to_string(),
         "session_key": session_key_value,
+        "instance_id": row.try_get::<Option<String>, _>("instance_id").map_err(|error| format!("decode postgres instance_id for session event {session_key}: {error}"))?,
         "name": session_key_value,
         "linked_agent_id": row.try_get::<Option<String>, _>("agent_id").map_err(|error| format!("decode postgres agent_id for session event {session_key}: {error}"))?,
         "provider": row.try_get::<Option<String>, _>("provider").map_err(|error| format!("decode postgres provider for session event {session_key}: {error}"))?,
@@ -621,6 +629,7 @@ pub(crate) async fn load_session_update_payload_pg(
         "SELECT
             id,
             session_key,
+            instance_id,
             agent_id,
             status,
             provider,
@@ -650,6 +659,7 @@ pub(crate) async fn load_session_update_payload_pg(
     Ok(Some(json!({
         "id": row.try_get::<i64, _>("id").map_err(|error| format!("decode postgres session id for update {id}: {error}"))?.to_string(),
         "session_key": row.try_get::<String, _>("session_key").map_err(|error| format!("decode postgres session_key for update {id}: {error}"))?,
+        "instance_id": row.try_get::<Option<String>, _>("instance_id").map_err(|error| format!("decode postgres instance_id for update {id}: {error}"))?,
         "agent_id": row.try_get::<Option<String>, _>("agent_id").map_err(|error| format!("decode postgres agent_id for update {id}: {error}"))?,
         "status": row.try_get::<Option<String>, _>("status").map_err(|error| format!("decode postgres status for update {id}: {error}"))?,
         "provider": row.try_get::<Option<String>, _>("provider").map_err(|error| format!("decode postgres provider for update {id}: {error}"))?,
@@ -912,6 +922,7 @@ pub(crate) async fn load_session_by_id_pg(
 
 pub(crate) struct HookSessionUpsert<'a> {
     pub(crate) session_key: &'a str,
+    pub(crate) instance_id: Option<&'a str>,
     pub(crate) agent_id: Option<&'a str>,
     pub(crate) provider: &'a str,
     pub(crate) status: &'a str,
@@ -960,6 +971,7 @@ pub(crate) async fn upsert_hook_session_pg(
     sqlx::query(
         "INSERT INTO sessions (
             session_key,
+            instance_id,
             agent_id,
             provider,
             status,
@@ -973,10 +985,11 @@ pub(crate) async fn upsert_hook_session_pg(
             raw_provider_session_id,
             last_heartbeat
          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW()
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW()
          )
          ON CONFLICT(session_key) DO UPDATE SET
             status = EXCLUDED.status,
+            instance_id = COALESCE(NULLIF(BTRIM(EXCLUDED.instance_id), ''), sessions.instance_id),
             provider = EXCLUDED.provider,
             session_info = COALESCE(EXCLUDED.session_info, sessions.session_info),
             model = COALESCE(EXCLUDED.model, sessions.model),
@@ -994,6 +1007,7 @@ pub(crate) async fn upsert_hook_session_pg(
             last_heartbeat = NOW()",
     )
     .bind(params.session_key)
+    .bind(params.instance_id)
     .bind(params.agent_id)
     .bind(params.provider)
     .bind(params.status)
@@ -1019,6 +1033,7 @@ pub(crate) fn upsert_hook_session_sqlite_for_tests(
     conn.execute(
         "INSERT INTO sessions (
             session_key,
+            instance_id,
             agent_id,
             provider,
             status,
@@ -1031,9 +1046,10 @@ pub(crate) fn upsert_hook_session_sqlite_for_tests(
             claude_session_id,
             raw_provider_session_id,
             last_heartbeat
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, datetime('now'))
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'))
          ON CONFLICT(session_key) DO UPDATE SET
             status = excluded.status,
+            instance_id = COALESCE(NULLIF(TRIM(excluded.instance_id), ''), sessions.instance_id),
             provider = excluded.provider,
             session_info = COALESCE(excluded.session_info, sessions.session_info),
             model = COALESCE(excluded.model, sessions.model),
@@ -1051,6 +1067,7 @@ pub(crate) fn upsert_hook_session_sqlite_for_tests(
             last_heartbeat = datetime('now')",
         sqlite_test::params![
             params.session_key,
+            params.instance_id,
             params.agent_id,
             params.provider,
             params.status,
