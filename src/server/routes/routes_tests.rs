@@ -3209,7 +3209,12 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
     let engine = test_engine_with_pg(&db, pool.clone());
+    let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
+        crate::services::provider::ProviderKind::Claude,
+    )
+    .await;
     let cc_channel_id = "1479671298497183835";
+    let cc_channel_num = cc_channel_id.parse::<u64>().unwrap();
     let cdx_channel_id = "1479671301387059200";
     let cc_session_key = "mac-mini:AgentDesk-claude-adk-cc";
     let cdx_session_key = "mac-mini:AgentDesk-codex-adk-cdx";
@@ -3247,12 +3252,21 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     .execute(&pool)
     .await
     .unwrap();
+    harness
+        .seed_channel_session(cc_channel_num, "adk-cc", Some("session-1636-turn-cancel"))
+        .await;
+    let token = harness
+        .start_active_turn(cc_channel_num, 16, 36, Some("AgentDesk-claude-adk-cc"))
+        .await;
+    harness
+        .seed_queue(cc_channel_num, &[(2_636, "preserve turn cancel follow-up")])
+        .await;
 
     let app = test_api_router_with_pg(
         db.clone(),
         engine,
         crate::config::Config::default(),
-        None,
+        Some(harness.registry()),
         pool.clone(),
     );
     let response = app
@@ -3279,8 +3293,20 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     assert_eq!(json["exact_channel_match"], true);
     assert_eq!(json["session_key"], cc_session_key);
     assert_eq!(json["tmux_session"], "AgentDesk-claude-adk-cc");
+    assert_eq!(json["lifecycle_path"], "mailbox_canonical");
+    assert_eq!(json["queued_remaining"], 1);
+    assert_eq!(json["queue_preserved"], true);
+    assert_eq!(json["inflight_cleared"], false);
     assert_eq!(json["turn_status"], "cancelled");
     assert!(json["turn_completed_at"].as_str().is_some());
+    assert!(
+        token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "turn cancel must signal the active turn token"
+    );
+    let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(cc_channel_num).await;
+    assert!(!has_active_turn);
+    assert_eq!(queue_depth, 1);
+    assert_eq!(session_id, None);
 
     let event = crate::services::observability::events::recent(10)
         .into_iter()
@@ -3293,6 +3319,11 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     assert_eq!(event.provider.as_deref(), Some("claude"));
     assert_eq!(event.payload["reason"], "queue-api cancel_turn (preserve)");
     assert_eq!(event.payload["surface"], "queue_cancel_preserve");
+    assert_eq!(event.payload["lifecyclePath"], "mailbox_canonical");
+    assert_eq!(event.payload["queueDepth"], 1);
+    assert_eq!(event.payload["queuePreserved"], true);
+    assert_eq!(event.payload["inflightCleared"], false);
+    assert_eq!(event.payload["terminationRecorded"], true);
     assert_eq!(event.payload["session_key"], cc_session_key);
     assert!(event.payload["dispatch_id"].is_null());
 

@@ -452,7 +452,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 232 |  |
+| `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 399 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 579 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2198 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 867 |  |

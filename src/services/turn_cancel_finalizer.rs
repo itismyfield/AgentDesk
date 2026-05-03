@@ -229,4 +229,171 @@ mod tests {
         assert_eq!(cc_stop.details.surface, "text_cc_stop");
         assert!(!cc_stop.details.termination_recorded);
     }
+
+    #[tokio::test]
+    async fn cancel_surface_payload_matrix_preserves_surface_specific_contract() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        crate::services::observability::init_observability(None);
+
+        let completed_at = Utc.with_ymd_and_hms(2026, 5, 3, 10, 0, 0).unwrap();
+        let preserve_lifecycle = TurnLifecycleStopResult {
+            lifecycle_path: "mailbox_canonical",
+            tmux_killed: false,
+            inflight_cleared: false,
+            queue_depth: Some(1),
+            queue_preserved: true,
+            termination_recorded: true,
+        };
+        let channel_id = ChannelId::new(1479671301387059200);
+        let cases = vec![
+            (
+                "!stop",
+                "text_stop",
+                true,
+                None,
+                None,
+                None,
+                FinalizeTurnCancelRequest::from_text_stop(
+                    ProviderKind::Codex,
+                    channel_id,
+                    "!stop",
+                    true,
+                )
+                .with_completed_at(completed_at),
+            ),
+            (
+                "!cc stop",
+                "text_cc_stop",
+                false,
+                None,
+                None,
+                None,
+                FinalizeTurnCancelRequest::from_text_stop(
+                    ProviderKind::Codex,
+                    channel_id,
+                    "!cc stop",
+                    false,
+                )
+                .with_completed_at(completed_at),
+            ),
+            (
+                "queue-api cancel_turn (preserve)",
+                "queue_cancel_preserve",
+                true,
+                Some(1),
+                None,
+                Some("mac-mini:AgentDesk-codex-adk-cdx"),
+                FinalizeTurnCancelRequest::from_lifecycle_result(
+                    TurnCancelCorrelation {
+                        provider: Some(ProviderKind::Codex),
+                        channel_id: Some(channel_id),
+                        dispatch_id: None,
+                        session_key: Some("mac-mini:AgentDesk-codex-adk-cdx".to_string()),
+                        turn_id: None,
+                    },
+                    "queue-api cancel_turn (preserve)",
+                    "queue_cancel_preserve",
+                    &preserve_lifecycle,
+                )
+                .with_completed_at(completed_at),
+            ),
+            (
+                "queue-api cancel_dispatch (preserve)",
+                "queue_cancel_preserve",
+                true,
+                Some(1),
+                Some("dispatch-1636"),
+                Some("mac-mini:AgentDesk-codex-dispatch-1636"),
+                FinalizeTurnCancelRequest::from_lifecycle_result(
+                    TurnCancelCorrelation {
+                        provider: Some(ProviderKind::Codex),
+                        channel_id: Some(channel_id),
+                        dispatch_id: Some("dispatch-1636".to_string()),
+                        session_key: Some("mac-mini:AgentDesk-codex-dispatch-1636".to_string()),
+                        turn_id: None,
+                    },
+                    "queue-api cancel_dispatch (preserve)",
+                    "queue_cancel_preserve",
+                    &preserve_lifecycle,
+                )
+                .with_completed_at(completed_at),
+            ),
+        ];
+
+        for (
+            reason,
+            surface,
+            expected_termination_recorded,
+            expected_queue_depth,
+            dispatch_id,
+            session_key,
+            request,
+        ) in cases
+        {
+            let finalized = finalize_turn_cancel(request);
+            assert_eq!(finalized.status, CANCELLED_TURN_STATUS, "{reason}");
+            assert_eq!(finalized.completed_at, completed_at, "{reason}");
+            assert_eq!(finalized.details.reason, reason, "{reason}");
+            assert_eq!(finalized.details.surface, surface, "{reason}");
+            assert_eq!(
+                finalized.details.queue_depth, expected_queue_depth,
+                "{reason}"
+            );
+            assert!(finalized.details.queue_preserved, "{reason}");
+            assert_eq!(
+                finalized.details.termination_recorded, expected_termination_recorded,
+                "{reason}"
+            );
+            assert_eq!(
+                finalized.correlation.dispatch_id.as_deref(),
+                dispatch_id,
+                "{reason}"
+            );
+            assert_eq!(
+                finalized.correlation.session_key.as_deref(),
+                session_key,
+                "{reason}"
+            );
+        }
+
+        let events: Vec<_> = crate::services::observability::events::recent(10)
+            .into_iter()
+            .filter(|event| event.event_type == "turn_cancelled")
+            .collect();
+        assert_eq!(events.len(), 4);
+
+        for expected_reason in [
+            "!stop",
+            "!cc stop",
+            "queue-api cancel_turn (preserve)",
+            "queue-api cancel_dispatch (preserve)",
+        ] {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.payload["reason"] == expected_reason),
+                "{expected_reason} must emit the canonical turn_cancelled payload"
+            );
+        }
+        let cc_stop_event = events
+            .iter()
+            .find(|event| event.payload["reason"] == "!cc stop")
+            .expect("!cc stop event should be recorded");
+        assert_eq!(cc_stop_event.payload["terminationRecorded"], false);
+        assert_eq!(cc_stop_event.payload["queuePreserved"], true);
+
+        for expected_reason in [
+            "queue-api cancel_turn (preserve)",
+            "queue-api cancel_dispatch (preserve)",
+        ] {
+            let event = events
+                .iter()
+                .find(|event| event.payload["reason"] == expected_reason)
+                .expect("queue API event should be recorded");
+            assert_eq!(event.payload["queueDepth"], 1);
+            assert_eq!(event.payload["queuePreserved"], true);
+            assert_eq!(event.payload["terminationRecorded"], true);
+        }
+    }
 }
