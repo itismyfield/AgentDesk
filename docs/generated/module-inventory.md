@@ -155,7 +155,7 @@
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 412 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 301 |  |
-| `server::routes::agents` | `src/server/routes/agents.rs` | 2337 | giant-file |
+| `server::routes::agents` | `src/server/routes/agents.rs` | 2431 | giant-file |
 | `server::routes::agents_crud` | `src/server/routes/agents_crud.rs` | 1853 | giant-file |
 | `server::routes::agents_setup` | `src/server/routes/agents_setup.rs` | 1383 | giant-file |
 | `server::routes::analytics` | `src/server/routes/analytics.rs` | 1973 | giant-file |
@@ -172,7 +172,7 @@
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 3291 | giant-file |
 | `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 1255 | giant-file |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 |  |
-| `server::routes::docs` | `src/server/routes/docs.rs` | 4835 | giant-file |
+| `server::routes::docs` | `src/server/routes/docs.rs` | 4843 | giant-file |
 | `server::routes::domains` | `src/server/routes/domains/mod.rs` | 8 |  |
 | `server::routes::domains::access` | `src/server/routes/domains/access.rs` | 13 |  |
 | `server::routes::domains::admin` | `src/server/routes/domains/admin.rs` | 89 |  |
@@ -276,7 +276,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3249 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 6165 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 6247 | giant-file |
 | `services::discord::http` | `src/services/discord/http.rs` | 23 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 587 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 1287 | giant-file |
@@ -320,7 +320,7 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 148 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2162 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 6989 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 6996 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 314 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 367 |  |
