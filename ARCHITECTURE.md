@@ -343,7 +343,8 @@ src/
 │   │   ├── tmux_lifecycle.rs
 │   │   ├── tmux_overload_retry.rs
 │   │   ├── tmux_reaper.rs
-│   │   └── tmux_restart_handoff.rs
+│   │   ├── tmux_restart_handoff.rs
+│   │   └── tmux_session_files.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
