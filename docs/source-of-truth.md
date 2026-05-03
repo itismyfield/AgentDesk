@@ -42,6 +42,7 @@ The runtime and operator paths in this index were verified on 2026-04-24 with `l
 | Per-skill packages | Obsidian `~/ObsidianVault/RemoteVault/99_Skills/<skill>/SKILL.md` | Provider mirrors include `~/.claude/skills/<skill>/`, `~/.codex/skills/<skill>/`, OpenCode user/workspace skill roots, and the AgentDesk release mirror `~/.adk/release/skills/<skill>/` for skills exposed via `manifest.json`. The `skill-sync` skill manages the symlink/fanout. | Edit Obsidian source then run `skill-sync`. Do not hand-edit the provider mirrors. | `ls ~/ObsidianVault/RemoteVault/99_Skills/<skill>/` and `readlink ~/.claude/skills/<skill>` |
 | Workspace CLAUDE.md per agent | `~/.adk/release/config/workspace-claude-md/<agent>.md` | Operator-managed file copied/symlinked into each agent's workspace as the agent-facing `CLAUDE.md`. Not git-tracked in this repo. | Edit the runtime file in place; it propagates on next workspace bootstrap. Do not hand-edit per-workspace `CLAUDE.md` copies. | `ls ~/.adk/release/config/workspace-claude-md/` |
 | Workspace MEMORY.md per agent | `~/.adk/release/config/workspace-memory-md/<agent>.md` | Per-agent memory anchor consumed by the `memory-merge` workflow alongside SAM/SAK/LTM tiers. Workspace copies are derived; agent-managed memory entries live in `config/memories/` and the Obsidian Long-Term tree. | Edit the runtime file or use the `memory-write` / `memory-merge` skills. Avoid editing derived per-workspace copies. | `ls ~/.adk/release/config/workspace-memory-md/` |
+| `API_FRICTION:` marker contract | Repo [`docs/source-of-truth.md`](source-of-truth.md) and `/api/docs/api-friction-markers` | Runtime extraction/persistence lives in `src/services/discord/turn_bridge/` and `src/services/api_friction.rs`; events/rollups live in Postgres tables `api_friction_events` and `api_friction_issues`; Memento is an optional consumer. | Edit this document first when changing marker schema or operator contract; edit `src/services/api_friction.rs` only for runtime parser/storage behavior. Do not add ad hoc grep/cron collectors unless replacing the built-in collector under a dedicated migration. | `rg -n "API_FRICTION|api_friction" docs src/services src/server/routes/docs.rs` |
 | LaunchAgent operator env overlay | `~/.adk/release/config/launchd.env` | Loaded by the LaunchAgent generator (`agentdesk emit-launchd-plist`) and by `scripts/install.sh` / `scripts/deploy-release.sh`. Do not duplicate values into the plist directly. | Edit the runtime file. Reload via `launchctl bootout`/`bootstrap` or the deploy script. | `cat ~/.adk/release/config/launchd.env` |
 | Memento workspace memory | Memento MCP-managed store on disk (operator-private). Scope contract: [`docs/memory-scope.md`](memory-scope.md) (#1100). | `permanent` is for user identity, preferences, long-term decisions, and resolved procedures. `workspace`/`session` is for project/turn-local state. File-canonical content (prompts, runtime config, policies, skills, memory tiers listed in this matrix) MUST NOT be mirrored into Memento. When unsure, write `workspace`. | Use the Memento tool surface (`remember`, `amend`, `forget`, `memory_consolidate`). Avoid file-level edits to its store. Promote `workspace` → `permanent` only via explicit `amend` after multi-session validation. | `mcp__memento__memory_stats` and `mcp__memento__context` |
 | Archived config snapshots | `~/.adk/release/config/.backups/YYYY-MM-DD/` | None. This is the only allowed home for `*.pre-*`, `*.bak`, and `*.migrated` snapshots. | Never edit in place. Restore or diff explicitly if needed. | `find ~/.adk/release/config/.backups -maxdepth 2 -type f | sort` |
@@ -87,6 +88,27 @@ Skills are two-layered. The repo carries a tiny `skills/` tree containing `manif
 ### Memory tiers (SAM / SAK / LTM / workspace)
 
 Shared agent knowledge (SAK) is a single `shared_knowledge.md`, shared agent memory (SAM) is per-agent JSON, and long-term memory (LTM) is a per-agent directory tree under `config/memories/long-term/<agent>/`. Workspace MEMORY anchors live separately under `config/workspace-memory-md/<agent>.md`. Pitfall: SAK and SAM are runtime-managed — manual edits should be repair-only, with content normally written through the `memory-write` / `memory-merge` skills. A second LTM tree exists in the Obsidian vault as legacy input; do not reintroduce it as canonical.
+
+### API_FRICTION markers
+
+`API_FRICTION:` is the canonical structured marker for API documentation gaps discovered during agent work. Emit it only when an agent had to infer a contract, trial-and-error an endpoint, or use a workaround because `/api/docs` was missing or misleading. The marker must be one physical line:
+
+```text
+API_FRICTION: {"endpoint":"PATCH /api/dispatches/{id}","friction_type":"missing-docs","summary":"dispatch completion docs omitted PATCH semantics","workaround":"read source and called PATCH manually","suggested_fix":"document status/result response fields in /api/docs/dispatches","docs_category":"dispatches"}
+```
+
+Required JSON fields are `endpoint`, `friction_type`, and `summary`. Optional fields are `workaround`, `suggested_fix`, `docs_category`, and `keywords`. Accepted aliases are `surface` for `endpoint`, `type` or `frictionType` for `friction_type`, `workaround_method` for `workaround`, `suggestedFix` for `suggested_fix`, and `docsCategory` for `docs_category`.
+
+Runtime collection is already built in: the Discord turn bridge extracts valid marker lines, strips them from the delivered response, persists events to Postgres `api_friction_events`, optionally writes Memento topic `api-friction`, and the policy tick aggregates repeated fingerprints into `api_friction_issues` / GitHub issues. Invalid JSON markers remain visible in the response and are logged as parse errors so the agent can fix the marker.
+
+Pitfall: do not add a parallel grep/cron collector for the same marker unless a dedicated migration replaces the runtime collector. Query the existing store first:
+
+```sql
+SELECT endpoint, friction_type, COUNT(*)
+FROM api_friction_events
+GROUP BY 1, 2
+ORDER BY COUNT(*) DESC;
+```
 
 ### LaunchAgent (`com.agentdesk.release.plist` + `launchd.env`)
 
