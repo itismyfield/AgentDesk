@@ -421,7 +421,7 @@ impl ContextPanelSnapshot {
             .saturating_add(self.cache_create_tokens)
             .saturating_add(self.cache_read_tokens);
         let percent = (u128::from(used_tokens) * 100) / u128::from(self.context_window_tokens);
-        Some(percent.min(u128::from(u64::MAX)) as u64)
+        Some(percent.min(100) as u64)
     }
 }
 
@@ -1845,6 +1845,18 @@ mod tests {
         let critical =
             events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
         assert!(critical.contains("Context   ⚠️ 85% used · auto-compact 90% — 자동 압축 직전"));
+    }
+
+    #[test]
+    fn status_panel_caps_context_usage_display_at_100_percent() {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(188);
+        assert!(events.set_context_panel_usage(channel_id, 4000, 80, 10, 1000, 60));
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+        assert!(rendered.contains("Context   ⚠️ 100% used · auto-compact 60%"));
+        assert!(!rendered.contains("409% used"));
     }
 
     #[test]
