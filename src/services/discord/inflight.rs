@@ -935,6 +935,49 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn inflight_malformed_json_graceful_skip() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        let dir = root.join(ProviderKind::Claude.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write valid JSON
+        let valid_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            111,
+            Some("adk-claude".to_string()),
+            222,
+            333,
+            444,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        let valid_path = dir.join("111.json");
+        std::fs::write(&valid_path, serde_json::to_string(&valid_state).unwrap()).unwrap();
+
+        // Write malformed JSON
+        let malformed_path = dir.join("999.json");
+        std::fs::write(&malformed_path, "{ malformed json ]").unwrap();
+
+        // Load states
+        let loaded = load_inflight_states_from_root(root, &ProviderKind::Claude);
+
+        // Assert: should load valid state, ignore malformed state, and delete the malformed file
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].channel_id, 111);
+
+        // Valid file should still exist
+        assert!(valid_path.exists());
+        // Malformed file should be deleted by the load function
+        assert!(!malformed_path.exists());
+    }
+
+    #[test]
     fn test_save_and_load_inflight_state() {
         let temp = TempDir::new().unwrap();
 
