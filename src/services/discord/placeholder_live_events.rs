@@ -20,6 +20,7 @@ const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 const TASK_PANEL_LINE_MAX_CHARS: usize = 140;
 const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
 const PROMPT_PANEL_LINE_MAX_CHARS: usize = 120;
+const PROMPT_PANEL_SKIPPED_REASON_MAX_CHARS: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecentPlaceholderEvent {
@@ -427,24 +428,37 @@ impl ContextPanelSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PromptPanelSnapshot {
     profile: Option<String>,
-    enabled_layer_count: i64,
-    layer_count: i64,
-    skipped_layer_count: i64,
+    enabled_layers: Vec<String>,
+    skipped_layers: Vec<SkippedLayerEntry>,
     total_input_tokens_est: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedLayerEntry {
+    name: String,
+    reason: Option<String>,
 }
 
 impl PromptPanelSnapshot {
     fn from_manifest(manifest: &PromptManifest) -> Self {
-        let layer_count = manifest
-            .layer_count
-            .max(i64::try_from(manifest.layers.len()).unwrap_or(i64::MAX))
-            .max(0);
-        let enabled_layer_count = manifest.layers.iter().filter(|layer| layer.enabled).count();
-        let enabled_layer_count = i64::try_from(enabled_layer_count)
-            .unwrap_or(i64::MAX)
-            .min(layer_count)
-            .max(0);
-        let skipped_layer_count = layer_count.saturating_sub(enabled_layer_count);
+        let mut enabled_layers = Vec::new();
+        let mut skipped_layers = Vec::new();
+        for layer in &manifest.layers {
+            if layer.enabled {
+                enabled_layers.push(layer.layer_name.clone());
+            } else {
+                let reason = layer
+                    .reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                skipped_layers.push(SkippedLayerEntry {
+                    name: layer.layer_name.clone(),
+                    reason,
+                });
+            }
+        }
         Self {
             profile: manifest
                 .profile
@@ -452,9 +466,8 @@ impl PromptPanelSnapshot {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            enabled_layer_count,
-            layer_count,
-            skipped_layer_count,
+            enabled_layers,
+            skipped_layers,
             total_input_tokens_est: manifest.total_input_tokens_est.max(0),
         }
     }
@@ -617,7 +630,7 @@ fn render_status_panel(
     }
 
     if let Some(prompt) = snapshot.prompt.as_ref() {
-        sections.push(render_prompt_panel_line(prompt));
+        sections.push(render_prompt_panel_block(prompt));
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.todos.is_empty() {
@@ -711,16 +724,50 @@ fn render_context_panel_line(context: &ContextPanelSnapshot) -> Option<String> {
     Some(truncate_chars(&line, CONTEXT_PANEL_LINE_MAX_CHARS))
 }
 
-fn render_prompt_panel_line(prompt: &PromptPanelSnapshot) -> String {
-    let parts = [
+fn render_prompt_panel_block(prompt: &PromptPanelSnapshot) -> String {
+    let header_parts = [
         render_prompt_profile_label(prompt.profile.as_deref()),
-        render_prompt_layer_count(prompt),
         render_prompt_tokens(prompt.total_input_tokens_est),
     ];
-    truncate_chars(
-        &format!("Prompt    {}", parts.join(" · ")),
+    let header = truncate_chars(
+        &format!("Prompt    {}", header_parts.join(" · ")),
         PROMPT_PANEL_LINE_MAX_CHARS,
-    )
+    );
+
+    let mut lines = vec![header];
+
+    if !prompt.enabled_layers.is_empty() {
+        let names = prompt.enabled_layers.join(", ");
+        lines.push(truncate_chars(
+            &format!("- 활성 ({}): {}", prompt.enabled_layers.len(), names),
+            PROMPT_PANEL_LINE_MAX_CHARS,
+        ));
+    }
+
+    if !prompt.skipped_layers.is_empty() {
+        let parts: Vec<String> = prompt
+            .skipped_layers
+            .iter()
+            .map(|entry| match entry.reason.as_deref() {
+                Some(reason) => format!(
+                    "{} ({})",
+                    entry.name,
+                    truncate_chars(reason, PROMPT_PANEL_SKIPPED_REASON_MAX_CHARS)
+                ),
+                None => entry.name.clone(),
+            })
+            .collect();
+        lines.push(truncate_chars(
+            &format!(
+                "- 스킵 ({}): {}",
+                prompt.skipped_layers.len(),
+                parts.join(", ")
+            ),
+            PROMPT_PANEL_LINE_MAX_CHARS,
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn render_prompt_profile_label(profile: Option<&str>) -> String {
@@ -744,17 +791,6 @@ fn render_prompt_profile_label(profile: Option<&str>) -> String {
             rendered
         }
     }
-}
-
-fn render_prompt_layer_count(prompt: &PromptPanelSnapshot) -> String {
-    let mut rendered = format!(
-        "{}/{} layers",
-        prompt.enabled_layer_count, prompt.layer_count
-    );
-    if prompt.skipped_layer_count > 0 {
-        rendered.push_str(&format!(" — {} skipped", prompt.skipped_layer_count));
-    }
-    rendered
 }
 
 fn render_prompt_tokens(total_input_tokens_est: i64) -> String {
@@ -1783,15 +1819,19 @@ mod tests {
     }
 
     #[test]
-    fn status_panel_renders_prompt_manifest_line() {
-        fn layer(name: &str, enabled: bool) -> crate::db::prompt_manifests::PromptManifestLayer {
+    fn status_panel_renders_prompt_manifest_block() {
+        fn layer(
+            name: &str,
+            enabled: bool,
+            reason: Option<&str>,
+        ) -> crate::db::prompt_manifests::PromptManifestLayer {
             crate::db::prompt_manifests::PromptManifestLayer {
                 id: None,
                 manifest_id: None,
                 layer_name: name.to_string(),
                 enabled,
                 source: Some("test".to_string()),
-                reason: None,
+                reason: reason.map(str::to_string),
                 chars: 0,
                 tokens_est: 0,
                 content_sha256: "0".repeat(64),
@@ -1812,26 +1852,27 @@ mod tests {
             dispatch_id: None,
             profile: Some("full".to_string()),
             total_input_tokens_est: 21_400,
-            layer_count: 9,
+            layer_count: 5,
             layers: vec![
-                layer("base", true),
-                layer("discord", true),
-                layer("memory", true),
-                layer("skills", true),
-                layer("policy", true),
-                layer("repo", true),
-                layer("task", true),
-                layer("user", true),
-                layer("optional", false),
+                layer("role_prompt", true, None),
+                layer("dispatch_contract", true, None),
+                layer("current_task", true, None),
+                layer("recovery_context", false, Some("no_recovery")),
+                layer(
+                    "memory_recall",
+                    false,
+                    Some("memory_backend=memento;mcp_unavailable"),
+                ),
             ],
         };
 
         assert!(events.set_prompt_manifest(channel_id, &manifest));
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-        assert!(
-            rendered
-                .contains("Prompt    Full profile · 8/9 layers — 1 skipped · ~21.4k input tokens")
-        );
+        assert!(rendered.contains("Prompt    Full profile · ~21.4k input tokens"));
+        assert!(rendered.contains("- 활성 (3): role_prompt, dispatch_contract, current_task"));
+        assert!(rendered.contains(
+            "- 스킵 (2): recovery_context (no_recovery), memory_recall (memory_backend=memento;mcp_unavailable)"
+        ));
     }
 
     #[test]
