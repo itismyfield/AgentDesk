@@ -56,6 +56,44 @@ pub struct ContextCompactionDetails {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TurnCancellationDetails {
+    pub reason: String,
+    pub surface: String,
+    pub lifecycle_path: String,
+    pub tmux_killed: bool,
+    pub inflight_cleared: bool,
+    pub queue_depth: Option<usize>,
+    pub queue_preserved: bool,
+    pub termination_recorded: bool,
+}
+
+impl TurnCancellationDetails {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        reason: &str,
+        surface: &str,
+        lifecycle_path: &str,
+        tmux_killed: bool,
+        inflight_cleared: bool,
+        queue_depth: Option<usize>,
+        queue_preserved: bool,
+        termination_recorded: bool,
+    ) -> Self {
+        Self {
+            reason: non_empty_or(reason, "unspecified").to_string(),
+            surface: normalize_label(surface, "unknown"),
+            lifecycle_path: non_empty_or(lifecycle_path, "unknown").to_string(),
+            tmux_killed,
+            inflight_cleared,
+            queue_depth,
+            queue_preserved,
+            termination_recorded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionStrategyDetails {
     pub reason: String,
     pub provider_session_id: Option<String>,
@@ -210,6 +248,27 @@ fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     } else {
         trimmed
     }
+}
+
+fn normalize_label(value: &str, fallback: &str) -> String {
+    // Most callers pass static labels; keep this defensive so future ad-hoc
+    // surfaces do not fragment analytics with whitespace/case variants.
+    let normalized: String = non_empty_or(value, fallback)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let normalized = normalized
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    non_empty_or(&normalized, fallback).to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +571,24 @@ mod tests {
         );
         assert_eq!(recovery.meta().severity, TurnEventSeverity::Warn);
         assert!(recovery.details_json()["recovery"].is_null());
+    }
+
+    #[test]
+    fn normalize_label_collapses_future_ad_hoc_surface_variants() {
+        assert_eq!(normalize_label("", "unknown"), "unknown");
+        assert_eq!(normalize_label(" --- ", "unknown"), "unknown");
+        assert_eq!(
+            normalize_label("Queue API Cancel", "unknown"),
+            "queue_api_cancel"
+        );
+        assert_eq!(
+            normalize_label("__queue--api  cancel__", "unknown"),
+            "queue_api_cancel"
+        );
+        assert_eq!(
+            normalize_label("queue_cancel_preserve", "unknown"),
+            "queue_cancel_preserve"
+        );
     }
 
     #[test]

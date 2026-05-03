@@ -5,6 +5,8 @@ use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
+const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
+
 #[derive(Debug, Clone)]
 pub(crate) struct TurnLifecycleTarget {
     pub provider: Option<ProviderKind>,
@@ -67,7 +69,7 @@ async fn stop_turn_with_policy(
             .await;
     }
 
-    let mut lifecycle_path = "direct-fallback";
+    let mut lifecycle_path = DIRECT_FALLBACK_PATH;
     let mut queue_depth = None;
     let mut termination_recorded = false;
     let mut runtime_persistent_inflight_cleared = false;
@@ -117,7 +119,7 @@ async fn stop_turn_with_policy(
     // provider/channel path cannot resolve, fall back to mailbox cleanup by
     // tmux lookup. Force-kill tears down watcher ownership; preserve-session
     // stops clear active-turn state while leaving watcher lifetime to tmux.
-    if lifecycle_path == "direct-fallback"
+    if lifecycle_path == DIRECT_FALLBACK_PATH
         && let Some(registry) = health_registry
     {
         let hard_stop = if cleanup_tmux {
@@ -182,13 +184,121 @@ async fn stop_turn_with_policy(
         false
     };
 
-    TurnLifecycleStopResult {
+    let result = TurnLifecycleStopResult {
         lifecycle_path,
         tmux_killed,
         inflight_cleared,
         queue_depth,
         queue_preserved: true,
         termination_recorded,
+    };
+
+    if should_emit_cancel_observability(target, &result) {
+        crate::services::observability::emit_turn_cancelled(
+            target.provider.as_ref().map(ProviderKind::as_str),
+            target.channel_id.map(|channel_id| channel_id.get()),
+            None,
+            None,
+            None,
+            crate::services::observability::turn_lifecycle::TurnCancellationDetails::new(
+                reason,
+                cleanup_policy_observability_surface(cleanup_policy),
+                result.lifecycle_path,
+                result.tmux_killed,
+                result.inflight_cleared,
+                result.queue_depth,
+                result.queue_preserved,
+                result.termination_recorded,
+            ),
+        );
+    }
+
+    result
+}
+
+fn should_emit_cancel_observability(
+    target: &TurnLifecycleTarget,
+    result: &TurnLifecycleStopResult,
+) -> bool {
+    target.channel_id.is_some()
+        || result.lifecycle_path != DIRECT_FALLBACK_PATH
+        || result.tmux_killed
+        || result.inflight_cleared
+        || result.queue_depth.is_some()
+        || result.termination_recorded
+}
+
+pub(crate) fn cleanup_policy_observability_surface(
+    cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+) -> &'static str {
+    match cleanup_policy {
+        crate::services::discord::TmuxCleanupPolicy::PreserveSession => "preserve_session_cancel",
+        crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
+            "queue_cancel_preserve"
+        }
+        crate::services::discord::TmuxCleanupPolicy::CleanupSession { .. } => "force_kill_cancel",
+    }
+}
+
+#[cfg(test)]
+mod policy_observability_tests {
+    use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
+
+    #[test]
+    fn cleanup_policy_observability_surface_matches_cancel_contract() {
+        assert_eq!(
+            super::cleanup_policy_observability_surface(TmuxCleanupPolicy::PreserveSession),
+            "preserve_session_cancel"
+        );
+        assert_eq!(
+            super::cleanup_policy_observability_surface(
+                TmuxCleanupPolicy::PreserveSessionAndInflight {
+                    restart_mode: InflightRestartMode::HotSwapHandoff,
+                },
+            ),
+            "queue_cancel_preserve"
+        );
+        assert_eq!(
+            super::cleanup_policy_observability_surface(TmuxCleanupPolicy::CleanupSession {
+                termination_reason_code: Some("force_kill"),
+            }),
+            "force_kill_cancel"
+        );
+    }
+
+    #[test]
+    fn cancel_observability_skips_only_unknown_noop_fallback() {
+        let target = super::TurnLifecycleTarget {
+            provider: None,
+            channel_id: None,
+            tmux_name: "missing-session".to_string(),
+        };
+        let noop = super::TurnLifecycleStopResult {
+            lifecycle_path: super::DIRECT_FALLBACK_PATH,
+            tmux_killed: false,
+            inflight_cleared: false,
+            queue_depth: None,
+            queue_preserved: true,
+            termination_recorded: false,
+        };
+        assert!(!super::should_emit_cancel_observability(&target, &noop));
+
+        let mut mailbox_cleanup = noop.clone();
+        mailbox_cleanup.lifecycle_path = "mailbox_canonical";
+        assert!(super::should_emit_cancel_observability(
+            &target,
+            &mailbox_cleanup
+        ));
+
+        let channel_scoped_target = super::TurnLifecycleTarget {
+            provider: None,
+            channel_id: Some(poise::serenity_prelude::ChannelId::new(42)),
+            tmux_name: "missing-session".to_string(),
+        };
+        assert!(super::should_emit_cancel_observability(
+            &channel_scoped_target,
+            &noop
+        ));
     }
 }
 

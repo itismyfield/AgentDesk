@@ -391,12 +391,12 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 397 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 434 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 401 |  |
-| `services::observability` | `src/services/observability/mod.rs` | 3458 | giant-file |
+| `services::observability` | `src/services/observability/mod.rs` | 3544 | giant-file |
 | `services::observability::events` | `src/services/observability/events.rs` | 345 |  |
 | `services::observability::metrics` | `src/services/observability/metrics.rs` | 391 |  |
 | `services::observability::recovery_audit` | `src/services/observability/recovery_audit.rs` | 528 |  |
 | `services::observability::session_inventory` | `src/services/observability/session_inventory.rs` | 308 |  |
-| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 844 |  |
+| `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 921 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 443 |  |
 | `services::onboarding` | `src/services/onboarding.rs` | 5279 | giant-file |
 | `services::opencode` | `src/services/opencode.rs` | 2133 | giant-file |
@@ -448,7 +448,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 398 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 709 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 237 |  |
-| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 419 |  |
+| `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 529 |  |
 | `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 2198 | giant-file |
 | `supervisor` | `src/supervisor/mod.rs` | 867 |  |
 | `ui` | `src/ui/mod.rs` | 1 |  |
