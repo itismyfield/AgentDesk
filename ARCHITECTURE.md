@@ -463,6 +463,7 @@ src/
 │   ├── tmux_diagnostics.rs
 │   ├── tmux_wrapper.rs
 │   ├── tool_output_guard.rs
+│   ├── turn_cancel_finalizer.rs
 │   ├── turn_lifecycle.rs
 │   └── turn_orchestrator.rs
 ├── supervisor/
