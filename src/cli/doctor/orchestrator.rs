@@ -2989,8 +2989,9 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
     match runtime.block_on(crate::db::postgres::connect(cfg)) {
         Ok(Some(pool)) => {
             let migration_status = runtime.block_on(crate::db::postgres::migration_status(&pool));
-            let checksum_mismatches =
-                runtime.block_on(crate::db::postgres::applied_migration_checksum_mismatches(&pool));
+            let checksum_mismatches = runtime.block_on(
+                crate::db::postgres::applied_migration_checksum_mismatches(&pool),
+            );
             drop(pool);
             match (migration_status, checksum_mismatches) {
                 (Ok(status), Ok(checksum_mismatches))
