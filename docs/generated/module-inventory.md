@@ -66,7 +66,7 @@
 | `cli::utils` | `src/cli/utils.rs` | 277 |  |
 | `compat` | `src/compat/mod.rs` | 185 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 23 |  |
-| `config` | `src/config.rs` | 2601 | giant-file |
+| `config` | `src/config.rs` | 2628 | giant-file |
 | `crate` | `src/main.rs` | 45 |  |
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 341 |  |
@@ -90,7 +90,7 @@
 | `dispatch` | `src/dispatch/mod.rs` | 5108 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3987 | giant-file |
-| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2777 | giant-file |
+| `dispatch::dispatch_create` | `src/dispatch/dispatch_create.rs` | 2877 | giant-file |
 | `dispatch::dispatch_status` | `src/dispatch/dispatch_status.rs` | 1875 | giant-file |
 | `engine` | `src/engine/mod.rs` | 2590 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
