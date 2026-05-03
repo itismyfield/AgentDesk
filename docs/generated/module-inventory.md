@@ -259,7 +259,7 @@
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 521 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1867 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 934 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1028 | giant-file |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1016 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 237 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 129 |  |
 | `services::discord::commands::inspect` | `src/services/discord/commands/inspect.rs` | 955 |  |
@@ -268,9 +268,9 @@
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 160 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 347 |  |
-| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
-| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 389 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1265 | giant-file |
+| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 258 |  |
+| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 381 |  |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1257 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 558 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3249 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
