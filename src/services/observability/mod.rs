@@ -686,6 +686,40 @@ pub fn emit_recovery_fired(
     );
 }
 
+/// Inflight lifecycle observability: pair-tracking events so external monitors
+/// can detect cleanup leaks. `kind` is the lifecycle phase identifier:
+/// `"delegated_to_watcher"`, `"cleared_by_bridge"`, `"cleared_by_watcher"`,
+/// `"leak_detected_completed_stale"`. `delegated_to_watcher` and
+/// `cleared_by_watcher` should pair 1:1; a sustained drift between counters
+/// indicates the bridge handed off cleanup but the watcher never executed it.
+/// `leak_detected_completed_stale` fires from the stall-watchdog when an
+/// inflight is healthy/synced but the mailbox is idle past the staleness
+/// threshold — the smoking-gun signal for the deadlock-manager alarm pattern.
+pub fn emit_inflight_lifecycle_event(
+    provider: &str,
+    channel_id: u64,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    kind: &str,
+    extra: Value,
+) {
+    emit_event(
+        "inflight_lifecycle",
+        Some(provider),
+        Some(channel_id),
+        dispatch_id,
+        session_key,
+        turn_id,
+        normalize_string(kind).as_deref(),
+        CounterDelta::default(),
+        json!({
+            "kind": normalize_string(kind),
+            "extra": extra,
+        }),
+    );
+}
+
 pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>) -> bool {
     if condition {
         return true;

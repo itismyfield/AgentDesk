@@ -5153,6 +5153,28 @@ pub(super) async fn tmux_output_watcher_with_restore(
             let delegated_finalize_owed = if dispatch_ok {
                 let owed = mailbox_finalize_owed.swap(false, std::sync::atomic::Ordering::AcqRel);
                 super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+                let watcher_turn_id = inflight_state
+                    .as_ref()
+                    .filter(|s| s.user_msg_id != 0)
+                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
+                let watcher_session_key_owned =
+                    inflight_state.as_ref().and_then(|s| s.session_key.clone());
+                let watcher_dispatch_id_owned = resolved_did
+                    .clone()
+                    .or_else(|| inflight_state.as_ref().and_then(|s| s.dispatch_id.clone()));
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider_kind.as_str(),
+                    channel_id.get(),
+                    watcher_dispatch_id_owned.as_deref(),
+                    watcher_session_key_owned.as_deref(),
+                    watcher_turn_id.as_deref(),
+                    "cleared_by_watcher",
+                    serde_json::json!({
+                        "owed_finalize": owed,
+                        "has_assistant_response": has_assistant_response,
+                        "full_response_len": full_response.len(),
+                    }),
+                );
                 finish_restored_watcher_active_turn(
                     &shared,
                     &provider_kind,

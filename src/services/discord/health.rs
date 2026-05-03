@@ -3864,6 +3864,51 @@ pub(super) fn stall_watchdog_should_force_clean(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+/// Detection-only counterpart to `stall_watchdog_should_force_clean`:
+/// returns `true` for the "completed-stale inflight on a healthy watcher"
+/// pattern that the deadlock-manager 30-min alarms keep flagging. All five
+/// signals must hold:
+/// - `attached == true` and `desynced == false` (relay is fine)
+/// - `inflight_state_present == true` (a stale file exists)
+/// - `mailbox_active_user_msg_id.is_none()` (no active turn anchor)
+/// - `tmux_session_alive == Some(true)` (session still waiting for input)
+/// - `inflight_updated_at` older than `threshold_secs`
+///
+/// Callers must NOT clean on this signal alone — the user may be reading the
+/// delivered response and about to send the next message. The helper exists
+/// so the watchdog can emit telemetry without altering recovery behaviour.
+pub(super) fn inflight_completed_stale_leak_detected(
+    attached: bool,
+    desynced: bool,
+    inflight_state_present: bool,
+    mailbox_active_user_msg_id: Option<u64>,
+    inflight_updated_at: Option<&str>,
+    tmux_session_alive: Option<bool>,
+    now_unix_secs: i64,
+    threshold_secs: u64,
+) -> bool {
+    if !attached || desynced {
+        return false;
+    }
+    if !inflight_state_present {
+        return false;
+    }
+    if mailbox_active_user_msg_id.is_some() {
+        return false;
+    }
+    if tmux_session_alive != Some(true) {
+        return false;
+    }
+    let Some(updated_at) = inflight_updated_at else {
+        return false;
+    };
+    let Some(updated_at_unix) = super::inflight::parse_updated_at_unix(updated_at) else {
+        return false;
+    };
+    let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
+    age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
 /// `2x` staleness window has elapsed, while staying well below the
 /// gateway-lease keepalive cadence so we never starve the gateway loop.
@@ -3929,6 +3974,69 @@ pub(super) async fn run_stall_watchdog_pass(
             STALL_WATCHDOG_THRESHOLD_SECS,
         );
         if !should_clean {
+            // Detection-only sibling probe for "completed-stale" inflight
+            // leaks: bridge handed off cleanup to the watcher (or the watcher
+            // delivered the response itself), but the inflight file persisted
+            // past the staleness threshold even though the relay is healthy
+            // and the mailbox has no active turn. This is the silent gap
+            // behind the deadlock-manager 30/45/60-min alarm pattern. We do
+            // NOT clean here — the live tmux session may be waiting for the
+            // user's next message. Emitting the structured event lets the
+            // external monitor and counters detect each occurrence so the
+            // root cause can be isolated.
+            if inflight_completed_stale_leak_detected(
+                snapshot.attached,
+                snapshot.desynced,
+                snapshot.inflight_state_present,
+                snapshot.mailbox_active_user_msg_id,
+                snapshot.inflight_updated_at.as_deref(),
+                snapshot.tmux_session_alive,
+                now_unix_secs,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+            ) {
+                let leak_inflight =
+                    super::inflight::load_inflight_state(provider, channel_id.get());
+                let leak_turn_id = leak_inflight
+                    .as_ref()
+                    .filter(|s| s.user_msg_id != 0)
+                    .map(|s| format!("discord:{}:{}", s.channel_id, s.user_msg_id));
+                let leak_dispatch_id = leak_inflight.as_ref().and_then(|s| s.dispatch_id.clone());
+                let leak_session_key = leak_inflight.as_ref().and_then(|s| s.session_key.clone());
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] 🔎 inflight leak suspected on channel {} (provider={}): completed-stale + healthy watcher; emitting telemetry only",
+                    channel_id,
+                    provider.as_str()
+                );
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider.as_str(),
+                    channel_id.get(),
+                    leak_dispatch_id.as_deref(),
+                    leak_session_key.as_deref(),
+                    leak_turn_id.as_deref(),
+                    "leak_detected_completed_stale",
+                    serde_json::json!({
+                        "inflight_started_at": snapshot.inflight_started_at,
+                        "inflight_updated_at": snapshot.inflight_updated_at,
+                        "tmux_session": snapshot.tmux_session,
+                        "tmux_session_alive": snapshot.tmux_session_alive,
+                        "watcher_attached": snapshot.attached,
+                        "has_pending_queue": snapshot.has_pending_queue,
+                        "full_response_len": leak_inflight
+                            .as_ref()
+                            .map(|s| s.full_response.len()),
+                        "response_sent_offset": leak_inflight
+                            .as_ref()
+                            .map(|s| s.response_sent_offset),
+                        "last_watcher_relayed_offset": leak_inflight
+                            .as_ref()
+                            .and_then(|s| s.last_watcher_relayed_offset),
+                        "watcher_owns_live_relay": leak_inflight
+                            .as_ref()
+                            .map(|s| s.watcher_owns_live_relay),
+                    }),
+                );
+            }
             continue;
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3996,8 +4104,128 @@ pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKin
 /// running in normal `cargo test --bin agentdesk` invocations.
 #[cfg(test)]
 mod stall_watchdog_pure_tests {
-    use super::{STALL_WATCHDOG_THRESHOLD_SECS, stall_watchdog_should_force_clean};
+    use super::{
+        STALL_WATCHDOG_THRESHOLD_SECS, inflight_completed_stale_leak_detected,
+        stall_watchdog_should_force_clean,
+    };
     use chrono::TimeZone;
+
+    fn local_string(unix: i64) -> String {
+        chrono::Local
+            .timestamp_opt(unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// `inflight_completed_stale_leak_detected` requires every signal of the
+    /// "completed-stale on healthy watcher" pattern. Each AND-clause is
+    /// inverted to lock the gate against accidental relaxation.
+    #[test]
+    fn inflight_completed_stale_leak_detected_requires_all_signals() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale = local_string(now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
+        let fresh = local_string(now_unix - 5);
+
+        // Happy path: attached + synced + inflight + idle mailbox + alive
+        // tmux + stale updated_at → leak.
+        assert!(inflight_completed_stale_leak_detected(
+            true,
+            false,
+            true,
+            None,
+            Some(stale.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Detached watcher → not this pattern (covered by other recovery).
+        assert!(!inflight_completed_stale_leak_detected(
+            false,
+            false,
+            true,
+            None,
+            Some(stale.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Desynced relay → handled by stall_watchdog_should_force_clean
+        // already; do not double-emit here.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            true,
+            true,
+            None,
+            Some(stale.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Mailbox still has an active turn anchor → live work, not a leak.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            false,
+            true,
+            Some(123),
+            Some(stale.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Tmux session gone → orphan path, not the completed-stale pattern.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            false,
+            true,
+            None,
+            Some(stale.as_str()),
+            Some(false),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // No inflight on disk → nothing to leak.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            false,
+            false,
+            None,
+            Some(stale.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Fresh updated_at → user may still be reading; do not flag yet.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            false,
+            true,
+            None,
+            Some(fresh.as_str()),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+
+        // Unparseable updated_at → never infer a leak from missing data.
+        assert!(!inflight_completed_stale_leak_detected(
+            true,
+            false,
+            true,
+            None,
+            Some("not-a-real-timestamp"),
+            Some(true),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+        ));
+    }
 
     /// All three signals (`attached`, `desynced`, stale `updated_at`) must
     /// be present before the watchdog cleans. A regression that drops any

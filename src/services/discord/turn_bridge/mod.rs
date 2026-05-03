@@ -4382,10 +4382,38 @@ pub(super) fn spawn_turn_bridge(
         } else if preserve_inflight_for_cleanup_retry || bridge_relay_delegated_to_watcher {
             let _ = save_inflight_state(&inflight_state);
             inflight_guard.provider.take();
+            if bridge_relay_delegated_to_watcher {
+                crate::services::observability::emit_inflight_lifecycle_event(
+                    provider.as_str(),
+                    channel_id.get(),
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    Some(turn_id.as_str()),
+                    "delegated_to_watcher",
+                    serde_json::json!({
+                        "preserve_inflight_for_cleanup_retry": preserve_inflight_for_cleanup_retry,
+                        "full_response_len": inflight_state.full_response.len(),
+                        "response_sent_offset": inflight_state.response_sent_offset,
+                        "watcher_owns_live_relay": inflight_state.watcher_owns_live_relay,
+                    }),
+                );
+            }
         } else {
             clear_inflight_state(&provider, channel_id.get());
             // Defuse the guard — cleanup already done above.
             inflight_guard.provider.take();
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                channel_id.get(),
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "cleared_by_bridge",
+                serde_json::json!({
+                    "full_response_len": inflight_state.full_response.len(),
+                    "response_sent_offset": inflight_state.response_sent_offset,
+                }),
+            );
         }
         super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
 
