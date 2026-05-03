@@ -2989,9 +2989,13 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
     match runtime.block_on(crate::db::postgres::connect(cfg)) {
         Ok(Some(pool)) => {
             let migration_status = runtime.block_on(crate::db::postgres::migration_status(&pool));
+            let checksum_mismatches =
+                runtime.block_on(crate::db::postgres::applied_migration_checksum_mismatches(&pool));
             drop(pool);
-            match migration_status {
-                Ok(status) if postgres_migration_status_is_healthy(&status) => {
+            match (migration_status, checksum_mismatches) {
+                (Ok(status), Ok(checksum_mismatches))
+                    if postgres_migration_status_is_healthy(&status, &checksum_mismatches) =>
+                {
                     let pending = status.pending_versions.len();
                     Check::ok(
                         "postgres_connection",
@@ -3008,17 +3012,19 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                         "applied_count": status.applied.len(),
                         "resolved_count": status.resolved_versions.len(),
                         "pending_versions": status.pending_versions,
+                        "checksum_mismatches": checksum_mismatches,
                     }))
                     .with_expected_actual("postgres connection and migration metadata readable", "ok")
                 }
-                Ok(status) => Check::fail(
+                (Ok(status), Ok(checksum_mismatches)) => Check::fail(
                     "postgres_connection",
                     CheckGroup::Core,
                     "PostgreSQL",
                     format!(
-                        "{summary} — migration drift: missing_from_resolved={:?} unsuccessful={:?}",
+                        "{summary} — migration drift: missing_from_resolved={:?} unsuccessful={:?} checksum_mismatches={:?}",
                         status.missing_from_resolved,
-                        unsuccessful_migration_versions(&status)
+                        unsuccessful_migration_versions(&status),
+                        checksum_mismatches
                     ),
                     "Postgres _sqlx_migrations contains drift or unsuccessful migration records.",
                 )
@@ -3031,12 +3037,13 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                     "missing_from_resolved": status.missing_from_resolved,
                     "unsuccessful_versions": unsuccessful_migration_versions(&status),
                     "pending_versions": status.pending_versions,
+                    "checksum_mismatches": checksum_mismatches,
                 }))
                 .with_expected_actual(
-                    "applied migrations all exist in resolved migrations and succeeded",
-                    "migration drift or unsuccessful migration",
+                    "applied migrations all exist in resolved migrations, succeeded, and checksum-matched",
+                    "migration drift, checksum mismatch, or unsuccessful migration",
                 ),
-                Err(error) => Check::fail(
+                (Err(error), _) => Check::fail(
                     "postgres_connection",
                     CheckGroup::Core,
                     "PostgreSQL",
@@ -3047,6 +3054,17 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
                 .with_fix_safety(FixSafety::NotFixable)
                 .with_security_exposure(SecurityExposure::OperationalMetadata)
                 .with_expected_actual("read-only _sqlx_migrations query succeeds", error),
+                (_, Err(error)) => Check::fail(
+                    "postgres_connection",
+                    CheckGroup::Core,
+                    "PostgreSQL",
+                    format!("{summary} — migration checksum verification failed"),
+                    "Postgres connection succeeded but read-only migration checksum metadata could not be queried.",
+                )
+                .with_subsystem("postgres")
+                .with_fix_safety(FixSafety::NotFixable)
+                .with_security_exposure(SecurityExposure::OperationalMetadata)
+                .with_expected_actual("read-only _sqlx_migrations checksum query succeeds", error),
             }
         }
         Ok(None) => Check::ok(
@@ -3077,8 +3095,13 @@ fn unsuccessful_migration_versions(status: &crate::db::postgres::MigrationStatus
         .collect()
 }
 
-fn postgres_migration_status_is_healthy(status: &crate::db::postgres::MigrationStatus) -> bool {
-    status.missing_from_resolved.is_empty() && unsuccessful_migration_versions(status).is_empty()
+fn postgres_migration_status_is_healthy(
+    status: &crate::db::postgres::MigrationStatus,
+    checksum_mismatches: &[i64],
+) -> bool {
+    status.missing_from_resolved.is_empty()
+        && unsuccessful_migration_versions(status).is_empty()
+        && checksum_mismatches.is_empty()
 }
 
 fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
@@ -4263,8 +4286,27 @@ mod tests {
             pending_versions: vec![202604250001],
         };
 
-        assert!(!postgres_migration_status_is_healthy(&status));
+        assert!(!postgres_migration_status_is_healthy(&status, &[]));
         assert_eq!(unsuccessful_migration_versions(&status), vec![202604250001]);
+    }
+
+    #[test]
+    fn postgres_migration_status_is_unhealthy_when_checksum_mismatch_exists() {
+        let status = crate::db::postgres::MigrationStatus {
+            applied: vec![crate::db::postgres::AppliedMigrationInfo {
+                version: 202604250001,
+                description: "ok_migration".to_string(),
+                success: true,
+            }],
+            resolved_versions: vec![202604250001],
+            missing_from_resolved: Vec::new(),
+            pending_versions: Vec::new(),
+        };
+
+        assert!(!postgres_migration_status_is_healthy(
+            &status,
+            &[202604250001]
+        ));
     }
 
     #[test]

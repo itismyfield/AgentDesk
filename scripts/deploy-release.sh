@@ -551,6 +551,49 @@ fi
 
 _assert_release_binary_runtime_surface
 
+echo "▸ Preflight PostgreSQL migration integrity via doctor..."
+DOCTOR_JSON_TMP=$(mktemp "${TMPDIR:-/tmp}/agentdesk-doctor.XXXXXX.json")
+set +e
+"$SOURCE_BINARY" doctor --json >"$DOCTOR_JSON_TMP" 2>/dev/null
+DOCTOR_RC=$?
+set -e
+if [ ! -s "$DOCTOR_JSON_TMP" ]; then
+    echo "✗ Doctor preflight did not return JSON output."
+    rm -f "$DOCTOR_JSON_TMP"
+    exit 1
+fi
+if ! python3 - "$DOCTOR_JSON_TMP" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+checks = data.get("checks", [])
+postgres = next((c for c in checks if c.get("id") == "postgres_connection"), None)
+if not postgres:
+    print("✗ Doctor preflight missing postgres_connection check.")
+    raise SystemExit(1)
+
+status = str(postgres.get("status", "")).lower()
+if status in {"pass", "ok", "info"}:
+    raise SystemExit(0)
+
+detail = postgres.get("detail") or "no detail"
+actual = postgres.get("actual") or "unknown"
+print(f"✗ Doctor postgres preflight failed: status={status}, detail={detail}, actual={actual}")
+raise SystemExit(1)
+PY
+then
+    rm -f "$DOCTOR_JSON_TMP"
+    exit 1
+fi
+if [ "$DOCTOR_RC" -ne 0 ]; then
+    echo "⚠ doctor command returned non-zero ($DOCTOR_RC), but postgres preflight check passed."
+fi
+rm -f "$DOCTOR_JSON_TMP"
+
 # Copy and sign the binary before stopping release. This keeps a missing
 # certificate or failed codesign from taking down a healthy dcserver.
 echo "▸ Staging signed binary from $SOURCE_BINARY..."

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -284,6 +284,40 @@ pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, String> 
         missing_from_resolved,
         pending_versions,
     })
+}
+
+pub async fn applied_migration_checksum_mismatches(pool: &PgPool) -> Result<Vec<i64>, String> {
+    let rows = sqlx::query(
+        "SELECT version, checksum, success
+         FROM _sqlx_migrations
+         ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("query _sqlx_migrations checksums: {error}"))?;
+
+    let resolved_checksums = POSTGRES_MIGRATOR
+        .iter()
+        .map(|migration| (migration.version, migration.checksum.as_ref()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut mismatches = Vec::new();
+    for row in rows {
+        let version = row.get::<i64, _>("version");
+        let success = row.get::<bool, _>("success");
+        if !success {
+            continue;
+        }
+        let Some(expected_checksum) = resolved_checksums.get(&version) else {
+            continue;
+        };
+        let applied_checksum = row.get::<Vec<u8>, _>("checksum");
+        if applied_checksum.as_slice() != *expected_checksum {
+            mismatches.push(version);
+        }
+    }
+
+    Ok(mismatches)
 }
 
 async fn apply_kv_seed_actions(pool: &PgPool, actions: &[KvSeedAction]) -> Result<(), String> {
