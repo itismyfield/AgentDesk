@@ -2268,6 +2268,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let dispatch_target_repo = dispatch_context_hints.target_repo.clone();
     let dispatch_reset_provider_state = dispatch_context_hints.reset_provider_state;
     let dispatch_recreate_tmux = dispatch_context_hints.recreate_tmux;
+    let dispatch_retry_resume_session_id = dispatch_context_hints.retry_resume_session_id.clone();
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
@@ -2589,6 +2590,29 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         provider
     };
+
+    if matches!(provider, ProviderKind::Codex)
+        && !dispatch_reset_provider_state
+        && !dispatch_recreate_tmux
+        && let Some(resume_session_id) = dispatch_retry_resume_session_id.as_deref()
+    {
+        if session_id.as_deref() != Some(resume_session_id) {
+            let mut data = shared.core.lock().await;
+            if let Some(session) = data.sessions.get_mut(&channel_id) {
+                session.restore_provider_session(Some(resume_session_id.to_string()));
+                memento_context_loaded = session.memento_context_loaded;
+            } else {
+                memento_context_loaded = false;
+            }
+            session_id = Some(resume_session_id.to_string());
+        }
+        session_strategy_reason = "dispatch_context_retry_resume";
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ↻ Dispatch retry: using context-supplied Codex resume session for channel {}",
+            channel_id.get()
+        );
+    }
 
     // Derive dispatch prompt profile before memory recall so ReviewLite can
     // skip heavy memory work consistently across supported backends.
@@ -5651,6 +5675,22 @@ mod session_strategy_lifecycle_tests {
         assert!(cli_just_spawned_for_emit(None));
         assert!(cli_just_spawned_for_emit(Some("")));
         assert!(cli_just_spawned_for_emit(Some("   ")));
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_extracts_auto_queue_retry_resume_session() {
+        let hints = parse_dispatch_context_hints(
+            Some(
+                r#"{"auto_queue_retry_resume_session_id":" thread-1585 ","reset_provider_state":false}"#,
+            ),
+            Some("implementation"),
+        );
+
+        assert_eq!(
+            hints.retry_resume_session_id.as_deref(),
+            Some("thread-1585")
+        );
+        assert!(!hints.reset_provider_state);
     }
 }
 

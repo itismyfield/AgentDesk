@@ -8,6 +8,7 @@ pub(super) struct DispatchContextHints {
     pub(super) target_repo: Option<String>,
     pub(super) reset_provider_state: bool,
     pub(super) recreate_tmux: bool,
+    pub(super) retry_resume_session_id: Option<String>,
 }
 
 pub(super) fn parse_dispatch_context_hints(
@@ -28,6 +29,18 @@ pub(super) fn parse_dispatch_context_hints(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(String::from);
+    let retry_resume_session_id = parsed
+        .as_ref()
+        .and_then(|value| value.get("auto_queue_retry_resume_session_id"))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get("resume_session_id"))
+        })
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
     let strategy =
         crate::dispatch::dispatch_session_strategy_from_context(parsed.as_ref(), dispatch_type);
     DispatchContextHints {
@@ -39,6 +52,7 @@ pub(super) fn parse_dispatch_context_hints(
         target_repo,
         reset_provider_state: strategy.reset_provider_state,
         recreate_tmux: strategy.recreate_tmux,
+        retry_resume_session_id,
     }
 }
 

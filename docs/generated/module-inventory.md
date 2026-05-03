@@ -71,7 +71,7 @@
 | `credential` | `src/credential.rs` | 106 |  |
 | `db` | `src/db/mod.rs` | 340 |  |
 | `db::agents` | `src/db/agents.rs` | 1125 | giant-file |
-| `db::auto_queue` | `src/db/auto_queue.rs` | 4555 | giant-file |
+| `db::auto_queue` | `src/db/auto_queue.rs` | 4770 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 489 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 1200 | giant-file |
 | `db::kanban` | `src/db/kanban.rs` | 1 |  |
@@ -227,7 +227,7 @@
 | `services::api_friction` | `src/services/api_friction.rs` | 1709 | giant-file |
 | `services::auto_queue` | `src/services/auto_queue.rs` | 1198 | giant-file |
 | `services::auto_queue::activate_bridge` | `src/services/auto_queue/activate_bridge.rs` | 24 |  |
-| `services::auto_queue::activate_command` | `src/services/auto_queue/activate_command.rs` | 1010 | giant-file |
+| `services::auto_queue::activate_command` | `src/services/auto_queue/activate_command.rs` | 1049 | giant-file |
 | `services::auto_queue::activate_preflight` | `src/services/auto_queue/activate_preflight.rs` | 199 |  |
 | `services::auto_queue::activate_route` | `src/services/auto_queue/activate_route.rs` | 19 |  |
 | `services::auto_queue::cancel_run` | `src/services/auto_queue/cancel_run.rs` | 987 |  |
@@ -317,9 +317,9 @@
 | `services::discord::router` | `src/services/discord/router/mod.rs` | 27 |  |
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 |  |
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
-| `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 134 |  |
+| `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 148 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2050 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7441 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7481 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 126 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 108 |  |
