@@ -249,5 +249,3 @@
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:166` | `src/server/routes/domains/ops.rs:268` |
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:261` | `src/server/routes/domains/ops.rs:269` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:266` |
-
-<!-- regression-1367-v2 drift marker; regen should remove this line -->
