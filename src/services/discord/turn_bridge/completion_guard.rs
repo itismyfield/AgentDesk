@@ -409,16 +409,21 @@ async fn auto_queue_review_disabled_for_runtime_dispatch_pg(
     })
 }
 
-fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_json::Value) -> bool {
+fn runtime_pg_complete_dispatch_with_result(
+    dispatch_id: &str,
+    result: &serde_json::Value,
+    transition_source: &str,
+) -> bool {
     let dispatch_id = dispatch_id.to_string();
     let result_json = result.to_string();
     let result_value = result.clone();
+    let transition_source = transition_source.to_string();
     with_runtime_postgres_result(move |pool| {
         Box::pin(async move {
             let mut tx = pool
                 .begin()
                 .await
-                .map_err(|error| format!("begin postgres completion fallback for {dispatch_id}: {error}"))?;
+                .map_err(|error| format!("begin postgres completion via {transition_source} for {dispatch_id}: {error}"))?;
 
             let current = sqlx::query(
                 "SELECT status, kanban_card_id, dispatch_type
@@ -487,12 +492,13 @@ fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_js
                     to_status,
                     transition_source,
                     payload_json
-                ) VALUES ($1, $2, $3, $4, 'completed', 'turn_bridge_runtime_db_fallback', CAST($5 AS jsonb))",
+                ) VALUES ($1, $2, $3, $4, 'completed', $5, CAST($6 AS jsonb))",
             )
             .bind(&dispatch_id)
             .bind(kanban_card_id)
             .bind(dispatch_type.clone())
             .bind(&current_status)
+            .bind(&transition_source)
             .bind(&result_json)
             .execute(&mut *tx)
             .await
@@ -507,7 +513,7 @@ fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_js
                     &mut tx,
                     &dispatch_id,
                     crate::db::auto_queue::ENTRY_STATUS_DONE,
-                    "turn_bridge_runtime_db_fallback",
+                    &transition_source,
                     true,
                 )
                 .await
@@ -530,7 +536,7 @@ fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_js
             .await
             .map_err(|error| format!("set postgres reconcile marker for {dispatch_id}: {error}"))?;
 
-            if !transition_source_uses_live_command_bot("turn_bridge_runtime_db_fallback") {
+            if !transition_source_uses_live_command_bot(&transition_source) {
                 sqlx::query(
                     "INSERT INTO dispatch_outbox (dispatch_id, action)
                      SELECT $1, 'status_reaction'
@@ -550,7 +556,7 @@ fn runtime_pg_complete_dispatch_with_result(dispatch_id: &str, result: &serde_js
 
             tx.commit()
                 .await
-                .map_err(|error| format!("commit postgres completion fallback for {dispatch_id}: {error}"))?;
+                .map_err(|error| format!("commit postgres completion via {transition_source} for {dispatch_id}: {error}"))?;
             Ok(true)
         })
     })
@@ -786,7 +792,14 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> bool {
-    runtime_pg_complete_dispatch_with_result(dispatch_id, result)
+    runtime_pg_complete_dispatch_with_result(dispatch_id, result, "turn_bridge_runtime_db_fallback")
+}
+
+pub(in crate::services::discord) fn streaming_final_complete_dispatch_with_result(
+    dispatch_id: &str,
+    result: &serde_json::Value,
+) -> bool {
+    runtime_pg_complete_dispatch_with_result(dispatch_id, result, "watcher_streaming_final")
 }
 
 pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
@@ -1764,9 +1777,9 @@ mod runtime_completion_policy_tests {
 
     #[test]
     fn runtime_auto_queue_terminal_sync_matches_dispatch_completion_policy() {
-        let normal_result = serde_json::json!({"completion_source": "watcher_db_fallback"});
+        let normal_result = serde_json::json!({"completion_source": "watcher_streaming_final"});
         let noop_result = serde_json::json!({
-            "completion_source": "watcher_db_fallback",
+            "completion_source": "watcher_streaming_final",
             "work_outcome": "noop",
             "completed_without_changes": true
         });

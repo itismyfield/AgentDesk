@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum StreamingFinalDisposition {
-    FallbackCompleted,
-    FallbackFailed,
+    Finalized,
+    FinalizeFailed,
     MissingAssistantResponse,
     NonWorkDispatch,
     UnknownDispatch,
@@ -53,7 +53,7 @@ pub(in crate::services::discord) struct WatcherStreamingFinalRequest<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatcherStreamingFinalPlan {
-    FallbackCompleteWork,
+    FinalizeWork,
     MissingAssistantResponse,
     NonWorkDispatch,
     UnknownDispatch,
@@ -65,7 +65,7 @@ fn plan_watcher_streaming_finalization(
 ) -> WatcherStreamingFinalPlan {
     match dispatch_type {
         Some("implementation") | Some("rework") if has_assistant_response => {
-            WatcherStreamingFinalPlan::FallbackCompleteWork
+            WatcherStreamingFinalPlan::FinalizeWork
         }
         Some("implementation") | Some("rework") => {
             WatcherStreamingFinalPlan::MissingAssistantResponse
@@ -101,21 +101,21 @@ fn watcher_completion_context(
     context
 }
 
-async fn watcher_runtime_fallback(
+async fn finalize_work_dispatch_from_stream(
     request: &WatcherStreamingFinalRequest<'_>,
     followup_source: &str,
 ) -> StreamingFinalResult {
-    let fallback_result = watcher_completion_context(
+    let completion_result = watcher_completion_context(
         request.pg_pool,
         request.dispatch_id,
-        "watcher_db_fallback",
-        true,
+        "watcher_streaming_final",
+        false,
         request.adk_cwd,
         request.full_response,
     );
-    let completed = super::turn_bridge::runtime_db_fallback_complete_with_result(
+    let completed = super::turn_bridge::streaming_final_complete_dispatch_with_result(
         request.dispatch_id,
-        &fallback_result,
+        &completion_result,
     );
     if completed {
         let _ = super::turn_bridge::queue_dispatch_followup_with_handles(
@@ -125,12 +125,12 @@ async fn watcher_runtime_fallback(
             followup_source,
         )
         .await;
-        StreamingFinalResult::completed(StreamingFinalDisposition::FallbackCompleted, None, None)
+        StreamingFinalResult::completed(StreamingFinalDisposition::Finalized, None, None)
     } else {
         StreamingFinalResult::not_completed(
-            StreamingFinalDisposition::FallbackFailed,
+            StreamingFinalDisposition::FinalizeFailed,
             None,
-            Some("runtime DB fallback did not complete dispatch".to_string()),
+            Some("watcher streaming finalizer did not complete dispatch".to_string()),
         )
     }
 }
@@ -148,9 +148,9 @@ pub(in crate::services::discord) async fn finalize_watcher_streaming_dispatch(
         dispatch_type.as_deref(),
         request.has_assistant_response,
     ) {
-        WatcherStreamingFinalPlan::FallbackCompleteWork => {
+        WatcherStreamingFinalPlan::FinalizeWork => {
             let mut result =
-                watcher_runtime_fallback(&request, "watcher_completed_runtime_fallback").await;
+                finalize_work_dispatch_from_stream(&request, "watcher_streaming_final").await;
             result.dispatch_type = dispatch_type;
             result
         }
@@ -191,16 +191,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normal_final_output_plans_runtime_fallback_and_context() {
+    fn normal_final_output_plans_streaming_finalization_and_context() {
         assert_eq!(
             plan_watcher_streaming_finalization(Some("implementation"), true),
-            WatcherStreamingFinalPlan::FallbackCompleteWork
+            WatcherStreamingFinalPlan::FinalizeWork
         );
 
         let context = watcher_completion_context(
             None,
             "dispatch-1",
-            "watcher_completed",
+            "watcher_streaming_final",
             false,
             None,
             "final answer",
@@ -210,7 +210,7 @@ mod tests {
             context
                 .get("completion_source")
                 .and_then(|value| value.as_str()),
-            Some("watcher_completed")
+            Some("watcher_streaming_final")
         );
         assert_eq!(
             context

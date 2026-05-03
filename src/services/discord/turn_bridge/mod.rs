@@ -37,6 +37,7 @@ pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
     fail_dispatch_auth_expired, fail_dispatch_with_retry, guard_review_dispatch_completion,
     queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
+    streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
     SessionRetryContext, auto_retry_with_history, build_session_retry_context_from_history,
