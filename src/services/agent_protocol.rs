@@ -113,7 +113,7 @@ pub enum StreamMessage {
         cache_read_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
-    /// tmux session is ready for background monitoring (first turn completed)
+    /// tmux session is ready for background monitoring or watcher-owned relay.
     TmuxReady {
         output_path: String,
         input_fifo_path: String,

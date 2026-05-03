@@ -250,7 +250,7 @@
 | `services::auto_queue::slot_routes` | `src/services/auto_queue/slot_routes.rs` | 268 |  |
 | `services::auto_queue::view` | `src/services/auto_queue/view.rs` | 300 |  |
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 702 |  |
-| `services::claude` | `src/services/claude.rs` | 2744 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 2798 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1713 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 734 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 5896 | giant-file |
