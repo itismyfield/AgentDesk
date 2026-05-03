@@ -1434,7 +1434,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         let now_ms = chrono::Utc::now().timestamp_millis();
         let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
-        let max_deadline_ms = now_ms + 3 * 3600 * 1000;
+        let max_deadline_ms = deadline_ms;
         watchdog_token
             .watchdog_deadline_ms
             .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
@@ -1480,17 +1480,20 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
                                 let updated_ms = updated.and_utc().timestamp_millis();
                                 let age_ms = now_ms_check - updated_ms;
                                 if age_ms < 300_000 {
-                                    let max_dl = watchdog_token
-                                        .watchdog_max_deadline_ms
-                                        .load(std::sync::atomic::Ordering::Relaxed);
-                                    let new_dl = std::cmp::min(
-                                        now_ms_check + timeout.as_millis() as i64,
-                                        max_dl,
-                                    );
+                                    let new_dl = now_ms_check + timeout.as_millis() as i64;
                                     if new_dl > current_dl {
                                         watchdog_token
                                             .watchdog_deadline_ms
                                             .store(new_dl, std::sync::atomic::Ordering::Relaxed);
+                                        watchdog_token.watchdog_max_deadline_ms.store(
+                                            std::cmp::max(
+                                                watchdog_token
+                                                    .watchdog_max_deadline_ms
+                                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                                new_dl,
+                                            ),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                         last_deadlock_prealert_deadline_ms = None;
                                     }
                                 }
@@ -3865,18 +3868,19 @@ pub(in crate::services::discord) async fn handle_text_message(
     );
     // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
-    // extended via POST /api/turns/{channel_id}/extend-timeout (up to 3h cap).
+    // extended via POST /api/turns/{channel_id}/extend-timeout.
     {
         let watchdog_token = cancel_token.clone();
         let watchdog_shared = shared.clone();
         let watchdog_http = ctx.http.clone();
         let timeout = super::super::turn_watchdog_timeout();
 
-        // Set initial deadline and max ceiling (initial + 3h)
+        // Set initial deadline. max_deadline tracks the farthest accepted
+        // extension for alert context; it is no longer an absolute cap.
         let now_ms = chrono::Utc::now().timestamp_millis();
         let turn_started_ms = now_ms;
         let deadline_ms = now_ms + timeout.as_millis() as i64;
-        let max_deadline_ms = now_ms + 3 * 3600 * 1000; // 3 hours absolute cap
+        let max_deadline_ms = deadline_ms;
         watchdog_token
             .watchdog_deadline_ms
             .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
@@ -3939,17 +3943,20 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 let age_ms = now_ms_check - updated_ms;
                                 // If inflight was updated within the last 5 minutes, auto-extend
                                 if age_ms < 300_000 {
-                                    let max_dl = watchdog_token
-                                        .watchdog_max_deadline_ms
-                                        .load(std::sync::atomic::Ordering::Relaxed);
-                                    let new_dl = std::cmp::min(
-                                        now_ms_check + timeout.as_millis() as i64,
-                                        max_dl,
-                                    );
+                                    let new_dl = now_ms_check + timeout.as_millis() as i64;
                                     if new_dl > current_dl {
                                         watchdog_token
                                             .watchdog_deadline_ms
                                             .store(new_dl, std::sync::atomic::Ordering::Relaxed);
+                                        watchdog_token.watchdog_max_deadline_ms.store(
+                                            std::cmp::max(
+                                                watchdog_token
+                                                    .watchdog_max_deadline_ms
+                                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                                new_dl,
+                                            ),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                         last_deadlock_prealert_deadline_ms = None;
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         let remaining_min = (new_dl - now_ms_check) / 1000 / 60;
@@ -7018,7 +7025,7 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_deadline_extension_moves_deadline_and_cap() {
+    fn watchdog_deadline_extension_moves_deadline_and_tracked_max() {
         let token = CancelToken::new();
         token
             .watchdog_deadline_ms
@@ -7033,9 +7040,9 @@ mod tests {
             applied_extend_secs: 2,
             requested_extend_secs: 2,
             extension_count: 1,
-            extension_count_limit: 6,
+            extension_count_limit: u32::MAX,
             extension_total_secs: 2,
-            extension_total_secs_limit: 10_800,
+            extension_total_secs_limit: u64::MAX,
             clamped: false,
         };
 

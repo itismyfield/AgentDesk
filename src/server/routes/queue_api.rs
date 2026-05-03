@@ -252,9 +252,10 @@ fn default_extend_secs() -> u64 {
 
 /// Extend the watchdog timeout for an active turn in a channel.
 ///
-/// The per-turn hard cap moves with accepted operator extensions and is bounded
-/// by `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT` and
-/// `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS`.
+/// The per-turn deadline moves with accepted operator extensions. Extension
+/// caps are disabled by default; setting `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT`
+/// or `AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS` to a positive value restores
+/// that bounded policy.
 pub async fn extend_turn_timeout(
     Path(channel_id): Path<String>,
     Json(body): Json<ExtendTimeoutBody>,
@@ -365,7 +366,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
-    async fn extend_turn_timeout_reports_effective_deadline_and_cap() {
+    async fn extend_turn_timeout_reports_effective_deadline_and_tracked_max() {
         let channel_id = ChannelId::new(1_417_000_001);
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel_id);

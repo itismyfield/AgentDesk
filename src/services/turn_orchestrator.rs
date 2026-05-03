@@ -972,7 +972,7 @@ fn watchdog_extension_count_limit() -> u32 {
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|value| *value > 0)
-            .unwrap_or(6)
+            .unwrap_or(u32::MAX)
     });
     *CACHED
 }
@@ -983,9 +983,31 @@ fn watchdog_extension_total_secs_limit() -> u64 {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
-            .unwrap_or(3 * 3600)
+            .unwrap_or(u64::MAX)
     });
     *CACHED
+}
+
+#[cfg(test)]
+mod watchdog_extension_limit_tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_extension_limits_default_to_unlimited_unless_env_sets_positive_cap() {
+        let expected_count = std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_COUNT")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(u32::MAX);
+        let expected_total = std::env::var("AGENTDESK_TURN_TIMEOUT_EXTEND_MAX_TOTAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(u64::MAX);
+
+        assert_eq!(watchdog_extension_count_limit(), expected_count);
+        assert_eq!(watchdog_extension_total_secs_limit(), expected_total);
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1268,8 +1290,10 @@ fn extend_active_watchdog_deadline(
         .watchdog_max_deadline_ms
         .store(max_deadline_ms, Ordering::Relaxed);
 
-    state.watchdog_extension_count += 1;
-    state.watchdog_extension_total_secs += applied_extend_secs;
+    state.watchdog_extension_count = state.watchdog_extension_count.saturating_add(1);
+    state.watchdog_extension_total_secs = state
+        .watchdog_extension_total_secs
+        .saturating_add(applied_extend_secs);
 
     let extension = WatchdogDeadlineExtension {
         requested_deadline_ms,
@@ -2221,6 +2245,8 @@ mod tests {
 
         let extended = handle.extend_timeout(30).await.unwrap();
         assert_eq!(extended.applied_extend_secs, 30);
+        assert_eq!(extended.extension_count_limit, u32::MAX);
+        assert_eq!(extended.extension_total_secs_limit, u64::MAX);
         assert!(!extended.clamped);
         assert!(extended.new_deadline_ms >= now_ms + 90_000);
         assert_eq!(
