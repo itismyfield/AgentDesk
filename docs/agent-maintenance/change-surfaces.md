@@ -106,6 +106,8 @@
     lifecycle behavior).
   - `src/services/discord/tmux.rs` (10291 lines after #1435 lifecycle
     extraction; still giant-file territory).
+  - `src/services/discord/tmux_watcher.rs` (3214 lines after #1520 watcher
+    loop extraction; split loop helpers further before adding behavior).
   - `src/services/discord/recovery_engine.rs` (4831 lines).
   - `src/services/discord/health.rs` (5921 lines).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).

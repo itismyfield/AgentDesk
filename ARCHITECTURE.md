@@ -346,12 +346,15 @@ src/
 │   │   ├── stall_recovery.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
+│   │   ├── tmux_kill_policy.rs
 │   │   ├── tmux_lifecycle.rs
+│   │   ├── tmux_output_stream.rs
 │   │   ├── tmux_overload_retry.rs
 │   │   ├── tmux_reaper.rs
 │   │   ├── tmux_reattach_offsets.rs
 │   │   ├── tmux_restart_handoff.rs
-│   │   └── tmux_session_files.rs
+│   │   ├── tmux_session_files.rs
+│   │   └── tmux_watcher.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
 │   │   ├── commit_resolver.rs
