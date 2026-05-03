@@ -266,12 +266,16 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── shared.rs
 │   │   ├── router/
+│   │   │   ├── authorization.rs
 │   │   │   ├── control_intent.rs
+│   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── intake_gate.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── response_format.rs
 │   │   │   ├── tests.rs
-│   │   │   └── thread_binding.rs
+│   │   │   ├── thread_binding.rs
+│   │   │   └── turn_start.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs
