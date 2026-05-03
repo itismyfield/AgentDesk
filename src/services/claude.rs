@@ -1327,16 +1327,54 @@ fn execute_streaming_local_tmux(
             .clone()
             .unwrap_or_else(|| input_fifo_path.clone());
         debug_log("Existing tmux session found — sending follow-up message");
-        match send_followup_to_tmux(
+        let followup = send_followup_to_tmux(
             prompt,
             &output_path,
             &input_fifo_path,
             sender.clone(),
             cancel_token.clone(),
             tmux_session_name,
-        )? {
-            ClaudeFollowupResult::Delivered => return Ok(()),
+        );
+        let followup = match followup {
+            Ok(value) => value,
+            Err(error) => {
+                log_producer_exit(
+                    "warm_followup_error",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "error_truncated": error.chars().take(200).collect::<String>(),
+                    }),
+                );
+                return Err(error);
+            }
+        };
+        match followup {
+            ClaudeFollowupResult::Delivered => {
+                log_producer_exit(
+                    "warm_followup_delivered",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                    }),
+                );
+                return Ok(());
+            }
             ClaudeFollowupResult::RecreateSession { error } => {
+                log_producer_exit(
+                    "warm_followup_recreate",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "error_truncated": error.chars().take(200).collect::<String>(),
+                    }),
+                );
                 debug_log(&format!("Follow-up failed, recreating session: {}", error));
                 crate::services::termination_audit::record_termination_for_tmux(
                     tmux_session_name,
@@ -1381,6 +1419,16 @@ fn execute_streaming_local_tmux(
                     &format!("partial follow-up output already delivered: {}", error),
                 );
                 emit_followup_restart_suppressed_notice(&sender, &notice);
+                log_producer_exit(
+                    "warm_followup_finalize_notice",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "error_truncated": error.chars().take(200).collect::<String>(),
+                    }),
+                );
                 return Ok(());
             }
         }
@@ -1536,6 +1584,17 @@ fn execute_streaming_local_tmux(
                     tmux_session_name: tmux_session_name.to_string(),
                     last_offset: offset,
                 });
+                log_producer_exit(
+                    "fresh_session_completed",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "offset": offset,
+                        "attempt": attempt,
+                    }),
+                );
                 return Ok(());
             }
             ReadOutputResult::Cancelled { offset } => {
@@ -1546,6 +1605,17 @@ fn execute_streaming_local_tmux(
                     tmux_session_name: tmux_session_name.to_string(),
                     last_offset: offset,
                 });
+                log_producer_exit(
+                    "fresh_session_cancelled",
+                    None,
+                    report_channel_id,
+                    0,
+                    serde_json::json!({
+                        "tmux_session_name": tmux_session_name,
+                        "offset": offset,
+                        "attempt": attempt,
+                    }),
+                );
                 return Ok(());
             }
             ReadOutputResult::SessionDied { .. } => {
@@ -1557,6 +1627,17 @@ fn execute_streaming_local_tmux(
                             .to_string(),
                         session_id: None,
                     });
+                    log_producer_exit(
+                        "fresh_session_died_max_retries",
+                        None,
+                        report_channel_id,
+                        0,
+                        serde_json::json!({
+                            "tmux_session_name": tmux_session_name,
+                            "attempts": attempt,
+                            "max_retries": MAX_RETRIES,
+                        }),
+                    );
                     return Ok(());
                 }
 
