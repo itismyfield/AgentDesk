@@ -247,5 +247,5 @@
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:568` | `src/server/routes/domains/admin.rs:73` |
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:249` | `src/server/routes/domains/admin.rs:80` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:162` | `src/server/routes/domains/ops.rs:268` |
-| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:259` | `src/server/routes/domains/ops.rs:269` |
+| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:257` | `src/server/routes/domains/ops.rs:269` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:264` |
