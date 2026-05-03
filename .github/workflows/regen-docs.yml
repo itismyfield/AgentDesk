@@ -115,16 +115,27 @@ jobs:
           }
 
           collect_and_mirror() {
+            # found_pending tracks ANY in-progress activity on the source SHA, not just
+            # contexts in our wanted set. Aggregator jobs (e.g. "Fast check (ubuntu-latest)"
+            # via `needs: check_fast`) only register a check-run after their dependencies
+            # complete, so we must keep polling whenever any other check-run is still
+            # running on the source SHA.
             local found_pending=0
 
-            while IFS=$'\t' read -r name conclusion status url; do
-              [[ -z "${wanted[$name]:-}" ]] && continue
-              [[ -n "${mirrored[$name]:-}" ]] && continue
+            local cr_data
+            cr_data=$(gh api --paginate \
+              "/repos/${REPOSITORY}/commits/${SOURCE_SHA}/check-runs?per_page=100" \
+              --jq '.check_runs[] | [.name, (.conclusion // ""), .status, (.html_url // "")] | @tsv')
 
+            while IFS=$'\t' read -r name conclusion status url; do
+              [[ -z "$name" ]] && continue
               if [[ "$status" != "completed" ]]; then
                 found_pending=1
-                continue
               fi
+
+              [[ -z "${wanted[$name]:-}" ]] && continue
+              [[ -n "${mirrored[$name]:-}" ]] && continue
+              [[ "$status" != "completed" ]] && continue
 
               case "$conclusion" in
                 success|skipped|neutral)
@@ -138,18 +149,18 @@ jobs:
                   echo "Mirrored check-run: $name ($conclusion -> failure)"
                   ;;
               esac
-            done < <(gh api --paginate \
-              "/repos/${REPOSITORY}/commits/${SOURCE_SHA}/check-runs?per_page=100" \
-              --jq '.check_runs[] | [.name, (.conclusion // ""), .status, (.html_url // "")] | @tsv')
+            done <<< "$cr_data"
 
             while IFS=$'\t' read -r ctx state url; do
+              [[ -z "$ctx" ]] && continue
+              if [[ "$state" == "pending" ]]; then
+                found_pending=1
+              fi
+
               [[ -z "${wanted[$ctx]:-}" ]] && continue
               [[ -n "${mirrored[$ctx]:-}" ]] && continue
 
               case "$state" in
-                pending)
-                  found_pending=1
-                  ;;
                 success)
                   publish_status "$ctx" success "$url"
                   mirrored["$ctx"]=1
@@ -178,7 +189,7 @@ jobs:
             fi
 
             if [[ "$found_pending" == "0" ]]; then
-              echo "::warning::Source SHA ${SOURCE_SHA} has no pending checks but some required contexts are absent. Missing:"
+              echo "::warning::Source SHA ${SOURCE_SHA} has settled but required contexts are absent. Missing:"
               for ctx in "${!wanted[@]}"; do
                 if [[ -z "${mirrored[$ctx]:-}" ]]; then
                   echo "::warning::  - $ctx"
