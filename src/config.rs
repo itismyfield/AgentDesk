@@ -664,6 +664,11 @@ pub struct ClusterConfig {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub capabilities: serde_json::Map<String, serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "ClusterDispatchRoutingConfig::is_default"
+    )]
+    pub dispatch_routing: ClusterDispatchRoutingConfig,
 }
 
 impl Default for ClusterConfig {
@@ -676,6 +681,7 @@ impl Default for ClusterConfig {
             lease_ttl_secs: default_cluster_lease_ttl_secs(),
             labels: Vec::new(),
             capabilities: serde_json::Map::new(),
+            dispatch_routing: ClusterDispatchRoutingConfig::default(),
         }
     }
 }
@@ -683,6 +689,27 @@ impl Default for ClusterConfig {
 impl ClusterConfig {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClusterDispatchRoutingConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_preferred_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opt_out_dispatch_types: Vec<String>,
+}
+
+impl ClusterDispatchRoutingConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn is_opted_out(&self, dispatch_type: &str) -> bool {
+        self.opt_out_dispatch_types
+            .iter()
+            .any(|value| value == dispatch_type)
     }
 }
 

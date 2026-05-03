@@ -358,6 +358,9 @@ cluster:
     mcp:
       unreal_editor:
         healthy: false
+  dispatch_routing:
+    default_preferred_labels: [mac-book]
+    opt_out_dispatch_types: ["create-pr", "github-sync"]
 
 # Optional file/MCP memory configuration. Omit the section entirely to use defaults.
 memory:

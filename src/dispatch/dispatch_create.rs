@@ -394,14 +394,44 @@ fn parse_dispatch_json_text_pg(raw: Option<&str>) -> Option<serde_json::Value> {
     raw.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
 }
 
-fn dispatch_required_capabilities(context_str: &str) -> Option<serde_json::Value> {
-    let context = serde_json::from_str::<serde_json::Value>(context_str).ok()?;
-    let required = context.get("required_capabilities")?.clone();
+fn normalize_required_capabilities(required: serde_json::Value) -> Option<serde_json::Value> {
     match &required {
         serde_json::Value::Null => None,
         serde_json::Value::Object(map) if map.is_empty() => None,
         _ => Some(required),
     }
+}
+
+fn dispatch_required_capabilities_from_routing(
+    context: &serde_json::Value,
+    dispatch_type: &str,
+    routing: &crate::config::ClusterDispatchRoutingConfig,
+) -> Option<serde_json::Value> {
+    if let Some(required) = context.get("required_capabilities") {
+        return normalize_required_capabilities(required.clone());
+    }
+    if routing.is_opted_out(dispatch_type) || routing.default_preferred_labels.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "preferred": {
+            "labels": routing.default_preferred_labels.clone(),
+        }
+    }))
+}
+
+fn dispatch_required_capabilities(
+    context_str: &str,
+    dispatch_type: &str,
+) -> Option<serde_json::Value> {
+    let context = serde_json::from_str::<serde_json::Value>(context_str).ok()?;
+    let config = crate::config::load_graceful();
+    dispatch_required_capabilities_from_routing(
+        &context,
+        dispatch_type,
+        &config.cluster.dispatch_routing,
+    )
 }
 
 pub(crate) async fn query_dispatch_row_pg(
@@ -1628,7 +1658,7 @@ pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
     if let TransitionOutcome::Blocked(reason) = &decision.outcome {
         return Err(anyhow::anyhow!("{}", reason));
     }
-    let required_capabilities = dispatch_required_capabilities(context_str);
+    let required_capabilities = dispatch_required_capabilities(context_str, dispatch_type);
 
     if let Err(error) = sqlx::query(
         "INSERT INTO task_dispatches (
@@ -1875,6 +1905,76 @@ fn apply_sqlite_transition_intent_for_tests(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod capability_routing_tests {
+    use super::*;
+
+    fn routing() -> crate::config::ClusterDispatchRoutingConfig {
+        crate::config::ClusterDispatchRoutingConfig {
+            default_preferred_labels: vec!["mac-book".to_string()],
+            opt_out_dispatch_types: vec!["create-pr".to_string(), "github-sync".to_string()],
+        }
+    }
+
+    #[test]
+    fn default_preferred_labels_are_injected_when_context_is_silent() {
+        let required =
+            dispatch_required_capabilities_from_routing(&json!({}), "implementation", &routing());
+
+        assert_eq!(
+            required,
+            Some(json!({
+                "preferred": {
+                    "labels": ["mac-book"],
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn explicit_required_capabilities_are_preserved() {
+        let required = dispatch_required_capabilities_from_routing(
+            &json!({
+                "required_capabilities": {
+                    "required": {
+                        "labels": ["mac-mini"],
+                    }
+                }
+            }),
+            "implementation",
+            &routing(),
+        );
+
+        assert_eq!(
+            required,
+            Some(json!({
+                "required": {
+                    "labels": ["mac-mini"],
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn explicit_null_suppresses_default_injection() {
+        let required = dispatch_required_capabilities_from_routing(
+            &json!({"required_capabilities": null}),
+            "implementation",
+            &routing(),
+        );
+
+        assert_eq!(required, None);
+    }
+
+    #[test]
+    fn opt_out_dispatch_types_do_not_get_defaults() {
+        let required =
+            dispatch_required_capabilities_from_routing(&json!({}), "create-pr", &routing());
+
+        assert_eq!(required, None);
+    }
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
