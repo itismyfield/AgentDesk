@@ -7,7 +7,8 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
-    TurnLifecycleTarget, force_kill_turn, stop_turn_preserving_queue,
+    TurnLifecycleTarget, force_kill_turn_without_cancel_event, stop_turn_preserving_queue,
+    stop_turn_preserving_queue_without_cancel_event,
 };
 use poise::serenity_prelude::ChannelId;
 
@@ -350,7 +351,7 @@ impl QueueService {
             tmux_name: tmux_name.clone(),
         };
         let lifecycle = if force {
-            force_kill_turn(
+            force_kill_turn_without_cancel_event(
                 health_registry.map(Arc::as_ref),
                 &target,
                 "queue-api cancel_turn (force)",
@@ -358,13 +359,39 @@ impl QueueService {
             )
             .await
         } else {
-            stop_turn_preserving_queue(
+            stop_turn_preserving_queue_without_cancel_event(
                 health_registry.map(Arc::as_ref),
                 &target,
                 "queue-api cancel_turn (preserve)",
             )
             .await
         };
+        let finalizer = crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
+                crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
+                    provider: target.provider.clone(),
+                    channel_id: target.channel_id,
+                    dispatch_id: dispatch_id.clone(),
+                    session_key: session_key.clone(),
+                    turn_id: None,
+                },
+                if force {
+                    "queue-api cancel_turn (force)"
+                } else {
+                    "queue-api cancel_turn (preserve)"
+                },
+                crate::services::turn_lifecycle::cleanup_policy_observability_surface(if force {
+                    crate::services::discord::TmuxCleanupPolicy::CleanupSession {
+                        termination_reason_code: Some("queue_api_cancel_turn"),
+                    }
+                } else {
+                    crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
+                        restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
+                    }
+                }),
+                &lifecycle,
+            ),
+        );
 
         if let Some(dispatch_id) = dispatch_id.as_ref() {
             if let Some(pool) = self.pg_pool.as_ref()
@@ -430,6 +457,8 @@ impl QueueService {
             "queue_preserved": lifecycle.queue_preserved,
             "inflight_cleared": lifecycle.inflight_cleared,
             "dispatch_cancelled": dispatch_id,
+            "turn_status": finalizer.status,
+            "turn_completed_at": finalizer.completed_at.to_rfc3339(),
         }))
     }
 

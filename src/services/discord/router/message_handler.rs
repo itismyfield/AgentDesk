@@ -4271,13 +4271,21 @@ pub(super) async fn handle_text_command(
                     cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
                 match stop_lookup {
                     TextStopLookup::Stop(token) => {
-                        super::super::turn_bridge::stop_active_turn(
+                        let termination_recorded = super::super::turn_bridge::stop_active_turn(
                             &data.provider,
                             &token,
                             super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                             "!stop",
                         )
                         .await;
+                        crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+                            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                                data.provider.clone(),
+                                channel_id,
+                                "!stop",
+                                termination_recorded,
+                            ),
+                        );
                         super::super::commands::notify_turn_stop(
                             &ctx.http,
                             &data.shared,
@@ -5008,13 +5016,22 @@ Any other message is sent to {p}.
                                 .await;
                         match stop_lookup {
                             TextStopLookup::Stop(token) => {
-                                super::super::turn_bridge::stop_active_turn(
+                                let termination_recorded =
+                                    super::super::turn_bridge::stop_active_turn(
                                     &data.provider,
                                     &token,
                                     super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                                     "!cc stop",
                                 )
                                 .await;
+                                crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+                                    crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                                        data.provider.clone(),
+                                        channel_id,
+                                        "!cc stop",
+                                        termination_recorded,
+                                    ),
+                                );
                                 super::super::commands::notify_turn_stop(
                                     &ctx.http,
                                     &data.shared,

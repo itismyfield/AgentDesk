@@ -51,10 +51,44 @@ impl FinalizeTurnCancelRequest {
         }
     }
 
+    pub(crate) fn from_text_stop(
+        provider: ProviderKind,
+        channel_id: ChannelId,
+        command: &str,
+        termination_recorded: bool,
+    ) -> Self {
+        Self {
+            correlation: TurnCancelCorrelation {
+                provider: Some(provider),
+                channel_id: Some(channel_id),
+                dispatch_id: None,
+                session_key: None,
+                turn_id: None,
+            },
+            reason: command.to_string(),
+            surface: text_stop_surface(command).to_string(),
+            lifecycle_path: "turn_bridge.stop_active_turn".to_string(),
+            tmux_killed: false,
+            inflight_cleared: false,
+            queue_depth: None,
+            queue_preserved: true,
+            termination_recorded,
+            completed_at: Utc::now(),
+        }
+    }
+
     #[cfg(test)]
     fn with_completed_at(mut self, completed_at: DateTime<Utc>) -> Self {
         self.completed_at = completed_at;
         self
+    }
+}
+
+fn text_stop_surface(command: &str) -> &'static str {
+    if command.trim().eq_ignore_ascii_case("!cc stop") {
+        "text_cc_stop"
+    } else {
+        "text_stop"
     }
 }
 
@@ -167,5 +201,32 @@ mod tests {
         assert_eq!(event.payload["dispatch_id"], "dispatch-1633");
         assert_eq!(event.payload["session_key"], "codex/session");
         assert_eq!(event.payload["turn_id"], "turn-1633");
+    }
+
+    #[tokio::test]
+    async fn text_stop_finalizer_uses_stable_surface_labels() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+        crate::services::observability::init_observability(None);
+
+        let stop = finalize_turn_cancel(FinalizeTurnCancelRequest::from_text_stop(
+            ProviderKind::Claude,
+            ChannelId::new(42),
+            "!stop",
+            true,
+        ));
+        let cc_stop = finalize_turn_cancel(FinalizeTurnCancelRequest::from_text_stop(
+            ProviderKind::Claude,
+            ChannelId::new(42),
+            "!cc stop",
+            false,
+        ));
+
+        assert_eq!(stop.status, CANCELLED_TURN_STATUS);
+        assert_eq!(stop.details.surface, "text_stop");
+        assert_eq!(stop.details.lifecycle_path, "turn_bridge.stop_active_turn");
+        assert!(stop.details.termination_recorded);
+        assert_eq!(cc_stop.details.surface, "text_cc_stop");
+        assert!(!cc_stop.details.termination_recorded);
     }
 }

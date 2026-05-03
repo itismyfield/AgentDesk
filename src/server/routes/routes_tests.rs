@@ -3201,6 +3201,10 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup_pg() {
 
 #[tokio::test]
 async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
+    let _obs_guard = crate::services::observability::test_runtime_lock();
+    crate::services::observability::reset_for_tests();
+    crate::services::observability::init_observability(None);
+
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let db = test_db();
@@ -3275,6 +3279,22 @@ async fn cancel_turn_targets_requested_provider_for_paired_agent_pg() {
     assert_eq!(json["exact_channel_match"], true);
     assert_eq!(json["session_key"], cc_session_key);
     assert_eq!(json["tmux_session"], "AgentDesk-claude-adk-cc");
+    assert_eq!(json["turn_status"], "cancelled");
+    assert!(json["turn_completed_at"].as_str().is_some());
+
+    let event = crate::services::observability::events::recent(10)
+        .into_iter()
+        .find(|event| event.event_type == "turn_cancelled")
+        .expect("turn_cancelled event should be recorded");
+    assert_eq!(
+        event.channel_id,
+        Some(cc_channel_id.parse::<u64>().unwrap())
+    );
+    assert_eq!(event.provider.as_deref(), Some("claude"));
+    assert_eq!(event.payload["reason"], "queue-api cancel_turn (preserve)");
+    assert_eq!(event.payload["surface"], "queue_cancel_preserve");
+    assert_eq!(event.payload["session_key"], cc_session_key);
+    assert!(event.payload["dispatch_id"].is_null());
 
     let cc_status =
         sqlx::query_scalar::<_, String>("SELECT status FROM sessions WHERE session_key = $1")

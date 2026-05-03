@@ -29,6 +29,23 @@ pub(crate) async fn stop_turn_preserving_queue(
     target: &TurnLifecycleTarget,
     reason: &str,
 ) -> TurnLifecycleStopResult {
+    stop_turn_preserving_queue_with_cancel_event(health_registry, target, reason, true).await
+}
+
+pub(crate) async fn stop_turn_preserving_queue_without_cancel_event(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    reason: &str,
+) -> TurnLifecycleStopResult {
+    stop_turn_preserving_queue_with_cancel_event(health_registry, target, reason, false).await
+}
+
+async fn stop_turn_preserving_queue_with_cancel_event(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    reason: &str,
+    emit_cancel_observability: bool,
+) -> TurnLifecycleStopResult {
     stop_turn_with_policy(
         health_registry,
         target,
@@ -36,6 +53,7 @@ pub(crate) async fn stop_turn_preserving_queue(
         crate::services::discord::TmuxCleanupPolicy::PreserveSessionAndInflight {
             restart_mode: crate::services::discord::InflightRestartMode::HotSwapHandoff,
         },
+        emit_cancel_observability,
     )
     .await
 }
@@ -46,6 +64,39 @@ pub(crate) async fn force_kill_turn(
     reason: &str,
     termination_reason_code: &'static str,
 ) -> TurnLifecycleStopResult {
+    force_kill_turn_with_cancel_event(
+        health_registry,
+        target,
+        reason,
+        termination_reason_code,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn force_kill_turn_without_cancel_event(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    reason: &str,
+    termination_reason_code: &'static str,
+) -> TurnLifecycleStopResult {
+    force_kill_turn_with_cancel_event(
+        health_registry,
+        target,
+        reason,
+        termination_reason_code,
+        false,
+    )
+    .await
+}
+
+async fn force_kill_turn_with_cancel_event(
+    health_registry: Option<&HealthRegistry>,
+    target: &TurnLifecycleTarget,
+    reason: &str,
+    termination_reason_code: &'static str,
+    emit_cancel_observability: bool,
+) -> TurnLifecycleStopResult {
     stop_turn_with_policy(
         health_registry,
         target,
@@ -53,6 +104,7 @@ pub(crate) async fn force_kill_turn(
         crate::services::discord::TmuxCleanupPolicy::CleanupSession {
             termination_reason_code: Some(termination_reason_code),
         },
+        emit_cancel_observability,
     )
     .await
 }
@@ -62,6 +114,7 @@ async fn stop_turn_with_policy(
     target: &TurnLifecycleTarget,
     reason: &str,
     cleanup_policy: crate::services::discord::TmuxCleanupPolicy,
+    emit_cancel_observability: bool,
 ) -> TurnLifecycleStopResult {
     if let Some(channel_id) = target.channel_id {
         let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
@@ -193,7 +246,7 @@ async fn stop_turn_with_policy(
         termination_recorded,
     };
 
-    if should_emit_cancel_observability(target, &result) {
+    if emit_cancel_observability && should_emit_cancel_observability(target, &result) {
         crate::services::turn_cancel_finalizer::finalize_turn_cancel(
             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
                 crate::services::turn_cancel_finalizer::TurnCancelCorrelation {

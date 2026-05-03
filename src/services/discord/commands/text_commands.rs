@@ -338,13 +338,21 @@ pub(in crate::services::discord) async fn handle_text_command(
                 TextStopLookup::Stop(token) => {
                     // #1218: send abort key first, then SIGKILL — see
                     // `stop_active_turn` doc comment.
-                    super::super::turn_bridge::stop_active_turn(
+                    let termination_recorded = super::super::turn_bridge::stop_active_turn(
                         &data.provider,
                         &token,
                         super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                         "!stop",
                     )
                     .await;
+                    crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+                        crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                            data.provider.clone(),
+                            channel_id,
+                            "!stop",
+                            termination_recorded,
+                        ),
+                    );
                     super::super::commands::notify_turn_stop(
                         &ctx.http,
                         &data.shared,
@@ -1122,13 +1130,21 @@ Any other message is sent to {p}.
                             .await;
                     match stop_lookup {
                         TextStopLookup::Stop(token) => {
-                            super::super::turn_bridge::stop_active_turn(
+                            let termination_recorded = super::super::turn_bridge::stop_active_turn(
                                 &data.provider,
                                 &token,
                                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
                                 "!cc stop",
                             )
                             .await;
+                            crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+                                crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                                    data.provider.clone(),
+                                    channel_id,
+                                    "!cc stop",
+                                    termination_recorded,
+                                ),
+                            );
                             super::super::commands::notify_turn_stop(
                                 &ctx.http,
                                 &data.shared,
