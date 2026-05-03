@@ -62,7 +62,7 @@
   - `src/engine/ops/review_automation_ops.rs` (2140 lines, giant-file).
   - `src/engine/transition.rs` (1309 lines, giant-file).
   - `src/engine/ops/kanban_ops.rs` (1116 lines, giant-file).
-  - `src/engine/ops/db_ops.rs` (1591 lines, giant-file).
+  - `src/engine/ops/db_ops.rs` (1652 lines, giant-file).
   - `src/engine/intent.rs` (873 lines, retained migration-sensitive surface).
   - `src/pipeline.rs` (2125 lines, giant-file).
 - active_callsite_coverage: n/a (no canonical replacement yet).
@@ -81,9 +81,9 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/mod.rs` (5115 lines).
-  - `src/dispatch/dispatch_context.rs` (3943 lines).
-  - `src/dispatch/dispatch_create.rs` (2777 lines).
+  - `src/dispatch/mod.rs` (5108 lines).
+  - `src/dispatch/dispatch_context.rs` (3987 lines).
+  - `src/dispatch/dispatch_create.rs` (2877 lines).
   - `src/dispatch/dispatch_status.rs` (1875 lines).
 - active_callsite_coverage: n/a.
 - invariants: dispatch creation is the only writer for `dispatched_sessions`;
@@ -101,18 +101,18 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (1969 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (1942 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior).
-  - `src/services/discord/tmux.rs` (10291 lines after #1435 lifecycle
+  - `src/services/discord/tmux.rs` (6208 lines after #1435 lifecycle
     extraction; still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (3214 lines after #1520 watcher
     loop extraction; split loop helpers further before adding behavior).
-  - `src/services/discord/recovery_engine.rs` (4831 lines).
-  - `src/services/discord/health.rs` (5921 lines).
+  - `src/services/discord/recovery_engine.rs` (4842 lines).
+  - `src/services/discord/health.rs` (6247 lines).
   - `src/services/discord/placeholder_controller.rs` (1237 lines).
-  - `src/services/discord/placeholder_live_events.rs` (1225 lines).
-  - `src/services/discord/router/message_handler.rs` (7374 lines).
+  - `src/services/discord/placeholder_live_events.rs` (2038 lines).
+  - `src/services/discord/router/message_handler.rs` (7013 lines).
   - `src/services/discord/meeting_orchestrator.rs` (3779 lines).
   - `src/services/discord/turn_bridge/mod.rs` (4267 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1016 lines; provider
