@@ -259,7 +259,7 @@
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 521 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1867 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 934 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1028 | giant-file |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1016 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 237 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 129 |  |
 | `services::discord::commands::inspect` | `src/services/discord/commands/inspect.rs` | 955 |  |
@@ -268,9 +268,9 @@
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
 | `services::discord::commands::receipt` | `src/services/discord/commands/receipt.rs` | 160 |  |
 | `services::discord::commands::restart` | `src/services/discord/commands/restart.rs` | 347 |  |
-| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 370 |  |
-| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 389 |  |
-| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1265 | giant-file |
+| `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 258 |  |
+| `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 381 |  |
+| `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1257 | giant-file |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 558 |  |
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 3249 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 841 |  |
@@ -319,7 +319,7 @@
 | `services::discord::router::control_intent` | `src/services/discord/router/control_intent.rs` | 352 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 148 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 2050 | giant-file |
-| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7477 | giant-file |
+| `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 7469 | giant-file |
 | `services::discord::router::response_format` | `src/services/discord/router/response_format.rs` | 126 |  |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 129 |  |
 | `services::discord::router::turn_start` | `src/services/discord/router/turn_start.rs` | 108 |  |

@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-use poise::serenity_prelude as serenity;
-
 use super::super::formatting::send_long_message_ctx;
 use super::super::runtime_store::{self, workspace_root};
 use super::super::settings::save_last_session_runtime;
@@ -11,39 +9,11 @@ use super::super::{
     create_git_worktree, detect_worktree_conflict, resolve_channel_category, scan_skills,
 };
 
-/// Autocomplete handler for remote profile names in /start
-pub(in crate::services::discord) async fn autocomplete_remote_profile<'a>(
-    _ctx: Context<'a>,
-    partial: &'a str,
-) -> Vec<serenity::AutocompleteChoice> {
-    let settings = crate::config::Settings::load();
-    let partial_lower = partial.to_lowercase();
-    let mut choices = Vec::new();
-    if partial.is_empty() || "off".contains(&partial_lower) {
-        choices.push(serenity::AutocompleteChoice::new(
-            "off (local execution)",
-            "off",
-        ));
-    }
-    for p in &settings.remote_profiles {
-        if partial.is_empty() || p.name.to_lowercase().contains(&partial_lower) {
-            choices.push(serenity::AutocompleteChoice::new(
-                format!("{} — {}@{}:{}", p.name, p.user, p.host, p.port),
-                p.name.clone(),
-            ));
-        }
-    }
-    choices.into_iter().take(25).collect()
-}
-
-/// /start [path] [remote] — Start session at directory
+/// /start [path] — Start session at directory
 #[poise::command(slash_command, rename = "start")]
 pub(in crate::services::discord) async fn cmd_start(
     ctx: Context<'_>,
     #[description = "Directory path (empty for auto workspace)"] path: Option<String>,
-    #[description = "Remote profile ('off' for local)"]
-    #[autocomplete = "autocomplete_remote_profile"]
-    remote: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -52,62 +22,23 @@ pub(in crate::services::discord) async fn cmd_start(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] ◀ [{user_name}] /start path={:?} remote={:?}",
-        path,
-        remote
-    );
+    tracing::info!("  [{ts}] ◀ [{user_name}] /start path={:?}", path);
 
     let path_str = path.as_deref().unwrap_or("").trim();
 
-    // remote_override: None=not specified, Some(None)="off", Some(Some(name))=profile
-    let remote_override = match remote.as_deref() {
-        None => None,
-        Some("off") => Some(None),
-        Some(name) => {
-            let settings = crate::config::Settings::load();
-            if settings.remote_profiles.iter().any(|p| p.name == name) {
-                Some(Some(name.to_string()))
-            } else {
-                ctx.say(format!("Remote profile '{}' not found.", name))
-                    .await?;
-                return Ok(());
-            }
-        }
-    };
-
-    // Determine if session will be remote (for path validation logic)
-    let will_be_remote = match &remote_override {
-        Some(Some(_)) => true,
-        Some(None) => false,
-        None => {
-            let data = ctx.data().shared.core.lock().await;
-            data.sessions
-                .get(&ctx.channel_id())
-                .and_then(|s| s.remote_profile_name.as_ref())
-                .is_some()
-        }
+    // Existing remote session state still influences path validation; /start no longer exposes
+    // a user-facing remote selector.
+    let will_be_remote = {
+        let data = ctx.data().shared.core.lock().await;
+        data.sessions
+            .get(&ctx.channel_id())
+            .and_then(|s| s.remote_profile_name.as_ref())
+            .is_some()
     };
 
     let canonical_path = if path_str.is_empty() && will_be_remote {
-        // Remote + no path: use profile's default_path or "~"
-        if let Some(Some(ref name)) = remote_override {
-            let settings = crate::config::Settings::load();
-            settings
-                .remote_profiles
-                .iter()
-                .find(|p| p.name == *name)
-                .map(|p| {
-                    if p.default_path.is_empty() {
-                        "~".to_string()
-                    } else {
-                        p.default_path.clone()
-                    }
-                })
-                .unwrap_or_else(|| "~".to_string())
-        } else {
-            "~".to_string()
-        }
+        // Remote + no path: keep remote-shell default expansion behavior.
+        "~".to_string()
     } else if path_str.is_empty() {
         // Local + no path: create random workspace directory
         let Some(workspace_dir) = workspace_root() else {
@@ -241,15 +172,6 @@ pub(in crate::services::discord) async fn cmd_start(
         session.last_active = tokio::time::Instant::now();
         session.current_path = Some(effective_path.clone());
 
-        // Apply remote override from /start parameter
-        if let Some(ref new_remote) = remote_override {
-            let old_remote = session.remote_profile_name.clone();
-            session.remote_profile_name = new_remote.clone();
-            if old_remote != *new_remote {
-                session.clear_provider_session();
-            }
-        }
-
         // Apply worktree info if created
         session.worktree = worktree_info.clone();
 
@@ -257,30 +179,14 @@ pub(in crate::services::discord) async fn cmd_start(
 
         if has_existing_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            let remote_info = session
-                .remote_profile_name
-                .as_ref()
-                .map(|n| format!(" (remote: {})", n))
-                .unwrap_or_default();
-            tracing::info!("  [{ts}] ▶ Session restored: {effective_path}{remote_info}");
-            response_lines.push(format!(
-                "Session restored at `{}`{}.",
-                effective_path, remote_info
-            ));
+            tracing::info!("  [{ts}] ▶ Session restored: {effective_path}");
+            response_lines.push(format!("Session restored at `{}`.", effective_path));
         } else {
             session.history.clear();
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            let remote_info = session
-                .remote_profile_name
-                .as_ref()
-                .map(|n| format!(" (remote: {})", n))
-                .unwrap_or_default();
-            tracing::info!("  [{ts}] ▶ Session started: {effective_path}{remote_info}");
-            response_lines.push(format!(
-                "Session started at `{}`{}.",
-                effective_path, remote_info
-            ));
+            tracing::info!("  [{ts}] ▶ Session started: {effective_path}");
+            response_lines.push(format!("Session started at `{}`.", effective_path));
         }
 
         // Notify about worktree if created
@@ -294,29 +200,19 @@ pub(in crate::services::discord) async fn cmd_start(
 
         // Persist channel → path mapping for auto-restore
         let ch_key = channel_id.get().to_string();
-        let current_remote_for_settings = match &remote_override {
-            None => {
-                // No explicit override — persist current session state
-                data.sessions
-                    .get(&channel_id)
-                    .and_then(|s| s.remote_profile_name.clone())
-            }
-            _ => None,
-        };
+        let current_remote_for_settings = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.remote_profile_name.clone());
         drop(data);
 
-        let remote_for_runtime = match &remote_override {
-            Some(Some(name)) => Some(name.as_str()),
-            Some(None) => None,
-            None => current_remote_for_settings.as_deref(),
-        };
         save_last_session_runtime(
             None::<&crate::db::Db>,
             ctx.data().shared.pg_pool.as_ref(),
             &ctx.data().shared.token_hash,
             ch_key.parse::<u64>().unwrap_or_default(),
             &canonical_path,
-            remote_for_runtime,
+            current_remote_for_settings.as_deref(),
         );
 
         // Rescan skills with project path to pick up project-level commands
@@ -345,22 +241,14 @@ pub(in crate::services::discord) async fn cmd_pwd(ctx: Context<'_>) -> Result<()
     // Auto-restore session
     auto_restore_session(&ctx.data().shared, ctx.channel_id(), ctx.serenity_context()).await;
 
-    let (current_path, remote_name) = {
+    let current_path = {
         let data = ctx.data().shared.core.lock().await;
         let session = data.sessions.get(&ctx.channel_id());
-        (
-            session.and_then(|s| s.current_path.clone()),
-            session.and_then(|s| s.remote_profile_name.clone()),
-        )
+        session.and_then(|s| s.current_path.clone())
     };
 
     match current_path {
-        Some(path) => {
-            let remote_info = remote_name
-                .map(|n| format!(" (remote: **{}**)", n))
-                .unwrap_or_else(|| " (local)".to_string());
-            ctx.say(format!("`{}`{}", path, remote_info)).await?
-        }
+        Some(path) => ctx.say(format!("`{}`", path)).await?,
         None => {
             ctx.say("No active session. Use `/start <path>` first.")
                 .await?

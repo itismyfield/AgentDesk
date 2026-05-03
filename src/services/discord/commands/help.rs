@@ -23,7 +23,7 @@ Manage server files & chat with {}.
 Each channel gets its own independent {} session.
 
 **Session**
-`/start <path> [remote]` — Start session at directory
+`/start <path>` — Start session at directory
 `/start` — Start with auto-generated workspace
 `/pwd` — Show current working directory
 `/health` — Show runtime health summary
