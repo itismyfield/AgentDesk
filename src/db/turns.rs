@@ -13,10 +13,59 @@ pub struct TurnTokenUsage {
 }
 
 impl TurnTokenUsage {
-    pub fn total_input_tokens(self) -> u64 {
+    /// Tokens occupying the model context for the final request in the turn.
+    ///
+    /// Anthropic reports cache reads, cache writes, and uncached input as
+    /// separate fields for pricing/rate-limit purposes. For context-window
+    /// occupancy, cached prefixes still count as prompt tokens.
+    pub fn context_occupancy_input_tokens(self) -> u64 {
         self.input_tokens
             .saturating_add(self.cache_create_tokens)
             .saturating_add(self.cache_read_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnTokenUsage;
+
+    #[test]
+    fn context_occupancy_counts_cached_and_uncached_input_tokens() {
+        let no_cache = TurnTokenUsage {
+            input_tokens: 850,
+            cache_create_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 42,
+        };
+        assert_eq!(no_cache.context_occupancy_input_tokens(), 850);
+
+        let cache_read = TurnTokenUsage {
+            input_tokens: 50,
+            cache_create_tokens: 0,
+            cache_read_tokens: 200_000,
+            output_tokens: 42,
+        };
+        assert_eq!(cache_read.context_occupancy_input_tokens(), 200_050);
+
+        let cache_create = TurnTokenUsage {
+            input_tokens: 21,
+            cache_create_tokens: 188_086,
+            cache_read_tokens: 0,
+            output_tokens: 393,
+        };
+        assert_eq!(cache_create.context_occupancy_input_tokens(), 188_107);
+    }
+
+    #[test]
+    fn context_occupancy_saturates_on_overflow() {
+        let usage = TurnTokenUsage {
+            input_tokens: u64::MAX,
+            cache_create_tokens: 1,
+            cache_read_tokens: 1,
+            output_tokens: 0,
+        };
+
+        assert_eq!(usage.context_occupancy_input_tokens(), u64::MAX);
     }
 }
 

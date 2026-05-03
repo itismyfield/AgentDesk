@@ -305,9 +305,11 @@ async fn emit_context_compacted_lifecycle_from_watcher(
     let before_pct = ctx_cfg.compact_pct_for(provider);
     let context_window = provider.resolve_context_window(model);
     let after_pct = usage.and_then(|usage| {
-        let pct =
-            super::adk_session::context_usage_percent(usage.total_input_tokens(), context_window)
-                .min(before_pct);
+        let pct = super::adk_session::context_usage_percent(
+            usage.context_occupancy_input_tokens(),
+            context_window,
+        )
+        .min(before_pct);
         (pct > 0).then_some(pct)
     });
     let emitted = super::adk_session::emit_context_compacted_lifecycle_for_inflight(

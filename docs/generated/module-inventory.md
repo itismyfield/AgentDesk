@@ -86,7 +86,7 @@
 | `db::session_status` | `src/db/session_status.rs` | 78 |  |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 877 |  |
 | `db::table_metadata` | `src/db/table_metadata.rs` | 231 |  |
-| `db::turns` | `src/db/turns.rs` | 166 |  |
+| `db::turns` | `src/db/turns.rs` | 215 |  |
 | `dispatch` | `src/dispatch/mod.rs` | 5108 | giant-file |
 | `dispatch::dispatch_channel` | `src/dispatch/dispatch_channel.rs` | 43 |  |
 | `dispatch::dispatch_context` | `src/dispatch/dispatch_context.rs` | 3987 | giant-file |
@@ -263,7 +263,7 @@
 | `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 1016 | giant-file |
 | `services::discord::commands::fast_mode` | `src/services/discord/commands/fast_mode.rs` | 237 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 129 |  |
-| `services::discord::commands::inspect` | `src/services/discord/commands/inspect.rs` | 955 |  |
+| `services::discord::commands::inspect` | `src/services/discord/commands/inspect.rs` | 996 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 102 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 185 |  |
 | `services::discord::commands::model_ui` | `src/services/discord/commands/model_ui.rs` | 484 |  |
@@ -336,7 +336,7 @@
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 392 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 119 |  |
-| `services::discord::tmux` | `src/services/discord/tmux.rs` | 6206 | giant-file |
+| `services::discord::tmux` | `src/services/discord/tmux.rs` | 6208 | giant-file |
 | `services::discord::tmux_error_detect` | `src/services/discord/tmux_error_detect.rs` | 324 |  |
 | `services::discord::tmux_kill_policy` | `src/services/discord/tmux_kill_policy.rs` | 406 |  |
 | `services::discord::tmux_lifecycle` | `src/services/discord/tmux_lifecycle.rs` | 708 |  |

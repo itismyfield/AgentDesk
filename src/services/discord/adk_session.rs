@@ -257,7 +257,7 @@ pub(super) async fn save_provider_session_id(
     }
 }
 
-pub(super) fn context_usage_percent(tokens: u64, context_window: u64) -> u64 {
+pub(crate) fn context_usage_percent(tokens: u64, context_window: u64) -> u64 {
     if context_window == 0 {
         return 0;
     }

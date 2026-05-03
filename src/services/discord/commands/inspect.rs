@@ -8,6 +8,7 @@ use super::super::{Context, Error};
 use crate::db::prompt_manifests::{
     PromptContentVisibility, PromptManifest, PromptManifestLayer, fetch_prompt_manifest,
 };
+use crate::db::turns::TurnTokenUsage;
 use crate::services::observability::recovery_audit::{RecoveryAuditRecord, fetch_recovery_audit};
 use crate::services::provider::ProviderKind;
 
@@ -187,10 +188,17 @@ struct LatestTurn {
 }
 
 impl LatestTurn {
-    fn total_input_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_add(self.cache_create_tokens)
-            .saturating_add(self.cache_read_tokens)
+    fn token_usage(&self) -> TurnTokenUsage {
+        TurnTokenUsage {
+            input_tokens: self.input_tokens,
+            cache_create_tokens: self.cache_create_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            output_tokens: 0,
+        }
+    }
+
+    fn context_occupancy_input_tokens(&self) -> u64 {
+        self.token_usage().context_occupancy_input_tokens()
     }
 }
 
@@ -618,11 +626,14 @@ fn layer_display_body(layer: &PromptManifestLayer) -> String {
 }
 
 fn format_context_usage(turn: &LatestTurn, context: &InspectContextConfig) -> String {
-    let used = turn.total_input_tokens();
+    let used = turn.context_occupancy_input_tokens();
     if context.context_window_tokens == 0 {
         return format!("unknown ({} tokens)", format_tokens(used as i64));
     }
-    let pct = (u128::from(used) * 100 / u128::from(context.context_window_tokens)) as u64;
+    let pct = crate::services::discord::adk_session::context_usage_percent(
+        used,
+        context.context_window_tokens,
+    );
     format!(
         "{}% ({} / {} tokens), compact threshold {}%",
         pct,
@@ -946,6 +957,36 @@ mod tests {
         assert!(report.contains("usage: 50%"));
         assert!(report.contains("before 88% -> after 41%"));
         assert!(user_idx < role_idx);
+    }
+
+    #[test]
+    fn context_report_clamps_context_usage_to_window() {
+        let turn = LatestTurn {
+            turn_id: "discord:1:3".to_string(),
+            channel_id: "1".to_string(),
+            provider: Some("codex".to_string()),
+            session_key: Some("channel:1".to_string()),
+            session_id: Some("codex-session".to_string()),
+            dispatch_id: None,
+            finished_at: DateTime::parse_from_rfc3339("2026-05-01T00:01:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            duration_ms: Some(60_000),
+            input_tokens: 50,
+            cache_create_tokens: 0,
+            cache_read_tokens: 400_000,
+        };
+        let context = InspectContextConfig {
+            provider: ProviderKind::Codex,
+            model: Some("gpt-test".to_string()),
+            context_window_tokens: 200_000,
+            compact_percent: 85,
+        };
+
+        let rendered = format_context_usage(&turn, &context);
+
+        assert!(rendered.starts_with("100% "));
+        assert!(!rendered.starts_with("200% "));
     }
 
     #[test]
