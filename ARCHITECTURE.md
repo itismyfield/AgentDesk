@@ -420,6 +420,7 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── discord_config_audit.rs
 │   ├── discord_delivery.rs
+│   ├── discord_delivery_metadata.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_watchdog.rs
