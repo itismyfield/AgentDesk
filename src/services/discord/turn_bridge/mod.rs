@@ -6,7 +6,9 @@ mod recovery_text;
 mod retry_state;
 mod skill_usage;
 mod stale_resume;
+mod terminal_delivery;
 mod tmux_runtime;
+mod turn_analytics;
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 mod tests;
@@ -163,9 +165,16 @@ use stale_resume::{
     output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
 };
+use terminal_delivery::{
+    should_complete_work_dispatch_after_terminal_delivery,
+    should_fail_dispatch_after_terminal_delivery, turn_bridge_replace_outcome_committed,
+};
 use tmux_runtime::is_dcserver_restart_command;
+use turn_analytics::{
+    assert_response_sent_offset_progress, discord_turn_id, emit_turn_quality_event,
+    record_turn_bridge_invariant, turn_duration_ms,
+};
 
-use super::formatting::ReplaceLongMessageOutcome;
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, AWAITING_USER, IDLE};
 use sqlx::Row;
@@ -507,37 +516,6 @@ fn redacted_thinking_transcript_event(_summary: Option<String>) -> SessionTransc
     }
 }
 
-fn emit_turn_quality_event(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    turn_id: &str,
-    role_binding: Option<&RoleBinding>,
-    event_type: &str,
-    payload: serde_json::Value,
-) {
-    crate::services::observability::emit_agent_quality_event(
-        crate::services::observability::AgentQualityEvent {
-            source_event_id: Some(turn_id.to_string()),
-            correlation_id: dispatch_id
-                .map(str::to_string)
-                .or_else(|| Some(turn_id.to_string())),
-            agent_id: role_binding.map(|binding| binding.role_id.clone()),
-            provider: Some(provider.as_str().to_string()),
-            channel_id: Some(channel_id.get().to_string()),
-            card_id: None,
-            dispatch_id: dispatch_id.map(str::to_string),
-            event_type: event_type.to_string(),
-            payload: serde_json::json!({
-                "turn_id": turn_id,
-                "session_key": session_key,
-                "details": payload,
-            }),
-        },
-    );
-}
-
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -593,10 +571,6 @@ fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: Sessio
     }
 }
 
-fn turn_duration_ms(started_at: std::time::Instant) -> i64 {
-    i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
-}
-
 fn status_panel_message_id_for_turn(
     inflight_state: &mut InflightTurnState,
     reuse_status_panel_message: bool,
@@ -634,120 +608,6 @@ fn live_watcher_registered_for_relay(shared: &SharedData, owner_channel_id: Chan
         .tmux_watchers
         .get(&owner_channel_id)
         .is_some_and(|watcher| !watcher.cancel.load(Ordering::Relaxed))
-}
-
-fn record_turn_bridge_invariant(
-    condition: bool,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    turn_id: Option<&str>,
-    invariant: &'static str,
-    code_location: &'static str,
-    message: &'static str,
-    details: serde_json::Value,
-) -> bool {
-    crate::services::observability::record_invariant_check(
-        condition,
-        crate::services::observability::InvariantViolation {
-            provider: Some(provider.as_str()),
-            channel_id: Some(channel_id.get()),
-            dispatch_id,
-            session_key,
-            turn_id,
-            invariant,
-            code_location,
-            message,
-            details,
-        },
-    )
-}
-
-fn discord_turn_id(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    session_key: Option<&str>,
-) -> String {
-    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
-    let nonzero_components = channel_id.get() != 0 && user_msg_id.get() != 0;
-    record_turn_bridge_invariant(
-        nonzero_components,
-        provider,
-        channel_id,
-        None,
-        session_key,
-        Some(turn_id.as_str()),
-        "turn_id_unique_within_session",
-        "src/services/discord/turn_bridge/mod.rs:discord_turn_id",
-        "turn_id must be built from non-zero Discord channel/message ids",
-        serde_json::json!({
-            "channel_id": channel_id.get(),
-            "user_msg_id": user_msg_id.get(),
-            "turn_id": turn_id.as_str(),
-        }),
-    );
-    debug_assert!(
-        nonzero_components,
-        "turn_id requires non-zero Discord channel/message ids"
-    );
-    turn_id
-}
-
-fn assert_response_sent_offset_progress(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    dispatch_id: Option<&str>,
-    session_key: Option<&str>,
-    turn_id: &str,
-    previous: usize,
-    next: usize,
-    full_response: &str,
-    code_location: &'static str,
-) {
-    let monotonic = next >= previous;
-    record_turn_bridge_invariant(
-        monotonic,
-        provider,
-        channel_id,
-        dispatch_id,
-        session_key,
-        Some(turn_id),
-        "response_sent_offset_monotonic",
-        code_location,
-        "turn_bridge response_sent_offset must not move backwards",
-        serde_json::json!({
-            "previous": previous,
-            "next": next,
-            "full_response_len": full_response.len(),
-        }),
-    );
-    debug_assert!(
-        monotonic,
-        "turn_bridge response_sent_offset must not move backwards"
-    );
-
-    let in_bounds = next <= full_response.len() && full_response.is_char_boundary(next);
-    record_turn_bridge_invariant(
-        in_bounds,
-        provider,
-        channel_id,
-        dispatch_id,
-        session_key,
-        Some(turn_id),
-        "response_sent_offset_in_bounds",
-        code_location,
-        "turn_bridge response_sent_offset must stay on a full_response boundary",
-        serde_json::json!({
-            "next": next,
-            "full_response_len": full_response.len(),
-        }),
-    );
-    debug_assert!(
-        in_bounds,
-        "turn_bridge response_sent_offset must stay on a full_response boundary"
-    );
 }
 
 fn advance_tmux_relay_confirmed_end(
@@ -847,90 +707,6 @@ fn advance_tmux_relay_confirmed_end(
     );
 }
 
-fn record_turn_bridge_terminal_replace_cleanup(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    tmux_session_name: Option<&str>,
-    outcome: super::placeholder_cleanup::PlaceholderCleanupOutcome,
-    source: &'static str,
-) {
-    if let super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed { class, detail } =
-        &outcome
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
-            super::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal.as_str(),
-            class.as_str(),
-            channel_id.get(),
-            message_id.get(),
-            detail
-        );
-    }
-    shared
-        .placeholder_cleanup
-        .record(super::placeholder_cleanup::PlaceholderCleanupRecord {
-            provider: provider.clone(),
-            channel_id,
-            message_id,
-            tmux_session_name: tmux_session_name.map(str::to_string),
-            operation: super::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
-            outcome,
-            source,
-        });
-}
-
-fn turn_bridge_replace_outcome_committed(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    tmux_session_name: Option<&str>,
-    replace_result: Result<ReplaceLongMessageOutcome, String>,
-    source: &'static str,
-) -> bool {
-    match replace_result {
-        Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
-            record_turn_bridge_terminal_replace_cleanup(
-                shared,
-                provider,
-                channel_id,
-                message_id,
-                tmux_session_name,
-                super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
-                source,
-            );
-            true
-        }
-        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
-            record_turn_bridge_terminal_replace_cleanup(
-                shared,
-                provider,
-                channel_id,
-                message_id,
-                tmux_session_name,
-                super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(edit_error),
-                source,
-            );
-            false
-        }
-        Err(error) => {
-            record_turn_bridge_terminal_replace_cleanup(
-                shared,
-                provider,
-                channel_id,
-                message_id,
-                tmux_session_name,
-                super::placeholder_cleanup::PlaceholderCleanupOutcome::failed(error),
-                source,
-            );
-            false
-        }
-    }
-}
-
 fn active_turn_thread_channel_id(
     adk_session_name: Option<&str>,
     inflight_state: &InflightTurnState,
@@ -944,122 +720,6 @@ fn active_turn_thread_channel_id(
                 .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name)
         })
         .or(inflight_state.thread_id)
-}
-
-fn should_complete_work_dispatch_after_terminal_delivery(
-    completion_candidate: bool,
-    terminal_delivery_committed: bool,
-    preserve_inflight_for_cleanup_retry: bool,
-    resume_failure_detected: bool,
-    recovery_retry: bool,
-    full_response: &str,
-) -> bool {
-    completion_candidate
-        && terminal_delivery_committed
-        && !preserve_inflight_for_cleanup_retry
-        && !resume_failure_detected
-        && !recovery_retry
-        && !full_response.trim().is_empty()
-}
-
-fn should_fail_dispatch_after_terminal_delivery(
-    fail_candidate: bool,
-    terminal_delivery_committed: bool,
-    preserve_inflight_for_cleanup_retry: bool,
-) -> bool {
-    fail_candidate && terminal_delivery_committed && !preserve_inflight_for_cleanup_retry
-}
-
-#[cfg(test)]
-mod terminal_delivery_gate_tests {
-    use super::{
-        should_complete_work_dispatch_after_terminal_delivery,
-        should_fail_dispatch_after_terminal_delivery,
-    };
-
-    #[test]
-    fn work_dispatch_completion_requires_terminal_delivery_commit() {
-        assert!(should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            true,
-            false,
-            false,
-            false,
-            "visible final response",
-        ));
-
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            false,
-            false,
-            false,
-            false,
-            "visible final response",
-        ));
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            true,
-            true,
-            false,
-            false,
-            "visible final response",
-        ));
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            true,
-            false,
-            true,
-            false,
-            "visible final response",
-        ));
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            true,
-            false,
-            false,
-            true,
-            "visible final response",
-        ));
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true, true, false, false, false, "   ",
-        ));
-    }
-
-    #[test]
-    fn final_completion_delivery_stays_blocked_until_terminal_message_commits() {
-        assert!(!should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            false,
-            false,
-            false,
-            false,
-            "final response waiting for Discord delivery",
-        ));
-        assert!(should_complete_work_dispatch_after_terminal_delivery(
-            true,
-            true,
-            false,
-            false,
-            false,
-            "final response delivered",
-        ));
-    }
-
-    #[test]
-    fn transport_error_dispatch_failure_requires_terminal_delivery_commit() {
-        assert!(should_fail_dispatch_after_terminal_delivery(
-            true, true, false,
-        ));
-        assert!(!should_fail_dispatch_after_terminal_delivery(
-            true, false, false,
-        ));
-        assert!(!should_fail_dispatch_after_terminal_delivery(
-            true, true, true,
-        ));
-        assert!(!should_fail_dispatch_after_terminal_delivery(
-            false, true, false,
-        ));
-    }
 }
 
 fn maybe_refresh_active_turn_activity_heartbeat(
