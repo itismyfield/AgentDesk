@@ -40,7 +40,7 @@
 | `GET` | `/api/auth/session` | `auth::get_session` | `src/server/routes/auth.rs:9` | `src/server/routes/domains/access.rs:11` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:19` | `src/server/routes/domains/ops.rs:250` |
 | `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:741` | `src/server/routes/domains/ops.rs:255` |
-| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:203` | `src/server/routes/domains/ops.rs:251` |
+| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:207` | `src/server/routes/domains/ops.rs:251` |
 | `GET` | `/api/cluster/issue-specs` | `cluster::list_issue_specs` | `src/server/routes/cluster.rs:321` | `src/server/routes/domains/ops.rs:82` |
 | `POST` | `/api/cluster/issue-specs/upsert` | `cluster::upsert_issue_spec` | `src/server/routes/cluster.rs:337` | `src/server/routes/domains/ops.rs:83` |
 | `GET` | `/api/cluster/nodes` | `cluster::list_nodes` | `src/server/routes/cluster.rs:10` | `src/server/routes/domains/ops.rs:36` |
@@ -79,7 +79,7 @@
 | `PATCH` | `/api/dispatched-sessions/{id}` | `dispatched_sessions::update_dispatched_session` | `src/server/routes/dispatched_sessions.rs:80` | `src/server/routes/domains/ops.rs:151` |
 | `GET` | `/api/dispatches` | `dispatches::list_dispatches` | `src/server/routes/dispatches/crud.rs:43` | `src/server/routes/domains/ops.rs:17` |
 | `POST` | `/api/dispatches` | `dispatches::create_dispatch` | `src/server/routes/dispatches/crud.rs:83` | `src/server/routes/domains/ops.rs:17` |
-| `POST` | `/api/dispatches/cancel-all` | `queue_api::cancel_all_dispatches` | `src/server/routes/queue_api.rs:122` | `src/server/routes/domains/ops.rs:264` |
+| `POST` | `/api/dispatches/cancel-all` | `queue_api::cancel_all_dispatches` | `src/server/routes/queue_api.rs:126` | `src/server/routes/domains/ops.rs:264` |
 | `GET` | `/api/dispatches/pending` | `queue_api::list_pending_dispatches` | `src/server/routes/queue_api.rs:65` | `src/server/routes/domains/ops.rs:259` |
 | `GET` | `/api/dispatches/{id}` | `dispatches::get_dispatch` | `src/server/routes/dispatches/crud.rs:64` | `src/server/routes/domains/ops.rs:91` |
 | `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:147` | `src/server/routes/domains/ops.rs:91` |
@@ -246,6 +246,6 @@
 | `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:520` | `src/server/routes/domains/admin.rs:47` |
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:568` | `src/server/routes/domains/admin.rs:73` |
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:249` | `src/server/routes/domains/admin.rs:80` |
-| `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:162` | `src/server/routes/domains/ops.rs:268` |
-| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:257` | `src/server/routes/domains/ops.rs:269` |
+| `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:166` | `src/server/routes/domains/ops.rs:268` |
+| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:261` | `src/server/routes/domains/ops.rs:269` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:160` | `src/server/mod.rs:264` |

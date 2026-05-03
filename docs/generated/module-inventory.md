@@ -198,7 +198,7 @@
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 |  |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 670 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 847 |  |
-| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 387 |  |
+| `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 391 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 343 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 18 |  |
@@ -414,7 +414,7 @@
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 929 |  |
 | `services::provider_exec` | `src/services/provider_exec.rs` | 505 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 122 |  |
-| `services::queue` | `src/services/queue.rs` | 472 |  |
+| `services::queue` | `src/services/queue.rs` | 619 |  |
 | `services::qwen` | `src/services/qwen.rs` | 2459 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 1194 | giant-file |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 45 |  |
