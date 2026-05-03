@@ -454,7 +454,7 @@ pub(crate) async fn activate_with_deps_pg(
                 );
             }
         };
-        let Some((entry_id, card_id, agent_id, batch_phase)) = entry else {
+        let Some((entry_id, card_id, agent_id, batch_phase, retry_count)) = entry else {
             continue;
         };
         let entry_log_ctx = AutoQueueLogContext::new()
@@ -737,12 +737,51 @@ pub(crate) async fn activate_with_deps_pg(
             }
         }
 
+        let retry_resume_session_id = if retry_count > 0 {
+            match crate::db::auto_queue::latest_entry_phase_codex_session_id_pg(
+                pool,
+                &entry_id,
+                "implementation",
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_retry_resume_lookup_failed_pg",
+                        entry_log_ctx.clone().maybe_slot_index(slot_index),
+                        "[auto-queue] failed to load previous Codex session for retry entry {}: {}",
+                        entry_id,
+                        error
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut dispatch_extra_fields = Vec::new();
+        if let Some(session_id) = retry_resume_session_id.as_deref() {
+            dispatch_extra_fields.push(("reset_provider_state", json!(false)));
+            dispatch_extra_fields.push(("force_new_session", json!(false)));
+            dispatch_extra_fields.push(("auto_queue_retry", json!(true)));
+            dispatch_extra_fields.push(("auto_queue_retry_count", json!(retry_count)));
+            dispatch_extra_fields.push(("auto_queue_retry_resume_session_id", json!(session_id)));
+            crate::auto_queue_log!(
+                info,
+                "activate_retry_resume_session_selected_pg",
+                entry_log_ctx.clone().maybe_slot_index(slot_index),
+                "[auto-queue] retry entry {entry_id} will resume previous Codex thread for same phase"
+            );
+        }
+
         let dispatch_context = build_auto_queue_dispatch_context(
             &entry_id,
             *group,
             slot_index,
             reset_slot_thread_before_reuse,
-            std::iter::empty(),
+            dispatch_extra_fields,
         );
         let dispatch_id = match create_activate_dispatch_pg(
             pool,
