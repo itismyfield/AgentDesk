@@ -107,7 +107,7 @@
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/ops.rs:160` |
 | `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:854` | `src/server/routes/domains/ops.rs:32` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:1068` | `src/server/routes/domains/ops.rs:99` |
-| `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1493` | `src/server/routes/domains/admin.rs:64` |
+| `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1513` | `src/server/routes/domains/admin.rs:64` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:973` | `src/server/routes/domains/ops.rs:95` |
 | `GET` | `/api/internal/pending-dispatch-for-thread` | `dispatches::get_pending_dispatch_for_thread` | `src/server/routes/dispatches/thread_reuse.rs:1197` | `src/server/routes/domains/ops.rs:100` |
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:260` | `src/server/routes/domains/kanban.rs:13` |
@@ -234,8 +234,8 @@
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:22` | `src/server/routes/domains/admin.rs:48` |
 | `GET` | `/api/settings/config` | `settings::get_config_entries` | `src/server/routes/settings.rs:35` | `src/server/routes/domains/admin.rs:52` |
 | `PATCH` | `/api/settings/config` | `settings::patch_config_entries` | `src/server/routes/settings.rs:47` | `src/server/routes/domains/admin.rs:52` |
-| `GET` | `/api/settings/escalation` | `escalation::get_escalation_settings` | `src/server/routes/escalation.rs:1408` | `src/server/routes/domains/admin.rs:60` |
-| `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1436` | `src/server/routes/domains/admin.rs:60` |
+| `GET` | `/api/settings/escalation` | `escalation::get_escalation_settings` | `src/server/routes/escalation.rs:1428` | `src/server/routes/domains/admin.rs:60` |
+| `PUT` | `/api/settings/escalation` | `escalation::put_escalation_settings` | `src/server/routes/escalation.rs:1456` | `src/server/routes/domains/admin.rs:60` |
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:58` | `src/server/routes/domains/admin.rs:56` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:68` | `src/server/routes/domains/admin.rs:56` |
 | `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:1422` | `src/server/routes/domains/admin.rs:82` |
