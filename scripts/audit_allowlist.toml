@@ -74,7 +74,7 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs:2841",
   "src/services/discord/turn_bridge/mod.rs:3263",
   "src/services/discord/turn_bridge/mod.rs:3501",
-  "src/services/discord/turn_bridge/mod.rs:3782",
+  "src/services/discord/turn_bridge/mod.rs:3797",
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
