@@ -383,21 +383,13 @@ pub(in crate::services::discord) async fn handle_text_command(
 
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
-            let (current_path, remote_name) = {
+            let current_path = {
                 let d = data.shared.core.lock().await;
                 let session = d.sessions.get(&channel_id);
-                (
-                    session.and_then(|s| s.current_path.clone()),
-                    session.and_then(|s| s.remote_profile_name.clone()),
-                )
+                session.and_then(|s| s.current_path.clone())
             };
             let reply = match current_path {
-                Some(path) => {
-                    let remote_info = remote_name
-                        .map(|n| format!(" (remote: **{}**)", n))
-                        .unwrap_or_else(|| " (local)".to_string());
-                    format!("`{}`{}", path, remote_info)
-                }
+                Some(path) => format!("`{}`", path),
                 None => "No active session. Use `!start <path>` first.".to_string(),
             };
             let _ = msg.reply(&ctx.http, &reply).await;

@@ -274,21 +274,12 @@ pub(in crate::services::discord) async fn build_status_report(
     channel_id: ChannelId,
 ) -> String {
     let channel_snapshot = mailbox_snapshot(shared, channel_id).await;
-    let (
-        session_path,
-        session_id,
-        remote_name,
-        pending_uploads,
-        history_len,
-        cleared,
-        session_channel_name,
-    ) = {
+    let (session_path, session_id, pending_uploads, history_len, cleared, session_channel_name) = {
         let data = shared.core.lock().await;
         let session = data.sessions.get(&channel_id);
         (
             session.and_then(|s| s.current_path.clone()),
             session.and_then(|s| s.session_id.clone()),
-            session.and_then(|s| s.remote_profile_name.clone()),
             session.map(|s| s.pending_uploads.len()).unwrap_or(0),
             session.map(|s| s.history.len()).unwrap_or(0),
             session.map(|s| s.cleared).unwrap_or(false),
@@ -353,7 +344,6 @@ pub(in crate::services::discord) async fn build_status_report(
         .map(|id| format!("<@{}>", id.get()))
         .unwrap_or_else(|| "(none)".to_string());
     let path_text = compact_path(session_path.unwrap_or_else(|| "(no session)".to_string()));
-    let remote_text = remote_name.unwrap_or_else(|| "local".to_string());
 
     format!(
         "\
@@ -365,7 +355,6 @@ pub(in crate::services::discord) async fn build_status_report(
 - session_id: `{}`
 - raw_provider_session_id: `{}`
 - session_key: `{}`
-- remote: `{}`
 - tmux: `{}`
 - owner: {}
 - queue: interventions `{}`, uploads `{}`
@@ -378,7 +367,6 @@ pub(in crate::services::discord) async fn build_status_report(
         session_id_short,
         raw_provider_session_id_short,
         truncate_str(&session_key_text, 96),
-        remote_text,
         tmux_alive,
         owner_text,
         queued_count,

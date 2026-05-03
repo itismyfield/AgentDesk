@@ -195,21 +195,13 @@ pub(in crate::services::discord) async fn cmd_cc(
             return Ok(());
         }
         "pwd" => {
-            let (current_path, remote_name) = {
+            let current_path = {
                 let data = ctx.data().shared.core.lock().await;
                 let session = data.sessions.get(&ctx.channel_id());
-                (
-                    session.and_then(|s| s.current_path.clone()),
-                    session.and_then(|s| s.remote_profile_name.clone()),
-                )
+                session.and_then(|s| s.current_path.clone())
             };
             match current_path {
-                Some(path) => {
-                    let remote_info = remote_name
-                        .map(|n| format!(" (remote: **{}**)", n))
-                        .unwrap_or_else(|| " (local)".to_string());
-                    ctx.say(format!("`{}`{}", path, remote_info)).await?
-                }
+                Some(path) => ctx.say(format!("`{}`", path)).await?,
                 None => {
                     ctx.say("No active session. Use `/start <path>` first.")
                         .await?
