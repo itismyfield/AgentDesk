@@ -491,6 +491,114 @@ async fn send_reaction_control_reply(
         .await;
 }
 
+async fn render_visible_queued_ack(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    text: &str,
+) -> bool {
+    let post_result = super::super::gateway::send_intake_placeholder(
+        ctx.http.clone(),
+        data.shared.clone(),
+        channel_id,
+        None,
+    )
+    .await;
+    let placeholder_msg_id = match post_result {
+        Ok(msg_id) => msg_id,
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ QUEUE-ACK: placeholder POST failed for queued message {} in channel {}: {}",
+                user_msg_id,
+                channel_id,
+                error
+            );
+            return false;
+        }
+    };
+
+    let persist_lock = data.shared.queued_placeholders_persist_lock(channel_id);
+    let persist_guard = persist_lock.lock_owned().await;
+    let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
+    let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+        intervention.message_id == user_msg_id
+            || intervention.source_message_ids.contains(&user_msg_id)
+    });
+    let already_started = snapshot.active_user_message_id == Some(user_msg_id);
+    if already_started || !still_queued {
+        drop(persist_guard);
+        let _ = channel_id
+            .delete_message(&ctx.http, placeholder_msg_id)
+            .await;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔁 QUEUE-ACK: queued message {} in channel {} no longer needs a queued card",
+            user_msg_id,
+            channel_id
+        );
+        return false;
+    }
+
+    data.shared
+        .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+    let gateway = super::super::gateway::DiscordGateway::new(
+        ctx.http.clone(),
+        data.shared.clone(),
+        data.provider.clone(),
+        None,
+    );
+    let key = super::super::placeholder_controller::PlaceholderKey {
+        provider: data.provider.clone(),
+        channel_id,
+        message_id: placeholder_msg_id,
+    };
+    let queued_input = super::super::placeholder_controller::PlaceholderActiveInput {
+        reason: super::super::formatting::MonitorHandoffReason::Queued,
+        started_at_unix: chrono::Utc::now().timestamp(),
+        tool_summary: None,
+        command_summary: None,
+        reason_detail: None,
+        context_line: None,
+        request_line: Some(text.to_string()),
+        progress_line: None,
+    };
+    let outcome = data
+        .shared
+        .placeholder_controller
+        .ensure_queued(&gateway, key, queued_input)
+        .await;
+    if matches!(
+        outcome,
+        super::super::placeholder_controller::PlaceholderControllerOutcome::Edited
+            | super::super::placeholder_controller::PlaceholderControllerOutcome::Coalesced
+    ) {
+        drop(persist_guard);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 📬 QUEUE-ACK: rendered queued placeholder for message {} in channel {}",
+            user_msg_id,
+            channel_id
+        );
+        return true;
+    }
+
+    data.shared
+        .remove_queued_placeholder_locked(channel_id, user_msg_id);
+    drop(persist_guard);
+    let _ = channel_id
+        .delete_message(&ctx.http, placeholder_msg_id)
+        .await;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ QUEUE-ACK: queued placeholder render failed for message {} in channel {}; deleted placeholder",
+        user_msg_id,
+        channel_id
+    );
+    false
+}
+
 async fn handle_reaction_remove(
     ctx: &serenity::Context,
     removed_reaction: &serenity::Reaction,
@@ -1243,6 +1351,10 @@ pub(in crate::services::discord) async fn handle_event(
                         .say(&ctx.http, "↪ 같은 메시지가 방금 이미 큐잉되어서 무시했어.")
                         .await;
                     return Ok(());
+                }
+
+                if !is_allowed_bot {
+                    render_visible_queued_ack(ctx, data, channel_id, new_message.id, text).await;
                 }
 
                 // React 📬 (standalone queue head) or ➕ (merged into previous head).
