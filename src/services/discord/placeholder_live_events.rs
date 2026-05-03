@@ -639,10 +639,11 @@ fn render_status_panel(
             .iter()
             .take(STATUS_PANEL_TODO_LIMIT)
             .map(|item| {
+                let content = escape_status_panel_markdown(&normalize_summary(&item.content));
                 format!(
                     "- {} {}",
                     item.status.checkbox_marker(),
-                    truncate_chars(&normalize_summary(&item.content), 110)
+                    truncate_chars(&content, 110)
                 )
             })
             .collect::<Vec<_>>();
@@ -695,12 +696,15 @@ fn render_session_panel_line(session: &SessionPanelSnapshot, provider: &Provider
 }
 
 fn render_task_panel_line(task: &TaskPanelSnapshot) -> String {
-    let mut parts = vec![format!("Task      dispatch #{}", task.dispatch_id)];
+    let mut parts = vec![format!(
+        "Task      dispatch #{}",
+        escape_status_panel_markdown(&task.dispatch_id)
+    )];
     if let Some(card_id) = task.card_id.as_deref() {
-        parts.push(format!("card #{card_id}"));
+        parts.push(format!("card #{}", escape_status_panel_markdown(card_id)));
     }
     if let Some(dispatch_type) = task.dispatch_type.as_deref() {
-        parts.push(dispatch_type.to_string());
+        parts.push(escape_status_panel_markdown(dispatch_type));
     }
     truncate_chars(&parts.join(" · "), TASK_PANEL_LINE_MAX_CHARS)
 }
@@ -737,7 +741,12 @@ fn render_prompt_panel_block(prompt: &PromptPanelSnapshot) -> String {
     let mut lines = vec![header];
 
     if !prompt.enabled_layers.is_empty() {
-        let names = prompt.enabled_layers.join(", ");
+        let names = prompt
+            .enabled_layers
+            .iter()
+            .map(|name| escape_status_panel_markdown(name))
+            .collect::<Vec<_>>()
+            .join(", ");
         lines.push(truncate_chars(
             &format!("- 활성 ({}): {}", prompt.enabled_layers.len(), names),
             PROMPT_PANEL_LINE_MAX_CHARS,
@@ -751,10 +760,13 @@ fn render_prompt_panel_block(prompt: &PromptPanelSnapshot) -> String {
             .map(|entry| match entry.reason.as_deref() {
                 Some(reason) => format!(
                     "{} ({})",
-                    entry.name,
-                    truncate_chars(reason, PROMPT_PANEL_SKIPPED_REASON_MAX_CHARS)
+                    escape_status_panel_markdown(&entry.name),
+                    truncate_chars(
+                        &escape_status_panel_markdown(reason),
+                        PROMPT_PANEL_SKIPPED_REASON_MAX_CHARS
+                    )
                 ),
-                None => entry.name.clone(),
+                None => escape_status_panel_markdown(&entry.name),
             })
             .collect();
         lines.push(truncate_chars(
@@ -920,12 +932,13 @@ fn render_derived_status(status: &DerivedStatus) -> String {
             let mut rendered = tool_prefix(name);
             if let Some(summary) = summary.as_deref().filter(|value| !value.trim().is_empty()) {
                 rendered.push(' ');
-                rendered.push_str(&normalize_summary(summary));
+                rendered.push_str(&escape_status_panel_markdown(&normalize_summary(summary)));
             }
             format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
         }
         DerivedStatus::SubagentRunning { desc } => {
-            format!("🧵 subagent 실행 중 ({})", truncate_chars(desc, 120))
+            let desc = escape_status_panel_markdown(desc);
+            format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
         }
     }
 }
@@ -939,7 +952,7 @@ fn render_subagent_slot(slot: &SubagentSlot) -> String {
     let mut line = format!(
         "└ {} {}",
         sanitize_label(&slot.subagent_type),
-        normalize_summary(&slot.desc)
+        escape_status_panel_markdown(&normalize_summary(&slot.desc))
     );
     if let Some(recent) = slot
         .recent
@@ -947,7 +960,7 @@ fn render_subagent_slot(slot: &SubagentSlot) -> String {
         .filter(|value| !value.trim().is_empty())
     {
         line.push_str(" — ");
-        line.push_str(&normalize_summary(recent));
+        line.push_str(&escape_status_panel_markdown(&normalize_summary(recent)));
     }
     if !marker.is_empty() {
         line.push(' ');
@@ -1412,7 +1425,7 @@ fn render_events<'a>(
 ) -> Option<String> {
     let mut lines = Vec::new();
     let mut used = 0usize;
-    let inner_limit = EVENT_BLOCK_MAX_CHARS.saturating_sub("```text\n\n```".len());
+    let inner_limit = EVENT_BLOCK_MAX_CHARS;
     for line in events
         .rev()
         .take(EVENT_RENDER_LIMIT)
@@ -1430,7 +1443,17 @@ fn render_events<'a>(
         return None;
     }
     lines.reverse();
-    Some(format!("```text\n{}\n```", lines.join("\n")))
+    Some(lines.join("\n"))
+}
+
+fn escape_status_panel_markdown(raw: &str) -> String {
+    raw.chars()
+        .flat_map(|ch| match ch {
+            '\\' | '`' | '*' | '_' | '~' | '|' => ['\\', ch],
+            _ => ['\0', ch],
+        })
+        .filter(|ch| *ch != '\0')
+        .collect()
 }
 
 fn tool_prefix(name: &str) -> String {
@@ -1525,7 +1548,7 @@ mod tests {
         }
 
         let block = events.render_block(channel_id).unwrap();
-        assert!(block.starts_with("```text\n"));
+        assert!(!block.contains("```"));
         assert!(block.chars().count() <= EVENT_BLOCK_MAX_CHARS);
         let live_lines = block
             .lines()
@@ -1635,7 +1658,8 @@ mod tests {
             "monitor handoff placeholder exceeded embed description limit: {}",
             rendered.len()
         );
-        assert!(rendered.contains("```text\n"));
+        assert!(rendered.contains("[Bash]"));
+        assert!(!rendered.contains("```"));
     }
 
     #[test]
@@ -1766,7 +1790,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-        assert!(rendered.contains("Task      dispatch #dsp_123 · card #42 · implementation"));
+        assert!(rendered.contains("Task      dispatch #dsp\\_123 · card #42 · implementation"));
     }
 
     #[test]
@@ -1787,7 +1811,7 @@ mod tests {
 
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-        assert!(rendered.contains("Task      dispatch #dsp_404"));
+        assert!(rendered.contains("Task      dispatch #dsp\\_404"));
         assert!(!rendered.contains("card #"));
     }
 
@@ -1869,9 +1893,11 @@ mod tests {
         assert!(events.set_prompt_manifest(channel_id, &manifest));
         let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
         assert!(rendered.contains("Prompt    Full profile · ~21.4k input tokens"));
-        assert!(rendered.contains("- 활성 (3): role_prompt, dispatch_contract, current_task"));
+        assert!(
+            rendered.contains("- 활성 (3): role\\_prompt, dispatch\\_contract, current\\_task")
+        );
         assert!(rendered.contains(
-            "- 스킵 (2): recovery_context (no_recovery), memory_recall (memory_backend=memento;mcp_unavailable)"
+            "- 스킵 (2): recovery\\_context (no\\_recovery), memory\\_recall (memory\\_backend=memento;mcp\\_unavailable)"
         ));
     }
 
