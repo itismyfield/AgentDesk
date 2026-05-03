@@ -1906,12 +1906,96 @@ fn should_suppress_relay_before_emit(
 }
 
 #[inline]
-fn should_stop_watcher_after_terminal_finalize(
+fn is_terminal_finalize_stop_candidate(
     terminal_output_committed: bool,
     dispatch_ok: bool,
     watcher_handled_mailbox_finish: bool,
 ) -> bool {
     terminal_output_committed && dispatch_ok && watcher_handled_mailbox_finish
+}
+
+#[inline]
+fn watcher_stop_decision_after_terminal_finalize(
+    terminal_output_committed: bool,
+    dispatch_ok: bool,
+    watcher_handled_mailbox_finish: bool,
+    tmux_alive: bool,
+    confirmed_end: u64,
+    tmux_tail_offset: u64,
+    idle_duration: Option<std::time::Duration>,
+) -> WatcherStopDecision {
+    if !is_terminal_finalize_stop_candidate(
+        terminal_output_committed,
+        dispatch_ok,
+        watcher_handled_mailbox_finish,
+    ) {
+        return WatcherStopDecision::Continue;
+    }
+
+    watcher_stop_decision_after_terminal_success(WatcherStopInput {
+        terminal_success_seen: terminal_output_committed,
+        tmux_alive,
+        confirmed_end,
+        tmux_tail_offset,
+        idle_duration,
+        idle_threshold: WATCHER_POST_TERMINAL_IDLE_WINDOW,
+    })
+}
+
+#[cfg(test)]
+mod terminal_finalize_liveness_tests {
+    use super::{
+        WATCHER_POST_TERMINAL_IDLE_WINDOW, WatcherStopDecision,
+        is_terminal_finalize_stop_candidate, watcher_stop_decision_after_terminal_finalize,
+    };
+
+    #[test]
+    fn terminal_finalize_stop_candidate_requires_all_terminal_flags() {
+        assert!(is_terminal_finalize_stop_candidate(true, true, true));
+
+        assert!(!is_terminal_finalize_stop_candidate(false, true, true));
+        assert!(!is_terminal_finalize_stop_candidate(true, false, true));
+        assert!(!is_terminal_finalize_stop_candidate(true, true, false));
+    }
+
+    #[test]
+    fn terminal_finalize_stop_decision_requires_dead_tmux() {
+        assert_eq!(
+            watcher_stop_decision_after_terminal_finalize(
+                true,
+                true,
+                true,
+                true,
+                4096,
+                4096,
+                Some(WATCHER_POST_TERMINAL_IDLE_WINDOW),
+            ),
+            WatcherStopDecision::Continue,
+            "terminal finalization with a live idle tmux pane must keep the watcher attached"
+        );
+
+        assert_eq!(
+            watcher_stop_decision_after_terminal_finalize(true, true, true, true, 2048, 4096, None,),
+            WatcherStopDecision::PostTerminalSuccessContinuation,
+            "terminal finalization with live tmux and unread tail bytes must stay attached"
+        );
+
+        assert_eq!(
+            watcher_stop_decision_after_terminal_finalize(
+                true, true, true, false, 4096, 4096, None,
+            ),
+            WatcherStopDecision::Stop,
+            "terminal finalization may stop only after tmux liveness is gone"
+        );
+
+        assert_eq!(
+            watcher_stop_decision_after_terminal_finalize(
+                false, true, true, false, 4096, 4096, None,
+            ),
+            WatcherStopDecision::Continue,
+            "non-committed terminal output is not a stop candidate even if liveness is gone"
+        );
+    }
 }
 
 /// #826: Build the dedupe session_key for a background-trigger outbox row.
@@ -5009,18 +5093,43 @@ pub(super) async fn tmux_output_watcher_with_restore(
                     "watcher completed with queued backlog",
                 );
             }
-            if should_stop_watcher_after_terminal_finalize(
+            if is_terminal_finalize_stop_candidate(
                 terminal_output_committed,
                 dispatch_ok,
                 watcher_handled_mailbox_finish,
             ) {
-                turn_delivered.store(true, Ordering::Release);
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 👁 watcher: terminal turn finalized; stopping watcher for {} to avoid duplicate relay",
-                    tmux_session_name
-                );
-                break 'watcher_loop;
+                let tmux_alive = probe_tmux_session_liveness(&tmux_session_name).await;
+                let confirmed_end = relay_coord.confirmed_end_offset.load(Ordering::Acquire);
+                let tmux_tail_offset = std::fs::metadata(&output_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(current_offset);
+                match watcher_stop_decision_after_terminal_finalize(
+                    terminal_output_committed,
+                    dispatch_ok,
+                    watcher_handled_mailbox_finish,
+                    tmux_alive,
+                    confirmed_end,
+                    tmux_tail_offset,
+                    None,
+                ) {
+                    WatcherStopDecision::Stop => {
+                        turn_delivered.store(true, Ordering::Release);
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 watcher: terminal turn finalized; stopping watcher for {} after tmux exit",
+                            tmux_session_name
+                        );
+                        break 'watcher_loop;
+                    }
+                    WatcherStopDecision::Continue
+                    | WatcherStopDecision::PostTerminalSuccessContinuation => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] 👁 watcher: terminal turn finalized but tmux is still alive for {}; watcher staying attached",
+                            tmux_session_name
+                        );
+                    }
+                }
             }
         } else if !relay_suppressed {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -5895,18 +6004,18 @@ mod tests {
         enqueue_monitor_auto_turn_suppressed_notification, fail_dispatch_for_ready_for_input_stall,
         fallback_placeholder_cleanup_decision, finish_monitor_auto_turn,
         finish_restored_watcher_active_turn, format_monitor_suppressed_body,
-        format_monitor_suppressed_label, lifecycle_reason_code_for_tmux_exit,
-        load_restored_provider_session_id, matching_recent_watcher_reattach_offset,
-        missing_inflight_fallback_plan, notify_path_offset_advance_decision,
-        orphan_suppressed_placeholder_action, parse_bg_trigger_offset_from_session_key,
-        process_watcher_lines, recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
+        format_monitor_suppressed_label, is_terminal_finalize_stop_candidate,
+        lifecycle_reason_code_for_tmux_exit, load_restored_provider_session_id,
+        matching_recent_watcher_reattach_offset, missing_inflight_fallback_plan,
+        notify_path_offset_advance_decision, orphan_suppressed_placeholder_action,
+        parse_bg_trigger_offset_from_session_key, process_watcher_lines,
+        recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range,
         record_recent_turn_stop_for_tests, record_recent_turn_stop_with_offset_for_tests,
         record_recent_watcher_reattach_offset, refresh_session_heartbeat_from_tmux_output,
         reset_stale_local_relay_offset_if_output_regressed,
         reset_stale_relay_watermark_if_output_regressed, restored_watcher_turn_from_inflight,
         rollback_enqueued_offset_for_reconciled_failures,
-        should_flush_post_terminal_success_continuation,
-        should_stop_watcher_after_terminal_finalize, should_suppress_relay_before_emit,
+        should_flush_post_terminal_success_continuation, should_suppress_relay_before_emit,
         should_suppress_streaming_placeholder_after_recent_stop,
         should_suppress_terminal_output_after_recent_stop, start_monitor_auto_turn_when_available,
         strip_inprogress_indicators, suppressed_placeholder_action, terminal_relay_decision,
@@ -5986,20 +6095,12 @@ mod tests {
     }
 
     #[test]
-    fn watcher_stops_after_terminal_finalize_only_when_mailbox_finished() {
-        assert!(should_stop_watcher_after_terminal_finalize(
-            true, true, true
-        ));
+    fn terminal_finalize_stop_candidate_requires_all_terminal_flags() {
+        assert!(is_terminal_finalize_stop_candidate(true, true, true));
 
-        assert!(!should_stop_watcher_after_terminal_finalize(
-            false, true, true
-        ));
-        assert!(!should_stop_watcher_after_terminal_finalize(
-            true, false, true
-        ));
-        assert!(!should_stop_watcher_after_terminal_finalize(
-            true, true, false
-        ));
+        assert!(!is_terminal_finalize_stop_candidate(false, true, true));
+        assert!(!is_terminal_finalize_stop_candidate(true, false, true));
+        assert!(!is_terminal_finalize_stop_candidate(true, true, false));
     }
 
     #[test]
