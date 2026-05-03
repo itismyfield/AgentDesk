@@ -159,6 +159,31 @@ pub fn debug_log_to(filename: &str, msg: &str) {
     }
 }
 
+/// SDK→bridge mpsc disconnect diagnostics (#1589 follow-up). Emits a single
+/// structured WARN line at every `execute_command_streaming` exit path so the
+/// operator can see *why* the producer task ended whenever the bridge
+/// subsequently observes `TryRecvError::Disconnected`. Pair-tracking against
+/// the bridge-side handoff log line lets us classify each disconnect as
+/// cancel / IO error / CLI crash / synthetic-done / normal-done without
+/// guessing.
+fn log_producer_exit(
+    kind: &'static str,
+    session_id: Option<&str>,
+    channel_id: Option<u64>,
+    line_count: usize,
+    extra: serde_json::Value,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] 🔚 claude producer exit kind={} channel={:?} session={:?} lines={} extra={}",
+        kind,
+        channel_id,
+        session_id,
+        line_count,
+        extra
+    );
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
@@ -742,6 +767,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
         if cancel_requested(cancel_token.as_deref()) {
             debug_log("Cancel detected — killing child process tree");
             kill_child_tree(&mut child);
+            log_producer_exit(
+                "cancel_during_read",
+                last_session_id.as_deref(),
+                report_channel_id,
+                line_count,
+                serde_json::json!({}),
+            );
             return Ok(());
         }
 
@@ -757,12 +789,24 @@ IMPORTANT: Format your responses using Markdown for better readability:
             }
             Err(e) => {
                 debug_log(&format!("ERROR: Failed to read line: {}", e));
-                let _ = sender.send(StreamMessage::Error {
-                    message: format!("Failed to read output: {}", e),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
+                let send_ok = sender
+                    .send(StreamMessage::Error {
+                        message: format!("Failed to read output: {}", e),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    })
+                    .is_ok();
+                log_producer_exit(
+                    "io_error_read",
+                    last_session_id.as_deref(),
+                    report_channel_id,
+                    line_count,
+                    serde_json::json!({
+                        "error": e.to_string(),
+                        "error_message_send_ok": send_ok,
+                    }),
+                );
                 break;
             }
         };
@@ -1031,20 +1075,40 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if cancel_requested(cancel_token.as_deref()) {
         debug_log("Cancel detected after loop — killing child process tree");
         kill_child_tree(&mut child);
+        log_producer_exit(
+            "cancel_after_loop",
+            last_session_id.as_deref(),
+            report_channel_id,
+            line_count,
+            serde_json::json!({}),
+        );
         return Ok(());
     }
 
     // Wait for process to finish
     debug_log("Waiting for child process to finish (child.wait())...");
     let wait_start = std::time::Instant::now();
-    let status = child.wait().map_err(|e| {
-        debug_log(&format!(
-            "ERROR: Process wait failed after {:?}: {}",
-            wait_start.elapsed(),
-            e
-        ));
-        format!("Process error: {}", e)
-    })?;
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(e) => {
+            debug_log(&format!(
+                "ERROR: Process wait failed after {:?}: {}",
+                wait_start.elapsed(),
+                e
+            ));
+            log_producer_exit(
+                "child_wait_error",
+                last_session_id.as_deref(),
+                report_channel_id,
+                line_count,
+                serde_json::json!({
+                    "error": e.to_string(),
+                    "elapsed_ms": wait_start.elapsed().as_millis() as u64,
+                }),
+            );
+            return Err(format!("Process error: {}", e));
+        }
+    };
     debug_log(&format!(
         "Process finished in {:?}, status: {:?}, exit_code: {:?}",
         wait_start.elapsed(),
@@ -1074,12 +1138,35 @@ IMPORTANT: Format your responses using Markdown for better readability:
             message,
             status.code()
         ));
-        let _ = sender.send(StreamMessage::Error {
-            message,
-            stdout: stdout_raw,
-            stderr: stderr_msg,
-            exit_code: status.code(),
-        });
+        let exit_code = status.code();
+        #[cfg(unix)]
+        let exit_signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let exit_signal: Option<i32> = None;
+        let send_ok = sender
+            .send(StreamMessage::Error {
+                message: message.clone(),
+                stdout: stdout_raw,
+                stderr: stderr_msg.clone(),
+                exit_code,
+            })
+            .is_ok();
+        log_producer_exit(
+            "child_exit_error",
+            last_session_id.as_deref(),
+            report_channel_id,
+            line_count,
+            serde_json::json!({
+                "exit_code": exit_code,
+                "exit_signal": exit_signal,
+                "message_truncated": message.chars().take(160).collect::<String>(),
+                "stderr_truncated": stderr_msg.chars().take(160).collect::<String>(),
+                "error_message_send_ok": send_ok,
+            }),
+        );
         return Ok(());
     }
 
@@ -1090,12 +1177,31 @@ IMPORTANT: Format your responses using Markdown for better readability:
             result: String::new(),
             session_id: last_session_id.clone(),
         });
+        log_producer_exit(
+            "synthetic_done",
+            last_session_id.as_deref(),
+            report_channel_id,
+            line_count,
+            serde_json::json!({
+                "send_ok": send_result.is_ok(),
+                "child_exit_code": status.code(),
+            }),
+        );
         debug_log(&format!(
             "Synthetic Done message sent, result={:?}",
             send_result.is_ok()
         ));
     } else {
         debug_log("Done message was already received, not sending synthetic one");
+        log_producer_exit(
+            "natural_done",
+            last_session_id.as_deref(),
+            report_channel_id,
+            line_count,
+            serde_json::json!({
+                "child_exit_code": status.code(),
+            }),
+        );
     }
 
     debug_log("========================================");
