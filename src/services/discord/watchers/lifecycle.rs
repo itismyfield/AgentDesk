@@ -51,7 +51,6 @@ pub(super) async fn handle_tmux_watcher_observed_death(
         shared.pg_pool.as_ref(),
     )
     .await;
-    // Notify: tmux session termination with reason
     if cancel_induced {
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
@@ -70,35 +69,9 @@ pub(super) async fn handle_tmux_watcher_observed_death(
             "cancel_induced_watcher_death",
         );
     } else if !is_normal_completion {
-        if let Some(reason_text) = tmux_death_lifecycle_notification_reason(reason_short.as_deref())
-        {
-            let reason_truncated: String = reason_text.chars().take(100).collect();
-            let session_key = super::super::adk_session::build_adk_session_key(
-                shared,
-                channel_id,
-                watcher_provider,
-            )
-            .await
-            .unwrap_or_else(|| {
-                format!(
-                    "{}:{}",
-                    crate::services::platform::hostname_short(),
-                    tmux_session_name
-                )
-            });
-            enqueue_lifecycle_notification_best_effort(
-                sqlite_runtime_db(shared.as_ref()),
-                shared.pg_pool.as_ref(),
-                &format!("channel:{}", channel_id.get()),
-                Some(session_key.as_str()),
-                lifecycle_reason_code_for_tmux_exit(reason_text),
-                &format!("🔴 세션 종료: {reason_truncated}"),
-            );
-        } else {
-            tracing::info!(
-                "  [{ts}] 👁 tmux session {tmux_session_name} ended without an actionable lifecycle reason, skipping lifecycle notification"
-            );
-        }
+        tracing::info!(
+            "  [{ts}] 👁 tmux session {tmux_session_name} ended without normal completion, skipping Discord lifecycle notification"
+        );
     } else {
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after normal completion, skipping lifecycle notification"

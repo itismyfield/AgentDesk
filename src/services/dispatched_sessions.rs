@@ -9,7 +9,6 @@ use crate::db::session_status::{
     is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
 use crate::server::routes::AppState;
-use crate::services::message_outbox::enqueue_lifecycle_notification_pg;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use axum::{
@@ -730,8 +729,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
             }
         };
 
-    let (termination_reason_code, lifecycle_reason_code) =
-        classify_session_termination_reason(reason);
+    let termination_reason_code = classify_session_termination_reason(reason);
 
     let lifecycle = force_kill_turn(
         state.health_registry.as_deref(),
@@ -851,36 +849,6 @@ pub(crate) async fn force_kill_session_impl_with_reason(
         );
     }
 
-    // Notify bot message for force-kill visibility
-    if tmux_killed && let Some(ref channel_id_str) = runtime_channel_id {
-        // Build human-readable message: agent name + reason from tmux exit file
-        let agent_label = agent_id.as_deref().unwrap_or("unknown");
-        let exit_reason = crate::services::tmux_diagnostics::read_tmux_exit_reason(&tmux_name)
-            .map(|r| {
-                // Strip timestamp prefix "[2026-...] " if present
-                let trimmed = if let Some(idx) = r.find("] ") {
-                    &r[idx + 2..]
-                } else {
-                    &r
-                };
-                let s = trimmed.trim();
-                if s.len() > 80 {
-                    format!("{}…", &s[..80])
-                } else {
-                    s.to_string()
-                }
-            })
-            .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
-        let _ = enqueue_lifecycle_notification_pg(
-            pool,
-            &format!("channel:{channel_id_str}"),
-            Some(session_key),
-            lifecycle_reason_code,
-            &format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
-        )
-        .await;
-    }
-
     (
         StatusCode::OK,
         Json(json!({
@@ -897,7 +865,7 @@ pub(crate) async fn force_kill_session_impl_with_reason(
     )
 }
 
-fn classify_session_termination_reason(reason: &str) -> (&'static str, &'static str) {
+fn classify_session_termination_reason(reason: &str) -> &'static str {
     let lower = reason.to_ascii_lowercase();
     if lower.contains("idle")
         || lower.contains("auto cleanup")
@@ -905,9 +873,9 @@ fn classify_session_termination_reason(reason: &str) -> (&'static str, &'static 
         || lower.contains("turn cap")
         || lower.contains("cleanup")
     {
-        ("auto_cleanup", "lifecycle.auto_cleanup")
+        "auto_cleanup"
     } else {
-        ("force_kill", "lifecycle.force_kill")
+        "force_kill"
     }
 }
 
