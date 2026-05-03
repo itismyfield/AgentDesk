@@ -417,7 +417,9 @@ var autoQueue = {
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
-      "WHERE e.status = 'pending' AND r.status IN ('active', 'paused')",
+      "WHERE e.status = 'pending' AND r.status IN ('active', 'paused') " +
+      "AND kc.status IN ('done', 'failed', 'cancelled') " +
+      "ORDER BY e.updated_at ASC LIMIT 100",
       []
     );
     for (var tp = 0; tp < terminalPending.length; tp++) {
@@ -461,7 +463,8 @@ var autoQueue = {
       "SELECT DISTINCT r.id " +
       "FROM auto_queue_runs r " +
       "JOIN auto_queue_entries e ON e.run_id = r.id " +
-      "WHERE r.status = 'active' AND e.status = 'pending'",
+      "WHERE r.status = 'active' AND e.status = 'pending' " +
+      "ORDER BY r.updated_at ASC LIMIT 50",
       []
     );
 
@@ -482,7 +485,8 @@ var autoQueue = {
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
       "AND e.dispatched_at IS NOT NULL " +
       "AND e.dispatched_at < datetime('now', '-" + staleDispatchedGraceMinutes + " minutes') " +
-      "AND (" + staleDispatchedConditions + ")",
+      "AND (" + staleDispatchedConditions + ") " +
+      "ORDER BY e.dispatched_at ASC LIMIT 50",
       []
     );
 
