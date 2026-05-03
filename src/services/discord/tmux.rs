@@ -53,11 +53,18 @@ use super::{
 };
 // Keep the extracted lifecycle code as a tmux child module until the remaining
 // watcher helpers it calls are split out of this file.
+#[path = "tmux_reattach_offsets.rs"]
+mod tmux_reattach_offsets;
 #[path = "tmux_session_files.rs"]
 mod tmux_session_files;
 #[path = "watchers/lifecycle.rs"]
 mod watcher_lifecycle;
 
+#[cfg(all(test, feature = "legacy-sqlite-tests"))]
+use self::tmux_reattach_offsets::clear_recent_watcher_reattach_offsets_for_tests;
+use self::tmux_reattach_offsets::{
+    matching_recent_watcher_reattach_offset, record_recent_watcher_reattach_offset,
+};
 pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
 use self::tmux_session_files::watermark_after_output_regression;
@@ -92,9 +99,6 @@ const SUPPRESSED_RESTART_LABEL: &str =
 const MISSING_INFLIGHT_REATTACH_GRACE_ATTEMPTS: usize = 3;
 const MISSING_INFLIGHT_REATTACH_GRACE_DELAY: tokio::time::Duration =
     tokio::time::Duration::from_millis(200);
-const RECENT_WATCHER_REATTACH_OFFSET_CAPACITY: usize = 32;
-const RECENT_WATCHER_REATTACH_OFFSET_TTL: std::time::Duration =
-    std::time::Duration::from_secs(15 * 60);
 const RECENT_TURN_STOP_CAPACITY: usize = 128;
 const RECENT_TURN_STOP_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: std::time::Duration =
@@ -110,21 +114,6 @@ const CANCEL_TEARDOWN_GRACE_BYTES: u64 = 16 * 1024;
 const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str = "lifecycle.monitor_auto_turn.deferred";
 const TMUX_LIVENESS_PROBE_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(2);
-
-#[derive(Debug, Clone)]
-struct RecentWatcherReattachOffset {
-    channel_id: ChannelId,
-    tmux_session_name: String,
-    offset: u64,
-    recorded_at: std::time::Instant,
-}
-
-static RECENT_WATCHER_REATTACH_OFFSETS: LazyLock<Mutex<VecDeque<RecentWatcherReattachOffset>>> =
-    LazyLock::new(|| {
-        Mutex::new(VecDeque::with_capacity(
-            RECENT_WATCHER_REATTACH_OFFSET_CAPACITY,
-        ))
-    });
 
 #[derive(Debug, Clone)]
 struct RecentTurnStop {
@@ -144,66 +133,6 @@ struct RecentTurnStop {
 
 static RECENT_TURN_STOPS: LazyLock<Mutex<VecDeque<RecentTurnStop>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(RECENT_TURN_STOP_CAPACITY)));
-
-fn recent_watcher_reattach_offsets()
--> std::sync::MutexGuard<'static, VecDeque<RecentWatcherReattachOffset>> {
-    match RECENT_WATCHER_REATTACH_OFFSETS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn prune_recent_watcher_reattach_offsets(
-    offsets: &mut VecDeque<RecentWatcherReattachOffset>,
-    now: std::time::Instant,
-) {
-    offsets.retain(|entry| {
-        now.saturating_duration_since(entry.recorded_at) <= RECENT_WATCHER_REATTACH_OFFSET_TTL
-    });
-}
-
-fn record_recent_watcher_reattach_offset(
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    offset: u64,
-) {
-    let now = std::time::Instant::now();
-    let mut offsets = recent_watcher_reattach_offsets();
-    prune_recent_watcher_reattach_offsets(&mut offsets, now);
-    while offsets.len() >= RECENT_WATCHER_REATTACH_OFFSET_CAPACITY {
-        offsets.pop_front();
-    }
-    offsets.push_back(RecentWatcherReattachOffset {
-        channel_id,
-        tmux_session_name: tmux_session_name.to_string(),
-        offset,
-        recorded_at: now,
-    });
-}
-
-fn matching_recent_watcher_reattach_offset(
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    data_start_offset: u64,
-) -> Option<RecentWatcherReattachOffset> {
-    let now = std::time::Instant::now();
-    let mut offsets = recent_watcher_reattach_offsets();
-    prune_recent_watcher_reattach_offsets(&mut offsets, now);
-    offsets
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.channel_id == channel_id
-                && entry.tmux_session_name == tmux_session_name
-                && entry.offset == data_start_offset
-        })
-        .cloned()
-}
-
-#[cfg(all(test, feature = "legacy-sqlite-tests"))]
-fn clear_recent_watcher_reattach_offsets_for_tests() {
-    recent_watcher_reattach_offsets().clear();
-}
 
 fn recent_turn_stops() -> std::sync::MutexGuard<'static, VecDeque<RecentTurnStop>> {
     match RECENT_TURN_STOPS.lock() {
