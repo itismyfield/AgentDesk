@@ -14,6 +14,8 @@ const STALE_INFLIGHT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// the default retention hint used by `settings/content.rs::cleanup_old_uploads`
 /// for manually-aged attachments, so the periodic sweep is a strict superset.
 const STALE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const COMPLETED_QUEUE_REVIEW_DRIFT_GRACE: Duration = Duration::from_secs(5 * 60);
+const COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT: i64 = 50;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BootReconcileStats {
@@ -23,6 +25,7 @@ pub(crate) struct BootReconcileStats {
     pub broken_auto_queue_entries_reset: usize,
     pub stale_channel_thread_map_entries_cleared: usize,
     pub missing_review_dispatches_refired: usize,
+    pub completed_queue_review_drift_recovered: usize,
 }
 
 impl BootReconcileStats {
@@ -33,6 +36,7 @@ impl BootReconcileStats {
             || self.broken_auto_queue_entries_reset > 0
             || self.stale_channel_thread_map_entries_cleared > 0
             || self.missing_review_dispatches_refired > 0
+            || self.completed_queue_review_drift_recovered > 0
     }
 }
 
@@ -70,6 +74,7 @@ pub(crate) async fn reconcile_boot_db_pg(pool: &PgPool) -> Result<BootReconcileS
         broken_auto_queue_entries_reset,
         stale_channel_thread_map_entries_cleared: 0,
         missing_review_dispatches_refired: 0,
+        completed_queue_review_drift_recovered: 0,
     })
 }
 
@@ -98,20 +103,35 @@ pub(crate) async fn reconcile_boot_runtime(
     } else {
         0
     };
+    stats.completed_queue_review_drift_recovered = if let Some(pool) = pg_pool {
+        reconcile_completed_queue_review_drift_pg(pool, db, engine).await?
+    } else {
+        0
+    };
 
     if stats.touched() {
         tracing::info!(
-            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} cleared_thread_map={} refired_review={}",
+            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} cleared_thread_map={} refired_review={} recovered_review_drift={}",
             stats.stale_processing_outbox_reset,
             stats.stale_dispatch_reservations_cleared,
             stats.missing_notify_outbox_backfilled,
             stats.broken_auto_queue_entries_reset,
             stats.stale_channel_thread_map_entries_cleared,
-            stats.missing_review_dispatches_refired
+            stats.missing_review_dispatches_refired,
+            stats.completed_queue_review_drift_recovered
         );
     }
 
     Ok(stats)
+}
+
+pub(crate) async fn reconcile_completed_queue_review_drift_pg(
+    pool: &PgPool,
+    db: Option<&Db>,
+    engine: &PolicyEngine,
+) -> Result<usize> {
+    let drift_candidates = completed_queue_review_drift_candidates_pg(pool).await?;
+    recover_completed_queue_review_drift_pg(pool, db, engine, drift_candidates).await
 }
 
 #[cfg(all(test, feature = "legacy-sqlite-tests"))]
@@ -174,6 +194,7 @@ fn reconcile_boot_db_sqlite(db: &Db) -> Result<BootReconcileStats> {
         broken_auto_queue_entries_reset,
         stale_channel_thread_map_entries_cleared: 0,
         missing_review_dispatches_refired: 0,
+        completed_queue_review_drift_recovered: 0,
     })
 }
 
@@ -288,18 +309,7 @@ async fn refire_missing_review_dispatches_pg(
         }
         crate::kanban::drain_hook_side_effects_with_backends(db, engine);
 
-        let has_review_dispatch = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                SELECT 1 FROM task_dispatches
-                WHERE kanban_card_id = $1
-                  AND dispatch_type IN ('review', 'review-decision')
-                  AND status IN ('pending', 'dispatched')
-            )",
-        )
-        .bind(&card_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
+        let has_review_dispatch = active_review_dispatch_exists_pg(pool, &card_id).await?;
         if has_review_dispatch {
             refired += 1;
         } else {
@@ -311,6 +321,139 @@ async fn refire_missing_review_dispatches_pg(
     }
 
     Ok(refired)
+}
+
+async fn recover_completed_queue_review_drift_pg(
+    pool: &PgPool,
+    db: Option<&Db>,
+    engine: &PolicyEngine,
+    drift_candidates: Vec<String>,
+) -> Result<usize> {
+    let mut recovered = 0usize;
+
+    for card_id in drift_candidates {
+        if !completed_queue_review_drift_candidate_exists_pg(pool, &card_id).await? {
+            continue;
+        }
+
+        match crate::kanban::transition_status_with_opts_pg(
+            db,
+            pool,
+            engine,
+            &card_id,
+            "review",
+            "review_drift_reconcile",
+            crate::engine::transition::ForceIntent::SystemRecovery,
+        )
+        .await
+        {
+            Ok(_) => {
+                crate::kanban::drain_hook_side_effects_with_backends(db, engine);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[review-drift-reconcile] failed to transition completed queue card {} to review: {error}",
+                    card_id
+                );
+                continue;
+            }
+        }
+
+        let has_review_dispatch = active_review_dispatch_exists_pg(pool, &card_id).await?;
+        if has_review_dispatch {
+            recovered += 1;
+        } else {
+            tracing::warn!(
+                "[review-drift-reconcile] transitioned completed queue card {} to review but no active review dispatch was created",
+                card_id
+            );
+        }
+    }
+
+    Ok(recovered)
+}
+
+async fn completed_queue_review_drift_candidates_pg(pool: &PgPool) -> Result<Vec<String>> {
+    completed_queue_review_drift_candidates_with_limit_pg(
+        pool,
+        COMPLETED_QUEUE_REVIEW_DRIFT_GRACE.as_secs() as i64,
+        COMPLETED_QUEUE_REVIEW_DRIFT_BATCH_LIMIT,
+    )
+    .await
+}
+
+async fn completed_queue_review_drift_candidate_exists_pg(
+    pool: &PgPool,
+    card_id: &str,
+) -> Result<bool> {
+    let candidates = completed_queue_review_drift_candidates_base_pg(
+        pool,
+        Some(card_id),
+        COMPLETED_QUEUE_REVIEW_DRIFT_GRACE.as_secs() as i64,
+        1,
+    )
+    .await?;
+    Ok(!candidates.is_empty())
+}
+
+async fn completed_queue_review_drift_candidates_with_limit_pg(
+    pool: &PgPool,
+    grace_seconds: i64,
+    limit: i64,
+) -> Result<Vec<String>> {
+    completed_queue_review_drift_candidates_base_pg(pool, None, grace_seconds, limit).await
+}
+
+async fn completed_queue_review_drift_candidates_base_pg(
+    pool: &PgPool,
+    card_id: Option<&str>,
+    grace_seconds: i64,
+    limit: i64,
+) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT c.id
+         FROM kanban_cards c
+         JOIN auto_queue_entries e ON e.kanban_card_id = c.id
+         WHERE c.status = 'in_progress'
+           AND e.status = 'done'
+           AND e.completed_at <= NOW() - ($1::BIGINT * INTERVAL '1 second')
+           AND ($2::TEXT IS NULL OR c.id = $2)
+           AND NOT EXISTS (
+             SELECT 1
+             FROM task_dispatches td
+             WHERE td.kanban_card_id = c.id
+               AND td.status IN ('pending', 'dispatched')
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM auto_queue_entries active_e
+             WHERE active_e.kanban_card_id = c.id
+               AND active_e.status IN ('pending', 'dispatched')
+           )
+         ORDER BY c.id
+         LIMIT $3",
+    )
+    .bind(grace_seconds)
+    .bind(card_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(anyhow::Error::from)
+}
+
+async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM task_dispatches
+            WHERE kanban_card_id = $1
+              AND dispatch_type IN ('review', 'review-decision')
+              AND status IN ('pending', 'dispatched')
+        )",
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .map_err(anyhow::Error::from)
 }
 
 // ============================================================================

@@ -377,3 +377,242 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
         .expect("close pg-only high_risk_recovery pool");
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries() {
+    let pg_db = PgRecoveryTestDatabase::create().await;
+    let pool = pg_db.migrate().await;
+    let engine = test_engine_with_pg(pool.clone());
+
+    seed_agent_pg(&pool).await;
+    seed_card_pg(&pool, "card-pg-drift-old", "in_progress").await;
+    seed_card_pg(&pool, "card-pg-drift-fresh", "in_progress").await;
+    seed_card_pg(&pool, "card-pg-drift-null-completed", "in_progress").await;
+    seed_card_pg(&pool, "card-pg-drift-review-state", "review").await;
+    seed_card_pg(&pool, "card-pg-drift-active-dispatch", "in_progress").await;
+    seed_card_pg(&pool, "card-pg-drift-active-entry", "in_progress").await;
+
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status)
+         VALUES
+            ('run-pg-review-drift', 'agent-1', 'active'),
+            ('run-pg-review-drift-active-entry', 'agent-1', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed auto queue run");
+
+    let reviewed_commit = crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
+
+    for card_id in [
+        "card-pg-drift-old",
+        "card-pg-drift-fresh",
+        "card-pg-drift-null-completed",
+        "card-pg-drift-review-state",
+        "card-pg-drift-active-dispatch",
+        "card-pg-drift-active-entry",
+    ] {
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                id,
+                kanban_card_id,
+                to_agent_id,
+                dispatch_type,
+                status,
+                title,
+                context,
+                created_at,
+                updated_at,
+                completed_at
+             ) VALUES (
+                $1,
+                $2,
+                'agent-1',
+                'implementation',
+                'completed',
+                'Completed implementation',
+                $3::jsonb,
+                NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '9 minutes',
+                NOW() - INTERVAL '9 minutes'
+             )",
+        )
+        .bind(format!("dispatch-{card_id}"))
+        .bind(card_id)
+        .bind(json!({
+            "reviewed_commit": reviewed_commit,
+            "branch": "test-review-drift"
+        }))
+        .execute(&pool)
+        .await
+        .expect("seed completed implementation dispatch");
+    }
+
+    sqlx::query(
+        "INSERT INTO auto_queue_entries (
+            id,
+            run_id,
+            kanban_card_id,
+            agent_id,
+            status,
+            dispatch_id,
+            completed_at,
+            created_at
+         ) VALUES
+           (
+             'entry-pg-drift-old',
+             'run-pg-review-drift',
+             'card-pg-drift-old',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-old',
+             NOW() - INTERVAL '6 minutes',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-fresh',
+             'run-pg-review-drift',
+             'card-pg-drift-fresh',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-fresh',
+             NOW() - INTERVAL '1 minute',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-null-completed',
+             'run-pg-review-drift',
+             'card-pg-drift-null-completed',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-null-completed',
+             NULL,
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-review-state',
+             'run-pg-review-drift',
+             'card-pg-drift-review-state',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-review-state',
+             NOW() - INTERVAL '6 minutes',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-active-dispatch',
+             'run-pg-review-drift',
+             'card-pg-drift-active-dispatch',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-active-dispatch',
+             NOW() - INTERVAL '6 minutes',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-active-entry-done',
+             'run-pg-review-drift',
+             'card-pg-drift-active-entry',
+             'agent-1',
+             'done',
+             'dispatch-card-pg-drift-active-entry',
+             NOW() - INTERVAL '6 minutes',
+             NOW() - INTERVAL '10 minutes'
+           ),
+           (
+             'entry-pg-drift-active-entry-pending',
+             'run-pg-review-drift-active-entry',
+             'card-pg-drift-active-entry',
+             'agent-1',
+             'pending',
+             NULL,
+             NULL,
+             NOW()
+           )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed auto queue entries");
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+            id,
+            kanban_card_id,
+            to_agent_id,
+            dispatch_type,
+            status,
+            title,
+            created_at,
+            updated_at
+         ) VALUES (
+            'dispatch-card-pg-drift-active-dispatch-pending',
+            'card-pg-drift-active-dispatch',
+            'agent-1',
+            'implementation',
+            'pending',
+            'Active implementation',
+            NOW(),
+            NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed active implementation dispatch");
+
+    let recovered =
+        crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, None, &engine)
+            .await
+            .expect("review drift reconcile succeeds");
+    assert_eq!(recovered, 1);
+
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status
+         FROM kanban_cards
+         WHERE id LIKE 'card-pg-drift-%'
+         ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("load card statuses");
+    assert_eq!(
+        statuses,
+        vec![
+            (
+                "card-pg-drift-active-dispatch".to_string(),
+                "in_progress".to_string()
+            ),
+            (
+                "card-pg-drift-active-entry".to_string(),
+                "in_progress".to_string()
+            ),
+            ("card-pg-drift-fresh".to_string(), "in_progress".to_string()),
+            (
+                "card-pg-drift-null-completed".to_string(),
+                "in_progress".to_string()
+            ),
+            ("card-pg-drift-old".to_string(), "review".to_string()),
+            (
+                "card-pg-drift-review-state".to_string(),
+                "review".to_string()
+            ),
+        ]
+    );
+
+    let active_review_dispatches: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM task_dispatches
+         WHERE kanban_card_id = 'card-pg-drift-old'
+           AND dispatch_type IN ('review', 'review-decision')
+           AND status IN ('pending', 'dispatched')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count active review dispatches");
+    assert_eq!(active_review_dispatches, 1);
+
+    drop(engine);
+    crate::db::postgres::close_test_pool(pool, "pg-only high_risk_recovery")
+        .await
+        .expect("close pg-only high_risk_recovery pool");
+    pg_db.drop().await;
+}
